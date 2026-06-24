@@ -1,5 +1,6 @@
 /**
- * Gemma4 dialect — maradel's default chat model (config.ollama.chatModel).
+ * Gemma4 dialect — selected when the backend reports a `gemma*` model; also the
+ * default dialect used until the active model id is known.
  *
  * Gemma4 reliably chains read → write → bash in a single response and often
  * "fuses" the parameter tag (<parameter=name</parameter>); the shared parser

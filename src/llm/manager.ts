@@ -6,17 +6,21 @@
  *     ayin tool / agent loop
  *          │  llmChat / llmCall            (transport: messages → text)
  *          ▼
- *     manager ── resolves the ACTIVE model (gemma ↔ qwen-coder, set by whoever
- *          │      owns the maradel `llm` resource) → picks the matching dialect
+ *     manager ── resolves the ACTIVE model the backend reports (GET /api/status →
+ *          │      {model}) → picks the matching dialect
  *          ▼
  *     dialect ── toolCallInstructions (→ system prompt) · parse(raw)
  *                · renderToolCall · renderToolResult
+ *
+ * ayin neither chooses nor knows WHY the backend's model changes — a backend is
+ * free to swap the served model at runtime (e.g. a host loading a coder model for
+ * a coding task); ayin simply observes /api/status and re-resolves the dialect.
  *
  * The transport itself (retries, image attach, OpenAI fallback) lives in
  * connection.ts and is model-agnostic; the manager re-exports it so every caller
  * imports LLM access from ONE place. Add a model family by implementing
  * ModelDialect (see types.ts) and registering it in DIALECTS below.
- * See docs/CODE_AGENT.md "Ayin LLM manager".
+ * See docs/ARCHITECTURE.md "LLM manager & dialects".
  */
 
 import { keliBaseUrl, llmChat as transportChat, llmCall as transportCall } from '../connection.js';
@@ -28,7 +32,7 @@ import { QwenDialect } from './dialects/qwen.js';
 // Registered dialects, in match-priority order. The first whose matches() returns
 // true for the active model wins; DEFAULT is used until the model id is known.
 const DIALECTS: ModelDialect[] = [new QwenDialect(), new GemmaDialect()];
-const DEFAULT: ModelDialect = DIALECTS[DIALECTS.length - 1]; // gemma — maradel's default model
+const DEFAULT: ModelDialect = DIALECTS[DIALECTS.length - 1]; // gemma — used until the model id is known
 
 let cachedModelId = '';
 let cachedDialect: ModelDialect = DEFAULT;
@@ -48,8 +52,8 @@ function ensureRefreshed(): void {
 /**
  * Refresh the active model id from the backend (GET /api/status → {model}) and
  * re-resolve the dialect. Non-fatal: on any failure the current dialect is kept
- * (gemma by default). Call on connect, and whenever the model may have swapped
- * (the `llm` resource flips gemma ↔ qwen-coder on ownership changes).
+ * (gemma by default). Call on connect, and whenever the backend may have swapped
+ * the served model.
  */
 export async function refreshActiveModel(): Promise<void> {
   refreshKicked = true;

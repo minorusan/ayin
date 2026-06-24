@@ -1,13 +1,10 @@
 /**
- * Qwen3-Coder dialect — the coder model the maradel `llm` resource swaps to when
- * a coding agent owns the LLM (config.skills.coderModel, e.g. qwen2.5-coder:32b).
+ * Qwen3-Coder dialect — selected automatically when the backend reports a `qwen*`
+ * model (a common choice when a backend serves a coder model for coding tasks).
  *
  * Qwen emits ayin's canonical XML tool-call form cleanly (it's where that form
  * originates), without Gemma4's fused-tag quirk — so the instructions are the
  * tight canonical block and parsing/result-framing are the shared XML base.
- * Selected automatically when the active backend model matches /qwen/; until
- * ayin actually acquires the llm resource the active model stays gemma, so this
- * dialect is wired and inert (mirrors the maradel-side state in docs/CODE_AGENT.md).
  */
 
 import { XmlToolCallDialect } from './xml.js';

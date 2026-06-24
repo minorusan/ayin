@@ -10,7 +10,7 @@
  *
  * Everything else — the agent loop, the tools, the transport — is model-agnostic.
  * Add a model family by implementing this interface and registering it in
- * `manager.ts`. See docs/CODE_AGENT.md "Ayin LLM manager".
+ * `manager.ts`. See docs/ARCHITECTURE.md "LLM manager & dialects".
  */
 
 import type { ParseAllResult, ParsedToolCall } from '../parser.js';
