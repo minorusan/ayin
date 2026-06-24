@@ -1,0 +1,26 @@
+{
+  "name": "@maradel/ayin",
+  "version": "1.0.138",
+  "description": "Ayin coding agent (vendored from egregor; LLM via Maradel backend → gemma)",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "ayin": "./dist/index.js",
+    "tg-auth": "./dist/tg-auth-cmd.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "sharp": "^0.33.5",
+    "telegram": "^2.26.22",
+    "undici": "^6.20.0"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.3"
+  }
+}
