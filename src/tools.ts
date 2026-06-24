@@ -12,6 +12,7 @@ import { dirname, basename, resolve, join, isAbsolute, extname } from 'node:path
 import { homedir } from 'node:os';
 import { isImagePath, preprocessImage, addPendingImage } from './image.js';
 import { getPrompt } from './prompts.js';
+import { toolCallInstructions } from './llm/manager.js';
 import { jiraExecute } from './jira.js';
 import { codexExecute } from './codex.js';
 import { fixmeExecute } from './fixme.js';
@@ -516,5 +517,9 @@ export function toolsSystemPrompt(): string {
   return getPrompt('system', {
     WORKING_DIR: CWD,
     TOOLS: toolDefs,
+    // The tool-call format is OWNED BY THE ACTIVE DIALECT (gemma/qwen), injected
+    // here via the LLM manager. New prompts use {{TOOL_CALL_FORMAT}}; an older
+    // persisted prompts.json that hardcodes the format simply ignores this var.
+    TOOL_CALL_FORMAT: toolCallInstructions(),
   });
 }

@@ -16,9 +16,9 @@
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
-import { llmChat, cancelActiveThinking } from './connection.js';
+import { cancelActiveThinking } from './connection.js';
+import { llmChat, parseToolCalls, renderToolCall, renderToolResult } from './llm/manager.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution } from './tools.js';
-import { parseResponse, parseResponseAll } from './parser.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
 import { addMessage, setAgentStatus, HEADLESS, formatToolResultForChat } from './ui.js';
 import { log } from './log.js';
@@ -505,7 +505,7 @@ export async function runAgent(userInput: string): Promise<void> {
       return;
     }
 
-    const parsed = parseResponseAll(response);
+    const parsed = parseToolCalls(response);
     const hasToolCalls = parsed.toolCalls.length > 0;
 
     // For tool-call rounds: print pre-tool reasoning immediately (both modes)
@@ -590,7 +590,7 @@ export async function runAgent(userInput: string): Promise<void> {
         const errMsg = `Unknown tool: ${name}.${hint}`;
         addMessage('system', `Unknown tool: ${name}`);
         pushToWindow('assistant', textPrefix ? `${textPrefix}\n[Called unknown tool: ${name}]` : `[Called unknown tool: ${name}]`);
-        pushToWindow('user', `<tool_response>\nError: ${errMsg}\n</tool_response>`);
+        pushToWindow('user', renderToolResult(`Error: ${errMsg}`));
         continue;
       }
 
@@ -606,7 +606,7 @@ export async function runAgent(userInput: string): Promise<void> {
         const errMsg = `Missing required parameter(s) for ${name}: ${missingNames}. Use: <function=${name}>\n<parameter=${missingRequired[0]}>\nvalue\n</parameter>\n...\n</function>`;
         addMessage('system', `${name}: missing ${missingNames}`);
         pushToWindow('assistant', textPrefix ? `${textPrefix}\n[${name}: missing ${missingNames}]` : `[${name}: missing ${missingNames}]`);
-        pushToWindow('user', `<tool_response>\n${errMsg}\n</tool_response>`);
+        pushToWindow('user', renderToolResult(errMsg));
         log('WARN', 'missing_required_params', { tool: name, missing: missingNames });
         continue;
       }
@@ -616,7 +616,7 @@ export async function runAgent(userInput: string): Promise<void> {
         const warnMsg = `You already ran ${name} with these exact parameters recently. The result is already in your context. Stop repeating — use those results, try a genuinely different approach, or ask the user for guidance.`;
         addMessage('system', `[Loop detected: ${name} called again with same params]`);
         pushToWindow('assistant', textPrefix ? `${textPrefix}\n[duplicate tool call blocked]` : '[duplicate tool call blocked]');
-        pushToWindow('user', `<tool_response>\nWARNING: ${warnMsg}\n</tool_response>`);
+        pushToWindow('user', renderToolResult(`WARNING: ${warnMsg}`));
         log('WARN', 'duplicate_tool_call', { tool: name });
         continue;
       }
@@ -687,13 +687,13 @@ export async function runAgent(userInput: string): Promise<void> {
                 // subsequent calls (e.g. `bash` to verify the rejected write) are stale.
                 addMessage('system', `[critic direction ${directions.length}/${MAX_DIRECTIONS}: ${newDirection.substring(0, 80)}]`);
                 pushToWindow('assistant', `[write_file reviewed — revision needed]`);
-                pushToWindow('user', `<tool_response>\nYour answer has issues:\n${criticResult}\n\nPrevious directions tried:\n${directions.map((d, i) => `${i + 1}. ${d.substring(0, 100)}`).join('\n')}\n\nTake a different approach and try again.</tool_response>`);
+                pushToWindow('user', renderToolResult(`Your answer has issues:\n${criticResult}\n\nPrevious directions tried:\n${directions.map((d, i) => `${i + 1}. ${d.substring(0, 100)}`).join('\n')}\n\nTake a different approach and try again.`));
                 continue roundLoop;
               } else {
                 // Interactive: report to user
                 addMessage('system', `[critic found issues — reporting to user]`);
                 pushToWindow('assistant', `[write_file reviewed — issues found]`);
-                pushToWindow('user', `<tool_response>\nYour answer has issues:\n${criticResult}\n\nExplain to the user what you tried, why the critic rejected it, and what directions you could take next.</tool_response>`);
+                pushToWindow('user', renderToolResult(`Your answer has issues:\n${criticResult}\n\nExplain to the user what you tried, why the critic rejected it, and what directions you could take next.`));
                 continue roundLoop;
               }
             }
@@ -725,7 +725,7 @@ export async function runAgent(userInput: string): Promise<void> {
 
       drainQueuedMessages();
 
-      const callXml = `<function=${name}>\n${Object.entries(params).map(([k, v]) => `<parameter=${k}>\n${v}\n</parameter>`).join('\n')}\n</function>`;
+      const callXml = renderToolCall({ name, params });
       const assistantTurn = textPrefix ? `${textPrefix}\n\n${callXml}` : callXml;
       pushToWindow('assistant', assistantTurn);
 
@@ -734,7 +734,7 @@ export async function runAgent(userInput: string): Promise<void> {
         addMessage('system', `${name} still running (>${BACKGROUND_TIMEOUT / 1000}s), continuing... [task ${taskId}]`);
         log('INFO', 'tool_backgrounded', { tool: name, taskId });
 
-        pushToWindow('user', `<tool_response>\n${name} is still running in the background (task ${taskId}). It started ${BACKGROUND_TIMEOUT / 1000}s ago. You can call the \`status\` tool to check progress, or continue with other work — the result will also arrive automatically.\n</tool_response>`);
+        pushToWindow('user', renderToolResult(`${name} is still running in the background (task ${taskId}). It started ${BACKGROUND_TIMEOUT / 1000}s ago. You can call the \`status\` tool to check progress, or continue with other work — the result will also arrive automatically.`));
         pushMessage('assistant', `[tool: ${name}(${paramPreview}) → backgrounded, task ${taskId}]`);
 
         toolPromise.then(r => {
@@ -744,7 +744,7 @@ export async function runAgent(userInput: string): Promise<void> {
           const bgPreview = bgLines.slice(0, 2).join('\n');
           const bgMore = bgLines.length > 2 ? `  {#555-fg}(${bgLines.length - 2} more lines — Ctrl+O){/}` : '';
           addMessage('system', `${name} [task ${taskId}] completed:\n${bgPreview}${bgMore ? `\n${bgMore}` : ''}`);
-          pushToWindow('user', `<tool_response>\nBackground ${name} (task ${taskId}) completed:\n${r.substring(0, 16000)}\n</tool_response>`);
+          pushToWindow('user', renderToolResult(`Background ${name} (task ${taskId}) completed:\n${r.substring(0, 16000)}`));
           pushMessage('assistant', `[tool: ${name}(${paramPreview}) → ${r.substring(0, 150)}]`);
           log('INFO', 'tool_background_complete', { tool: name, taskId, resultLength: String(r.length) });
         }).catch((err: unknown) => {
@@ -792,7 +792,7 @@ export async function runAgent(userInput: string): Promise<void> {
 
       log('INFO', 'tool_result', { tool: name, resultLength: String(result.length) });
 
-      pushToWindow('user', `<tool_response>\n${result.substring(0, 16000)}\n</tool_response>`);
+      pushToWindow('user', renderToolResult(result.substring(0, 16000)));
       pushMessage('assistant', `[tool: ${name}(${paramPreview})]`);
 
       // CTA just delivered — tell the model it's done. This prevents the
@@ -856,11 +856,11 @@ export async function runAgent(userInput: string): Promise<void> {
     pushToWindow('user', `<system>You have reached the maximum rounds. Write your final output to ${ctaTarget} NOW using whatever facts you have gathered. Do not explore further.</system>`);
     try {
       const finalResponse = await llmChat(buildMessages(maxRounds - 1, maxRounds));
-      const finalParsed = parseResponse(finalResponse);
-      if (finalParsed.toolCall && finalParsed.toolCall.name === 'write_file') {
+      const finalCall = parseToolCalls(finalResponse).toolCalls[0] ?? null;
+      if (finalCall && finalCall.name === 'write_file') {
         const tool = getTool('write_file');
         if (tool) {
-          await tool.execute(finalParsed.toolCall.params);
+          await tool.execute(finalCall.params);
           ctaDelivered = true;
           log('INFO', 'cta_force_delivered', { target: ctaTarget });
         }

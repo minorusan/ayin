@@ -12,7 +12,7 @@
  * with clean context. Main agent calls explore many times to cover the tree.
  */
 
-import { llmChat } from '../connection.js';
+import { llmChat } from '../llm/manager.js';
 import { spawn } from 'node:child_process';
 import { log } from '../log.js';
 import { addMessage } from '../ui.js';

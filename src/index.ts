@@ -13,6 +13,7 @@ import {
   onInput, onGlobalKey, focusInput, blurInput, chatBox, shutdown, getTokensDisplay,
 } from './ui.js';
 import { connect, disconnect, onConnectionChange, isConnected } from './connection.js';
+import { refreshActiveModel } from './llm/manager.js';
 import { getSummaryText, getSummary, resetSummary } from './summary.js';
 import { estimateSessionTokens } from './tokens.js';
 import { loadHistory, pushEntry } from './history.js';
@@ -382,6 +383,9 @@ async function runHeadless(): Promise<void> {
     process.stderr.write(`ayin: connection failed — ${err instanceof Error ? err.message : err}\n`);
     process.exit(1);
   }
+
+  // Resolve the active model (gemma/qwen) → dialect before the first round.
+  await refreshActiveModel();
 
   try {
     await runAgent(prompt);

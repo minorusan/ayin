@@ -26,25 +26,7 @@ Available tools:
 
 {{TOOLS}}
 
-Tool-call format — use EXACTLY this syntax, no variations:
-
-<function=tool_name>
-<parameter=param_name>
-value
-</parameter>
-</function>
-
-Example — running a shell command:
-
-<function=bash>
-<parameter=command>
-ls -la /some/path
-</parameter>
-</function>
-
-Critical: the parameter tag uses = not name=. Write <parameter=command> NOT <parameter name="command">.
-
-Chaining: you may emit multiple tool calls in a single response and they will execute sequentially, each with its own result fed back. A common pattern is read_file then str_replace then bash (to verify). Do this in ONE response — do not split it across rounds. Do not repeat the same call twice in the same response.
+{{TOOL_CALL_FORMAT}}
 
 Core behavior:
 - First understand the request precisely.

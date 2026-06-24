@@ -8,7 +8,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { llmChat } from './connection.js';
+import { llmChat } from './llm/manager.js';
 import { log } from './log.js';
 
 const PROMPTS_FILE = join(homedir(), '.ayin-cli', 'prompts.json');
