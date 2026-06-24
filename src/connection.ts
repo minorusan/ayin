@@ -24,8 +24,8 @@ import { getConfigString } from './prompts.js';
  *   2. persisted per-machine config `keliUrl` in ~/.ayin-cli/prompts.json (`/set keli-url …`)
  *   3. http://localhost:9100 — ONLY correct when the backend runs on THIS machine.
  *
- * The backend + gemma live on the NUC; on a Mac/Pi/Windows box localhost is wrong, so set the
- * LAN address once (e.g. `/set keli-url http://192.168.0.229:9100`) and it sticks across runs.
+ * The backend usually runs on another machine on your LAN; where it isn't local, set the backend
+ * address once (e.g. `/set keli-url http://<backend-host>:9100`) and it sticks across runs.
  * Both the LLM call and the docs_search tool use this resolver, so they never diverge.
  */
 export function keliBaseUrl(): string {
@@ -91,8 +91,8 @@ export async function llmChat(
       return llmChatOpenAI(messages, openAiKey);
     }
     throw new Error(
-      `No reachable Maradel backend at ${keliBaseUrl()}. On another machine, point ayin at the NUC: ` +
-      `set env KELI_URL=http://192.168.0.229:9100 or run \`/set keli-url http://192.168.0.229:9100\`.`,
+      `No reachable LLM backend at ${keliBaseUrl()}. Point ayin at your backend: ` +
+      `set env KELI_URL=http://<backend-host>:9100 or run \`/set keli-url http://<backend-host>:9100\`.`,
     );
   }
 

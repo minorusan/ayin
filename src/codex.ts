@@ -10,7 +10,7 @@
 
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { log } from './log.js';
 import { getConfigString } from './prompts.js';
@@ -18,7 +18,7 @@ import { getConfigString } from './prompts.js';
 // ── Env loader (same as jira.ts) ─────────────────────────────────────
 
 function loadEgregorEnv(): Record<string, string> {
-  const envPath = `${process.env.HOME ?? '/home/erkamen'}/.egregor/config.env`;
+  const envPath = join(homedir(), '.egregor', 'config.env');
   if (!existsSync(envPath)) return {};
   const out: Record<string, string> = {};
   for (const line of readFileSync(envPath, 'utf-8').split('\n')) {
