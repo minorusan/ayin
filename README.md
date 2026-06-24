@@ -31,14 +31,6 @@ headless mode for scripting and automation.
 - **Headless or interactive.** A blessed TUI for live work; `-p "task"` for one-shot,
   scriptable runs (CI, batch jobs, parent agents).
 
-## Lineage
-
-ayin began life inside the **egregor** stack as `@egregor/ayin-cli` and was **vendored and
-decoupled** into the **Maradel** assistant as `@maradel/ayin`. The egregor-specific plumbing
-(service discovery, remote session sync,
-a private registry) has been stripped; what remains is a standalone agent that needs only
-Node, the POSIX tools its file tools shell out to, and an LLM endpoint.
-
 ## Quickstart
 
 ```bash
@@ -86,7 +78,7 @@ integrations you can ignore.
 - **Node ≥ 18** (uses global `fetch` + `AbortSignal.timeout`; Node 20+ recommended).
 - A **POSIX shell** at `/bin/bash` — present on macOS and Linux. On Windows, run ayin under
   **WSL** (the file tools shell out to `bash`/`grep`/`find`).
-- An **LLM endpoint** (local Ollama via the bundled adapter, a Maradel backend, or OpenAI).
+- An **LLM endpoint** (local Ollama via the bundled adapter, any compatible backend, or OpenAI).
   See [`SETUP.md`](SETUP.md).
 
 ## Configuration
