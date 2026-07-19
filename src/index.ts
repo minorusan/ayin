@@ -93,7 +93,7 @@ function showSummaryOverlay(): void {
     tags: true,
     scrollable: true,
     alwaysScroll: true,
-    mouse: true,
+    // no mouse:true — keeps terminal-native text selection/copy working (scroll: PgUp/PgDn)
     padding: { left: 1, right: 1, top: 0, bottom: 1 },
     style: {
       fg: 'white',
@@ -158,7 +158,7 @@ function renderArtifactsOverlay(): void {
     tags: true,
     scrollable: true,
     alwaysScroll: true,
-    mouse: true,
+    // no mouse:true — keeps terminal-native text selection/copy working (scroll: PgUp/PgDn)
     padding: { left: 1, right: 1, top: 0, bottom: 0 },
     style: {
       fg: 'white',
@@ -211,6 +211,17 @@ if (!HEADLESS) {
       if (artifactIdx < artifacts.length - 1) { artifactIdx++; renderArtifactsOverlay(); }
     }
   });
+
+  // Overlays scroll by keyboard (mouse tracking is off so terminal selection stays native).
+  // The chat box has its own PgUp/PgDn in the input handler; it is inert while an overlay is open.
+  const overlayScroll = (dir: 1 | -1) => {
+    const box = artifactsOverlay ?? summaryOverlay;
+    if (!box) return;
+    box.scroll(dir * Math.floor((box.height as number) / 2));
+    screen.render();
+  };
+  screen.key(['pageup'], () => overlayScroll(-1));
+  screen.key(['pagedown'], () => overlayScroll(1));
 }
 
 // ── Connection ──────────────────────────────────────────────────────

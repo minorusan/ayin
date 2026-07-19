@@ -77,7 +77,9 @@ export const chatBox: blessed.Widgets.BoxElement = HEADLESS
     top: 0, left: 0, right: 0, bottom: 4,
     scrollable: true, alwaysScroll: true,
     scrollbar: { style: { bg: 'grey' } },
-    mouse: true, tags: true,
+    // NO mouse:true — blessed mouse tracking hijacks the terminal's native text selection/copy.
+    // Scrolling is PageUp/PageDown (global key handler below); selection stays native.
+    tags: true,
     padding: { left: 1, right: 1, top: 0, bottom: 0 },
     style: { fg: 'white', bg: 'default' },
   });
