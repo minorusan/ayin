@@ -218,10 +218,10 @@ if (!HEADLESS) {
 onConnectionChange((state) => {
   setStatus({ connection: state });
   if (state === 'connected') {
-    addMessage('system', 'Connected to Egregor');
+    addMessage('system', 'Connected to backend');
     refreshTokens();
   } else {
-    addMessage('system', 'Disconnected from Egregor');
+    addMessage('system', 'Disconnected from backend');
   }
 });
 
@@ -339,7 +339,7 @@ onInput(async (text: string) => {
   }
 
   if (!isConnected()) {
-    addMessage('system', 'Not connected. Waiting for Egregor...');
+    addMessage('system', 'Not connected. Waiting for the backend...');
     return;
   }
 
