@@ -373,6 +373,12 @@ onInput(async (text: string) => {
 // ── Start ───────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  if (process.argv[2] === 'watch') {
+    // Repo watcher daemon — no TUI, no agent loop. See src/watch.ts.
+    const { runWatch } = await import('./watch.js');
+    await runWatch(process.argv.slice(3));
+    return;
+  }
   loadRules(process.cwd());
   if (HEADLESS) {
     await runHeadless();

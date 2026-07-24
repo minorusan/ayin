@@ -127,6 +127,30 @@ configured): `web_search`, `docs_search`, `codex`, `jira`, `fixme`. See the READ
   the model keeps re-searching at low confidence despite having gathered real data, it
   returns that data verbatim instead of burning all iterations.
 
+## Repo watcher (`watch.ts`)
+
+`ayin watch --repo <path>` installs a `post-commit` hook and runs a foreground daemon;
+bare `ayin watch` is the boot/launchd resume path (hooks already installed); `--once`
+processes the backlog and exits.
+
+The moving parts, designed to survive interruption at any point:
+
+- **Hook** (`.git/hooks/post-commit`, marker-tagged, idempotent reinstall; a foreign hook is
+  never overwritten) appends `{ts, repo, commit}` as one JSON line to
+  `~/.ayin-cli/watch/queue.jsonl`. It never blocks the commit and never needs the daemon up.
+- **Daemon** polls the queue every 2s (poll-only — no fs.watch, no sockets). An entry absent
+  from the processed ledger (`processed.jsonl`) is backlog: commits made while the daemon was
+  down, or in flight when the machine died, are picked up on the next start with no human in
+  the loop. Reviews are idempotent (report rewritten), so a crash mid-review just re-runs.
+  Singleton via pidfile (stale pids are taken over). One daemon serves all watched repos.
+- **Review**: commit metadata + capped diff (120 KB, truncated at a hunk boundary) → one
+  `llmChat` call scoring the diff against the `SMELL_SIGNALS` catalog (~20 typical smells);
+  each finding carries a **confidence 0.30–1.0**. Output: `CodeReview-<shortHash>.md` in the
+  repo root — metadata table, changed files, findings, verdict.
+- **Guards**: commits touching only `CodeReview-*.md` are skipped (no review-of-review loop);
+  vanished commits (rebase/gc) are ledgered as `gone`; LLM/backend failures retry with
+  linear backoff up to 5 attempts, then are ledgered as `failed`.
+
 ## Permissions (`permissions.ts`)
 
 Read-only tools (`read_file`, `grep`, `find_files`, `explore`, `status`) are auto-allowed.
@@ -157,7 +181,8 @@ can finish — see the warning in `SETUP.md`.
 
 ```
 src/
-├── index.ts            entry; interactive vs headless (-p); overlays; input handling
+├── index.ts            entry; interactive vs headless (-p) vs `watch`; overlays; input handling
+├── watch.ts            repo watcher daemon: post-commit hook → queue → LLM code review
 ├── agent.ts            the agent loop (build → call → parse → execute → loop)
 ├── llm/
 │   ├── manager.ts      active-model resolution + dialect selection; all LLM calls route here

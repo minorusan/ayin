@@ -25,7 +25,8 @@ import { navigateUp, navigateDown, resetNavigation } from './history.js';
 // ── Headless detection ──────────────────────────────────────────────
 // Must happen before any blessed initialization.
 
-export const HEADLESS = process.argv.some(a => a === '-p' || a === '--prompt' || a === '--non-interactive');
+export const HEADLESS = process.argv.some(a => a === '-p' || a === '--prompt' || a === '--non-interactive')
+  || process.argv[2] === 'watch'; // watch daemon has no TUI
 export const THINKING_MODE = process.argv.includes('--thinking');
 
 // ── Commands registry ───────────────────────────────────────────────

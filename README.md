@@ -73,6 +73,29 @@ The **core eight** (`read_file`, `grep`, `find_files`, `write_file`, `str_replac
 `explore`, `status`) need nothing but Node + a POSIX shell. The rest are optional
 integrations you can ignore.
 
+## Repo watcher — automatic post-commit code review
+
+```bash
+ayin watch --repo /path/to/your/repo        # install the hook + run the daemon (foreground)
+ayin watch --once                           # process any queued commits, then exit
+```
+
+`ayin watch` installs a `post-commit` hook in the target repo and runs a persistent daemon.
+Every commit is queued (a JSON line in `~/.ayin-cli/watch/queue.jsonl`) and reviewed by the
+LLM against a catalog of ~20 typical code-smell signals (long functions, swallowed errors,
+race conditions, hardcoded secrets, injection risk, unbounded memory, …); each finding is
+reported **with a confidence score**. The review lands as `CodeReview-<shortHash>.md` in the
+repo root — commit metadata first, then the findings, then a verdict.
+
+Built to survive interruption: the hook never blocks a commit and never needs the daemon up —
+the queue accumulates, and on its next start the daemon processes the whole backlog (a
+processed-ledger keeps reviews exactly-once; a crash mid-review just re-runs it). One daemon
+serves any number of watched repos. Commits that only touch `CodeReview-*.md` are skipped, so
+committing a review never triggers a review of the review.
+
+To keep it running on macOS: `nohup ayin watch --repo <repo> &`, or wrap it in a launchd
+agent with `KeepAlive` — the daemon is safe to kill and restart at any point.
+
 ## Requirements
 
 - **Node ≥ 18** (uses global `fetch` + `AbortSignal.timeout`; Node 20+ recommended).
