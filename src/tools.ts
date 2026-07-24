@@ -20,6 +20,7 @@ import { statusExecute } from './tools/status.js';
 import { exploreExecute } from './tools/explore.js';
 import { webSearch } from './tools/web-search.js';
 import { docsSearchExecute } from './tools/docs-search.js';
+import { sendPushExecute } from './tools/send-push.js';
 
 // ── Async exec ──────────────────────────────────────────────────────
 
@@ -487,6 +488,21 @@ const tools: Tool[] = [
     ],
     async execute(params) {
       return docsSearchExecute(params);
+    },
+  },
+  {
+    name: 'send_push',
+    description:
+      "Send a push notification to the user's phone via the Maradel backend (FCM). Use to proactively " +
+      'notify them — a long autonomous run finished, a build/CI result is ready, or something needs their ' +
+      'attention. Goes through the backend, so it works even though ayin runs out-of-process. Params: ' +
+      'title (short) and body (the message). Reports "no device registered" if push is not set up.',
+    parameters: [
+      { name: 'title', type: 'string', description: 'Short notification title.', required: true },
+      { name: 'body', type: 'string', description: 'The notification message body.', required: true },
+    ],
+    async execute(params) {
+      return sendPushExecute(params);
     },
   },
 ];
