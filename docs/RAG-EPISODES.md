@@ -62,7 +62,11 @@ Farming now happens automatically — no manual `rag-mine` runs:
    (never blocks; skips non-git-repo cwds, stop-continuations, and our own hound/`-p` runs).
 2. **The always-on `ayin watch` daemon** drains `mine` markers **without taking the GPU**
    (deterministic), mines that session's transcript, and dedup-merges the git-verified episodes into
-   `~/.ayin-cli/rag/<repo>/episodes.json`. Survives relaunch (queue is persistent; one instance).
+   the **central store on the backend** — `logs` resource op `rag.episodes.append`, landing at
+   `~/.maradel/logs/rag/<repo>/episodes.json` **on the nuk**, so every machine's ayin farms into ONE
+   store (same door as `ayin rag`). Local `~/.ayin-cli/rag/` is a **fallback only** (backend
+   unreachable / op not yet deployed) so nothing is lost. Survives relaunch (persistent queue).
+   **The `where:'backend'` in the daemon log / rag-mine output is the "central storage working" signal.**
 
 So on the nuk/backend it starts collecting the moment the daemon + Stop hook are installed there,
 in whatever repo Claude works in. Verified end-to-end (synthetic repo+transcript → 1 episode farmed).

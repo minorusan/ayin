@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, relative, resolve } from 'node:path';
-import { writeEpisodeStore } from './store.js';
+import { appendEpisodes } from './store.js';
 
 export interface Edit { file: string; kind: 'Edit' | 'Write' | 'MultiEdit'; snippet: string }
 export interface Episode {
@@ -180,10 +180,10 @@ export async function runRagMine(args: string[]): Promise<void> {
   const all = files.flatMap(f => segmentTranscript(f, repo));
   const kept = verifyEpisodes(repo, all);
   const limit = args.includes('--limit') ? Number(args[args.indexOf('--limit') + 1]) : 0;
-  const store = writeEpisodeStore(repo, kept, limit > 0 ? kept.slice(0, limit) : kept, all.length);
+  const r = await appendEpisodes(repo, limit > 0 ? kept.slice(0, limit) : kept);
 
   const nEdit = kept.filter(e => e.kind === 'edit').length;
   out(`episodes: ${all.length} found · ${kept.length} verified (${nEdit} edit, ${kept.length - nEdit} investigation) · ${all.length - kept.length} dropped`);
-  out(`→ ${store}`);
+  out(`→ +${r.added} new (${r.total} total) on the ${r.where === 'backend' ? 'backend (maradel, central)' : 'LOCAL fallback — backend unreachable'}`);
   for (const ep of kept.slice(0, 4)) { out(`\n  • [${ep.kind}] ${ep.request.split('\n')[0].slice(0, 90)}`); out(`    files: ${ep.verifiedFiles.slice(0, 4).join(', ') || '(none)'}`); }
 }

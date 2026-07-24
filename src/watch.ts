@@ -603,10 +603,10 @@ async function mineSession(transcript: string, cwd: string): Promise<{ status: '
   if (!repo) return { status: 'skipped', note: 'not a git repo — no verifiable episodes' };
   const eps = verifyEpisodes(repo, segmentTranscript(transcript, repo));
   if (eps.length === 0) return { status: 'skipped', note: 'no verified episodes yet' };
-  const { added, total } = appendEpisodes(repo, eps);
-  if (added > 0) out(`mined ${repoName(repo)}: +${added} episode(s) → store now ${total}`);
-  log('INFO', 'watch_mined', { repo, added: String(added), total: String(total) });
-  return { status: 'reviewed', note: `+${added} episodes (store ${total})` };
+  const { added, total, where } = await appendEpisodes(repo, eps);
+  if (added > 0) out(`mined ${repoName(repo)}: +${added} episode(s) → ${where} store now ${total}`);
+  log('INFO', 'watch_mined', { repo, added: String(added), total: String(total), where });
+  return { status: 'reviewed', note: `+${added} episodes (${where}, ${total})` };
 }
 
 // ── 10-min working-tree pass: autostage + smell review (the eGPU workhorse) ──
