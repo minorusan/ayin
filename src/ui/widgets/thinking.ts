@@ -15,6 +15,7 @@
  */
 
 import { theme } from '../theme.js';
+import { onTick } from '../ticker.js';
 
 export type AgentState = 'idle' | 'thinking' | 'tool' | 'explaining' | 'summarizing';
 
@@ -22,17 +23,17 @@ interface StateSpec {
   frames: string[];
   color: string;       // state color (gutter + spinner)
   pulse?: string;      // label pulses color ↔ pulse (defaults to no pulse)
-  intervalMs: number;  // frame duration
+  every: number;       // base ticks (80ms, see ui/ticker.ts) per frame
   dots: boolean;       // animated ellipsis after the label
 }
 
 const BRAILLE = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 const STATE_SPECS: Record<Exclude<AgentState, 'idle'>, StateSpec> = {
-  thinking:    { frames: BRAILLE, color: theme.thinking, pulse: theme.accentBright, intervalMs: 80, dots: true },
-  tool:        { frames: ['◢', '◣', '◤', '◥'], color: theme.tool, intervalMs: 120, dots: false },
-  explaining:  { frames: BRAILLE, color: theme.explaining, pulse: theme.accentBright, intervalMs: 80, dots: true },
-  summarizing: { frames: ['◐', '◓', '◑', '◒'], color: theme.summarizing, intervalMs: 140, dots: true },
+  thinking:    { frames: BRAILLE, color: theme.thinking, pulse: theme.accentBright, every: 1, dots: true },
+  tool:        { frames: ['◢', '◣', '◤', '◥'], color: theme.tool, every: 2, dots: false },
+  explaining:  { frames: BRAILLE, color: theme.explaining, pulse: theme.accentBright, every: 1, dots: true },
+  summarizing: { frames: ['◐', '◓', '◑', '◒'], color: theme.summarizing, every: 2, dots: true },
 };
 
 /** Compat inference so plain setAgentStatus(text) picks a sensible state from its phrasing. */
@@ -55,11 +56,11 @@ export class ThinkingIndicator {
   private label = '';
   private tick = 0;
   private startTime = 0;
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private onTick: () => void;
+  private unTick: (() => void) | null = null; // shared ticker subscription (ui/ticker.ts)
+  private notify: () => void;
 
-  constructor(onTick: () => void) {
-    this.onTick = onTick;
+  constructor(onChange: () => void) {
+    this.notify = onChange;
   }
 
   /** Explicit state + label. Same state keeps the clock; a new state restarts it. */
@@ -76,9 +77,14 @@ export class ThinkingIndicator {
     if (restart) {
       this.tick = 0;
       this.startTime = Date.now();
-      this.rearm();
+      if (!this.unTick) {
+        this.unTick = onTick(() => {
+          this.tick++;
+          this.notify();
+        });
+      }
     }
-    this.onTick();
+    this.notify();
   }
 
   /** Compat shim for setAgentStatus(text): '' clears, otherwise state is inferred. */
@@ -90,8 +96,8 @@ export class ThinkingIndicator {
   stop(): void {
     this.state = 'idle';
     this.label = '';
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
-    this.onTick();
+    if (this.unTick) { this.unTick(); this.unTick = null; }
+    this.notify();
   }
 
   active(): boolean {
@@ -102,26 +108,16 @@ export class ThinkingIndicator {
   line(): string | null {
     if (this.state === 'idle') return null;
     const spec = STATE_SPECS[this.state];
-    const frame = spec.frames[this.tick % spec.frames.length];
-    // label pulse: a slow breathe between the state color and its bright variant
+    const frame = spec.frames[Math.floor(this.tick / spec.every) % spec.frames.length];
+    // label pulse: a slow breathe between the state color and its bright variant (480ms)
     const labelColor = spec.pulse && Math.floor(this.tick / 6) % 2 === 1 ? spec.pulse : spec.color;
-    // ellipsis breathes 0→3 dots at a fraction of the frame rate
+    // ellipsis breathes 0→3 dots (320ms per step)
     const dots = spec.dots ? '·'.repeat(Math.floor(this.tick / 4) % 4) : '';
     const elapsed = formatElapsed(Date.now() - this.startTime);
     return `{${spec.color}-fg}▍ ${frame}{/} {${labelColor}-fg}${this.label}{/}{${theme.dim}-fg}${dots}   ${elapsed}{/}`;
   }
 
   destroy(): void {
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
-  }
-
-  private rearm(): void {
-    if (this.timer) clearInterval(this.timer);
-    if (this.state === 'idle') return;
-    const spec = STATE_SPECS[this.state];
-    this.timer = setInterval(() => {
-      this.tick++;
-      this.onTick();
-    }, spec.intervalMs);
+    if (this.unTick) { this.unTick(); this.unTick = null; }
   }
 }

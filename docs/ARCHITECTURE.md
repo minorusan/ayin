@@ -193,13 +193,21 @@ tree knows about the internals). Design rules:
 - **Copy-paste contract** (`screen.ts`): no widget may ever enable blessed mouse tracking
   (`mouse: true`, `enableMouse`, `clickable`) — it hijacks terminal-native text selection,
   which is what keeps chat text copy-pastable. Scrolling is PgUp/PgDn by design.
+- **One animation heartbeat** (`ticker.ts`): widgets subscribe for 80ms beats instead of
+  owning intervals — every animation is phase-locked, one re-render per beat regardless of how
+  many things move, and the clock stops itself when nothing is subscribed (idle = zero CPU).
+  Per-animation speed is a tick divisor (`every`) in the widget's spec table.
 - **Live LLM phase in the status bar** (`llm-events.ts` + `widgets/status.ts`): the TUI
   subscribes to the backend llm resource's SSE stream (`GET {keliUrl}/resource/llm/events`,
-  auto-reconnect with backoff) and reduces its events to one segment — `⇆ swapping <model>`
-  (amber) → `◌ preprocessing` (indigo) → `▶ responding <model>` (green) →
-  `◆ postprocessing` (violet); idle hides the segment, and a dead stream blanks it rather
-  than showing a stale phase. The ayin-layer postprocess (tool-call parsing in `agent.ts`)
-  reports through the same segment as `postprocessing ayin`.
+  auto-reconnect with backoff) and reduces its events to one **animated** segment, each phase
+  with its own motion (a new phase = one `LLM_PHASE_LOOK` entry):
+  `⇆/⇄ swapping <model>` (amber, arrows trading places) → `◔◑◕● preprocessing` (indigo,
+  context filling) → `▸▹▹ responding <model>` (green, tokens flowing) → `◇◈◆ postprocessing`
+  (violet, reply crystallizing). **Event blips** flash transiently and auto-clear:
+  `✓ 1.8s` on request.finish, `✓ <model> ready` on swap.finish, blinking `⚠ context overflow
+  risk` on oom.warning. Idle hides the segment; a dead stream blanks it rather than showing a
+  stale phase. The ayin-layer postprocess (tool-call parsing in `agent.ts`) reports through
+  the same segment as `postprocessing ayin`.
 - **Tool output cards** (`widgets/chat.ts#formatToolResultForChat`): `write_file` renders the
   diff card; every other tool gets a `│`-gutter preview block (6 lines for bash/grep, 4 for
   read_file, 2 default, 200-char line cap) with blessed tags **escaped via `{open}`/`{close}`**
@@ -268,6 +276,7 @@ src/
 │   ├── theme.ts        every color + glyph in one place (widgets never hardcode)
 │   ├── screen.ts       the one blessed screen — copy-paste contract: NO mouse tracking, ever
 │   ├── layout.ts       bottom-up widget stack (status→input→hints→chat); the only geometry authority
+│   ├── ticker.ts       the one animation heartbeat (80ms; runs only while something animates)
 │   ├── keys.ts         the one keypress router (global keys → input → chat scroll)
 │   └── widgets/        chat.ts (ChatLog + diff cards) · thinking.ts (ThinkingIndicator —
 │                       stateful animation) · input.ts (InputBar) · hints.ts (CmdHints +

@@ -11,8 +11,9 @@ import { keliBaseUrl } from './connection.js';
 import { log } from './log.js';
 
 export interface LlmPhase {
-  phase: 'swapping' | 'preprocessing' | 'responding' | 'postprocessing' | null;
+  phase: 'swapping' | 'preprocessing' | 'responding' | 'postprocessing' | 'done' | 'warning' | null;
   detail?: string; // e.g. the model being swapped in
+  ttlMs?: number;  // transient blip (✓ done / ⚠ warning) — auto-clears in the status bar
 }
 
 type PhaseListener = (p: LlmPhase) => void;
@@ -25,12 +26,16 @@ function shortModel(model: unknown): string {
 export function reducePhase(type: string, payload: Record<string, unknown>): LlmPhase | undefined {
   switch (type) {
     case 'model.swap.start': return { phase: 'swapping', detail: shortModel(payload.to) };
-    case 'model.swap.finish': return { phase: null };
+    case 'model.swap.finish': return { phase: 'done', detail: `${shortModel(payload.to)} ready`, ttlMs: 2000 };
     case 'request.preprocess': return { phase: 'preprocessing', detail: shortModel(payload.model) };
     case 'request.start': return { phase: 'preprocessing', detail: shortModel(payload.model) };
     case 'request.responding': return { phase: 'responding', detail: shortModel(payload.model) };
     case 'request.postprocess': return { phase: 'postprocessing', detail: shortModel(payload.model) };
-    case 'request.finish': return { phase: null };
+    case 'request.finish': {
+      const ms = Number(payload.ms ?? 0);
+      return { phase: 'done', detail: ms > 0 ? `${(ms / 1000).toFixed(1)}s` : undefined, ttlMs: 1500 };
+    }
+    case 'oom.warning': return { phase: 'warning', detail: 'context overflow risk', ttlMs: 4000 };
     default: return undefined;
   }
 }

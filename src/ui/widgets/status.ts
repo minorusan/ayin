@@ -6,21 +6,31 @@ import blessed from 'blessed';
 import { HEADLESS, noopBox } from '../headless.js';
 import { screen, render } from '../screen.js';
 import { theme } from '../theme.js';
+import { onTick } from '../ticker.js';
+
+export type LlmPhaseName =
+  | 'swapping' | 'preprocessing' | 'responding' | 'postprocessing' // live phases (animated)
+  | 'done' | 'warning';                                            // transient event blips (ttl)
 
 export interface StatusState {
   connection: 'connected' | 'disconnected' | 'connecting';
   tokens: { used: number; total: number } | null;
   cwd: string;
   update: string | null; // e.g. "v1.0.30 available"
-  /** live LLM phase from the backend llm resource event stream (null = idle, segment hidden) */
-  llm: { phase: 'swapping' | 'preprocessing' | 'responding' | 'postprocessing'; detail?: string } | null;
+  /** live LLM phase from the backend llm resource event stream (null = idle, segment hidden).
+   *  ttlMs makes it a transient blip that auto-clears (event acknowledgements). */
+  llm: { phase: LlmPhaseName; detail?: string; ttlMs?: number } | null;
 }
 
-const LLM_PHASE_LOOK: Record<NonNullable<StatusState['llm']>['phase'], { glyph: string; color: string }> = {
-  swapping:       { glyph: '⇆', color: theme.warn },
-  preprocessing:  { glyph: '◌', color: theme.accent },
-  responding:     { glyph: '▶', color: theme.ok },
-  postprocessing: { glyph: '◆', color: theme.summarizing },
+/** Each phase owns its animation: frames + how many base ticks (80ms) per frame + color.
+ *  A new phase = one entry here. */
+const LLM_PHASE_LOOK: Record<LlmPhaseName, { frames: string[]; every: number; color: string }> = {
+  swapping:       { frames: ['⇆', '⇄'], every: 4, color: theme.warn },              // arrows trading places
+  preprocessing:  { frames: ['◔', '◑', '◕', '●', '◕', '◑'], every: 2, color: theme.accent }, // context filling up
+  responding:     { frames: ['▸▹▹', '▹▸▹', '▹▹▸', '▹▹▹'], every: 1, color: theme.ok },       // tokens flowing out
+  postprocessing: { frames: ['◇', '◈', '◆', '◈'], every: 3, color: theme.summarizing },      // reply crystallizing
+  done:           { frames: ['✓'], every: 1, color: theme.ok },
+  warning:        { frames: ['⚠', '⚠', ' '], every: 3, color: theme.err },                   // blink — look at me
 };
 
 function formatTokens(n: number): string {
@@ -50,9 +60,33 @@ export class StatusBar {
       });
   }
 
+  private tick = 0;
+  private unTick: (() => void) | null = null;
+  private blipTimer: ReturnType<typeof setTimeout> | null = null;
+
   set(partial: Partial<StatusState>): void {
     if (HEADLESS) return;
     Object.assign(this.state, partial);
+
+    if ('llm' in partial) {
+      // Animate only while a phase is showing; the ticker stops itself when idle.
+      if (this.state.llm && !this.unTick) {
+        this.unTick = onTick((t) => { this.tick = t; this.redraw(); });
+      } else if (!this.state.llm && this.unTick) {
+        this.unTick();
+        this.unTick = null;
+      }
+      // Transient blips (✓ done / ⚠ warning) clear themselves — unless something replaced them.
+      if (this.blipTimer) { clearTimeout(this.blipTimer); this.blipTimer = null; }
+      if (this.state.llm?.ttlMs) {
+        const shown = this.state.llm;
+        this.blipTimer = setTimeout(() => {
+          if (this.state.llm === shown) this.set({ llm: null });
+        }, shown.ttlMs);
+        this.blipTimer.unref?.();
+      }
+    }
+
     this.redraw();
   }
 
@@ -86,8 +120,11 @@ export class StatusBar {
 
     if (this.state.llm) {
       const look = LLM_PHASE_LOOK[this.state.llm.phase];
+      const frame = look.frames[Math.floor(this.tick / look.every) % look.frames.length];
+      const label = this.state.llm.phase === 'done' || this.state.llm.phase === 'warning'
+        ? '' : ` ${this.state.llm.phase}`;
       const detail = this.state.llm.detail ? ` {${theme.muted}-fg}${this.state.llm.detail}{/}` : '';
-      parts.push(`{${look.color}-fg}${look.glyph} ${this.state.llm.phase}{/}${detail}`);
+      parts.push(`{${look.color}-fg}${frame}${label}{/}${detail}`);
     }
 
     if (this.state.update) parts.push(`{${theme.warn}-fg}↑ ${this.state.update}{/}`);
