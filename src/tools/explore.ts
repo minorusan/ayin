@@ -13,7 +13,7 @@
  */
 
 import { llmChat } from '../llm/manager.js';
-import { spawn } from 'node:child_process';
+import { spawnShell, killTree } from '../shell.js';
 import { log } from '../log.js';
 import { addMessage } from '../ui.js';
 
@@ -86,11 +86,7 @@ async function expandContext(answer: string, cwd: string): Promise<string> {
 
 function execCommand(command: string, cwd: string): Promise<string> {
   return new Promise((resolve) => {
-    const child = spawn('/bin/bash', ['-lc', command], {
-      cwd,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = spawnShell(command, { cwd });
 
     let stdout = '';
     let stderr = '';
@@ -99,7 +95,7 @@ function execCommand(command: string, cwd: string): Promise<string> {
     child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
 
     const timer = setTimeout(() => {
-      try { child.kill(); } catch {}
+      killTree(child);
       resolve('(timeout after 30s)');
     }, COMMAND_TIMEOUT);
 

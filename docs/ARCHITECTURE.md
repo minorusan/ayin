@@ -305,6 +305,7 @@ src/
 │   └── dialects/       xml.ts (shared base) · gemma.ts · qwen.ts
 ├── connection.ts       transport: the keli-shaped endpoint + OpenAI fallback; KELI_URL resolver
 ├── parser.ts           lenient tool-call parser (multi-format)
+├── shell.ts            cross-platform shell: /bin/bash (POSIX) · Git Bash/cmd (Windows) + killTree
 ├── tools.ts            tool registry + the system prompt assembler
 ├── tools/              explore.ts · docs-search.ts · status.ts · signals.ts · web-search.ts (SearXNG→DDG)
 ├── permissions.ts      approval dialogs + allow-lists

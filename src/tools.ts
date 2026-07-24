@@ -6,7 +6,7 @@
  *   - execute() function that runs it and returns string output
  */
 
-import { spawn } from 'node:child_process';
+import { spawnShell, killTree } from './shell.js';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { dirname, basename, resolve, join, isAbsolute, extname } from 'node:path';
 import { homedir } from 'node:os';
@@ -26,15 +26,6 @@ import { sendPushExecute } from './tools/send-push.js';
 
 let activeToolCancel: (() => void) | null = null;
 
-function terminateChild(pid: number | undefined, signal: NodeJS.Signals): void {
-  if (!pid) return;
-  try {
-    process.kill(-pid, signal);
-  } catch {
-    try { process.kill(pid, signal); } catch {}
-  }
-}
-
 export function cancelActiveToolExecution(): boolean {
   if (!activeToolCancel) return false;
   activeToolCancel();
@@ -44,12 +35,7 @@ export function cancelActiveToolExecution(): boolean {
 
 function execAsync(command: string, opts: { cwd?: string } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn('/bin/bash', ['-lc', command], {
-      cwd: opts.cwd,
-      env: process.env,
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = spawnShell(command, { cwd: opts.cwd });
 
     let stdout = '';
     let stderr = '';
@@ -65,8 +51,8 @@ function execAsync(command: string, opts: { cwd?: string } = {}): Promise<string
 
     const cancel = (): void => {
       cancelled = true;
-      terminateChild(child.pid, 'SIGTERM');
-      setTimeout(() => terminateChild(child.pid, 'SIGKILL'), 1500);
+      killTree(child, 'SIGTERM');
+      setTimeout(() => killTree(child, 'SIGKILL'), 1500);
     };
     activeToolCancel = cancel;
 
@@ -273,7 +259,7 @@ function buildUnifiedDiff(path: string, before: string, after: string, contextLi
 // ── Tool implementations ────────────────────────────────────────────
 
 const CWD = process.cwd();
-const PROMPTS_FILE = `${homedir()}/.ayin-cli/prompts.json`;
+const PROMPTS_FILE = join(homedir(), '.ayin-cli', 'prompts.json');
 
 const tools: Tool[] = [
   {

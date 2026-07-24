@@ -8,11 +8,15 @@ matters), and run it as your terminal coding agent.
 ## 1. Prerequisites
 
 - **Node ≥ 18** (Node 20+ recommended). Check: `node --version`.
-- **A POSIX shell at `/bin/bash`** — ayin's file tools shell out to `bash`/`grep`/`find`/`git`.
-  - macOS & Linux: already present.
-  - **Windows: run ayin under [WSL](https://learn.microsoft.com/windows/wsl/).** Native
-    PowerShell is not supported.
-- **git** (for cloning; also used by some tools).
+- **A shell for the file tools** (they shell out to `grep`/`find`/`git`/etc):
+  - macOS & Linux: uses `/bin/bash` — already present.
+  - **Windows (native): install [Git for Windows](https://git-scm.com/download/win).** ayin
+    auto-detects its bundled **Git Bash** (`…\Git\bin\bash.exe`) and runs tool commands through it,
+    so the POSIX-style commands the model emits work. If Git Bash isn't found it falls back to
+    `cmd.exe` (most tool commands won't work there). Override the shell with `AYIN_SHELL`
+    (e.g. a WSL or MSYS bash path). WSL also works and needs no extra setup.
+- **git** (for cloning; also used by some tools). On Windows, Git for Windows also runs the
+  `ayin watch` git hooks (they're portable `#!/bin/sh`).
 
 ## 2. Clone, install, build
 
@@ -172,6 +176,25 @@ inert:
 - **Wrong / garbled tool calls** — ayin picks its dialect from `/api/status`'s `model`
   field. If your model isn't recognised (not gemma/qwen), it defaults to the gemma dialect;
   add a dialect in `src/llm/dialects/` (a few lines — see `docs/ARCHITECTURE.md`).
-- **Windows** — use WSL; ayin needs `/bin/bash`.
+- **Windows: tools do nothing / "not recognized"** — Git Bash wasn't found and ayin fell back
+  to `cmd.exe`. Install Git for Windows, or set `AYIN_SHELL` to a bash path. Check which shell
+  ayin resolved in the version/status line.
 - **Slow first response** — the model is loading into VRAM on the first call; subsequent
   calls are fast.
+
+## Windows deployment
+
+ayin runs natively on Windows (no WSL required) once **Git for Windows** is installed — its Git
+Bash is auto-detected and used for the file tools; the `ayin watch` git hooks are portable
+`#!/bin/sh` and run through it.
+
+- **Interactive / headless:** same as macOS/Linux — `node dist\index.js` (TUI) or `-p "…"`.
+- **The watch daemon** (the launchd equivalent) installs as a **Task Scheduler** job that starts
+  at logon and restarts on failure:
+  ```powershell
+  npm run build
+  powershell -ExecutionPolicy Bypass -File tool\install-watch-windows.ps1 -KeliUrl http://<backend-host>:9100
+  ayin watch --repo C:\path\to\repo    # register each repo to review
+  ```
+  Uninstall: `Unregister-ScheduledTask -TaskName AyinWatch -Confirm:$false`.
+- **Shell override:** `AYIN_SHELL=C:\path\to\bash.exe` forces a specific POSIX shell (WSL/MSYS).
