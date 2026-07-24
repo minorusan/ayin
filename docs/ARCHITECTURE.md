@@ -179,6 +179,27 @@ Docs are saved through the backend logs resource (`rag.save`, per-repo store on 
 host); already-stored questions are skipped on re-run, so resume = re-run the same command.
 The LLM is held as the `ayin` authority for the whole run.
 
+## TUI (`src/ui/`)
+
+The interface is a tree of decoupled widgets behind the `ui.ts` façade (the exported function
+API — `addMessage`, `setAgentStatus`, `setStatus`, … — is unchanged, so nothing outside the
+tree knows about the internals). Design rules:
+
+- **One geometry authority.** Widgets never touch each other's `bottom`/`height`. The screen
+  is a bottom-up stack (status bar → input → hints → chat gets the rest) managed by
+  `layout.ts#relayout()`; a widget that changes height calls `relayout()` and everything
+  restacks. Adding a new bottom-docked element = one entry in the stack registration.
+- **One keypress router** (`keys.ts`) and **one theme** (`theme.ts`).
+- **Copy-paste contract** (`screen.ts`): no widget may ever enable blessed mouse tracking
+  (`mouse: true`, `enableMouse`, `clickable`) — it hijacks terminal-native text selection,
+  which is what keeps chat text copy-pastable. Scrolling is PgUp/PgDn by design.
+- **ThinkingIndicator** (`widgets/thinking.ts`) is a small state machine: each `AgentState`
+  (`thinking` · `tool` · `explaining` · `summarizing`) owns its frames, speed and color in
+  `STATE_SPECS` — a new animation state is one entry there, no plumbing. The line renders as
+  `▍ ⠹ label··  12s` (state-colored gutter, spinner, pulsing label, breathing ellipsis,
+  elapsed). Drive it explicitly with `setAgentState(state, label)`; the legacy
+  `setAgentStatus(text)` still works and infers the state from the text.
+
 ## Permissions (`permissions.ts`)
 
 Read-only tools (`read_file`, `grep`, `find_files`, `explore`, `status`) are auto-allowed.
@@ -230,7 +251,17 @@ src/
 ├── history.ts          prompt history
 ├── tokens.ts           context-meter estimate
 ├── tiferet-session.ts  local session stub (no remote sync)
-├── ui.ts / markdown.ts / dialog.ts / log.ts   TUI + helpers
+├── ui.ts               compatibility façade → src/ui/ (all './ui.js' imports keep working)
+├── ui/                 the TUI, decoupled:
+│   ├── headless.ts     HEADLESS/THINKING_MODE detection + noop element factories
+│   ├── theme.ts        every color + glyph in one place (widgets never hardcode)
+│   ├── screen.ts       the one blessed screen — copy-paste contract: NO mouse tracking, ever
+│   ├── layout.ts       bottom-up widget stack (status→input→hints→chat); the only geometry authority
+│   ├── keys.ts         the one keypress router (global keys → input → chat scroll)
+│   └── widgets/        chat.ts (ChatLog + diff cards) · thinking.ts (ThinkingIndicator —
+│                       stateful animation) · input.ts (InputBar) · hints.ts (CmdHints +
+│                       slash registry) · status.ts (StatusBar)
+├── markdown.ts / dialog.ts / log.ts   render + overlay + logging helpers
 ├── image.ts            image downscale for vision turns
 └── fixme.ts / jira.ts / codex.ts / tg-auth*.ts   optional integrations
 ```

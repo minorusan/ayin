@@ -10,7 +10,7 @@ captureConsole();
 
 import {
   screen, addMessage, setStatus, setAgentStatus, clearChat,
-  onInput, onGlobalKey, focusInput, blurInput, chatBox, shutdown, getTokensDisplay,
+  onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
 } from './ui.js';
 import { connect, disconnect, onConnectionChange, isConnected } from './connection.js';
 import { refreshActiveModel } from './llm/manager.js';

@@ -20,7 +20,7 @@ import { cancelActiveThinking } from './connection.js';
 import { llmChat, parseToolCalls, renderToolCall, renderToolResult } from './llm/manager.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution } from './tools.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
-import { addMessage, setAgentStatus, HEADLESS, formatToolResultForChat } from './ui.js';
+import { addMessage, setAgentStatus, setAgentState, HEADLESS, formatToolResultForChat } from './ui.js';
 import { log } from './log.js';
 import { checkPermission } from './permissions.js';
 import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
@@ -653,7 +653,7 @@ export async function runAgent(userInput: string): Promise<void> {
         return;
       }
 
-      setAgentStatus(`Running ${name}(${paramPreview})`);
+      setAgentState('tool', `Running ${name}(${paramPreview})`);
       addMessage('system', `${name}: ${paramPreview}`);
       log('INFO', 'tool_call', { tool: name, params: JSON.stringify(params).substring(0, 200) });
 
