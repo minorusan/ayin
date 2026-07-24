@@ -473,6 +473,12 @@ async function main(): Promise<void> {
     await runRag(process.argv.slice(3));
     return;
   }
+  if (process.argv[2] === 'rag-mine') {
+    // Phase 0 episodic RAG: mine Claude transcripts → git-verified problem→fix episodes. See src/rag/mine.ts.
+    const { runRagMine } = await import('./rag/mine.js');
+    await runRagMine(process.argv.slice(3));
+    return;
+  }
   loadRules(process.cwd());
   if (HEADLESS) {
     await runHeadless();
