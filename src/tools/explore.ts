@@ -18,7 +18,6 @@ import { log } from '../log.js';
 import { addMessage } from '../ui.js';
 
 const MAX_ITERATIONS = 12;
-const CONFIDENCE_THRESHOLD = 0.6;
 const COMMAND_TIMEOUT = 30_000;
 const MAX_COMMAND_OUTPUT = 8000;
 const MAX_ANSWER_LENGTH = 8000;
@@ -39,53 +38,34 @@ function capAnswer(text: string): string {
 
 /**
  * Context expansion — after explore finds an answer, automatically grep for related code.
- * Extracts method names, class names, interfaces from the answer text and finds:
- * - Who CALLS the methods found (callers)
- * - Who IMPLEMENTS the interfaces found
- * - Where registration/initialization methods are called from
- * Pure grep — no LLM. This catches the files the model wouldn't think to ask for.
+ * Extracts identifiers (functions, classes, types) from the answer text and greps for where
+ * else they appear (callers, implementers, registrations). Pure grep — no LLM.
+ * LANGUAGE-AGNOSTIC: searches all files (grep's own binary skip), not just one language.
  */
 async function expandContext(answer: string, cwd: string): Promise<string> {
-  // Extract identifiers from the answer to grep for related code.
-  // The goal: when explore finds a method that uses a field/dictionary/provider,
-  // automatically find who POPULATES or REGISTERS with that field.
+  // Extract candidate identifiers from the answer, language-neutrally:
+  //  - camelCase / PascalCase words (functions, classes, types across C#, TS, JS, Go, Python…)
+  //  - snake_case words (Python, Rust, C)
+  // Then grep for each to surface related sites the model didn't think to ask for.
+  const camel = answer.match(/\b[A-Za-z_][A-Za-z0-9]*(?:[A-Z][a-z0-9]+)+\b/g) || []; // fooBar, FooBar, addMul
+  const snake = answer.match(/\b[a-z][a-z0-9]+(?:_[a-z0-9]+)+\b/g) || [];             // foo_bar, do_thing
 
-  // 1. Method names: Add*, Remove*, Register*, etc.
-  const methodPatterns = answer.match(/\b(Add\w+|Remove\w+|Register\w+|Unregister\w+|Initialize\w*|Dispose\w*|OnDestroy|Clear|Reset)\b/g) || [];
-
-  // 2. Private fields: _someField (C# convention)
-  const fieldPatterns = answer.match(/\b_[a-z][a-zA-Z]+(?:Provider|Registry|Service|Manager|Dictionary|List|Collection|s)\b/g) || [];
-
-  // 3. Class names: PascalCase with common suffixes
-  const classPatterns = answer.match(/\b([A-Z][a-z]+(?:[A-Z][a-z]+){1,}(?:Provider|Service|Controller|Manager|Handler|Factory|Installer))\b/g) || [];
-
-  // 4. Interface names: ISomethingProvider, ISomethingService
-  const interfacePatterns = answer.match(/\bI[A-Z][a-zA-Z]+(?:Provider|Service|Registry|Manager)\b/g) || [];
-
-  // 5. For fields that look like collections, also search for Add/Remove patterns
-  const collectionFields = fieldPatterns.filter(f => f.endsWith('s') || f.includes('Provider') || f.includes('Registry') || f.includes('Dictionary') || f.includes('List'));
-  const derivedMethods: string[] = [];
-  for (const field of collectionFields) {
-    // _skuProviders → search for ".Add(" near skuProvider or AddSkuProvider
-    const baseName = field.replace(/^_/, '').replace(/s$/, '');
-    if (baseName.length > 3) {
-      derivedMethods.push(`Add${baseName.charAt(0).toUpperCase()}${baseName.slice(1)}`);
-      derivedMethods.push(`Remove${baseName.charAt(0).toUpperCase()}${baseName.slice(1)}`);
-    }
-  }
-
-  const allPatterns = [...new Set([...methodPatterns, ...classPatterns, ...interfacePatterns, ...derivedMethods])];
+  // Keep identifiers likely to be meaningful symbols; drop very short/common noise.
+  const NOISE = new Set(['module', 'exports', 'require', 'const', 'return', 'function', 'export', 'import', 'default']);
+  const allPatterns = [...new Set([...camel, ...snake])]
+    .filter(p => p.length > 4 && p.length < 50 && !NOISE.has(p));
   if (allPatterns.length === 0) return '';
 
-  const prioritized = allPatterns
-    .filter(p => p.length > 4 && p.length < 50)
-    .slice(0, 8);
+  const prioritized = allPatterns.slice(0, 8);
 
   const results: string[] = [];
   for (const pattern of prioritized) {
     try {
+      // No --include filter: search every file type; grep -I skips binaries.
+      // But DO skip vendor/build dirs — on a JS/Rust/Python repo they'd drown the 8-line
+      // budget in third-party matches and can stall a big tree toward the 30s timeout.
       const output = await execCommand(
-        `grep -rn "${pattern}" --include="*.cs" . | grep -v "Binary" | head -8`,
+        `grep -rnI --exclude-dir={.git,node_modules,dist,build,vendor,target,.venv,__pycache__} "${pattern}" . 2>/dev/null | head -8`,
         cwd,
       );
       if (output && output !== '(no output)' && output.length > 10) {
@@ -189,45 +169,54 @@ ${historyText}
 
 **Allowed commands (read-only):** ls, cat, head, tail, grep, find, git show, git log, git blame, git branch, git grep, wc
 
+**This codebase can be ANY language** (TypeScript, JavaScript, Python, Go, C#, Rust, …). Do NOT
+assume file extensions. To find a symbol, grep the whole tree WITHOUT an --include filter, e.g.
+\`grep -rnI --exclude-dir={.git,node_modules,dist,build,vendor,target} "symbolName" .\`
+(always exclude vendor/build dirs or the output is third-party noise). If you don't know the
+language yet, run \`ls\` first to see the files.
+
 **How commands work:**
 When you list commands in the "commands" array, the tool RUNS them in the shell and shows you their stdout on the next iteration. You MUST run commands to get data — you cannot know the answer from memory. Never claim you "cannot execute commands" — YES YOU CAN, by listing them in the "commands" array.
+
+**CRITICAL — commit your answer as soon as you have the data:**
+If your "previous steps" above already contain the file content / grep output / git output that
+answers the question, DO NOT run more commands. Immediately set "answer" to those verbatim excerpts
+and confidence 0.8+. Searching again after you already found it wastes iterations and fails the task.
 
 **How "answer" works:**
 Your "answer" field is pasted VERBATIM into the caller's context. The caller cannot see your commands, reasoning, or this conversation. They only see what you put in "answer". If the question asks "run git log", the answer MUST be the actual stdout from that git log command — not the command itself, not a description. Run the command first, THEN put its output in the answer.
 
-Examples of GOOD and BAD answers:
+Examples of GOOD and BAD answers (language-neutral):
 
-Question: "Show the StartFirstGameBallFtue method body in BingoGameFtueService.cs"
-BAD answer: "The method is at line 238 in Assets/Games/Bingo/Gameplay/Scripts/FTUE/BingoGameFtueService.cs"
+Question: "Show the body of the exploreExecute function"
+BAD answer: "The function is at line 298 in tools/explore.ts"
 GOOD answer:
 \`\`\`
-File: Assets/Games/Bingo/Gameplay/Scripts/FTUE/BingoGameFtueService.cs
-Lines 238-260:
-private async UniTaskVoid StartFirstGameBallFtue()
-{
-    _ftueCancellation = new CancellationTokenSource();
-    await UniTask.WaitUntil(() => _firstBallAppeared, cancellationToken: _ftueCancellation.Token);
-    ...
+File: tools/explore.ts
+Lines 298-312:
+export async function exploreExecute(params) {
+  const question = params.question;
+  ...
 }
 \`\`\`
 
-Question: "Run git log --format='%aN %ae' -10 -- path/to/file.cs"
+Question: "Run git log --format='%aN %ae' -10 -- path/to/file"
 BAD answer: "I ran git log and found 10 commits by various authors"
 GOOD answer:
 \`\`\`
-Oleksii Chernov oleksii@company.com
-Oleksii Chernov oleksii@company.com
-Artem Sukhliak artem@company.com
+Jane Dev jane@example.com
+Jane Dev jane@example.com
+Sam Coder sam@example.com
 ... (actual verbatim output)
 \`\`\`
 
-Question: "Find every place that sets _ftueCancellation to null"
-BAD answer: "_ftueCancellation is set to null in 3 places"
+Question: "Find every place that sets activeChatModel to null"
+BAD answer: "activeChatModel is set to null in 3 places"
 GOOD answer:
 \`\`\`
-Line 112: _ftueCancellation = null;  // in CancelToken()
-Line 189: _ftueCancellation = null;  // in Dispose()
-Line 245: _ftueCancellation = null;  // in Reset()
+Line 22: activeChatModel = ...;  // in setActiveChatModel()
+Line 118: loadedChatModel = null;  // in doSwap()
+Line 245: loadedChatModel = null;  // in unloadChatModelVram()
 \`\`\`
 
 **Respond in STRICT JSON only:**
@@ -248,6 +237,24 @@ Line 245: _ftueCancellation = null;  // in Reset()
 - Maximum 2 commands per iteration.
 - Answer field can be up to 3000 characters — use it to include real data, not meta descriptions.
 - Return ONLY raw JSON. No markdown fences around the JSON. No prose before or after.`;
+}
+
+/**
+ * Fallback answer built from the actual command outputs gathered so far. Used when the model
+ * found data but never committed it to the "answer" field (qwen sometimes stalls at low
+ * confidence). Returns the real greps/reads so the caller gets usable data, not meta-reasoning.
+ */
+function historyDigest(history: HistoryEntry[]): string {
+  const chunks: string[] = [];
+  for (const h of history) {
+    for (let j = 0; j < h.commands.length; j++) {
+      const out = (h.results[j] || '').trim();
+      if (out && out !== '(no output)' && out.length > 3) {
+        chunks.push(`$ ${h.commands[j]}\n${out}`);
+      }
+    }
+  }
+  return chunks.join('\n\n');
 }
 
 function parseResponse(raw: string): ExploreIteration {
@@ -307,6 +314,7 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
 
   const history: HistoryEntry[] = [];
   let bestIteration: ExploreIteration | null = null;
+  let emptyStreak = 0; // consecutive iterations where every command returned nothing → bail early
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const prompt = buildPrompt(question, context, cwd, history, i + 1);
@@ -334,9 +342,9 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     if (i === 0 && iteration.answer) {
       log('WARN', 'explore_iter1_answer_rejected', { preview: iteration.answer.substring(0, 80) });
       iteration.answer = undefined;
-      // If it also didn't provide commands, inject sensible ones based on the question
+      // If it also didn't provide commands, inject a language-agnostic starter.
       if (iteration.commands.length === 0) {
-        iteration.commands = [`find . -name "*.cs" | head -5`];  // just to get something going
+        iteration.commands = [`ls`];  // see what's here, whatever the language
       }
     }
 
@@ -365,20 +373,27 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
       return capAnswer(answer);
     }
 
-    // No commands and no answer — stuck
+    // No commands and no answer — the model stalled. Return the real data we already gathered
+    // (grep/read outputs) rather than the model's meta-reasoning, which is useless to the caller.
     if (iteration.commands.length === 0) {
       log('WARN', 'explore_stuck', { iteration: String(i + 1) });
+      const digest = historyDigest(history);
+      if (digest) return capAnswer(`Found (from the searches run so far):\n\n${digest}`);
       return iteration.reasoning || 'Investigation inconclusive: no commands suggested.';
     }
 
     // Execute commands
     const results: string[] = [];
+    let anyData = false;
     for (const cmd of iteration.commands) {
       if (!isAllowed(cmd)) {
         results.push(`(blocked: ${cmd.substring(0, 50)} not in allowed list)`);
         continue;
       }
       const output = await execCommand(cmd, cwd);
+      const empty = !output || output === '(no output)' || output === '(timeout after 30s)' || output.trim().length === 0;
+      if (!empty) anyData = true;
+      log('INFO', 'explore_cmd', { iter: String(i + 1), cmd: cmd.substring(0, 120), bytes: String(output.length), empty: String(empty) });
       let trimmed = output;
       if (output.length > MAX_COMMAND_OUTPUT) {
         const cut = output.lastIndexOf('\n', MAX_COMMAND_OUTPUT);
@@ -389,11 +404,36 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
       results.push(trimmed);
     }
 
+    // Stuck-guard: if commands keep returning nothing, don't burn all 12 iterations.
+    emptyStreak = anyData ? 0 : emptyStreak + 1;
+    if (emptyStreak >= 3) {
+      log('WARN', 'explore_empty_streak_bail', { iteration: String(i + 1) });
+      addMessage('system', `  → explore: 3 empty searches in a row, stopping. Try a broader question or check the path.`);
+      const digest = historyDigest(history);
+      return bestIteration?.answer
+        || (digest && capAnswer(`Found (from the searches run so far):\n\n${digest}`))
+        || `Explore could not find anything for: "${question}". Searched ${i + 1} times, all commands returned no data. The symbol/file may not exist here, or the working directory (${cwd}) may be wrong.`;
+    }
+
     history.push({
       reasoning: iteration.reasoning,
       commands: iteration.commands,
       results,
     });
+
+    // Found-but-won't-commit guard: qwen often keeps re-searching at low confidence even after its
+    // commands returned the answer. Once we have substantial gathered data and the model is STILL
+    // reporting low confidence a few iterations in, stop and return the real data rather than
+    // looping to 12. Confidence-gated so a legitimately progressing investigation (rising
+    // confidence, about to commit an answer) is not cut off at iteration 4.
+    if (i + 1 >= 4 && iteration.confidence < 0.6) {
+      const digest = historyDigest(history);
+      if (digest.length > 200) {
+        log('INFO', 'explore_commit_digest', { iteration: String(i + 1), bytes: String(digest.length) });
+        addMessage('system', `  → have data, committing it (model kept re-searching)`);
+        return capAnswer(`Found (from the searches run):\n\n${digest}`);
+      }
+    }
 
     // Cap history at last 4 steps to keep context manageable
     if (history.length > 4) {
@@ -401,13 +441,10 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     }
   }
 
-  // Max iterations reached — return best iteration if available
+  // Max iterations reached — prefer a committed answer, else the real command data gathered.
   log('WARN', 'explore_max_iterations', { bestConfidence: String(bestIteration?.confidence ?? 0) });
-  if (bestIteration) {
-    return capAnswer(bestIteration.answer || bestIteration.reasoning);
-  }
-  const lastStep = history[history.length - 1];
-  return capAnswer(lastStep
-    ? `Reached max iterations. Last finding: ${lastStep.reasoning}`
-    : 'Reached max iterations with no findings.');
+  if (bestIteration?.answer) return capAnswer(bestIteration.answer);
+  const digest = historyDigest(history);
+  if (digest) return capAnswer(`Found (from the searches run so far):\n\n${digest}`);
+  return capAnswer(bestIteration?.reasoning || 'Reached max iterations with no findings.');
 }

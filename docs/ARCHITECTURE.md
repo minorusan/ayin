@@ -121,7 +121,11 @@ configured): `web_search`, `docs_search`, `codex`, `jira`, `fixme`. See the READ
   touches only the targeted block. `write_file` is for new files / deliberate full rewrites
   (regenerating a large file from memory risks dropping content).
 - **`explore`** is a sub-investigation with its own short LLM loop and clean context — good
-  for "find/read X" questions; it translates depth into width.
+  for "find/read X" questions; it translates depth into width. It is **language-agnostic**
+  (identifier extraction + whole-tree grep with vendor/build dirs excluded — no assumed file
+  extensions) and self-limiting: it bails after 3 consecutive empty search rounds, and when
+  the model keeps re-searching at low confidence despite having gathered real data, it
+  returns that data verbatim instead of burning all iterations.
 
 ## Permissions (`permissions.ts`)
 
