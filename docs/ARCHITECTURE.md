@@ -143,6 +143,12 @@ The moving parts, designed to survive interruption at any point:
   down, or in flight when the machine died, are picked up on the next start with no human in
   the loop. Reviews are idempotent (report rewritten), so a crash mid-review just re-runs.
   Singleton via pidfile (stale pids are taken over). One daemon serves all watched repos.
+- **One door to the GPU**: before a review batch the daemon enqueues on the backend's llm
+  resource as the `ayin` authority (`POST {keliUrl}/resource/llm`) — the backend swaps to the
+  coder model on `ownership.gained` and reverts when the batch drains (detach; also released
+  on SIGINT/SIGTERM so a kill mid-batch doesn't strand the grant until TTL). Resource busy →
+  the batch is **deferred** to a later poll, never run by side-door. No resource layer on the
+  backend → best-effort on the served model.
 - **Review**: commit metadata + capped diff (120 KB, truncated at a hunk boundary) → one
   `llmChat` call scoring the diff against the `SMELL_SIGNALS` catalog (~20 typical smells);
   each finding carries a **confidence 0.30–1.0**. Output: `CodeReview-<shortHash>.md` in the

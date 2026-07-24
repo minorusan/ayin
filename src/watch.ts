@@ -26,8 +26,8 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { llmChat } from './llm/manager.js';
-import { connect } from './connection.js';
+import { llmChat, refreshActiveModel } from './llm/manager.js';
+import { connect, keliBaseUrl } from './connection.js';
 import { log } from './log.js';
 
 const WATCH_DIR = join(homedir(), '.ayin-cli', 'watch');
@@ -108,6 +108,54 @@ interface QueueEntry { ts: number; repo: string; commit: string }
 
 function entryKey(e: { repo: string; commit: string }): string {
   return `${e.repo}@${e.commit}`;
+}
+
+// ── llm authority (one door to the GPU) ──────────────────────────────
+// Reviews are LLM work, so the daemon takes the llm resource as the `ayin` authority for the
+// duration of a backlog batch — the backend swaps gemma → qwen-coder on ownership.gained and
+// reverts on release (same dance as the interactive launcher and code_agent). If the resource
+// is BUSY (podcast render, a code_agent run), reviews are DEFERRED to a later poll — a
+// background reviewer waits its turn, it never side-doors the GPU on whatever model is loaded.
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function llmOp(op: string, params: Record<string, unknown> = {}): Promise<any | null> {
+  try {
+    const res = await fetch(`${keliBaseUrl()}/resource/llm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op, params }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return body && body.ok ? body.data : null;
+  } catch {
+    return null;
+  }
+}
+
+type LlmHold = { release: () => Promise<void> } | 'busy' | 'no-resource-layer';
+
+async function acquireLlm(): Promise<LlmHold> {
+  const grant = await llmOp('authority.enqueue', { holder: 'ayin', reason: 'ayin watch: commit review batch' });
+  if (grant && grant.granted) {
+    // Slide the grant for long batches (many queued commits), like the launcher does.
+    const keepalive = setInterval(() => { void llmOp('authority.enqueue', { holder: 'ayin' }); }, 10 * 60 * 1000);
+    keepalive.unref();
+    let released = false;
+    return {
+      release: async () => {
+        if (released) return;
+        released = true;
+        clearInterval(keepalive);
+        await llmOp('authority.detach', { token: grant.token });
+      },
+    };
+  }
+  if (grant && grant.busy) return 'busy';
+  // null → backend unreachable or predates the resource layer: proceed best-effort on the
+  // served model rather than deferring reviews forever (per-call failures still retry above).
+  return 'no-resource-layer';
 }
 
 // ── hook install ─────────────────────────────────────────────────────
@@ -289,17 +337,41 @@ function acquirePidfile(): boolean {
   return true;
 }
 
+let lastBusyLogAt = 0;
+let activeHold: { release: () => Promise<void> } | null = null; // released on SIGTERM so a kill mid-batch doesn't strand the grant until TTL
+
 async function processBacklog(retryState: Map<string, { attempts: number; nextTryAt: number }>): Promise<void> {
   const processed = new Set(readJsonl(PROCESSED_FILE).map(r => String(r.key)));
   const queue = readJsonl(QUEUE_FILE) as unknown as QueueEntry[];
 
-  for (const entry of queue) {
-    if (!entry.repo || !entry.commit) continue;
-    const key = entryKey(entry);
-    if (processed.has(key)) continue;
+  const pending = queue.filter(e => {
+    if (!e.repo || !e.commit || processed.has(entryKey(e))) return false;
+    const retry = retryState.get(entryKey(e));
+    return !retry || Date.now() >= retry.nextTryAt;
+  });
+  if (pending.length === 0) return;
 
+  // One door: take the llm resource as `ayin` for this batch (backend swaps gemma → qwen).
+  const hold = await acquireLlm();
+  if (hold === 'busy') {
+    if (Date.now() - lastBusyLogAt > 60_000) {
+      lastBusyLogAt = Date.now();
+      out(`llm resource busy — ${pending.length} review(s) deferred until it frees`);
+      log('INFO', 'watch_llm_busy_deferred', { pending: String(pending.length) });
+    }
+    return;
+  }
+  if (hold !== 'no-resource-layer') {
+    activeHold = hold;
+    out('llm acquired (ayin) — backend swapping to the coder model');
+  }
+  // The swap changes the served model → re-resolve the dialect before reviewing.
+  await refreshActiveModel().catch(() => {});
+
+  try {
+  for (const entry of pending) {
+    const key = entryKey(entry);
     const retry = retryState.get(key);
-    if (retry && Date.now() < retry.nextTryAt) continue;
 
     try {
       const result = await reviewCommit(entry.repo, entry.commit);
@@ -320,6 +392,10 @@ async function processBacklog(retryState: Map<string, { attempts: number; nextTr
         out(`  → attempt ${attempts} failed (${msg.substring(0, 120)}) — will retry`);
       }
     }
+  }
+  } finally {
+    // Batch drained (or failed) → give the GPU back; backend reverts to gemma.
+    if (typeof hold === 'object') { await hold.release(); activeHold = null; }
   }
 }
 
@@ -357,8 +433,13 @@ export async function runWatch(args: string[]): Promise<void> {
   await processBacklog(retryState);
   if (once) { cleanupPidfile(); out('backlog processed — exiting (--once).'); return; }
 
-  process.on('SIGINT', () => { cleanupPidfile(); process.exit(0); });
-  process.on('SIGTERM', () => { cleanupPidfile(); process.exit(0); });
+  const shutdownSignal = async () => {
+    cleanupPidfile();
+    if (activeHold) await activeHold.release().catch(() => {});
+    process.exit(0);
+  };
+  process.on('SIGINT', () => { void shutdownSignal(); });
+  process.on('SIGTERM', () => { void shutdownSignal(); });
 
   // Poll loop. Serialized: one pass at a time, one review at a time (one door to the LLM).
   for (;;) {

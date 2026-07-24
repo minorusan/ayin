@@ -87,6 +87,12 @@ race conditions, hardcoded secrets, injection risk, unbounded memory, …); each
 reported **with a confidence score**. The review lands as `CodeReview-<shortHash>.md` in the
 repo root — commit metadata first, then the findings, then a verdict.
 
+Reviews are LLM work, so the daemon takes the backend's **llm resource as the `ayin`
+authority** for each review batch (the backend swaps to the coder model, and reverts when the
+batch drains — the same dance as interactive ayin). If the resource is busy, reviews are
+**deferred**, not run on the side; a backend without the resource layer falls back to
+best-effort on the served model.
+
 Built to survive interruption: the hook never blocks a commit and never needs the daemon up —
 the queue accumulates, and on its next start the daemon processes the whole backlog (a
 processed-ledger keeps reviews exactly-once; a crash mid-review just re-runs it). One daemon
