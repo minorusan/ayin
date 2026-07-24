@@ -77,13 +77,13 @@ export function parseResponseAll(raw: string): ParseAllResult {
     const fmt1 = /<parameter=([a-zA-Z_][a-zA-Z0-9_]*)>\n?([\s\S]*?)\n?<\/parameter>/g;
     let m: RegExpExecArray | null;
     while ((m = fmt1.exec(block)) !== null) {
-      params[m[1].trim()] = m[2].trim();
+      params[m[1].trim()] = unwrapValue(m[2]);
     }
     // Format 2 (HTML attr): <parameter name="key">value</parameter>
     if (Object.keys(params).length === 0) {
       const fmt2 = /<parameter\s+name=["']([^"']+)["']>\n?([\s\S]*?)\n?<\/parameter>/g;
       while ((m = fmt2.exec(block)) !== null) {
-        params[m[1].trim()] = m[2].trim();
+        params[m[1].trim()] = unwrapValue(m[2]);
       }
     }
     // Format 3 (Gemma4 fused): <parameter=name</parameter>\n...VALUE... where
@@ -100,7 +100,7 @@ export function parseResponseAll(raw: string): ParseAllResult {
         const wrap = raw.match(/^\s*<parameter[^>]*>\n?([\s\S]*?)\n?<\/parameter>\s*/);
         if (wrap) raw = wrap[1];
         else raw = raw.replace(/<\/?parameter[^>]*>/g, ''); // strip any stray tags
-        params[key] = raw.trim();
+        params[key] = unwrapValue(raw);
       }
     }
 
@@ -114,6 +114,19 @@ export function parseResponseAll(raw: string): ParseAllResult {
   const text = firstIdx >= 0 ? raw.slice(0, firstIdx).trim() : raw.trim();
 
   return { text, toolCalls };
+}
+
+/**
+ * Unwrap a parameter value. gemma4 (and some other models) nest the scalar inside a
+ * `<value>…</value>` tag — `<parameter=path><value>.</value></parameter>` — which, left
+ * as-is, reaches the tool as the literal string `<value>.</value>` and every path/pattern
+ * fails. We only unwrap when the ENTIRE trimmed value is one `<value>…</value>`, so real
+ * content that merely contains the word "value" is never touched.
+ */
+function unwrapValue(v: string): string {
+  const s = v.trim();
+  const m = s.match(/^<value>\n?([\s\S]*?)\n?<\/value>$/);
+  return (m ? m[1] : s).trim();
 }
 
 export function parseResponse(raw: string): ParseResult {
