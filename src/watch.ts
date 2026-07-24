@@ -38,6 +38,7 @@ const PID_FILE = join(WATCH_DIR, 'daemon.pid');
 const REPOS_FILE = join(WATCH_DIR, 'repos.json');
 
 const POLL_MS = 2_000;
+const HOOK_SELF_HEAL_MS = 5 * 60 * 1000; // re-add missing post-commit hooks to watched repos every 5 min
 const MAX_DIFF_CHARS = 120_000;   // diff sent to the LLM is capped; big commits get a truncation note
 const MAX_REVIEW_ATTEMPTS = 5;    // LLM/backend failures retry with backoff, then give up (ledgered)
 const RETRY_BACKOFF_MS = 60_000;
@@ -118,16 +119,11 @@ function entryKey(e: { repo: string; commit: string }): string {
 
 // ── hook install ─────────────────────────────────────────────────────
 
-async function installHook(repo: string): Promise<void> {
-  const hooksDirRes = await git(repo, ['rev-parse', '--git-path', 'hooks']);
-  if (!hooksDirRes.ok) throw new Error(`not a git repo: ${repo} (${hooksDirRes.stderr.trim()})`);
-  const hooksDirRel = hooksDirRes.stdout.trim();
-  const hooksDir = hooksDirRel.startsWith('/') ? hooksDirRel : join(repo, hooksDirRel);
-  mkdirSync(hooksDir, { recursive: true });
-
-  const hookPath = join(hooksDir, 'post-commit');
-  const script = `#!/bin/sh
-# ${HOOK_MARKER} — installed by \`ayin watch --repo ${repo}\`. Reinstalling overwrites this file.
+/** The post-commit hook body for a repo. Extracted so install + self-heal write byte-identical
+ *  hooks. repo path goes to printf as a %s ARG (not the format string) so a '%' can't corrupt it. */
+function hookScript(repo: string): string {
+  return `#!/bin/sh
+# ${HOOK_MARKER} — installed by \`ayin watch\`. Reinstalling overwrites this file.
 # Appends this commit to the ayin-watch persistent queue. Never blocks the commit; if the
 # daemon is down the queue just accumulates and is processed on its next boot.
 QUEUE_DIR="$HOME/.ayin-cli/watch"
@@ -136,30 +132,82 @@ HASH=$(git rev-parse HEAD 2>/dev/null) || exit 0
 printf '{"ts":%s,"repo":%s,"commit":"%s"}\\n' "$(date +%s)" '${JSON.stringify(repo)}' "$HASH" >> "$QUEUE_DIR/queue.jsonl"
 exit 0
 `;
-  // NOTE: repo path is passed to printf as a %s ARG (not in the format string) so a '%' in the
-  // path can't corrupt it. A single-quote in the path would still break the hook — install refuses
-  // nothing there, but such paths are pathological; keep repos on sane paths.
+}
 
-  if (existsSync(hookPath)) {
-    const existing = readFileSync(hookPath, 'utf-8');
+/** Resolve a repo's hooks dir + post-commit path, or null if it's not a git repo (moved/deleted). */
+async function hookPathFor(repo: string): Promise<{ hooksDir: string; hookPath: string } | null> {
+  const res = await git(repo, ['rev-parse', '--git-path', 'hooks']);
+  if (!res.ok) return null;
+  const rel = res.stdout.trim();
+  const hooksDir = rel.startsWith('/') ? rel : join(repo, rel);
+  return { hooksDir, hookPath: join(hooksDir, 'post-commit') };
+}
+
+async function installHook(repo: string): Promise<void> {
+  const paths = await hookPathFor(repo);
+  if (!paths) throw new Error(`not a git repo: ${repo}`);
+  mkdirSync(paths.hooksDir, { recursive: true });
+
+  if (existsSync(paths.hookPath)) {
+    const existing = readFileSync(paths.hookPath, 'utf-8');
     if (!existing.includes(HOOK_MARKER)) {
       throw new Error(
-        `${hookPath} already exists and was not installed by ayin-watch — refusing to overwrite.\n` +
+        `${paths.hookPath} already exists and was not installed by ayin-watch — refusing to overwrite.\n` +
         `Add this line to it manually:\n` +
         `  printf '{"ts":%s,"repo":%s,"commit":"%s"}\\n' "$(date +%s)" '${JSON.stringify(repo)}' "$(git rev-parse HEAD)" >> "$HOME/.ayin-cli/watch/queue.jsonl"`,
       );
     }
   }
-  writeFileSync(hookPath, script);
-  chmodSync(hookPath, 0o755);
+  writeFileSync(paths.hookPath, hookScript(repo));
+  chmodSync(paths.hookPath, 0o755);
 
-  // Register the repo (informational + lets us re-install hooks later).
+  // Register the repo (informational + lets the self-heal poll re-install hooks later).
   const repos = existsSync(REPOS_FILE) ? JSON.parse(readFileSync(REPOS_FILE, 'utf-8')) : {};
-  repos[repo] = { hookPath, installedAt: new Date().toISOString() };
+  repos[repo] = { hookPath: paths.hookPath, installedAt: new Date().toISOString() };
   writeFileSync(REPOS_FILE, JSON.stringify(repos, null, 2));
 
-  out(`hook installed: ${hookPath}`);
-  log('INFO', 'watch_hook_installed', { repo, hookPath });
+  out(`hook installed: ${paths.hookPath}`);
+  log('INFO', 'watch_hook_installed', { repo, hookPath: paths.hookPath });
+}
+
+/** The registered repos (keys of repos.json) — the set the daemon watches. */
+function registeredRepos(): string[] {
+  if (!existsSync(REPOS_FILE)) return [];
+  try { return Object.keys(JSON.parse(readFileSync(REPOS_FILE, 'utf-8'))); } catch { return []; }
+}
+
+/** Ensure one repo's post-commit hook is present. Re-adds it if missing (repos get re-cloned,
+ *  reset, or wiped and then commits stop queueing silently). Never clobbers a FOREIGN post-commit
+ *  hook (one without our marker); reports a moved/deleted repo as 'gone'. */
+async function ensureHook(repo: string): Promise<'ok' | 'reinstalled' | 'foreign' | 'gone'> {
+  const paths = await hookPathFor(repo);
+  if (!paths) return 'gone';
+  if (existsSync(paths.hookPath)) {
+    return readFileSync(paths.hookPath, 'utf-8').includes(HOOK_MARKER) ? 'ok' : 'foreign';
+  }
+  mkdirSync(paths.hooksDir, { recursive: true });
+  writeFileSync(paths.hookPath, hookScript(repo));
+  chmodSync(paths.hookPath, 0o755);
+  log('INFO', 'watch_hook_reinstalled', { repo, hookPath: paths.hookPath });
+  return 'reinstalled';
+}
+
+/** Self-heal pass (runs on boot + every 5 min): re-add the hook to every registered repo that
+ *  lost it. Cheap: one `git rev-parse` + a stat per repo, writes only when actually missing. */
+async function selfHealHooks(): Promise<void> {
+  const repos = registeredRepos();
+  if (repos.length === 0) return;
+  let reinstalled = 0, foreign = 0, gone = 0;
+  for (const repo of repos) {
+    const r = await ensureHook(repo);
+    if (r === 'reinstalled') reinstalled++;
+    else if (r === 'foreign') foreign++;
+    else if (r === 'gone') gone++;
+  }
+  if (reinstalled || foreign || gone) {
+    out(`hook self-heal: ${reinstalled} re-added, ${foreign} foreign (skipped), ${gone} missing repo(s) — of ${repos.length} watched`);
+    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), foreign: String(foreign), gone: String(gone) });
+  }
 }
 
 // ── review ───────────────────────────────────────────────────────────
@@ -457,6 +505,10 @@ export async function runWatch(args: string[]): Promise<void> {
   out(`ayin watch daemon up (pid ${process.pid}) — queue: ${QUEUE_FILE}`);
   log('INFO', 'watch_daemon_up', { pid: String(process.pid), once: String(once) });
 
+  // Self-heal hooks on boot — a repo re-cloned/reset while we were down lost its post-commit hook.
+  await selfHealHooks();
+  let lastHookHealAt = Date.now();
+
   // Backlog first — anything committed while we were down (or in flight at the power cut).
   await processBacklog(retryState);
   if (once) { cleanupPidfile(); out('backlog processed — exiting (--once).'); return; }
@@ -473,6 +525,10 @@ export async function runWatch(args: string[]): Promise<void> {
   for (;;) {
     await new Promise(r => setTimeout(r, POLL_MS));
     try {
+      if (Date.now() - lastHookHealAt >= HOOK_SELF_HEAL_MS) {
+        lastHookHealAt = Date.now();
+        await selfHealHooks(); // re-add the post-commit hook to any watched repo that lost it
+      }
       await processBacklog(retryState);
     } catch (err) {
       log('ERROR', 'watch_loop_error', { error: err instanceof Error ? err.message : String(err) });
