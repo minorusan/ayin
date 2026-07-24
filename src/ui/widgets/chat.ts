@@ -43,19 +43,19 @@ export class ChatLog {
     onGoalChange(() => this.redraw()); // goal line lives in this box; re-render when it changes
   }
 
-  /** The goal line for the blank area at the top of the chat: cursive, dim, above everything.
-   *  Empty when no goal is set (or the box is too short to spare the rows). blessed can't do
-   *  italic (its attr model has no italic bit — see docs), so "cursive" is a Unicode
-   *  Mathematical-Italic transform of the letters; a genuine slant that needs no terminal
-   *  italic support. Truncated by RAW length (pre-transform) because each italic glyph is a
-   *  surrogate pair — String#length would over-count and the width math would be wrong. */
-  private goalLines(chatHeight: number): string[] {
+  /** The goal line, shown in cursive+dim at the BOTTOM of the chat — just above the thinking
+   *  indicator and the input, so it sits in the user's eyeline while they type/watch ayin think.
+   *  Null when no goal is set. blessed can't do italic (its attr model has no italic bit — see
+   *  docs), so "cursive" is a Unicode Mathematical-Italic transform of the letters; a genuine
+   *  slant that needs no terminal italic support. Truncated by RAW length (pre-transform)
+   *  because each italic glyph is a surrogate pair — String#length would over-count. */
+  private goalLine(): string | null {
     const goal = getGoal();
-    if (!goal || chatHeight < 3) return [];
+    if (!goal) return null;
     const maxCols = Math.max(12, Number(screen.width ?? 80) - 3);
     let raw = `Goal: ${goal}`;
     if (raw.length > maxCols) raw = raw.slice(0, maxCols - 1) + '…';
-    return [` {${theme.muted}-fg}${escapeBlessedTags(toItalic(raw))}{/}`, ''];
+    return ` {${theme.muted}-fg}${escapeBlessedTags(toItalic(raw))}{/}`;
   }
 
   add(role: MessageRole, content: string): void {
@@ -138,17 +138,17 @@ export class ChatLog {
       }
     }
 
+    // The goal (cursive) and the thinking indicator live at the very BOTTOM of the chat, just
+    // above the input — goal first, indicator under it — so both stay in the user's eyeline.
+    const goalLine = this.goalLine();
     const indicatorLine = this.indicator.line();
-    if (indicatorLine) {
-      lines.push('');
-      lines.push(` ${indicatorLine}`);
-    }
+    const tail: string[] = [];
+    if (goalLine) tail.push(goalLine);
+    if (indicatorLine) tail.push(` ${indicatorLine}`);
+    if (tail.length) lines.push('', ...tail);
 
-    // Goal sits at the very top; the blank padding then pushes the messages to the bottom —
-    // so the goal reads in the empty space, above both the thinking indicator and the input.
-    const goalLines = this.goalLines(chatHeight);
-    const padLines = Math.max(0, chatHeight - lines.length - goalLines.length);
-    this.box.setContent([...goalLines, ...Array(padLines).fill(''), ...lines].join('\n'));
+    const padLines = Math.max(0, chatHeight - lines.length);
+    this.box.setContent([...Array(padLines).fill(''), ...lines].join('\n'));
     this.box.setScrollPerc(100);
     render();
   }

@@ -13,7 +13,7 @@ import {
   onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
 } from './ui.js';
 import { connect, disconnect, onConnectionChange, isConnected } from './connection.js';
-import { refreshActiveModel } from './llm/manager.js';
+import { refreshActiveModel, activeModelId } from './llm/manager.js';
 import { getSummaryText, getSummary, resetSummary } from './summary.js';
 import { estimateSessionTokens } from './tokens.js';
 import { loadHistory, pushEntry } from './history.js';
@@ -238,6 +238,57 @@ onConnectionChange((state) => {
   }
 });
 
+// ── Model authority (/model) ──────────────────────────────────────────
+// Interactive booking of the coder model: `/model qwen` takes the llm resource as the `ayin`
+// authority (backend swaps gemma → qwen-coder) and HOLDS it for the whole session; `/model gemma`
+// releases it. The hold is released on /quit and on SIGINT/SIGTERM; a hard kill lets the backend
+// grant TTL-expire (the keepalive is unref'd, so it stops on exit).
+let modelHold: LlmHold | null = null;
+
+async function releaseModelHold(): Promise<void> {
+  const h = modelHold;
+  modelHold = null;
+  if (h && typeof h === 'object') await h.release().catch(() => {});
+}
+
+async function handleModelCommand(arg: string): Promise<void> {
+  const t = arg.trim().toLowerCase();
+  const held = modelHold && typeof modelHold === 'object';
+
+  if (!t) {
+    addMessage('system', `Model: ${activeModelId() || '(resolving…)'}${held ? ' — booked by you until quit' : ' (shared)'}`);
+    addMessage('system', '/model qwen — book the coder model (qwen) for this session; holds the GPU until you quit');
+    addMessage('system', '/model gemma — release back to the shared model (gemma)');
+    return;
+  }
+
+  if (t === 'qwen' || t === 'coder') {
+    if (held) { addMessage('system', 'qwen is already booked for this session.'); return; }
+    addMessage('system', 'Booking qwen — requesting the coder authority from the backend…');
+    setAgentStatus('Switching to qwen…');
+    const hold = await acquireLlm('interactive /model qwen (held for session)');
+    setAgentStatus('');
+    if (hold === 'busy') { addMessage('system', 'GPU is busy — another authority holds the model right now. Try /model qwen again shortly.'); return; }
+    if (hold === 'no-resource-layer') { addMessage('system', 'Backend has no resource layer (or is unreachable) — cannot switch the model from here.'); return; }
+    modelHold = hold;
+    await new Promise((r) => setTimeout(r, 1500)); // let the backend load qwen before re-resolving
+    await refreshActiveModel().catch(() => {});
+    addMessage('system', `Booked ${activeModelId() || 'qwen-coder'} — held until you /quit (or /model gemma).`);
+    return;
+  }
+
+  if (t === 'gemma' || t === 'chat' || t === 'release') {
+    if (!held) { addMessage('system', 'Nothing booked — the shared model (gemma) is already served.'); return; }
+    await releaseModelHold();
+    await new Promise((r) => setTimeout(r, 1000));
+    await refreshActiveModel().catch(() => {});
+    addMessage('system', `Released — back to the shared model (${activeModelId() || 'gemma'}).`);
+    return;
+  }
+
+  addMessage('system', `Unknown model "${arg.trim()}". Use: /model qwen  ·  /model gemma`);
+}
+
 // ── Input handler ───────────────────────────────────────────────────
 
 let busy = false;
@@ -265,8 +316,12 @@ onInput(async (text: string) => {
     const cmd = text.split(' ')[0];
     switch (cmd) {
       case '/quit': case '/q': case '/exit':
+        await releaseModelHold(); // give qwen back to the shared model
         await disconnect();
         shutdown();
+        return;
+      case '/model':
+        await handleModelCommand(text.slice('/model'.length));
         return;
       case '/clear':
         clearChat();
@@ -356,6 +411,7 @@ onInput(async (text: string) => {
         return;
       case '/help':
         addMessage('system', '/goal <text> — set the session goal (shown in cursive above the chat); /goal clear to unset');
+        addMessage('system', '/model qwen|gemma — book qwen-coder for this session (held until quit) or release to the shared model');
         addMessage('system', '/summary — show session summary (Esc to close)');
         addMessage('system', '/resume — list sessions for this version');
         addMessage('system', '/resume <sessionId> — restore a specific session');
@@ -475,6 +531,11 @@ async function runInteractive(): Promise<void> {
   addMessage('system', process.cwd());
 
   startPromptServer();
+
+  // Release a booked model (/model qwen) if we're killed — /quit already does this; a hard kill
+  // otherwise leaves the grant to TTL-expire on the backend.
+  process.on('SIGTERM', () => { void releaseModelHold(); });
+  process.on('SIGINT', () => { void releaseModelHold(); });
 
   focusInput();
   screen.render();

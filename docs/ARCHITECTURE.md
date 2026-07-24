@@ -240,8 +240,9 @@ tree knows about the internals). Design rules:
   for the session — the anti-wander anchor. On the first user message `refreshGoal()` makes one
   cheap LLM call (the `goal` prompt) that distils the user's intent into a stable one-liner;
   it's injected into the agent's system context every round (`Session goal (…do not wander…)`,
-  above the volatile `Current task`), and shown in the chat's **blank area** at the top, in
-  **cursive** and dim. blessed has no italic attribute (its attr model has no italic bit; a raw
+  above the volatile `Current task`), and shown at the **bottom of the chat — just above the
+  thinking indicator and the input** (in the user's eyeline while typing / watching ayin think),
+  in **cursive** and dim. blessed has no italic attribute (its attr model has no italic bit; a raw
   `\x1b[3m` is dropped by `attrCode`), so "cursive" is a Unicode Mathematical-Italic transform
   (`chat.ts#toItalic`) — real slant, no terminal italic support needed (caveat: copy-paste
   yields math-italic codepoints). Set/override with `/goal <text>`, clear with `/goal clear`;
@@ -251,6 +252,14 @@ tree knows about the internals). Design rules:
   git repo, the path shows the current branch — `…/maradel (main)`. Read straight from
   `.git/HEAD` (handles a `.git` *file* for submodules/worktrees; detached HEAD → short sha) and
   cached 2s so the per-tick status redraw doesn't hammer the fs.
+
+- **Model booking** (`/model`, `index.ts`): the interactive counterpart to headless
+  `AYIN_ACQUIRE_LLM=1`. `/model qwen` takes the backend llm resource as the `ayin` authority
+  (backend swaps gemma → `config.skills.coderModel`, default qwen-coder) and **holds it for the
+  whole session** — released on `/model gemma`, `/quit`, or SIGINT/SIGTERM (a hard kill lets the
+  grant TTL-expire; the keepalive is unref'd). `busy` → another authority holds the GPU, try
+  again. The active dialect re-resolves after the swap (`refreshActiveModel`). See "one door to
+  every resource" — this never side-doors the GPU.
 
 ## Permissions (`permissions.ts`)
 
