@@ -599,7 +599,7 @@ const SECRET_RE = /(^|\/)(\.env(\.[^/]+)?|[^/]*\.(pem|key|p12|pfx|keystore)|id_r
 // Infra the developer manages by hand — never auto-staged, and excluded from the review trigger:
 // git hooks, Unity ProjectSettings/ + UserSettings/, and editor/IDE settings (.vscode/.idea/.vs,
 // .csproj/.sln/.user/.vsconfig). Deterministic so it holds regardless of the model's judgement.
-const NEVER_STAGE_RE = /(^|\/)(ProjectSettings|UserSettings|\.vscode|\.idea|\.vs|hooks)(\/|$)|\.(csproj|sln|user|vsconfig)$/i;
+const NEVER_STAGE_RE = /(^|\/)(ProjectSettings|UserSettings|Packages|\.vscode|\.idea|\.vs|hooks)(\/|$)|\.(csproj|sln|user|vsconfig|txt)$/i;
 function isStageable(path: string): boolean {
   const base = path.split('/').pop() || path;
   if (AYIN_REPORT_RE.test(base)) return false;
@@ -622,8 +622,8 @@ function saveWorktreeState(s: WorktreeState): void {
 // UserSettings/IDE/hooks — the dev owns those). Matches isStageable / NEVER_STAGE_RE in intent.
 const EXCLUDE_PATHSPEC = [
   'CLAUDE.md', 'AYIN-REPORT-*.md', 'CodeReview-*.md', 'AssetDiff-*.md',
-  'ProjectSettings/**', 'UserSettings/**', '.vscode/**', '.idea/**', '.vs/**',
-  '*.csproj', '*.sln', '*.user', '*.vsconfig',
+  'ProjectSettings/**', 'UserSettings/**', 'Packages/**', '.vscode/**', '.idea/**', '.vs/**',
+  '*.csproj', '*.sln', '*.user', '*.vsconfig', '*.txt',
 ].flatMap(g => [`:(exclude,glob)${g}`, `:(exclude,glob)**/${g}`]);
 
 /** Fingerprint of the UNSTAGED work only — `git diff` (working tree vs index, NOT --cached) plus
@@ -675,8 +675,8 @@ MEANINGFUL → stage:true: C# source (.cs); animation assets (.anim / .controlle
 .overrideController); ScriptableObjects & data assets (.asset); plus normal source, tests, docs.
 NOT meaningful → stage:false: debug scaffolding, stray prints/logs (Debug.Log/console.log),
 commented-out experiments, throwaway/scratch files, editor cruft. When unsure, stage:false (safer).
-(Git hooks, Unity ProjectSettings/UserSettings, and editor/IDE files are already filtered out — you
-won't see them; never propose staging them.)
+(Git hooks, Unity ProjectSettings/UserSettings, Packages/, editor/IDE files, and .txt are already
+filtered out — you won't see them; never propose staging them.)
 
 ## Changed files
 ${files.map(f => `- ${f}`).join('\n')}
