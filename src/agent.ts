@@ -25,6 +25,7 @@ import { addMessage, setAgentStatus, setAgentState, setStatus, HEADLESS, formatT
 import { log } from './log.js';
 import { checkPermission } from './permissions.js';
 import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
+import { recordPrompt, recordTool, recordAnswer } from './session-record.js';
 import { getConfig } from './prompts.js';
 import { getRules } from './rules.js';
 import { syncSession, getSessionId } from './tiferet-session.js';
@@ -457,6 +458,7 @@ function isSimilarText(a: string, b: string): boolean {
 
 export async function runAgent(userInput: string): Promise<void> {
   currentGoal = userInput;
+  recordPrompt(userInput); // consolidated per-session record (prompts + tools + answers)
   pushToWindow('user', userInput);
   pushMessage('user', userInput);
   interrupted = false;
@@ -531,6 +533,7 @@ export async function runAgent(userInput: string): Promise<void> {
     triggerSync();
 
     if (!hasToolCalls) {
+      recordAnswer(response);
       pushToWindow('assistant', response);
       pushMessage('assistant', response);
 
@@ -764,6 +767,7 @@ export async function runAgent(userInput: string): Promise<void> {
         toolPromise.then(r => {
           completeTask(taskId, r);
           saveArtifact(name, paramPreview, r);
+          recordTool(name, paramPreview, r, true);
           addMessage('tool', `${formatToolCallForChat(name, `task ${taskId} completed`)}\n${formatToolResultForChat(name, r, Date.now() - toolStarted)}`);
           pushToWindow('user', renderToolResult(`Background ${name} (task ${taskId}) completed:\n${r.substring(0, 16000)}`));
           pushMessage('assistant', `[tool: ${name}(${paramPreview}) → ${r.substring(0, 150)}]`);
@@ -781,6 +785,7 @@ export async function runAgent(userInput: string): Promise<void> {
 
       result = result!;
       saveArtifact(name, paramPreview, result);
+      recordTool(name, paramPreview, result);
 
       let ctaJustDelivered = false;
       // One formatter for every tool: write_file gets the diff card, the rest a tag-escaped

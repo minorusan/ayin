@@ -495,6 +495,10 @@ async function runHeadless(): Promise<void> {
     process.exit(1);
   }
 
+  // Establish a session id so the per-run record (session-record.ts) has a key to write under.
+  // Headless runs (ayin -p, the watch daemon) need this exactly like the interactive REPL does.
+  await initSession().catch(() => {});
+
   // Coder authority (AYIN_ACQUIRE_LLM=1): take the llm resource so the backend swaps gemma → the
   // coder model (qwen) for this run. Sliding grant + unref'd keepalive → auto-released when the
   // process exits; we also release explicitly on normal completion so gemma reverts promptly.
