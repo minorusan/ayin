@@ -47,6 +47,15 @@ const RETRY_BACKOFF_MS = 60_000;
 
 const HOOK_MARKER = 'ayin-watch post-commit hook';
 
+// Shared reviewer discipline (Unity): a reviewer must not claim an animator binding is "missing"
+// from a prefab it merely grepped by name — a true fact about the wrong prefab is worse than a lie.
+const ANIMATOR_EXISTENCE_RULE =
+  'Existence discipline (Unity): never assert a state/param/clip/object "does not exist" or "is not ' +
+  'in <prefab>" unless you resolved the binding chain (clip → its AnimatorController → the GameObject ' +
+  'whose Animator uses it → the prefab/scene that instantiates it). If you can\'t resolve it, say ' +
+  '"unverified: <what\'s unresolved>" — never "missing". Don\'t report a fact about a plausibly-named ' +
+  'prefab as if it were the binding target.';
+
 /** Typical code-smell signals the reviewer scores. Kept as data so the list is one place. */
 export const SMELL_SIGNALS: Array<{ name: string; hint: string }> = [
   { name: 'long-function',        hint: 'a function/method doing too much or spanning far more lines than its siblings' },
@@ -402,6 +411,7 @@ One subsection per code-smell signal you actually observe, ordered by confidence
 - **Suggestion:** the fix, in one or two sentences
 
 Confidence is YOUR certainty the smell is real and worth acting on (0.30 = plausible hunch, 0.60 = likely real, 0.85+ = certain). Do NOT list signals below 0.30 and do NOT invent findings to fill space — an empty findings list is a valid, good outcome. If none: write exactly "No significant smells detected."
+${ANIMATOR_EXISTENCE_RULE}
 
 ## Verdict
 One line: **LGTM** / **LGTM with nits** / **Needs attention** — plus one sentence of justification.`;
@@ -521,6 +531,7 @@ ${diff}
 \`\`\`
 
 Respond in clean markdown with sections: ## Summary · ## What changed · ## Watch out · ## Follow-ups.
+${ANIMATOR_EXISTENCE_RULE}
 END with a final line that is EXACTLY one of: \`VERDICT: RISKY\` (breaking/risky changes the puller must act on) or \`VERDICT: OK\`.`;
 }
 
