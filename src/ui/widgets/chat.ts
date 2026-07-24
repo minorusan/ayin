@@ -133,15 +133,43 @@ function escapeBlessedTags(text: string): string {
 const PREVIEW_LINES: Record<string, number> = { bash: 6, grep: 6, read_file: 4 };
 const DEFAULT_PREVIEW_LINES = 2;
 
+/** Styled tool-call header shown when a tool starts: `▸ bash · cat package.json` */
+export function formatToolCallForChat(tool: string, params: string): string {
+  const p = params ? ` {${theme.muted}-fg}· ${escapeBlessedTags(params)}{/}` : '';
+  return `{${theme.tool}-fg}▸{/} {bold}{${theme.accent}-fg}${tool}{/${theme.accent}-fg}{/bold}${p}`;
+}
+
+function formatToolMs(ms: number): string {
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`;
+}
+
+/** Card footer: `╰ ✓ 0.4s` (green) or `╰ ✗ 12.0s` (red) when the result smells like an error. */
+function toolFooter(content: string, elapsedMs?: number): string {
+  if (elapsedMs === undefined) return '';
+  const failed = /^error[:\s]/i.test(content.trim())
+    || /^command exited with code/i.test(content.trim())
+    || content.includes('(exit code ')
+    || content.includes('(timeout after')
+    || content.includes('(command failed');
+  const mark = failed ? `{${theme.err}-fg}✗{/}` : `{${theme.ok}-fg}✓{/}`;
+  return `\n{${theme.faint}-fg}╰{/} ${mark} {${theme.dim}-fg}${formatToolMs(elapsedMs)}{/}`;
+}
+
 /**
  * Render a tool result for the chat. write_file gets the diff card; every other tool gets a
  * gutter-block preview with blessed tags ESCAPED — raw output full of `{`/`}` (JSON, code)
- * used to be fed to blessed as markup, which silently ate or garbled it.
+ * used to be fed to blessed as markup, which silently ate or garbled it. When elapsedMs is
+ * given, the card closes with a ✓/✗ + duration footer.
  */
-export function formatToolResultForChat(tool: string, content: string): string {
+export function formatToolResultForChat(tool: string, content: string, elapsedMs?: number): string {
   if (tool !== 'write_file') {
     const lines = content.split('\n').filter(l => l.trim());
-    if (lines.length === 0) return `{${theme.dim}-fg}(no output){/}`;
+    if (lines.length === 0) {
+      return elapsedMs === undefined
+        ? `{${theme.dim}-fg}(no output){/}`
+        : `{${theme.faint}-fg}╰{/} {${theme.ok}-fg}✓{/} {${theme.dim}-fg}${formatToolMs(elapsedMs)} · no output{/}`;
+    }
     const max = PREVIEW_LINES[tool] ?? DEFAULT_PREVIEW_LINES;
     const shown = lines.slice(0, max).map(l => {
       const cut = l.length > 200 ? l.slice(0, 200) + '…' : l;
@@ -150,7 +178,7 @@ export function formatToolResultForChat(tool: string, content: string): string {
     const more = lines.length > max
       ? `\n{${theme.faint}-fg}│{/} {${theme.dim}-fg}… ${lines.length - max} more lines — Ctrl+O to browse{/}`
       : '';
-    return shown.join('\n') + more;
+    return shown.join('\n') + more + toolFooter(content, elapsedMs);
   }
 
   const rendered: string[] = [];
@@ -179,5 +207,5 @@ export function formatToolResultForChat(tool: string, content: string): string {
     }
     rendered.push(escaped);
   }
-  return rendered.join('\n');
+  return rendered.join('\n') + toolFooter(content, elapsedMs);
 }

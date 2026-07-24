@@ -20,7 +20,7 @@ import { cancelActiveThinking } from './connection.js';
 import { llmChat, parseToolCalls, renderToolCall, renderToolResult } from './llm/manager.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution } from './tools.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
-import { addMessage, setAgentStatus, setAgentState, setStatus, HEADLESS, formatToolResultForChat } from './ui.js';
+import { addMessage, setAgentStatus, setAgentState, setStatus, HEADLESS, formatToolResultForChat, formatToolCallForChat } from './ui.js';
 import { log } from './log.js';
 import { checkPermission } from './permissions.js';
 import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
@@ -658,7 +658,7 @@ export async function runAgent(userInput: string): Promise<void> {
       }
 
       setAgentState('tool', `Running ${name}(${paramPreview})`);
-      addMessage('system', `${name}: ${paramPreview}`);
+      addMessage('system', formatToolCallForChat(name, paramPreview));
       log('INFO', 'tool_call', { tool: name, params: JSON.stringify(params).substring(0, 200) });
 
       // Internal critic — when model writes substantial output and has gathered facts,
@@ -710,6 +710,7 @@ export async function runAgent(userInput: string): Promise<void> {
       // Other tools may go background after 20s.
       // explore and web_search need long timeouts — they do real work
       const BACKGROUND_TIMEOUT = (name === 'explore' || name === 'web_search') ? 600_000 : 20_000;
+      const toolStarted = Date.now();
       const toolPromise = tool.execute(params).catch(
         (err: unknown) => `Error: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -744,10 +745,7 @@ export async function runAgent(userInput: string): Promise<void> {
         toolPromise.then(r => {
           completeTask(taskId, r);
           saveArtifact(name, paramPreview, r);
-          const bgLines = r.split('\n').filter((l: string) => l.trim());
-          const bgPreview = bgLines.slice(0, 2).join('\n');
-          const bgMore = bgLines.length > 2 ? `  {#555-fg}(${bgLines.length - 2} more lines — Ctrl+O){/}` : '';
-          addMessage('system', `${name} [task ${taskId}] completed:\n${bgPreview}${bgMore ? `\n${bgMore}` : ''}`);
+          addMessage('system', `${name} [task ${taskId}] completed:\n${formatToolResultForChat(name, r, Date.now() - toolStarted)}`);
           pushToWindow('user', renderToolResult(`Background ${name} (task ${taskId}) completed:\n${r.substring(0, 16000)}`));
           pushMessage('assistant', `[tool: ${name}(${paramPreview}) → ${r.substring(0, 150)}]`);
           log('INFO', 'tool_background_complete', { tool: name, taskId, resultLength: String(r.length) });
@@ -767,8 +765,9 @@ export async function runAgent(userInput: string): Promise<void> {
 
       let ctaJustDelivered = false;
       // One formatter for every tool: write_file gets the diff card, the rest a tag-escaped
-      // gutter-block preview (raw braces in bash/grep output used to break blessed markup).
-      addMessage('system', formatToolResultForChat(name, result));
+      // gutter-block preview (raw braces in bash/grep output used to break blessed markup),
+      // both closed by a ✓/✗ + duration footer.
+      addMessage('system', formatToolResultForChat(name, result, Date.now() - toolStarted));
       if (name === 'write_file') {
         // Track CTA delivery — if the write target matches the CTA, mark as delivered
         if (ctaTarget && !ctaDelivered && (params.path || '').includes(ctaTarget) && (params.content || '').length > 200) {
