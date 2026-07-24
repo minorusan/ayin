@@ -208,10 +208,21 @@ tree knows about the internals). Design rules:
   risk` on oom.warning. Idle hides the segment; a dead stream blanks it rather than showing a
   stale phase. The ayin-layer postprocess (tool-call parsing in `agent.ts`) reports through
   the same segment as `postprocessing ayin`.
-- **Tool output cards** (`widgets/chat.ts#formatToolResultForChat`): `write_file` renders the
-  diff card; every other tool gets a `│`-gutter preview block (6 lines for bash/grep, 4 for
-  read_file, 2 default, 200-char line cap) with blessed tags **escaped via `{open}`/`{close}`**
-  — raw `{`/`}` in bash/JSON output used to be parsed as markup and silently garbled.
+- **Speaker anchors** (`widgets/chat.ts#redraw`): the transcript is parseable by the left
+  gutter alone — `▌ bold` = the user (indigo bar, every line of a multi-line prompt),
+  `◉ text` = ayin speaking (ayin = "eye"; accent glyph on the first line, markdown body),
+  indented `▸/│/╰` amber frames = tool cards (a dedicated `tool` message role, not `system`),
+  `· dim` = system notices (the quietest thing on screen). The input prompt is the matching
+  accent `❯`. User lines are tag-escaped like tool output (braces in prompts are literal).
+- **Tool cards** (`widgets/chat.ts`): a call opens with a styled header
+  (`formatToolCallForChat` → `▸ bash · cat package.json`), the result renders via
+  `formatToolResultForChat` — `write_file` gets the diff card, every other tool a `│`-gutter
+  preview block (6 lines for bash/grep, 4 for read_file, 2 default, 200-char line cap) with
+  blessed tags **escaped via `{open}`/`{close}`** (raw `{`/`}` in bash/JSON output used to be
+  parsed as markup and silently garbled) — and every card **closes with a timing footer**:
+  `╰ ✓ 3.0s` (green) or `╰ ✗ 0.2s` (red) when the result is an error/timeout/non-zero exit.
+  The bash tool appends `(exit code N)` to failing-with-output commands so both the model and
+  the card can tell failure from success. Backgrounded completions get the same card + timing.
 - **ThinkingIndicator** (`widgets/thinking.ts`) is a small state machine: each `AgentState`
   (`thinking` · `tool` · `explaining` · `summarizing`) owns its frames, speed and color in
   `STATE_SPECS` — a new animation state is one entry there, no plumbing. The line renders as

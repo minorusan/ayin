@@ -84,7 +84,9 @@ function execAsync(command: string, opts: { cwd?: string } = {}): Promise<string
       }
 
       finish(() => {
-        if (out) resolve(out);
+        // A failing command WITH output must still say it failed — both the model and the
+        // chat card otherwise read stderr text as success.
+        if (out) resolve(code && code !== 0 ? `${out}\n(exit code ${code})` : out);
         else if (code && code !== 0) resolve(`Command exited with code ${code}`);
         else resolve('(no output)');
       });
