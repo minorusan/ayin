@@ -20,6 +20,7 @@ import { cancelActiveThinking } from './connection.js';
 import { llmChat, parseToolCalls, renderToolCall, renderToolResult } from './llm/manager.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution } from './tools.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
+import { getGoal } from './goal.js';
 import { addMessage, setAgentStatus, setAgentState, setStatus, HEADLESS, formatToolResultForChat, formatToolCallForChat } from './ui.js';
 import { log } from './log.js';
 import { checkPermission } from './permissions.js';
@@ -327,6 +328,13 @@ function buildMessages(round: number, maxRounds: number): Message[] {
   const rules = getRules();
   if (rules) {
     systemContent = `<rules>\n${rules}\n</rules>\n\n${systemContent}`;
+  }
+
+  // Session goal — the auto-determined overall direction (goal.ts). This is the anti-wander
+  // anchor: it stays stable while `currentGoal` (the latest raw input) changes turn to turn.
+  const sessionGoal = getGoal();
+  if (sessionGoal) {
+    systemContent += `\n\nSession goal (the user's overall direction — keep every step aligned with this and do not wander off it): ${sessionGoal}`;
   }
 
   if (currentGoal) {

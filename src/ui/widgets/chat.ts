@@ -12,6 +12,7 @@ import { HEADLESS, noopBox } from '../headless.js';
 import { screen, render } from '../screen.js';
 import { theme } from '../theme.js';
 import { ThinkingIndicator, type AgentState } from './thinking.js';
+import { getGoal, onGoalChange } from '../../goal.js';
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
@@ -39,6 +40,22 @@ export class ChatLog {
         style: { fg: theme.text, bg: theme.bg },
       });
     this.indicator = new ThinkingIndicator(() => this.redraw());
+    onGoalChange(() => this.redraw()); // goal line lives in this box; re-render when it changes
+  }
+
+  /** The goal line for the blank area at the top of the chat: cursive, dim, above everything.
+   *  Empty when no goal is set (or the box is too short to spare the rows). blessed can't do
+   *  italic (its attr model has no italic bit — see docs), so "cursive" is a Unicode
+   *  Mathematical-Italic transform of the letters; a genuine slant that needs no terminal
+   *  italic support. Truncated by RAW length (pre-transform) because each italic glyph is a
+   *  surrogate pair — String#length would over-count and the width math would be wrong. */
+  private goalLines(chatHeight: number): string[] {
+    const goal = getGoal();
+    if (!goal || chatHeight < 3) return [];
+    const maxCols = Math.max(12, Number(screen.width ?? 80) - 3);
+    let raw = `Goal: ${goal}`;
+    if (raw.length > maxCols) raw = raw.slice(0, maxCols - 1) + '…';
+    return [` {${theme.muted}-fg}${escapeBlessedTags(toItalic(raw))}{/}`, ''];
   }
 
   add(role: MessageRole, content: string): void {
@@ -127,8 +144,11 @@ export class ChatLog {
       lines.push(` ${indicatorLine}`);
     }
 
-    const padLines = Math.max(0, chatHeight - lines.length);
-    this.box.setContent(Array(padLines).fill('').concat(lines).join('\n'));
+    // Goal sits at the very top; the blank padding then pushes the messages to the bottom —
+    // so the goal reads in the empty space, above both the thinking indicator and the input.
+    const goalLines = this.goalLines(chatHeight);
+    const padLines = Math.max(0, chatHeight - lines.length - goalLines.length);
+    this.box.setContent([...goalLines, ...Array(padLines).fill(''), ...lines].join('\n'));
     this.box.setScrollPerc(100);
     render();
   }
@@ -144,6 +164,23 @@ function escapeBlessedTags(text: string): string {
   // blessed's escape syntax is {open}/{close} — NOT backslashes (those render literally).
   // Single pass so the '}' of an inserted '{open}' is never re-escaped.
   return text.replace(/[{}]/g, m => (m === '{' ? '{open}' : '{close}'));
+}
+
+/** Fake italic for a blessed TUI (which has no italic attribute — see docs): map ASCII letters
+ *  to their Unicode Mathematical-Italic glyphs. Digits, spaces, and punctuation stay upright
+ *  (Unicode has no italic digit block). Small 'h' is the one hole in the block — it lives at
+ *  U+210E (ℎ, PLANCK CONSTANT) rather than the contiguous slot. Non-letters pass through, so
+ *  the result is still safe to feed through escapeBlessedTags afterwards. */
+export function toItalic(text: string): string {
+  let out = '';
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!;
+    if (ch === 'h') out += String.fromCodePoint(0x210e);
+    else if (c >= 0x61 && c <= 0x7a) out += String.fromCodePoint(0x1d44e + (c - 0x61)); // a–z
+    else if (c >= 0x41 && c <= 0x5a) out += String.fromCodePoint(0x1d434 + (c - 0x41)); // A–Z
+    else out += ch;
+  }
+  return out;
 }
 
 /** How many output lines each tool's chat card shows before truncating. */

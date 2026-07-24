@@ -7,6 +7,7 @@ import { HEADLESS, noopBox } from '../headless.js';
 import { screen, render } from '../screen.js';
 import { theme } from '../theme.js';
 import { onTick } from '../ticker.js';
+import { gitBranch } from '../../git.js';
 
 export type LlmPhaseName =
   | 'swapping' | 'preprocessing' | 'responding' | 'postprocessing' // live phases (animated)
@@ -133,7 +134,15 @@ export class StatusBar {
     let cwd = this.state.cwd;
     if (cwd.length > cwdMax) cwd = '…' + cwd.slice(cwd.length - cwdMax + 1);
 
-    this.box.setContent(`${parts.join(` {${theme.faint}-fg}│{/} `)}{|}${cwd}`);
+    // A git repo? Show the current branch next to the path. Cached (git.ts) so this is cheap
+    // even though redraw runs on every animation tick. Braces stripped defensively — a ref
+    // name with a '{' would otherwise corrupt the blessed tag stream.
+    const branch = gitBranch(this.state.cwd);
+    const loc = branch
+      ? `${cwd} {${theme.faint}-fg}(${branch.replace(/[{}]/g, '')}){/}`
+      : cwd;
+
+    this.box.setContent(`${parts.join(` {${theme.faint}-fg}│{/} `)}{|}${loc}`);
     render();
   }
 }

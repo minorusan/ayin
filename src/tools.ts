@@ -18,6 +18,7 @@ import { codexExecute } from './codex.js';
 import { fixmeExecute } from './fixme.js';
 import { statusExecute } from './tools/status.js';
 import { exploreExecute } from './tools/explore.js';
+import { webSearch } from './tools/web-search.js';
 import { docsSearchExecute } from './tools/docs-search.js';
 
 // ── Async exec ──────────────────────────────────────────────────────
@@ -409,16 +410,13 @@ const tools: Tool[] = [
   },
   {
     name: 'web_search',
-    description: 'Search the web for documentation, APIs, tutorials, error messages, or any information not available locally. Returns a synthesized answer with sources.',
+    description: 'Search the web for documentation, APIs, tutorials, error messages, or any information not available locally. Returns readable content extracted from the top result pages, with sources (SearXNG → DuckDuckGo).',
     parameters: [
       { name: 'query', type: 'string', description: 'Search query', required: true },
     ],
     async execute(params) {
       if (!params.query) return 'Error: query required';
-      return execAsync(
-        `malkhut search -query "${params.query.replace(/"/g, '\\"')}" --reasoning`,
-        { cwd: CWD },
-      );
+      return webSearch(params.query);
     },
   },
   {

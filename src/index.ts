@@ -26,6 +26,7 @@ import { renderMarkdown } from './markdown.js';
 import { HEADLESS } from './ui.js';
 import { loadRules } from './rules.js';
 import { setConfigValue, resetPromptsToDefaults } from './prompts.js';
+import { getGoal, setGoal, clearGoal, refreshGoal } from './goal.js';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -303,6 +304,7 @@ onInput(async (text: string) => {
           }
           setSessionId(targetId);
           resetSummary();
+          clearGoal(); // goal belongs to the session; re-seeds from the next message
           // Restore summary and recent into current session state
           const s = getSummary();
           s.summary = checkpoint.summary;
@@ -330,11 +332,30 @@ onInput(async (text: string) => {
         addMessage('system', `Set ${key} ✓`);
         return;
       }
+      case '/goal': {
+        const arg = text.slice('/goal'.length).trim();
+        if (!arg) {
+          const g = getGoal();
+          addMessage('system', g
+            ? `Goal: ${g}`
+            : "No goal set. Usage: /goal <what you're working toward>  ·  /goal clear");
+          return;
+        }
+        if (arg === 'clear' || arg === 'none') {
+          clearGoal();
+          addMessage('system', 'Goal cleared');
+          return;
+        }
+        setGoal(arg);
+        addMessage('system', 'Goal set ✓');
+        return;
+      }
       case '/reset':
         resetPromptsToDefaults();
         addMessage('system', 'Prompts restored to defaults ✓');
         return;
       case '/help':
+        addMessage('system', '/goal <text> — set the session goal (shown in cursive above the chat); /goal clear to unset');
         addMessage('system', '/summary — show session summary (Esc to close)');
         addMessage('system', '/resume — list sessions for this version');
         addMessage('system', '/resume <sessionId> — restore a specific session');
@@ -358,6 +379,16 @@ onInput(async (text: string) => {
   // Run agent loop
   busy = true;
   try {
+    // First real prompt of the session auto-determines the goal — one LLM call that distills
+    // the user's direction into a stable one-liner (the anti-wander anchor). Derived before the
+    // loop so it's in the agent's context from round 1. Overridable any time with /goal.
+    // Bounded wait: llmCall's own ceiling is 10 min, so we cap the pre-loop block; if the
+    // derivation is slow it keeps running in the background and lands on a later round + the
+    // cursive line updates itself via the goal subscription.
+    if (!getGoal()) {
+      setAgentStatus('Determining goal...');
+      await Promise.race([refreshGoal(text), new Promise(r => setTimeout(r, 12_000))]);
+    }
     await runAgent(text);
   } catch (err) {
     setAgentStatus('');

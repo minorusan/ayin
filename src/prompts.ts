@@ -115,6 +115,25 @@ Update the summary. Rules:
 
 Return only the updated summary text.`,
   },
+  goal: {
+    description: 'Distills the user\'s overall direction into one line — the session goal (anti-wander anchor).',
+    content: `You maintain a ONE-LINE statement of the user's GOAL for a coding-agent session: the
+overall direction they want, so the agent stays on track and does not wander off into
+tangents.
+
+CURRENT GOAL (may be empty on the first turn):
+{{CURRENT_GOAL}}
+
+NEW USER MESSAGE:
+{{USER_MESSAGE}}
+
+Return an updated one-line goal. Rules:
+- Imperative, concrete, ≤ 16 words. No preamble, no quotes, no trailing period.
+- Capture the durable objective, NOT the momentary sub-task or a pleasantry.
+- If the new message doesn't change the direction, return the current goal unchanged.
+- If there is no discernible goal yet, restate the user's request as a crisp objective.
+Return only the single line.`,
+  },
 } as const;
 
 interface PromptEntry {

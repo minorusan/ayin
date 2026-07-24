@@ -120,6 +120,13 @@ configured): `web_search`, `docs_search`, `codex`, `jira`, `fixme`. See the READ
 - **`str_replace`** is the preferred edit tool — a single-unique-match find/replace that
   touches only the targeted block. `write_file` is for new files / deliberate full rewrites
   (regenerating a large file from memory risks dropping content).
+- **`web_search`** (`tools/web-search.ts`) mirrors maradel's pipeline (`backend/src/tasks/webSearch.ts`),
+  in-process and dependency-free: **SearXNG** (keyless self-hosted metasearch, JSON API) PRIMARY →
+  **DuckDuckGo HTML** fallback → **DDG Instant Answer** last resort; rank + dedup → fetch top 4 pages →
+  strip to readable text → merged markdown digest (the loop's model synthesizes). 15-min per-query
+  cache. The SearXNG base is `MARADEL_SEARXNG_URL` / `AYIN_SEARXNG_URL` / `/set searxng-url`, else
+  **derived from the KELI backend host on `:8888`** (the shared container next to the backend). If it's
+  unreachable, DDG covers it. (Replaced the old shell-out to `malkhut search`, which isn't installed.)
 - **`explore`** is a sub-investigation with its own short LLM loop and clean context — good
   for "find/read X" questions; it translates depth into width. It is **language-agnostic**
   (identifier extraction + whole-tree grep with vendor/build dirs excluded — no assumed file
@@ -229,6 +236,21 @@ tree knows about the internals). Design rules:
   `▍ ⠹ label··  12s` (state-colored gutter, spinner, pulsing label, breathing ellipsis,
   elapsed). Drive it explicitly with `setAgentState(state, label)`; the legacy
   `setAgentStatus(text)` still works and infers the state from the text.
+- **Session goal** (`goal.ts` + `widgets/chat.ts`): a one-line, auto-determined **direction**
+  for the session — the anti-wander anchor. On the first user message `refreshGoal()` makes one
+  cheap LLM call (the `goal` prompt) that distils the user's intent into a stable one-liner;
+  it's injected into the agent's system context every round (`Session goal (…do not wander…)`,
+  above the volatile `Current task`), and shown in the chat's **blank area** at the top, in
+  **cursive** and dim. blessed has no italic attribute (its attr model has no italic bit; a raw
+  `\x1b[3m` is dropped by `attrCode`), so "cursive" is a Unicode Mathematical-Italic transform
+  (`chat.ts#toItalic`) — real slant, no terminal italic support needed (caveat: copy-paste
+  yields math-italic codepoints). Set/override with `/goal <text>`, clear with `/goal clear`;
+  cleared on `/resume`. The pre-loop derivation is bounded (12s) so a stalled backend can't
+  freeze turn 1 — a late result still lands via the goal subscription.
+- **Git branch in the status bar** (`git.ts` + `widgets/status.ts`): when the cwd is inside a
+  git repo, the path shows the current branch — `…/maradel (main)`. Read straight from
+  `.git/HEAD` (handles a `.git` *file* for submodules/worktrees; detached HEAD → short sha) and
+  cached 2s so the per-tick status redraw doesn't hammer the fs.
 
 ## Permissions (`permissions.ts`)
 
@@ -272,9 +294,11 @@ src/
 ├── connection.ts       transport: the keli-shaped endpoint + OpenAI fallback; KELI_URL resolver
 ├── parser.ts           lenient tool-call parser (multi-format)
 ├── tools.ts            tool registry + the system prompt assembler
-├── tools/              explore.ts · docs-search.ts · status.ts · signals.ts
+├── tools/              explore.ts · docs-search.ts · status.ts · signals.ts · web-search.ts (SearXNG→DDG)
 ├── permissions.ts      approval dialogs + allow-lists
 ├── summary.ts          rolling session summary
+├── goal.ts             auto-determined session goal (anti-wander anchor; LLM-distilled, cursive)
+├── git.ts              current-branch lookup for the status bar (reads .git/HEAD, 2s cache)
 ├── prompts.ts          ~/.ayin-cli/prompts.json (read every access) + /set values
 ├── prompt-server.ts    optional web UI for prompts
 ├── artifacts.ts        save/browse tool outputs
