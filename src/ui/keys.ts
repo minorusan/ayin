@@ -36,6 +36,10 @@ export function installKeyRouter(opts: {
 
     if (key.full === 'pageup') { opts.chat.scrollHalfPage(-1); return; }
     if (key.full === 'pagedown') { opts.chat.scrollHalfPage(1); return; }
+    // Shift+↑/↓ scroll the transcript a line at a time (plain ↑/↓ stay prompt-history). Scrolling up
+    // disengages follow-the-bottom; scroll back to the bottom (or Shift+↓ past it) to resume.
+    if (key.full === 'S-up') { opts.chat.scrollLine(-1); return; }
+    if (key.full === 'S-down') { opts.chat.scrollLine(1); return; }
 
     opts.input.handleKey(ch, key);
   });

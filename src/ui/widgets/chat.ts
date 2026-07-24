@@ -25,6 +25,10 @@ export class ChatLog {
   readonly box: blessed.Widgets.BoxElement;
   readonly indicator: ThinkingIndicator;
   private messages: Message[] = [];
+  // Follow the live bottom until the user scrolls up; re-engages when they scroll back to the bottom.
+  // Without this, every redraw (new message, goal change, thinking-indicator tick) snapped to the
+  // bottom and it was nearly impossible to scroll up while anything was happening.
+  private stick = true;
 
   constructor() {
     this.box = HEADLESS
@@ -99,8 +103,29 @@ export class ChatLog {
     this.box.bottom = row;
   }
 
+  /** True when the view is at (or past) the bottom — i.e. following live output. */
+  private atBottom(): boolean {
+    const b = this.box as unknown as { getScrollPerc?: () => number };
+    return (b.getScrollPerc?.() ?? 100) >= 100;
+  }
+
   scrollHalfPage(dir: 1 | -1): void {
     this.box.scroll(dir * Math.floor((this.box.height as number) / 2));
+    this.stick = this.atBottom(); // re-engage follow ONLY when scrolled back to the bottom
+    render();
+  }
+
+  /** Line-granular scroll (Shift+↑/↓). */
+  scrollLine(dir: 1 | -1): void {
+    this.box.scroll(dir);
+    this.stick = this.atBottom();
+    render();
+  }
+
+  /** Jump to the newest message and resume following live output. */
+  scrollToBottom(): void {
+    this.box.setScrollPerc(100);
+    this.stick = true;
     render();
   }
 
@@ -148,8 +173,11 @@ export class ChatLog {
     if (tail.length) lines.push('', ...tail);
 
     const padLines = Math.max(0, chatHeight - lines.length);
+    const b = this.box as unknown as { getScroll?: () => number; scrollTo?: (i: number) => void };
+    const prevScroll = b.getScroll?.() ?? 0; // remember the user's position BEFORE content changes
     this.box.setContent([...Array(padLines).fill(''), ...lines].join('\n'));
-    this.box.setScrollPerc(100);
+    if (this.stick) this.box.setScrollPerc(100); // following live → snap to newest
+    else b.scrollTo?.(prevScroll); // scrolled up → keep the user exactly where they were
     render();
   }
 
