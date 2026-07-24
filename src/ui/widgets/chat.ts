@@ -121,14 +121,37 @@ export class ChatLog {
   }
 }
 
-// ── tool-result decoration (write_file diff cards) ────────────────────
+// ── tool-result decoration ────────────────────────────────────────────
 
 function escapeBlessedTags(text: string): string {
-  return text.replace(/\{/g, '\\{').replace(/\}/g, '\\}');
+  // blessed's escape syntax is {open}/{close} — NOT backslashes (those render literally).
+  // Single pass so the '}' of an inserted '{open}' is never re-escaped.
+  return text.replace(/[{}]/g, m => (m === '{' ? '{open}' : '{close}'));
 }
 
+/** How many output lines each tool's chat card shows before truncating. */
+const PREVIEW_LINES: Record<string, number> = { bash: 6, grep: 6, read_file: 4 };
+const DEFAULT_PREVIEW_LINES = 2;
+
+/**
+ * Render a tool result for the chat. write_file gets the diff card; every other tool gets a
+ * gutter-block preview with blessed tags ESCAPED — raw output full of `{`/`}` (JSON, code)
+ * used to be fed to blessed as markup, which silently ate or garbled it.
+ */
 export function formatToolResultForChat(tool: string, content: string): string {
-  if (tool !== 'write_file') return content;
+  if (tool !== 'write_file') {
+    const lines = content.split('\n').filter(l => l.trim());
+    if (lines.length === 0) return `{${theme.dim}-fg}(no output){/}`;
+    const max = PREVIEW_LINES[tool] ?? DEFAULT_PREVIEW_LINES;
+    const shown = lines.slice(0, max).map(l => {
+      const cut = l.length > 200 ? l.slice(0, 200) + '…' : l;
+      return `{${theme.faint}-fg}│{/} {${theme.diffCtx}-fg}${escapeBlessedTags(cut)}{/}`;
+    });
+    const more = lines.length > max
+      ? `\n{${theme.faint}-fg}│{/} {${theme.dim}-fg}… ${lines.length - max} more lines — Ctrl+O to browse{/}`
+      : '';
+    return shown.join('\n') + more;
+  }
 
   const rendered: string[] = [];
   for (const line of content.split('\n')) {

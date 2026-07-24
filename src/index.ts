@@ -424,6 +424,11 @@ async function runHeadless(): Promise<void> {
 async function runInteractive(): Promise<void> {
   loadHistory();
   setStatus({ connection: 'connecting', cwd: process.cwd() });
+
+  // Live LLM phase in the status bar (swapping/preprocessing/responding/postprocessing) —
+  // fed by the backend llm resource's SSE event stream, reconnects on its own.
+  const { subscribeLlmPhase } = await import('./llm-events.js');
+  subscribeLlmPhase((p) => setStatus({ llm: p.phase ? { phase: p.phase, detail: p.detail } : null }));
   addMessage('system', `ayin v${getVersion()}`);
   addMessage('system', process.cwd());
 

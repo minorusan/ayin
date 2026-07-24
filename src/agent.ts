@@ -20,7 +20,7 @@ import { cancelActiveThinking } from './connection.js';
 import { llmChat, parseToolCalls, renderToolCall, renderToolResult } from './llm/manager.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution } from './tools.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
-import { addMessage, setAgentStatus, setAgentState, HEADLESS, formatToolResultForChat } from './ui.js';
+import { addMessage, setAgentStatus, setAgentState, setStatus, HEADLESS, formatToolResultForChat } from './ui.js';
 import { log } from './log.js';
 import { checkPermission } from './permissions.js';
 import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
@@ -505,7 +505,11 @@ export async function runAgent(userInput: string): Promise<void> {
       return;
     }
 
+    // Postprocessing (ayin layer): parsing tool calls out of the raw model text. Usually
+    // instant, but a malformed/huge response makes this visible — surface it honestly.
+    setStatus({ llm: { phase: 'postprocessing', detail: 'ayin' } });
     const parsed = parseToolCalls(response);
+    setStatus({ llm: null });
     const hasToolCalls = parsed.toolCalls.length > 0;
 
     // For tool-call rounds: print pre-tool reasoning immediately (both modes)
@@ -762,19 +766,16 @@ export async function runAgent(userInput: string): Promise<void> {
       saveArtifact(name, paramPreview, result);
 
       let ctaJustDelivered = false;
+      // One formatter for every tool: write_file gets the diff card, the rest a tag-escaped
+      // gutter-block preview (raw braces in bash/grep output used to break blessed markup).
+      addMessage('system', formatToolResultForChat(name, result));
       if (name === 'write_file') {
-        addMessage('system', formatToolResultForChat(name, result));
         // Track CTA delivery — if the write target matches the CTA, mark as delivered
         if (ctaTarget && !ctaDelivered && (params.path || '').includes(ctaTarget) && (params.content || '').length > 200) {
           ctaDelivered = true;
           ctaJustDelivered = true;
           log('INFO', 'cta_delivered', { target: ctaTarget, contentLength: String((params.content || '').length) });
         }
-      } else {
-        const lines = result.split('\n').filter(l => l.trim());
-        const preview = lines.slice(0, 2).join('\n');
-        const more = lines.length > 2 ? `  {#555-fg}(${lines.length - 2} more lines — Ctrl+O to browse){/}` : '';
-        addMessage('system', preview + (more ? `\n${more}` : ''));
       }
 
       // Fallback CTA detection: model may write the target via bash/edit_file/etc.

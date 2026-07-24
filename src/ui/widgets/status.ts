@@ -12,7 +12,16 @@ export interface StatusState {
   tokens: { used: number; total: number } | null;
   cwd: string;
   update: string | null; // e.g. "v1.0.30 available"
+  /** live LLM phase from the backend llm resource event stream (null = idle, segment hidden) */
+  llm: { phase: 'swapping' | 'preprocessing' | 'responding' | 'postprocessing'; detail?: string } | null;
 }
+
+const LLM_PHASE_LOOK: Record<NonNullable<StatusState['llm']>['phase'], { glyph: string; color: string }> = {
+  swapping:       { glyph: '⇆', color: theme.warn },
+  preprocessing:  { glyph: '◌', color: theme.accent },
+  responding:     { glyph: '▶', color: theme.ok },
+  postprocessing: { glyph: '◆', color: theme.summarizing },
+};
 
 function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
@@ -26,6 +35,7 @@ export class StatusBar {
     tokens: null,
     cwd: process.cwd(),
     update: null,
+    llm: null,
   };
 
   constructor() {
@@ -72,6 +82,12 @@ export class StatusBar {
       const pct = Math.round((this.state.tokens.used / this.state.tokens.total) * 100);
       const color = pct > 80 ? theme.err : pct > 60 ? theme.warn : theme.ok;
       parts.push(`{${color}-fg}${formatTokens(this.state.tokens.used)}/${formatTokens(this.state.tokens.total)} tokens{/}`);
+    }
+
+    if (this.state.llm) {
+      const look = LLM_PHASE_LOOK[this.state.llm.phase];
+      const detail = this.state.llm.detail ? ` {${theme.muted}-fg}${this.state.llm.detail}{/}` : '';
+      parts.push(`{${look.color}-fg}${look.glyph} ${this.state.llm.phase}{/}${detail}`);
     }
 
     if (this.state.update) parts.push(`{${theme.warn}-fg}↑ ${this.state.update}{/}`);

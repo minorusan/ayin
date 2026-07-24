@@ -193,6 +193,17 @@ tree knows about the internals). Design rules:
 - **Copy-paste contract** (`screen.ts`): no widget may ever enable blessed mouse tracking
   (`mouse: true`, `enableMouse`, `clickable`) — it hijacks terminal-native text selection,
   which is what keeps chat text copy-pastable. Scrolling is PgUp/PgDn by design.
+- **Live LLM phase in the status bar** (`llm-events.ts` + `widgets/status.ts`): the TUI
+  subscribes to the backend llm resource's SSE stream (`GET {keliUrl}/resource/llm/events`,
+  auto-reconnect with backoff) and reduces its events to one segment — `⇆ swapping <model>`
+  (amber) → `◌ preprocessing` (indigo) → `▶ responding <model>` (green) →
+  `◆ postprocessing` (violet); idle hides the segment, and a dead stream blanks it rather
+  than showing a stale phase. The ayin-layer postprocess (tool-call parsing in `agent.ts`)
+  reports through the same segment as `postprocessing ayin`.
+- **Tool output cards** (`widgets/chat.ts#formatToolResultForChat`): `write_file` renders the
+  diff card; every other tool gets a `│`-gutter preview block (6 lines for bash/grep, 4 for
+  read_file, 2 default, 200-char line cap) with blessed tags **escaped via `{open}`/`{close}`**
+  — raw `{`/`}` in bash/JSON output used to be parsed as markup and silently garbled.
 - **ThinkingIndicator** (`widgets/thinking.ts`) is a small state machine: each `AgentState`
   (`thinking` · `tool` · `explaining` · `summarizing`) owns its frames, speed and color in
   `STATE_SPECS` — a new animation state is one entry there, no plumbing. The line renders as
