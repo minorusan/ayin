@@ -601,13 +601,20 @@ function saveWorktreeState(s: WorktreeState): void {
   try { writeFileSync(WORKTREE_STATE_FILE, JSON.stringify(s, null, 2)); } catch { /* best effort */ }
 }
 
-/** Hash of the porcelain status with ayin's own artifacts + CLAUDE.md filtered out — so writing a
- *  report or the CLAUDE.md pointer never re-triggers the pass, and staging (which flips XY codes) is
- *  captured in the post-run recompute. */
+// ayin's own outputs — excluded from the unstaged-change fingerprint (pathspec) so writing a report
+// or the CLAUDE.md pointer never re-triggers the pass, and from staging (isStageable).
+const AYIN_EXCLUDE_PATHSPEC = ['CLAUDE.md', 'AYIN-REPORT-*.md', 'CodeReview-*.md', 'AssetDiff-*.md']
+  .map(p => `:(exclude,glob)${p}`).concat([':(exclude,glob)**/AYIN-REPORT-*.md', ':(exclude,glob)**/CodeReview-*.md']);
+
+/** Fingerprint of the UNSTAGED work only — `git diff` (working tree vs index, NOT --cached) plus
+ *  new untracked files — with ayin's own artifacts + CLAUDE.md excluded. So the big (LLM) review
+ *  fires only when the user's unstaged changes actually change: staging/unstaging alone doesn't
+ *  trip it, and the dog writing its own report/CLAUDE.md never re-triggers itself. */
 async function worktreeFingerprint(repo: string): Promise<string> {
-  const st = await git(repo, ['-c', 'core.quotepath=false', 'status', '--porcelain=v1']);
-  const lines = st.stdout.split('\n').filter(Boolean).filter(l => isStageable(l.slice(3)));
-  return createHash('sha1').update(lines.sort().join('\n')).digest('hex');
+  const diff = await git(repo, ['diff', '--', '.', ...AYIN_EXCLUDE_PATHSPEC], 400_000);
+  const others = await git(repo, ['ls-files', '--others', '--exclude-standard']);
+  const untracked = others.stdout.split('\n').filter(Boolean).filter(isStageable).sort().join('\n');
+  return createHash('sha1').update(`${diff.stdout}\n--untracked--\n${untracked}`).digest('hex');
 }
 
 async function absGitDir(repo: string): Promise<string> {
