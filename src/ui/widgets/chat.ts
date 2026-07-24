@@ -13,8 +13,10 @@ import { screen, render } from '../screen.js';
 import { theme } from '../theme.js';
 import { ThinkingIndicator, type AgentState } from './thinking.js';
 
+export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
+
 export interface Message {
-  role: 'user' | 'assistant' | 'system';
+  role: MessageRole;
   content: string;
 }
 
@@ -39,10 +41,10 @@ export class ChatLog {
     this.indicator = new ThinkingIndicator(() => this.redraw());
   }
 
-  add(role: Message['role'], content: string): void {
+  add(role: MessageRole, content: string): void {
     if (HEADLESS) {
       if (role === 'assistant') process.stdout.write(content + '\n');
-      else if (role === 'system') process.stderr.write(`[${role}] ${content}\n`);
+      else process.stderr.write(`[${role}] ${content}\n`);
       return;
     }
     this.messages.push({ role, content });
@@ -90,17 +92,32 @@ export class ChatLog {
     const chatHeight = Number(this.box.height ?? 20) - 1;
     const lines: string[] = [];
 
+    // Every speaker gets a distinct left-edge anchor, so the eye can parse the transcript
+    // by the gutter alone:
+    //   ▌ bold        — the user (indigo bar)
+    //   ◉ text        — ayin speaking (ayin = "eye"; accent glyph on the first line)
+    //   ▸ │ ╰ cards   — tool calls (indented one step under the flow, amber frame)
+    //   · dim         — system notices (quietest thing on screen)
     for (const msg of this.messages) {
       if (msg.role === 'user') {
         lines.push('');
-        lines.push(`{bold}{${theme.accent}-fg} > ${msg.content}{/}`);
+        for (const line of msg.content.split('\n')) {
+          lines.push(`{${theme.accent}-fg}▌{/} {bold}${escapeBlessedTags(line)}{/bold}`);
+        }
       } else if (msg.role === 'assistant') {
         lines.push('');
-        for (const line of renderMarkdown(msg.content).split('\n')) {
-          lines.push(`   ${line}`);
+        const rendered = renderMarkdown(msg.content).split('\n');
+        rendered.forEach((line, i) => {
+          lines.push(i === 0 ? `{${theme.accent}-fg}◉{/} ${line}` : `  ${line}`);
+        });
+      } else if (msg.role === 'tool') {
+        for (const line of msg.content.split('\n')) {
+          lines.push(`  ${line}`);
         }
       } else {
-        lines.push(`{${theme.dim}-fg}   ${msg.content}{/}`);
+        msg.content.split('\n').forEach((line, i) => {
+          lines.push(`  {${theme.dim}-fg}${i === 0 ? '· ' : '  '}${line}{/}`);
+        });
       }
     }
 

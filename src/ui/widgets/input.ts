@@ -45,7 +45,7 @@ export class InputBar {
       blessed.text({
         parent: this.wrapper,
         top: 0, left: 0, width: 1, height: 1,
-        content: '>',
+        content: '❯',
         style: { fg: theme.accent, bg: theme.bg },
       });
     }

@@ -33,8 +33,8 @@ export function renderMarkdown(text: string): string {
 
     // Inside code block — no markdown processing, just color
     if (inCodeBlock) {
-      // Escape blessed tags inside code
-      const escaped = line.replace(/\{/g, '\\{').replace(/\}/g, '\\}');
+      // Escape blessed tags inside code — {open}/{close}, NOT backslashes (those render literally)
+      const escaped = line.replace(/[{}]/g, m => (m === '{' ? '{open}' : '{close}'));
       result.push(`{#ABB2BF-fg}  │ ${escaped}{/}`);
       continue;
     }

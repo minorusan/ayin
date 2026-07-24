@@ -658,7 +658,7 @@ export async function runAgent(userInput: string): Promise<void> {
       }
 
       setAgentState('tool', `Running ${name}(${paramPreview})`);
-      addMessage('system', formatToolCallForChat(name, paramPreview));
+      addMessage('tool', formatToolCallForChat(name, paramPreview));
       log('INFO', 'tool_call', { tool: name, params: JSON.stringify(params).substring(0, 200) });
 
       // Internal critic — when model writes substantial output and has gathered facts,
@@ -745,7 +745,7 @@ export async function runAgent(userInput: string): Promise<void> {
         toolPromise.then(r => {
           completeTask(taskId, r);
           saveArtifact(name, paramPreview, r);
-          addMessage('system', `${name} [task ${taskId}] completed:\n${formatToolResultForChat(name, r, Date.now() - toolStarted)}`);
+          addMessage('tool', `${formatToolCallForChat(name, `task ${taskId} completed`)}\n${formatToolResultForChat(name, r, Date.now() - toolStarted)}`);
           pushToWindow('user', renderToolResult(`Background ${name} (task ${taskId}) completed:\n${r.substring(0, 16000)}`));
           pushMessage('assistant', `[tool: ${name}(${paramPreview}) → ${r.substring(0, 150)}]`);
           log('INFO', 'tool_background_complete', { tool: name, taskId, resultLength: String(r.length) });
@@ -767,7 +767,7 @@ export async function runAgent(userInput: string): Promise<void> {
       // One formatter for every tool: write_file gets the diff card, the rest a tag-escaped
       // gutter-block preview (raw braces in bash/grep output used to break blessed markup),
       // both closed by a ✓/✗ + duration footer.
-      addMessage('system', formatToolResultForChat(name, result, Date.now() - toolStarted));
+      addMessage('tool', formatToolResultForChat(name, result, Date.now() - toolStarted));
       if (name === 'write_file') {
         // Track CTA delivery — if the write target matches the CTA, mark as delivered
         if (ctaTarget && !ctaDelivered && (params.path || '').includes(ctaTarget) && (params.content || '').length > 200) {

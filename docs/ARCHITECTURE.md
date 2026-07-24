@@ -208,6 +208,12 @@ tree knows about the internals). Design rules:
   risk` on oom.warning. Idle hides the segment; a dead stream blanks it rather than showing a
   stale phase. The ayin-layer postprocess (tool-call parsing in `agent.ts`) reports through
   the same segment as `postprocessing ayin`.
+- **Speaker anchors** (`widgets/chat.ts#redraw`): the transcript is parseable by the left
+  gutter alone — `▌ bold` = the user (indigo bar, every line of a multi-line prompt),
+  `◉ text` = ayin speaking (ayin = "eye"; accent glyph on the first line, markdown body),
+  indented `▸/│/╰` amber frames = tool cards (a dedicated `tool` message role, not `system`),
+  `· dim` = system notices (the quietest thing on screen). The input prompt is the matching
+  accent `❯`. User lines are tag-escaped like tool output (braces in prompts are literal).
 - **Tool cards** (`widgets/chat.ts`): a call opens with a styled header
   (`formatToolCallForChat` → `▸ bash · cat package.json`), the result renders via
   `formatToolResultForChat` — `write_file` gets the diff card, every other tool a `│`-gutter
