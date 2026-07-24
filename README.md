@@ -102,6 +102,34 @@ committing a review never triggers a review of the review.
 To keep it running on macOS: `nohup ayin watch --repo <repo> &`, or wrap it in a launchd
 agent with `KeepAlive` — the daemon is safe to kill and restart at any point.
 
+**Unity repos** (`Assets/` + `ProjectSettings/`) additionally get a **deterministic asset
+diff** in every review: the external `unity_asset_diff` tool renders object-level changes
+(full hierarchy paths, `field old → new`) for prefabs/scenes/assets, embedded verbatim ahead
+of the LLM's take and fed to the reviewer as ground truth. Tool path: `~/tools/unity_asset_diff.py`
+or `AYIN_UNITY_DIFF`. Non-Unity repos never spawn it.
+
+## RAG corpus generator
+
+```bash
+ayin rag --repo /path/to/repo --questions "How does X work?" "Where is Y handled?"
+```
+
+For each question ayin runs a real investigation against the repo (explore: commands,
+excerpts) and synthesizes a detailed **grounded** markdown answer — every claim cites files
+and quotes code verbatim. After the initial questions are answered, it generates **5 more
+close-to-domain questions per initial question** and answers those too.
+
+A **fabrication guard** keeps the corpus honest: every code block the model "quotes" is
+verified against the investigation data; unverifiable blocks trigger one re-synthesis and are
+otherwise stripped with a visible warning (and `groundingWarnings` in the doc's meta).
+
+Every answer is saved through the backend **logs resource** (`rag.save`) into a per-repo
+store on the backend host (`~/.maradel/logs/rag/<repoKey>/<slug>.md` + `.json`) — the corpus
+for later chunking/vectorising/retrieval. Runs are resume-safe: docs already in the store are
+skipped on re-run, and generated follow-up questions are persisted before being answered, so
+an interrupted run re-uses the same set. The LLM is held as the `ayin` authority for the whole
+run and released on exit.
+
 ## Requirements
 
 - **Node ≥ 18** (uses global `fetch` + `AbortSignal.timeout`; Node 20+ recommended).

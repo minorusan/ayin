@@ -27,7 +27,8 @@ import {
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { llmChat, refreshActiveModel } from './llm/manager.js';
-import { connect, keliBaseUrl } from './connection.js';
+import { connect } from './connection.js';
+import { acquireLlm, type LlmHold } from './resource-client.js';
 import { log } from './log.js';
 
 const WATCH_DIR = join(homedir(), '.ayin-cli', 'watch');
@@ -110,53 +111,10 @@ function entryKey(e: { repo: string; commit: string }): string {
   return `${e.repo}@${e.commit}`;
 }
 
-// ── llm authority (one door to the GPU) ──────────────────────────────
-// Reviews are LLM work, so the daemon takes the llm resource as the `ayin` authority for the
-// duration of a backlog batch — the backend swaps gemma → qwen-coder on ownership.gained and
-// reverts on release (same dance as the interactive launcher and code_agent). If the resource
-// is BUSY (podcast render, a code_agent run), reviews are DEFERRED to a later poll — a
-// background reviewer waits its turn, it never side-doors the GPU on whatever model is loaded.
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function llmOp(op: string, params: Record<string, unknown> = {}): Promise<any | null> {
-  try {
-    const res = await fetch(`${keliBaseUrl()}/resource/llm`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ op, params }),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return null;
-    const body = await res.json();
-    return body && body.ok ? body.data : null;
-  } catch {
-    return null;
-  }
-}
-
-type LlmHold = { release: () => Promise<void> } | 'busy' | 'no-resource-layer';
-
-async function acquireLlm(): Promise<LlmHold> {
-  const grant = await llmOp('authority.enqueue', { holder: 'ayin', reason: 'ayin watch: commit review batch' });
-  if (grant && grant.granted) {
-    // Slide the grant for long batches (many queued commits), like the launcher does.
-    const keepalive = setInterval(() => { void llmOp('authority.enqueue', { holder: 'ayin' }); }, 10 * 60 * 1000);
-    keepalive.unref();
-    let released = false;
-    return {
-      release: async () => {
-        if (released) return;
-        released = true;
-        clearInterval(keepalive);
-        await llmOp('authority.detach', { token: grant.token });
-      },
-    };
-  }
-  if (grant && grant.busy) return 'busy';
-  // null → backend unreachable or predates the resource layer: proceed best-effort on the
-  // served model rather than deferring reviews forever (per-call failures still retry above).
-  return 'no-resource-layer';
-}
+// llm authority (one door to the GPU): reviews take the llm resource as the `ayin` authority per
+// backlog batch via acquireLlm() (resource-client.ts) — gemma → qwen on gained, revert on release.
+// BUSY (podcast render, code_agent) → reviews DEFER to a later poll; a background reviewer waits
+// its turn, it never side-doors the GPU. No resource layer → best-effort on the served model.
 
 // ── hook install ─────────────────────────────────────────────────────
 
@@ -228,14 +186,54 @@ async function gatherMeta(repo: string, commit: string): Promise<CommitMeta | nu
   };
 }
 
+// ── deterministic Unity asset diff (Unity repos ONLY) ────────────────
+// Unity scene/prefab/asset YAML is noise to an LLM; the deterministic unity_asset_diff tool
+// (external, published on nukshare) turns it into a readable object-level report with full
+// hierarchy paths. For repos with Assets/ + ProjectSettings/ we run it commit^ → commit and
+// embed its --md output in the review verbatim, ahead of the LLM's take. The tool itself
+// no-ops on non-Unity repos (exit 0), but we gate anyway to avoid spawning python elsewhere.
+
+const UNITY_DIFF_MAX_CHARS = 30_000;
+
+function unityDiffToolPath(): string {
+  return process.env.AYIN_UNITY_DIFF || join(homedir(), 'tools', 'unity_asset_diff.py');
+}
+
+function isUnityRepo(repo: string): boolean {
+  return existsSync(join(repo, 'Assets')) && existsSync(join(repo, 'ProjectSettings'));
+}
+
+async function unityAssetDiff(repo: string, commit: string): Promise<string | null> {
+  if (!isUnityRepo(repo)) return null; // non-Unity repo → section absent entirely
+  const tool = unityDiffToolPath();
+  if (!existsSync(tool)) {
+    return `_(unity repo detected, but the deterministic diff tool is missing at \`${tool}\` — ` +
+      `fetch it from nukshare or set AYIN_UNITY_DIFF)_`;
+  }
+  const parent = await git(repo, ['rev-parse', `${commit}^`]);
+  if (!parent.ok) return '_(first commit — no parent to diff against)_';
+  const res = await sh('python3', [tool, `${commit}^`, '--target', commit, '--repo', repo, '--md'], repo, UNITY_DIFF_MAX_CHARS + 4096);
+  if (!res.ok) {
+    log('WARN', 'watch_unity_diff_failed', { repo, commit: commit.substring(0, 12), stderr: res.stderr.substring(0, 200) });
+    return `_(deterministic diff failed: ${res.stderr.trim().substring(0, 200) || 'unknown error'})_`;
+  }
+  let out = res.stdout.trim();
+  if (!out) return '_(no Unity asset changes in this commit)_';
+  if (out.length > UNITY_DIFF_MAX_CHARS) out = out.substring(0, UNITY_DIFF_MAX_CHARS) + '\n\n… (unity diff truncated) …';
+  return out;
+}
+
 function onlyReviewFiles(numstat: string): boolean {
   const files = numstat.split('\n').filter(Boolean).map(l => l.split('\t')[2] || '');
   return files.length > 0 && files.every(f => /(^|\/)CodeReview-[0-9a-f]+\.md$/.test(f));
 }
 
-function buildReviewPrompt(meta: CommitMeta, diff: string, truncated: boolean): string {
+function buildReviewPrompt(meta: CommitMeta, diff: string, truncated: boolean, unityMd?: string | null): string {
   const catalog = SMELL_SIGNALS.map(s => `- **${s.name}** — ${s.hint}`).join('\n');
-  return `Review the following git commit. You are a rigorous senior code reviewer: concrete, specific, no filler. Judge ONLY what the diff shows (plus obvious implications for callers).
+  const unitySection = unityMd
+    ? `\n## Deterministic Unity asset diff (tool-generated, object-level — trust this over raw YAML)\n${unityMd}\n`
+    : '';
+  return `Review the following git commit. You are a rigorous senior code reviewer: concrete, specific, no filler. Judge ONLY what the diff shows (plus obvious implications for callers).${unitySection}
 
 ## Commit
 - Subject: ${meta.subject}
@@ -289,10 +287,13 @@ async function reviewCommit(repo: string, commit: string): Promise<{ status: 're
   }
   if (!diff.trim()) diff = '(empty diff — merge or metadata-only commit)';
 
+  // Unity repos only: deterministic object-level asset diff, embedded verbatim + fed to the reviewer.
+  const unityMd = await unityAssetDiff(repo, commit);
+
   out(`reviewing ${meta.shortHash} "${meta.subject}" (${meta.filesChanged} files)…`);
   const review = await llmChat([
     { role: 'system', content: 'You are a rigorous senior code reviewer. You respond in clean markdown, no preamble, no tool calls.' },
-    { role: 'user', content: buildReviewPrompt(meta, diff, truncated) },
+    { role: 'user', content: buildReviewPrompt(meta, diff, truncated, unityMd) },
   ]);
 
   const reportPath = join(repo, `CodeReview-${meta.shortHash}.md`);
@@ -313,7 +314,7 @@ async function reviewCommit(repo: string, commit: string): Promise<{ status: 're
 ${meta.numstat || '(none)'}
 \`\`\`
 
----
+${unityMd ? `## Deterministic Unity asset diff\n\n${unityMd}\n\n` : ''}---
 
 `;
   writeFileSync(reportPath, header + review.trim() + '\n');
@@ -352,7 +353,7 @@ async function processBacklog(retryState: Map<string, { attempts: number; nextTr
   if (pending.length === 0) return;
 
   // One door: take the llm resource as `ayin` for this batch (backend swaps gemma → qwen).
-  const hold = await acquireLlm();
+  const hold: LlmHold = await acquireLlm('ayin watch: commit review batch');
   if (hold === 'busy') {
     if (Date.now() - lastBusyLogAt > 60_000) {
       lastBusyLogAt = Date.now();

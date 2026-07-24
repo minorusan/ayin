@@ -125,7 +125,10 @@ configured): `web_search`, `docs_search`, `codex`, `jira`, `fixme`. See the READ
   (identifier extraction + whole-tree grep with vendor/build dirs excluded — no assumed file
   extensions) and self-limiting: it bails after 3 consecutive empty search rounds, and when
   the model keeps re-searching at low confidence despite having gathered real data, it
-  returns that data verbatim instead of burning all iterations.
+  returns that data verbatim instead of burning all iterations (callers can pass
+  \`thorough: 'true'\` — used by \`ayin rag\` — to let broad questions investigate longer before
+  that guard may fire). Vendor/build/backup dirs (\`node_modules\`, \`dist*\`, \`*.bak*\`, …) are
+  excluded from its greps and from the guidance given to the model.
 
 ## Repo watcher (`watch.ts`)
 
@@ -157,6 +160,20 @@ The moving parts, designed to survive interruption at any point:
   vanished commits (rebase/gc) are ledgered as `gone`; LLM/backend failures retry with
   linear backoff up to 5 attempts, then are ledgered as `failed`.
 
+## RAG corpus generator (`rag.ts`)
+
+`ayin rag --repo <path> --questions "q1" ["q2" …]` — per question: a **thorough explore**
+investigation (+ one gap-fill explore for the biggest missing piece), then synthesis into a
+detailed grounded markdown answer. A **fabrication guard** verifies every code fence in the
+answer against the investigation data (whitespace-collapsed line matching, ≥50% per fence);
+a failing draft is re-synthesized once, and still-fabricated blocks are stripped with a
+visible warning in the doc + `groundingWarnings` in the meta. After the initial questions,
+5 close-to-domain follow-ups are generated per initial question and answered the same way
+(the generated list is persisted on the parent doc's meta BEFORE answering — resume-safe).
+Docs are saved through the backend logs resource (`rag.save`, per-repo store on the backend
+host); already-stored questions are skipped on re-run, so resume = re-run the same command.
+The LLM is held as the `ayin` authority for the whole run.
+
 ## Permissions (`permissions.ts`)
 
 Read-only tools (`read_file`, `grep`, `find_files`, `explore`, `status`) are auto-allowed.
@@ -187,8 +204,10 @@ can finish — see the warning in `SETUP.md`.
 
 ```
 src/
-├── index.ts            entry; interactive vs headless (-p) vs `watch`; overlays; input handling
+├── index.ts            entry; interactive vs headless (-p) vs `watch`/`rag`; overlays; input handling
 ├── watch.ts            repo watcher daemon: post-commit hook → queue → LLM code review
+├── rag.ts              grounded Q&A corpus generator (explore → synthesize → logs resource store)
+├── resource-client.ts  backend resource door (POST /resource/<name>) + shared llm-authority dance
 ├── agent.ts            the agent loop (build → call → parse → execute → loop)
 ├── llm/
 │   ├── manager.ts      active-model resolution + dialect selection; all LLM calls route here

@@ -379,6 +379,12 @@ async function main(): Promise<void> {
     await runWatch(process.argv.slice(3));
     return;
   }
+  if (process.argv[2] === 'rag') {
+    // Grounded Q&A corpus generator — no TUI. See src/rag.ts.
+    const { runRag } = await import('./rag.js');
+    await runRag(process.argv.slice(3));
+    return;
+  }
   loadRules(process.cwd());
   if (HEADLESS) {
     await runHeadless();

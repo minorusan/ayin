@@ -65,7 +65,7 @@ async function expandContext(answer: string, cwd: string): Promise<string> {
       // But DO skip vendor/build dirs — on a JS/Rust/Python repo they'd drown the 8-line
       // budget in third-party matches and can stall a big tree toward the 30s timeout.
       const output = await execCommand(
-        `grep -rnI --exclude-dir={.git,node_modules,dist,build,vendor,target,.venv,__pycache__} "${pattern}" . 2>/dev/null | head -8`,
+        `grep -rnI --exclude-dir={.git,node_modules,'dist*','*.bak*',build,vendor,target,.venv,__pycache__} "${pattern}" . 2>/dev/null | head -8`,
         cwd,
       );
       if (output && output !== '(no output)' && output.length > 10) {
@@ -171,9 +171,11 @@ ${historyText}
 
 **This codebase can be ANY language** (TypeScript, JavaScript, Python, Go, C#, Rust, …). Do NOT
 assume file extensions. To find a symbol, grep the whole tree WITHOUT an --include filter, e.g.
-\`grep -rnI --exclude-dir={.git,node_modules,dist,build,vendor,target} "symbolName" .\`
-(always exclude vendor/build dirs or the output is third-party noise). If you don't know the
-language yet, run \`ls\` first to see the files.
+\`grep -rnI --exclude-dir={.git,node_modules,'dist*','*.bak*',build,vendor,target} "symbolName" .\`
+(ALWAYS exclude vendor/build/backup dirs — node_modules, dist*, *.bak*, build — or the output is
+noise; the same applies to \`find\`). If you don't know the language yet, run \`ls\` first.
+Prefer READING FILE CONTENT (cat/head/grep -A) over listing file names — a list of paths is not
+an answer; the code inside them is.
 
 **How commands work:**
 When you list commands in the "commands" array, the tool RUNS them in the shell and shows you their stdout on the next iteration. You MUST run commands to get data — you cannot know the answer from memory. Never claim you "cannot execute commands" — YES YOU CAN, by listing them in the "commands" array.
@@ -306,6 +308,9 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   const question = params.question;
   const context = params.context || '';
   const cwd = process.cwd();
+  // thorough (rag corpus runs): let the investigation run long before the digest-commit guard
+  // may cut it — broad "how does X work" questions legitimately need many read steps.
+  const digestCommitAt = params.thorough === 'true' ? 9 : 4;
 
   if (!question) return 'Error: question required';
 
@@ -426,7 +431,7 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     // reporting low confidence a few iterations in, stop and return the real data rather than
     // looping to 12. Confidence-gated so a legitimately progressing investigation (rising
     // confidence, about to commit an answer) is not cut off at iteration 4.
-    if (i + 1 >= 4 && iteration.confidence < 0.6) {
+    if (i + 1 >= digestCommitAt && iteration.confidence < 0.6) {
       const digest = historyDigest(history);
       if (digest.length > 200) {
         log('INFO', 'explore_commit_digest', { iteration: String(i + 1), bytes: String(digest.length) });
