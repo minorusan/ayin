@@ -52,6 +52,24 @@ Claude actively edits a git repo** — most likely the **nuk** (maradel dev) —
 accumulate. The value scales with real interactive edit-sessions; the Mac's usage today is
 automation (hound) + investigation, not problem-solving-with-edits.
 
+## Auto-farm loop (WIRED)
+
+Farming now happens automatically — no manual `rag-mine` runs:
+
+1. **User-level Claude Stop hook** (`tool/claude-stop-farm.mjs`, installed into `~/.claude/settings.json`
+   via `tool/install-stop-farm.mjs`) fires on *every* Claude stop, in *any* directory. It drops one
+   marker into the watch queue — `{kind:"mine", transcript, cwd, session, ts}` — and nothing else
+   (never blocks; skips non-git-repo cwds, stop-continuations, and our own hound/`-p` runs).
+2. **The always-on `ayin watch` daemon** drains `mine` markers **without taking the GPU**
+   (deterministic), mines that session's transcript, and dedup-merges the git-verified episodes into
+   `~/.ayin-cli/rag/<repo>/episodes.json`. Survives relaunch (queue is persistent; one instance).
+
+So on the nuk/backend it starts collecting the moment the daemon + Stop hook are installed there,
+in whatever repo Claude works in. Verified end-to-end (synthetic repo+transcript → 1 episode farmed).
+Install elsewhere: `node tool/install-stop-farm.mjs` (uninstall: `--remove`).
+
+Not yet: embeddings/retrieval (Phase 2/3) — the store is still raw JSON to eyeball.
+
 ## Next steps
 
 1. Run `ayin rag-mine --repo <maradel-on-the-nuk>` and eyeball — confirm real edit-episodes exist.

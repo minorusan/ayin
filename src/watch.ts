@@ -31,6 +31,8 @@ import { createHash } from 'node:crypto';
 import { llmChat, refreshActiveModel } from './llm/manager.js';
 import { connect, keliBaseUrl } from './connection.js';
 import { acquireLlm, type LlmHold } from './resource-client.js';
+import { segmentTranscript, verifyEpisodes, gitTop } from './rag/mine.js';
+import { appendEpisodes } from './rag/store.js';
 import { log } from './log.js';
 
 const WATCH_DIR = join(homedir(), '.ayin-cli', 'watch');
@@ -117,12 +119,20 @@ function readJsonl(path: string): Array<Record<string, unknown>> {
   return rows;
 }
 
-interface QueueEntry { ts: number; repo: string; commit: string; kind?: 'commit' | 'merge'; prev?: string }
+interface QueueEntry {
+  ts: number; repo: string; commit: string;
+  kind?: 'commit' | 'merge' | 'mine';
+  prev?: string;             // merge: ORIG_HEAD
+  transcript?: string; cwd?: string; session?: string; // mine: from the Claude Stop hook
+}
 
-function entryKey(e: { repo: string; commit: string; kind?: string }): string {
-  // Commit keys stay `repo@commit` (back-compat with the existing ledger); a merge at the same
-  // HEAD gets its own key so it can't be deduped against a commit review of that hash.
-  return e.kind === 'merge' ? `${e.repo}@merge@${e.commit}` : `${e.repo}@${e.commit}`;
+function entryKey(e: { repo?: string; commit?: string; kind?: string; session?: string; ts?: number }): string {
+  // Commit keys stay `repo@commit` (back-compat with the ledger). Merge gets its own namespace so
+  // it can't dedup against a commit of the same hash. Mine is keyed per-marker (session+ts) so each
+  // Claude Stop re-mines the growing session; episode-level dedup lives in the store.
+  if (e.kind === 'merge') return `${e.repo}@merge@${e.commit}`;
+  if (e.kind === 'mine') return `mine@${e.session || e.repo || 'anon'}@${e.ts}`;
+  return `${e.repo}@${e.commit}`;
 }
 
 // llm authority (one door to the GPU): reviews take the llm resource as the `ayin` authority per
@@ -582,6 +592,23 @@ async function reviewMerge(repo: string, commit: string, prev?: string): Promise
   return { status: 'reviewed', note: reportPath };
 }
 
+// ── episode mining (kind:"mine" — auto-farm on Claude Stop) ──────────
+// A user-level Claude Stop hook drops {kind:"mine", transcript, cwd} per stop; here we mine that
+// session's transcript into git-verified episodes and dedup-merge them into the repo's store.
+// Deterministic (no LLM) — so it's processed WITHOUT taking the GPU. Non-repo cwd → skipped.
+
+async function mineSession(transcript: string, cwd: string): Promise<{ status: 'reviewed' | 'skipped' | 'gone'; note: string }> {
+  if (!transcript || !existsSync(transcript)) return { status: 'gone', note: 'transcript missing' };
+  const repo = cwd ? gitTop(cwd) : '';
+  if (!repo) return { status: 'skipped', note: 'not a git repo — no verifiable episodes' };
+  const eps = verifyEpisodes(repo, segmentTranscript(transcript, repo));
+  if (eps.length === 0) return { status: 'skipped', note: 'no verified episodes yet' };
+  const { added, total } = appendEpisodes(repo, eps);
+  if (added > 0) out(`mined ${repoName(repo)}: +${added} episode(s) → store now ${total}`);
+  log('INFO', 'watch_mined', { repo, added: String(added), total: String(total) });
+  return { status: 'reviewed', note: `+${added} episodes (store ${total})` };
+}
+
 // ── 10-min working-tree pass: autostage + smell review (the eGPU workhorse) ──
 // Every 10 min, per watched repo, IF the working tree changed since last check: qwen reviews the
 // unstaged work, stages what's meaningful + unstages debug/junk (NO commit, NO push), drafts a
@@ -841,20 +868,36 @@ async function processBacklog(retryState: Map<string, { attempts: number; nextTr
   const processed = new Set(readJsonl(PROCESSED_FILE).map(r => String(r.key)));
   const queue = readJsonl(QUEUE_FILE) as unknown as QueueEntry[];
 
-  const pending = queue.filter(e => {
-    if (!e.repo || !e.commit || processed.has(entryKey(e))) return false;
+  const ready = (e: QueueEntry) => {
+    if (processed.has(entryKey(e))) return false;
     const retry = retryState.get(entryKey(e));
     return !retry || Date.now() >= retry.nextTryAt;
-  });
-  if (pending.length === 0) return;
+  };
+  const mineEntries = queue.filter(e => e.kind === 'mine' && e.transcript && ready(e));
+  const reviewEntries = queue.filter(e => e.repo && e.commit && e.kind !== 'mine' && ready(e));
+  if (mineEntries.length === 0 && reviewEntries.length === 0) return;
 
-  // One door: take the llm resource as `ayin` for this batch (backend swaps gemma → qwen).
+  // Mine pass FIRST — deterministic (no LLM), so Claude-Stop farming never swaps the GPU.
+  for (const entry of mineEntries) {
+    const key = entryKey(entry);
+    try {
+      const result = await mineSession(entry.transcript || '', entry.cwd || entry.repo || '');
+      appendFileSync(PROCESSED_FILE, JSON.stringify({ key, ts: Date.now(), ...result }) + '\n');
+    } catch (err) {
+      appendFileSync(PROCESSED_FILE, JSON.stringify({ key, ts: Date.now(), status: 'failed', note: (err instanceof Error ? err.message : String(err)).slice(0, 200) }) + '\n');
+    }
+    processed.add(key);
+  }
+
+  if (reviewEntries.length === 0) return;
+
+  // One door: take the llm resource as `ayin` for the REVIEW batch (backend swaps gemma → qwen).
   const hold: LlmHold = await acquireLlm('ayin watch: commit review batch');
   if (hold === 'busy') {
     if (Date.now() - lastBusyLogAt > 60_000) {
       lastBusyLogAt = Date.now();
-      out(`llm resource busy — ${pending.length} review(s) deferred until it frees`);
-      log('INFO', 'watch_llm_busy_deferred', { pending: String(pending.length) });
+      out(`llm resource busy — ${reviewEntries.length} review(s) deferred until it frees`);
+      log('INFO', 'watch_llm_busy_deferred', { pending: String(reviewEntries.length) });
     }
     return;
   }
@@ -866,7 +909,7 @@ async function processBacklog(retryState: Map<string, { attempts: number; nextTr
   await refreshActiveModel().catch(() => {});
 
   try {
-  for (const entry of pending) {
+  for (const entry of reviewEntries) {
     const key = entryKey(entry);
     const retry = retryState.get(key);
 
