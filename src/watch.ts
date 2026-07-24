@@ -27,6 +27,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { llmChat, refreshActiveModel } from './llm/manager.js';
 import { connect } from './connection.js';
 import { acquireLlm, type LlmHold } from './resource-client.js';
@@ -538,6 +539,214 @@ async function reviewMerge(repo: string, commit: string, prev?: string): Promise
   return { status: 'reviewed', note: reportPath };
 }
 
+// ── 10-min working-tree pass: autostage + smell review (the eGPU workhorse) ──
+// Every 10 min, per watched repo, IF the working tree changed since last check: qwen reviews the
+// unstaged work, stages what's meaningful + unstages debug/junk (NO commit, NO push), drafts a
+// conventional-commit message into .git/COMMIT_EDITMSG, and writes AYIN-REPORT-SMELLS-<ts>.md
+// (dangerous ad-hoc solutions, heavy violations, logging suggestions). So you open Fork to ready
+// chores. Fingerprint (ayin's own artifacts + CLAUDE.md excluded) means it's near-free when idle.
+
+const WORKTREE_REVIEW_MS = 10 * 60 * 1000;
+const WORKTREE_STATE_FILE = join(WATCH_DIR, 'worktree-state.json');
+const MAX_WORKTREE_DIFF = 80_000;
+const MAX_STAGE_BYTES = 2 * 1024 * 1024; // never stage a file bigger than this (blobs/binaries)
+
+// Never stage (secrets + ayin's own artifacts + CLAUDE.md pointer).
+const SECRET_RE = /(^|\/)(\.env(\.[^/]+)?|[^/]*\.(pem|key|p12|pfx|keystore)|id_rsa|id_ed25519|[^/]*(secret|credential)[^/]*)$/i;
+function isStageable(path: string): boolean {
+  const base = path.split('/').pop() || path;
+  if (AYIN_REPORT_RE.test(base)) return false;
+  if (base === 'CLAUDE.md') return false;
+  if (SECRET_RE.test(path)) return false;
+  return true;
+}
+
+interface WorktreeState { [repo: string]: { fingerprint: string; at: number } }
+function loadWorktreeState(): WorktreeState {
+  try { return existsSync(WORKTREE_STATE_FILE) ? JSON.parse(readFileSync(WORKTREE_STATE_FILE, 'utf-8')) : {}; } catch { return {}; }
+}
+function saveWorktreeState(s: WorktreeState): void {
+  try { writeFileSync(WORKTREE_STATE_FILE, JSON.stringify(s, null, 2)); } catch { /* best effort */ }
+}
+
+/** Hash of the porcelain status with ayin's own artifacts + CLAUDE.md filtered out — so writing a
+ *  report or the CLAUDE.md pointer never re-triggers the pass, and staging (which flips XY codes) is
+ *  captured in the post-run recompute. */
+async function worktreeFingerprint(repo: string): Promise<string> {
+  const st = await git(repo, ['-c', 'core.quotepath=false', 'status', '--porcelain=v1']);
+  const lines = st.stdout.split('\n').filter(Boolean).filter(l => isStageable(l.slice(3)));
+  return createHash('sha1').update(lines.sort().join('\n')).digest('hex');
+}
+
+async function absGitDir(repo: string): Promise<string> {
+  return (await git(repo, ['rev-parse', '--absolute-git-dir'])).stdout.trim();
+}
+async function mergeOrRebaseInProgress(repo: string): Promise<boolean> {
+  const gd = await absGitDir(repo);
+  if (!gd) return false;
+  return ['MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'].some(f => existsSync(join(gd, f)));
+}
+
+interface WorktreePlan {
+  files: Array<{ path: string; stage: boolean; reason?: string }>;
+  commit?: { type?: string; scope?: string; subject?: string; body?: string };
+  smells?: Array<{ severity?: string; where?: string; issue?: string; fix?: string }>;
+  logging?: string[];
+}
+function parseWorktreePlan(raw: string): WorktreePlan | null {
+  const m = raw.match(/```json\s*([\s\S]*?)```/) || raw.match(/(\{[\s\S]*\})/);
+  if (!m) return null;
+  try {
+    const o = JSON.parse(m[1]);
+    if (!Array.isArray(o.files)) o.files = [];
+    return o as WorktreePlan;
+  } catch { return null; }
+}
+function commitText(c: NonNullable<WorktreePlan['commit']>): string {
+  const head = `${c.type || 'chore'}${c.scope ? `(${c.scope})` : ''}: ${c.subject || 'work in progress'}`;
+  return c.body ? `${head}\n\n${c.body}\n` : `${head}\n`;
+}
+
+const WORKTREE_SYS = 'You are a senior engineer triaging a teammate\'s uncommitted work. You respond with ONE json code block and nothing else.';
+function buildWorktreePrompt(files: string[], status: string, diff: string, truncated: boolean): string {
+  return `A developer has uncommitted changes. Decide what to STAGE vs leave unstaged, draft a commit
+message, and review for dangerous code. Meaningful product/logic/test/doc changes → stage:true.
+Debug scaffolding, stray prints/logs, commented-out experiments, throwaway/scratch files, editor
+cruft → stage:false. When unsure, stage:false (safer).
+
+## Changed files
+${files.map(f => `- ${f}`).join('\n')}
+
+## git status --porcelain
+\`\`\`
+${status.trim()}
+\`\`\`
+
+## Diff vs HEAD${truncated ? ' (TRUNCATED)' : ''}
+\`\`\`diff
+${diff}
+\`\`\`
+
+Respond with exactly one \`\`\`json block:
+{
+  "files": [{"path": "<repo-relative path from the list>", "stage": true|false, "reason": "<short>"}],
+  "commit": {"type": "feat|fix|refactor|chore|docs|test|perf", "scope": "<area or empty>", "subject": "<imperative <=72 chars>", "body": "<1-4 lines: what & why; bullet points ok>"},
+  "smells": [{"severity": "high|med|low", "where": "<file:line>", "issue": "<dangerous ad-hoc / heavy violation>", "fix": "<concrete fix>"}],
+  "logging": ["<specific suggestion to improve logging/observability in these changes>"]
+}
+Include EVERY changed file in "files". Only list real smells (empty array if none). Keep it terse.`;
+}
+
+function buildSmellReport(plan: WorktreePlan | null, raw: string, applied: { staged: number; unstaged: number }): string {
+  const when = new Date().toISOString();
+  if (!plan) {
+    return `# Ayin working-tree review — ${when}\n\n_(could not parse a staging plan from the model; no staging applied — raw output below)_\n\n${raw.trim()}\n`;
+  }
+  const staged = plan.files.filter(f => f.stage).map(f => `- \`${f.path}\`${f.reason ? ` — ${f.reason}` : ''}`).join('\n') || '- (none)';
+  const skipped = plan.files.filter(f => !f.stage).map(f => `- \`${f.path}\`${f.reason ? ` — ${f.reason}` : ''}`).join('\n') || '- (none)';
+  const smells = (plan.smells || []).length
+    ? plan.smells!.map(s => `### [${s.severity || '?'}] ${s.where || ''}\n- **Issue:** ${s.issue || ''}\n- **Fix:** ${s.fix || ''}`).join('\n\n')
+    : 'None flagged.';
+  const logging = (plan.logging || []).length ? plan.logging!.map(l => `- ${l}`).join('\n') : '- (no suggestions)';
+  const msg = plan.commit?.subject ? commitText(plan.commit) : '(none drafted)';
+  return `# Ayin working-tree review — ${when}
+
+_Applied: staged ${applied.staged}, unstaged ${applied.unstaged}. **No commit, no push** — review in your git client and commit when ready._
+
+## Staged (meaningful)
+${staged}
+
+## Left unstaged (debug / junk / unsure)
+${skipped}
+
+## Proposed commit message
+\`\`\`
+${msg.trim()}
+\`\`\`
+_(also written to \`.git/COMMIT_EDITMSG\` — your client / \`git commit\` will prefill it.)_
+
+## ⚠ Dangerous ad-hoc solutions & heavy violations
+${smells}
+
+## Logging / observability suggestions
+${logging}
+`;
+}
+
+async function reviewWorktree(repo: string): Promise<void> {
+  const statusRes = await git(repo, ['-c', 'core.quotepath=false', 'status', '--porcelain=v1']);
+  const files = statusRes.stdout.split('\n').filter(Boolean).map(l => l.slice(3)).filter(isStageable);
+  if (files.length === 0) return;
+
+  let diff = (await git(repo, ['diff', 'HEAD'], MAX_WORKTREE_DIFF + 4096)).stdout;
+  const truncated = diff.length > MAX_WORKTREE_DIFF;
+  if (truncated) diff = diff.slice(0, MAX_WORKTREE_DIFF) + '\n\n… DIFF TRUNCATED …';
+
+  out(`reviewing working tree of ${repo} (${files.length} files)…`);
+  const raw = await llmChat([
+    { role: 'system', content: WORKTREE_SYS },
+    { role: 'user', content: buildWorktreePrompt(files, statusRes.stdout, diff, truncated) },
+  ]);
+  const plan = parseWorktreePlan(raw);
+
+  let staged = 0, unstaged = 0;
+  if (plan) {
+    for (const f of plan.files) {
+      if (!f.path || !isStageable(f.path)) continue;
+      const abs = join(repo, f.path);
+      if (f.stage) {
+        try { if (existsSync(abs) && statSync(abs).size <= MAX_STAGE_BYTES && (await git(repo, ['add', '--', f.path])).ok) staged++; } catch { /* skip */ }
+      } else {
+        await git(repo, ['reset', '-q', 'HEAD', '--', f.path]); // unstage if staged; no-op otherwise
+        unstaged++;
+      }
+    }
+    if (plan.commit?.subject) {
+      const gd = await absGitDir(repo);
+      if (gd) { try { writeFileSync(join(gd, 'COMMIT_EDITMSG'), commitText(plan.commit)); } catch { /* skip */ } }
+    }
+  }
+
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const reportPath = join(repo, `AYIN-REPORT-SMELLS-${ts}.md`);
+  writeFileSync(reportPath, buildSmellReport(plan, raw, { staged, unstaged }));
+  out(`  → ${reportPath} (staged ${staged}, unstaged ${unstaged}) — NO commit`);
+  log('INFO', 'worktree_reviewed', { repo, staged: String(staged), unstaged: String(unstaged), parsed: String(!!plan) });
+  upsertClaudeReports(repo);
+}
+
+/** The 10-min pass over all watched repos whose working tree changed since last check. Takes the
+ *  qwen authority once for the batch (one door); defers if the GPU is busy. */
+async function runWorktreePass(): Promise<void> {
+  const repos = registeredRepos();
+  if (repos.length === 0) return;
+  const state = loadWorktreeState();
+  const changed: string[] = [];
+  for (const repo of repos) {
+    if (!existsSync(repo)) continue;
+    if (await mergeOrRebaseInProgress(repo)) continue; // don't touch the index mid-merge/rebase
+    const fp = await worktreeFingerprint(repo);
+    if (fp && fp !== state[repo]?.fingerprint) changed.push(repo);
+  }
+  if (changed.length === 0) return;
+
+  const hold: LlmHold = await acquireLlm('ayin watch: working-tree review');
+  if (hold === 'busy') { out(`llm busy — working-tree review of ${changed.length} repo(s) deferred`); return; }
+  if (typeof hold === 'object') { activeHold = hold; out('llm acquired (ayin) — working-tree review'); }
+  await refreshActiveModel().catch(() => {});
+  try {
+    for (const repo of changed) {
+      try { await reviewWorktree(repo); }
+      catch (err) { log('WARN', 'worktree_review_failed', { repo, error: (err instanceof Error ? err.message : String(err)).slice(0, 200) }); }
+      // Recompute AFTER staging (staging flips porcelain XY codes) so we don't re-trigger on our own work.
+      state[repo] = { fingerprint: await worktreeFingerprint(repo), at: Date.now() };
+      saveWorktreeState(state);
+    }
+  } finally {
+    if (typeof hold === 'object') { await hold.release(); activeHold = null; }
+  }
+}
+
 // ── daemon ───────────────────────────────────────────────────────────
 
 function pidAlive(pid: number): boolean {
@@ -650,6 +859,7 @@ export async function runWatch(args: string[]): Promise<void> {
   // Self-heal hooks on boot — a repo re-cloned/reset while we were down lost its post-commit hook.
   await selfHealHooks();
   let lastHookHealAt = Date.now();
+  let lastWorktreeAt = 0; // 0 → first working-tree pass runs shortly after boot, then every 10 min
 
   // Backlog first — anything committed while we were down (or in flight at the power cut).
   await processBacklog(retryState);
@@ -672,6 +882,10 @@ export async function runWatch(args: string[]): Promise<void> {
         await selfHealHooks(); // re-add the post-commit hook to any watched repo that lost it
       }
       await processBacklog(retryState);
+      if (Date.now() - lastWorktreeAt >= WORKTREE_REVIEW_MS) {
+        lastWorktreeAt = Date.now();
+        await runWorktreePass(); // autostage + smell review of any watched repo whose tree changed
+      }
     } catch (err) {
       log('ERROR', 'watch_loop_error', { error: err instanceof Error ? err.message : String(err) });
     }
