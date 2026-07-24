@@ -225,7 +225,7 @@ async function unityAssetDiff(repo: string, commit: string): Promise<string | nu
 
 function onlyReviewFiles(numstat: string): boolean {
   const files = numstat.split('\n').filter(Boolean).map(l => l.split('\t')[2] || '');
-  return files.length > 0 && files.every(f => /(^|\/)CodeReview-[0-9a-f]+\.md$/.test(f));
+  return files.length > 0 && files.every(f => /(^|\/)(CodeReview|AssetDiff)-[0-9a-f]+\.md$/.test(f));
 }
 
 function buildReviewPrompt(meta: CommitMeta, diff: string, truncated: boolean, unityMd?: string | null): string {
@@ -287,8 +287,27 @@ async function reviewCommit(repo: string, commit: string): Promise<{ status: 're
   }
   if (!diff.trim()) diff = '(empty diff — merge or metadata-only commit)';
 
-  // Unity repos only: deterministic object-level asset diff, embedded verbatim + fed to the reviewer.
+  // Unity repos only: deterministic object-level asset diff → its OWN file next to the review
+  // (AssetDiff-<shortHash>.md), and fed to the reviewer as ground truth.
   const unityMd = await unityAssetDiff(repo, commit);
+  let assetDiffPath: string | null = null;
+  if (unityMd) {
+    assetDiffPath = join(repo, `AssetDiff-${meta.shortHash}.md`);
+    writeFileSync(assetDiffPath, `# Unity Asset Diff — ${meta.subject}
+
+| | |
+|---|---|
+| **Commit** | \`${meta.hash}\` |
+| **Author** | ${meta.author} \`<${meta.email}>\` |
+| **Date** | ${meta.date} |
+| **Generated** | ${new Date().toISOString()} — ayin watch (deterministic, unity_asset_diff) |
+
+---
+
+${unityMd}
+`);
+    out(`  → ${assetDiffPath}`);
+  }
 
   out(`reviewing ${meta.shortHash} "${meta.subject}" (${meta.filesChanged} files)…`);
   const review = await llmChat([
@@ -314,7 +333,7 @@ async function reviewCommit(repo: string, commit: string): Promise<{ status: 're
 ${meta.numstat || '(none)'}
 \`\`\`
 
-${unityMd ? `## Deterministic Unity asset diff\n\n${unityMd}\n\n` : ''}---
+${unityMd ? `## Deterministic Unity asset diff\n\n→ **[AssetDiff-${meta.shortHash}.md](AssetDiff-${meta.shortHash}.md)** (object-level change map; the reviewer below saw it)\n\n` : ''}---
 
 `;
   writeFileSync(reportPath, header + review.trim() + '\n');

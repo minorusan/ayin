@@ -156,7 +156,12 @@ The moving parts, designed to survive interruption at any point:
   `llmChat` call scoring the diff against the `SMELL_SIGNALS` catalog (~20 typical smells);
   each finding carries a **confidence 0.30–1.0**. Output: `CodeReview-<shortHash>.md` in the
   repo root — metadata table, changed files, findings, verdict.
-- **Guards**: commits touching only `CodeReview-*.md` are skipped (no review-of-review loop);
+- **Unity repos** (`Assets/` + `ProjectSettings/`): each commit also gets `AssetDiff-<shortHash>.md` —
+  the deterministic `unity_asset_diff` (`commit^ → commit`, `--md`) object-level change map — as a
+  second file next to the review; the review links to it and the reviewer receives its content.
+  Tool at `~/tools/unity_asset_diff.py` or `AYIN_UNITY_DIFF`; missing tool → one-line note.
+- **Guards**: commits touching only `CodeReview-*.md`/`AssetDiff-*.md` are skipped (no
+  review-of-review loop);
   vanished commits (rebase/gc) are ledgered as `gone`; LLM/backend failures retry with
   linear backoff up to 5 attempts, then are ledgered as `failed`.
 

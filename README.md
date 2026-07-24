@@ -102,11 +102,13 @@ committing a review never triggers a review of the review.
 To keep it running on macOS: `nohup ayin watch --repo <repo> &`, or wrap it in a launchd
 agent with `KeepAlive` — the daemon is safe to kill and restart at any point.
 
-**Unity repos** (`Assets/` + `ProjectSettings/`) additionally get a **deterministic asset
-diff** in every review: the external `unity_asset_diff` tool renders object-level changes
-(full hierarchy paths, `field old → new`) for prefabs/scenes/assets, embedded verbatim ahead
-of the LLM's take and fed to the reviewer as ground truth. Tool path: `~/tools/unity_asset_diff.py`
-or `AYIN_UNITY_DIFF`. Non-Unity repos never spawn it.
+**Unity repos** (`Assets/` + `ProjectSettings/`) get **two files per commit**:
+`CodeReview-<hash>.md` (the LLM review) and `AssetDiff-<hash>.md` — a **deterministic asset
+diff** from the external `unity_asset_diff` tool: object-level changes with full hierarchy
+paths (`MonoBehaviour at Path/To/Object · field old → new`) for prefabs/scenes/assets. The
+review links to it and the reviewer is fed its content as ground truth. Tool path:
+`~/tools/unity_asset_diff.py` or `AYIN_UNITY_DIFF`. Non-Unity repos never spawn it and get
+only the review file.
 
 ## RAG corpus generator
 
