@@ -134,6 +134,22 @@ exit 0
 `;
 }
 
+const CHAIN_BEGIN = '# >>> ayin-watch (chained) >>>';
+const CHAIN_END = '# <<< ayin-watch (chained) <<<';
+
+/** An appendable block that queues the commit WITHOUT owning the file — so ayin-watch coexists
+ *  with a repo's existing post-commit hook (git-lfs, husky, …). No shebang, and it never `exit`s
+ *  or fails the host hook (`… || true`); carries HOOK_MARKER so the marker check treats a chained
+ *  hook as "ours" (present), and is fenced so it can be found / removed / not double-appended. */
+function chainedBlock(repo: string): string {
+  return `
+${CHAIN_BEGIN}
+# ${HOOK_MARKER} (chained) — queues this commit for ayin review; coexists with the hook above.
+{ QUEUE_DIR="$HOME/.ayin-cli/watch"; mkdir -p "$QUEUE_DIR" && HASH=$(git rev-parse HEAD 2>/dev/null) && [ -n "$HASH" ] && printf '{"ts":%s,"repo":%s,"commit":"%s"}\\n' "$(date +%s)" '${JSON.stringify(repo)}' "$HASH" >> "$QUEUE_DIR/queue.jsonl"; } || true
+${CHAIN_END}
+`;
+}
+
 /** Resolve a repo's hooks dir + post-commit path, or null if it's not a git repo (moved/deleted). */
 async function hookPathFor(repo: string): Promise<{ hooksDir: string; hookPath: string } | null> {
   const res = await git(repo, ['rev-parse', '--git-path', 'hooks']);
@@ -150,24 +166,25 @@ async function installHook(repo: string): Promise<void> {
 
   if (existsSync(paths.hookPath)) {
     const existing = readFileSync(paths.hookPath, 'utf-8');
-    if (!existing.includes(HOOK_MARKER)) {
-      throw new Error(
-        `${paths.hookPath} already exists and was not installed by ayin-watch — refusing to overwrite.\n` +
-        `Add this line to it manually:\n` +
-        `  printf '{"ts":%s,"repo":%s,"commit":"%s"}\\n' "$(date +%s)" '${JSON.stringify(repo)}' "$(git rev-parse HEAD)" >> "$HOME/.ayin-cli/watch/queue.jsonl"`,
-      );
+    if (existing.includes(HOOK_MARKER)) {
+      out(`hook already present: ${paths.hookPath}`);
+    } else {
+      // A foreign post-commit hook (git-lfs/husky/…) owns the file — CHAIN onto it, don't clobber.
+      appendFileSync(paths.hookPath, chainedBlock(repo));
+      out(`chained ayin-watch onto existing post-commit hook: ${paths.hookPath}`);
+      log('INFO', 'watch_hook_chained', { repo, hookPath: paths.hookPath });
     }
+  } else {
+    writeFileSync(paths.hookPath, hookScript(repo));
+    chmodSync(paths.hookPath, 0o755);
+    out(`hook installed: ${paths.hookPath}`);
+    log('INFO', 'watch_hook_installed', { repo, hookPath: paths.hookPath });
   }
-  writeFileSync(paths.hookPath, hookScript(repo));
-  chmodSync(paths.hookPath, 0o755);
 
   // Register the repo (informational + lets the self-heal poll re-install hooks later).
   const repos = existsSync(REPOS_FILE) ? JSON.parse(readFileSync(REPOS_FILE, 'utf-8')) : {};
   repos[repo] = { hookPath: paths.hookPath, installedAt: new Date().toISOString() };
   writeFileSync(REPOS_FILE, JSON.stringify(repos, null, 2));
-
-  out(`hook installed: ${paths.hookPath}`);
-  log('INFO', 'watch_hook_installed', { repo, hookPath: paths.hookPath });
 }
 
 /** The registered repos (keys of repos.json) — the set the daemon watches. */
@@ -176,14 +193,19 @@ function registeredRepos(): string[] {
   try { return Object.keys(JSON.parse(readFileSync(REPOS_FILE, 'utf-8'))); } catch { return []; }
 }
 
-/** Ensure one repo's post-commit hook is present. Re-adds it if missing (repos get re-cloned,
- *  reset, or wiped and then commits stop queueing silently). Never clobbers a FOREIGN post-commit
- *  hook (one without our marker); reports a moved/deleted repo as 'gone'. */
-async function ensureHook(repo: string): Promise<'ok' | 'reinstalled' | 'foreign' | 'gone'> {
+/** Ensure one repo's post-commit hook is present, re-adding it if it was lost (repos get
+ *  re-cloned/reset, or another tool overwrites .git/hooks and commits stop queueing silently).
+ *  Missing → write our standalone hook. Foreign hook (git-lfs/husky) → CHAIN onto it (never
+ *  clobber). Already ours/chained → 'ok'. Moved/deleted repo → 'gone'. */
+async function ensureHook(repo: string): Promise<'ok' | 'reinstalled' | 'gone'> {
   const paths = await hookPathFor(repo);
   if (!paths) return 'gone';
   if (existsSync(paths.hookPath)) {
-    return readFileSync(paths.hookPath, 'utf-8').includes(HOOK_MARKER) ? 'ok' : 'foreign';
+    const existing = readFileSync(paths.hookPath, 'utf-8');
+    if (existing.includes(HOOK_MARKER)) return 'ok';
+    appendFileSync(paths.hookPath, chainedBlock(repo)); // re-chain onto a foreign hook
+    log('INFO', 'watch_hook_rechained', { repo, hookPath: paths.hookPath });
+    return 'reinstalled';
   }
   mkdirSync(paths.hooksDir, { recursive: true });
   writeFileSync(paths.hookPath, hookScript(repo));
@@ -192,21 +214,20 @@ async function ensureHook(repo: string): Promise<'ok' | 'reinstalled' | 'foreign
   return 'reinstalled';
 }
 
-/** Self-heal pass (runs on boot + every 5 min): re-add the hook to every registered repo that
- *  lost it. Cheap: one `git rev-parse` + a stat per repo, writes only when actually missing. */
+/** Self-heal pass (runs on boot + every 5 min): re-add/re-chain the hook to every registered repo
+ *  that lost it. Cheap: one `git rev-parse` + a stat per repo, writes only when actually needed. */
 async function selfHealHooks(): Promise<void> {
   const repos = registeredRepos();
   if (repos.length === 0) return;
-  let reinstalled = 0, foreign = 0, gone = 0;
+  let reinstalled = 0, gone = 0;
   for (const repo of repos) {
     const r = await ensureHook(repo);
     if (r === 'reinstalled') reinstalled++;
-    else if (r === 'foreign') foreign++;
     else if (r === 'gone') gone++;
   }
-  if (reinstalled || foreign || gone) {
-    out(`hook self-heal: ${reinstalled} re-added, ${foreign} foreign (skipped), ${gone} missing repo(s) — of ${repos.length} watched`);
-    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), foreign: String(foreign), gone: String(gone) });
+  if (reinstalled || gone) {
+    out(`hook self-heal: ${reinstalled} re-added, ${gone} missing repo(s) — of ${repos.length} watched`);
+    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), gone: String(gone) });
   }
 }
 
