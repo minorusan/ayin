@@ -29,7 +29,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { llmChat, refreshActiveModel } from './llm/manager.js';
-import { connect } from './connection.js';
+import { connect, keliBaseUrl } from './connection.js';
 import { acquireLlm, type LlmHold } from './resource-client.js';
 import { log } from './log.js';
 
@@ -275,6 +275,30 @@ function upsertClaudeReports(repo: string): void {
   try { writeFileSync(claudePath, content); } catch { /* read-only tree — skip */ }
 }
 
+// ── danger push ───────────────────────────────────────────────────────
+// When a review flags something dangerous, ping the user's phone via the Maradel backend's FCM
+// door (POST /api/push — the headless counterpart to the send_push tool; no TUI). On by default;
+// set AYIN_WATCH_PUSH=0 to silence. Best-effort — a push failure never breaks a review.
+const PUSH_ENABLED = process.env.AYIN_WATCH_PUSH !== '0';
+function repoName(repo: string): string { return repo.split('/').filter(Boolean).pop() || repo; }
+
+async function sendDangerPush(title: string, body: string): Promise<void> {
+  if (!PUSH_ENABLED) return;
+  try {
+    const res = await fetch(`${keliBaseUrl()}/api/push`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, body }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = res.ok ? (await res.json()) as { delivered?: number } : null;
+    out(`  📲 push: ${title} (delivered ${data?.delivered ?? 0})`);
+    log('INFO', 'watch_push', { title: title.slice(0, 80), delivered: String(data?.delivered ?? 0), ok: String(res.ok) });
+  } catch (err) {
+    log('WARN', 'watch_push_failed', { error: (err instanceof Error ? err.message : String(err)).slice(0, 150) });
+  }
+}
+
 // ── review ───────────────────────────────────────────────────────────
 
 interface CommitMeta {
@@ -463,6 +487,10 @@ ${unityMd ? `## Deterministic Unity asset diff\n\n→ **[AssetDiff-${meta.shortH
   out(`  → ${reportPath}`);
   log('INFO', 'watch_review_written', { repo, commit: meta.shortHash, report: reportPath });
   upsertClaudeReports(repo);
+  // Dangerous → ping the phone. "Needs attention" is the reviewer's bad verdict.
+  if (/needs attention/i.test(review)) {
+    await sendDangerPush(`⚠ Ayin: review flags ${repoName(repo)}`, `"${meta.subject}" (${meta.shortHash}) — Needs attention. See CodeReview-${meta.shortHash}.md`);
+  }
   return { status: 'reviewed', note: reportPath };
 }
 
@@ -492,7 +520,8 @@ ${stat || '(none)'}
 ${diff}
 \`\`\`
 
-Respond in clean markdown with sections: ## Summary · ## What changed · ## Watch out · ## Follow-ups.`;
+Respond in clean markdown with sections: ## Summary · ## What changed · ## Watch out · ## Follow-ups.
+END with a final line that is EXACTLY one of: \`VERDICT: RISKY\` (breaking/risky changes the puller must act on) or \`VERDICT: OK\`.`;
 }
 
 async function reviewMerge(repo: string, commit: string, prev?: string): Promise<{ status: 'reviewed' | 'skipped' | 'gone'; note: string }> {
@@ -536,6 +565,9 @@ async function reviewMerge(repo: string, commit: string, prev?: string): Promise
   out(`  → ${reportPath}`);
   log('INFO', 'watch_merge_written', { repo, commit: meta.shortHash, report: reportPath });
   upsertClaudeReports(repo);
+  if (/^VERDICT:\s*RISKY/im.test(review)) {
+    await sendDangerPush(`⚠ Ayin: risky pull in ${repoName(repo)}`, `${range} brought in breaking/risky changes — see AYIN-REPORT-MERGE-${meta.shortHash}.md`);
+  }
   return { status: 'reviewed', note: reportPath };
 }
 
@@ -713,6 +745,14 @@ async function reviewWorktree(repo: string): Promise<void> {
   out(`  → ${reportPath} (staged ${staged}, unstaged ${unstaged}) — NO commit`);
   log('INFO', 'worktree_reviewed', { repo, staged: String(staged), unstaged: String(unstaged), parsed: String(!!plan) });
   upsertClaudeReports(repo);
+  const high = (plan?.smells || []).filter(s => (s.severity || '').toLowerCase() === 'high');
+  if (high.length) {
+    const first = high[0];
+    await sendDangerPush(
+      `⚠ Ayin: ${high.length} dangerous issue${high.length > 1 ? 's' : ''} in ${repoName(repo)}`,
+      `${first.where ? first.where + ': ' : ''}${first.issue || 'high-severity finding'} — see ${reportPath.split('/').pop()}`,
+    );
+  }
 }
 
 /** The 10-min pass over all watched repos whose working tree changed since last check. Takes the
