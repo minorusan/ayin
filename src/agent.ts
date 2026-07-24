@@ -637,6 +637,17 @@ export async function runAgent(userInput: string): Promise<void> {
       setAgentStatus('');
       const permission = await checkPermission(name, params, textPrefix);
       if (permission === 'deny') {
+        // Read-only mode (AYIN_READONLY=1): soft-deny — the tool is unavailable, but DON'T abort
+        // the run the way an interactive user-deny does. Feed a denial result back and continue so
+        // the model reports with read tools. Without this the doggo dies on its first bash/explore.
+        if (process.env.AYIN_READONLY === '1') {
+          log('INFO', 'tool_denied_readonly', { tool: name });
+          addMessage('system', `Denied (read-only): ${name}`);
+          const denyCall = renderToolCall({ name, params });
+          pushToWindow('assistant', textPrefix ? `${textPrefix}\n\n${denyCall}` : denyCall);
+          pushToWindow('user', renderToolResult(`${name} is unavailable in read-only mode. Investigate using only read_file, grep, and find_files — do not write files or run shell/bash. Then report your findings.`));
+          continue roundLoop;
+        }
         addMessage('system', `Denied: ${name}(${paramPreview})`);
         log('INFO', 'tool_denied', { tool: name });
 
