@@ -292,8 +292,9 @@ can finish — see the warning in `SETUP.md`.
 ```
 src/
 ├── index.ts            entry; interactive vs headless (-p) vs `watch`/`rag`; overlays; input handling
-├── watch.ts            repo watcher daemon: post-commit hook → queue → LLM code review;
-│                       5-min self-heal re-adds the hook to any watched repo that lost it
+├── watch.ts            repo watcher daemon: post-commit → CodeReview, post-merge → AYIN-REPORT-MERGE
+│                       (what a pull brought in); upserts a CLAUDE.md pointer to pending reports;
+│                       chains onto foreign hooks (git-lfs); 5-min self-heal re-adds lost hooks
 ├── rag.ts              grounded Q&A corpus generator (explore → synthesize → logs resource store)
 ├── resource-client.ts  backend resource door (POST /resource/<name>) + shared llm-authority dance
 ├── agent.ts            the agent loop (build → call → parse → execute → loop)

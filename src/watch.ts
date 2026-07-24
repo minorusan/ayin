@@ -23,6 +23,7 @@
 import { spawn } from 'node:child_process';
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync,
+  readdirSync, statSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -106,10 +107,12 @@ function readJsonl(path: string): Array<Record<string, unknown>> {
   return rows;
 }
 
-interface QueueEntry { ts: number; repo: string; commit: string }
+interface QueueEntry { ts: number; repo: string; commit: string; kind?: 'commit' | 'merge'; prev?: string }
 
-function entryKey(e: { repo: string; commit: string }): string {
-  return `${e.repo}@${e.commit}`;
+function entryKey(e: { repo: string; commit: string; kind?: string }): string {
+  // Commit keys stay `repo@commit` (back-compat with the existing ledger); a merge at the same
+  // HEAD gets its own key so it can't be deduped against a commit review of that hash.
+  return e.kind === 'merge' ? `${e.repo}@merge@${e.commit}` : `${e.repo}@${e.commit}`;
 }
 
 // llm authority (one door to the GPU): reviews take the llm resource as the `ayin` authority per
@@ -121,69 +124,85 @@ function entryKey(e: { repo: string; commit: string }): string {
 
 /** The post-commit hook body for a repo. Extracted so install + self-heal write byte-identical
  *  hooks. repo path goes to printf as a %s ARG (not the format string) so a '%' can't corrupt it. */
-function hookScript(repo: string): string {
+const CHAIN_BEGIN = '# >>> ayin-watch (chained) >>>';
+const CHAIN_END = '# <<< ayin-watch (chained) <<<';
+
+// The two hooks the daemon installs per repo: post-commit → review each commit; post-merge →
+// explain each pull/merge (AYIN-REPORT-MERGE). Both append one JSON line to the shared queue.
+const WATCH_HOOKS: Array<{ name: string; kind: 'commit' | 'merge' }> = [
+  { name: 'post-commit', kind: 'commit' },
+  { name: 'post-merge', kind: 'merge' },
+];
+
+/** The shell that appends one queue line for this hook kind (assumes $QUEUE_DIR + $HASH set).
+ *  A merge also captures $PREV (ORIG_HEAD) so the reviewer can diff exactly what was pulled. */
+function queueAppend(repo: string, kind: 'commit' | 'merge'): string {
+  const r = JSON.stringify(repo);
+  if (kind === 'merge') {
+    return `PREV=$(git rev-parse ORIG_HEAD 2>/dev/null || echo ""); printf '{"ts":%s,"repo":%s,"commit":"%s","prev":"%s","kind":"merge"}\\n' "$(date +%s)" '${r}' "$HASH" "$PREV" >> "$QUEUE_DIR/queue.jsonl"`;
+  }
+  return `printf '{"ts":%s,"repo":%s,"commit":"%s","kind":"commit"}\\n' "$(date +%s)" '${r}' "$HASH" >> "$QUEUE_DIR/queue.jsonl"`;
+}
+
+/** Standalone hook file (owns .git/hooks/<name>). Never blocks git; queue accumulates if down. */
+function hookScript(repo: string, kind: 'commit' | 'merge'): string {
   return `#!/bin/sh
 # ${HOOK_MARKER} — installed by \`ayin watch\`. Reinstalling overwrites this file.
-# Appends this commit to the ayin-watch persistent queue. Never blocks the commit; if the
-# daemon is down the queue just accumulates and is processed on its next boot.
+# Appends this ${kind} to the ayin-watch persistent queue; if the daemon is down it accumulates.
 QUEUE_DIR="$HOME/.ayin-cli/watch"
 mkdir -p "$QUEUE_DIR" || exit 0
 HASH=$(git rev-parse HEAD 2>/dev/null) || exit 0
-printf '{"ts":%s,"repo":%s,"commit":"%s"}\\n' "$(date +%s)" '${JSON.stringify(repo)}' "$HASH" >> "$QUEUE_DIR/queue.jsonl"
+${queueAppend(repo, kind)}
 exit 0
 `;
 }
 
-const CHAIN_BEGIN = '# >>> ayin-watch (chained) >>>';
-const CHAIN_END = '# <<< ayin-watch (chained) <<<';
-
-/** An appendable block that queues the commit WITHOUT owning the file — so ayin-watch coexists
- *  with a repo's existing post-commit hook (git-lfs, husky, …). No shebang, and it never `exit`s
- *  or fails the host hook (`… || true`); carries HOOK_MARKER so the marker check treats a chained
- *  hook as "ours" (present), and is fenced so it can be found / removed / not double-appended. */
-function chainedBlock(repo: string): string {
+/** An appendable block that queues WITHOUT owning the file — ayin-watch coexists with a repo's
+ *  existing hook (git-lfs, husky, …). No shebang; never `exit`s or fails the host hook (`… || true`);
+ *  carries HOOK_MARKER so the marker check treats a chained hook as "ours"; fenced for idempotency. */
+function chainedBlock(repo: string, kind: 'commit' | 'merge'): string {
   return `
 ${CHAIN_BEGIN}
-# ${HOOK_MARKER} (chained) — queues this commit for ayin review; coexists with the hook above.
-{ QUEUE_DIR="$HOME/.ayin-cli/watch"; mkdir -p "$QUEUE_DIR" && HASH=$(git rev-parse HEAD 2>/dev/null) && [ -n "$HASH" ] && printf '{"ts":%s,"repo":%s,"commit":"%s"}\\n' "$(date +%s)" '${JSON.stringify(repo)}' "$HASH" >> "$QUEUE_DIR/queue.jsonl"; } || true
+# ${HOOK_MARKER} (chained) — queues this ${kind} for ayin; coexists with the hook above.
+{ QUEUE_DIR="$HOME/.ayin-cli/watch"; mkdir -p "$QUEUE_DIR" && HASH=$(git rev-parse HEAD 2>/dev/null) && [ -n "$HASH" ] && { ${queueAppend(repo, kind)}; }; } || true
 ${CHAIN_END}
 `;
 }
 
-/** Resolve a repo's hooks dir + post-commit path, or null if it's not a git repo (moved/deleted). */
-async function hookPathFor(repo: string): Promise<{ hooksDir: string; hookPath: string } | null> {
+/** Resolve a repo's hooks dir + a named hook path, or null if it's not a git repo (moved/deleted). */
+async function hookPathFor(repo: string, hookName: string): Promise<{ hooksDir: string; hookPath: string } | null> {
   const res = await git(repo, ['rev-parse', '--git-path', 'hooks']);
   if (!res.ok) return null;
   const rel = res.stdout.trim();
   const hooksDir = rel.startsWith('/') ? rel : join(repo, rel);
-  return { hooksDir, hookPath: join(hooksDir, 'post-commit') };
+  return { hooksDir, hookPath: join(hooksDir, hookName) };
+}
+
+/** Ensure one named hook is present: write our standalone if missing, chain onto a foreign hook,
+ *  no-op if already ours. Returns whether it wrote anything. */
+function ensureOneHook(hooksDir: string, hookPath: string, repo: string, kind: 'commit' | 'merge'): 'ok' | 'wrote' {
+  if (existsSync(hookPath)) {
+    if (readFileSync(hookPath, 'utf-8').includes(HOOK_MARKER)) return 'ok';
+    appendFileSync(hookPath, chainedBlock(repo, kind)); // chain onto foreign (git-lfs/husky)
+    return 'wrote';
+  }
+  mkdirSync(hooksDir, { recursive: true });
+  writeFileSync(hookPath, hookScript(repo, kind));
+  chmodSync(hookPath, 0o755);
+  return 'wrote';
 }
 
 async function installHook(repo: string): Promise<void> {
-  const paths = await hookPathFor(repo);
-  if (!paths) throw new Error(`not a git repo: ${repo}`);
-  mkdirSync(paths.hooksDir, { recursive: true });
-
-  if (existsSync(paths.hookPath)) {
-    const existing = readFileSync(paths.hookPath, 'utf-8');
-    if (existing.includes(HOOK_MARKER)) {
-      out(`hook already present: ${paths.hookPath}`);
-    } else {
-      // A foreign post-commit hook (git-lfs/husky/…) owns the file — CHAIN onto it, don't clobber.
-      appendFileSync(paths.hookPath, chainedBlock(repo));
-      out(`chained ayin-watch onto existing post-commit hook: ${paths.hookPath}`);
-      log('INFO', 'watch_hook_chained', { repo, hookPath: paths.hookPath });
-    }
-  } else {
-    writeFileSync(paths.hookPath, hookScript(repo));
-    chmodSync(paths.hookPath, 0o755);
-    out(`hook installed: ${paths.hookPath}`);
-    log('INFO', 'watch_hook_installed', { repo, hookPath: paths.hookPath });
+  for (const { name, kind } of WATCH_HOOKS) {
+    const paths = await hookPathFor(repo, name);
+    if (!paths) throw new Error(`not a git repo: ${repo}`);
+    const r = ensureOneHook(paths.hooksDir, paths.hookPath, repo, kind);
+    out(r === 'wrote' ? `${name} hook set: ${paths.hookPath}` : `${name} hook already present`);
+    log('INFO', 'watch_hook_installed', { repo, hook: name, result: r });
   }
-
-  // Register the repo (informational + lets the self-heal poll re-install hooks later).
+  // Register the repo (the set the daemon watches + self-heals + reviews the working tree of).
   const repos = existsSync(REPOS_FILE) ? JSON.parse(readFileSync(REPOS_FILE, 'utf-8')) : {};
-  repos[repo] = { hookPath: paths.hookPath, installedAt: new Date().toISOString() };
+  repos[repo] = { installedAt: new Date().toISOString() };
   writeFileSync(REPOS_FILE, JSON.stringify(repos, null, 2));
 }
 
@@ -193,42 +212,66 @@ function registeredRepos(): string[] {
   try { return Object.keys(JSON.parse(readFileSync(REPOS_FILE, 'utf-8'))); } catch { return []; }
 }
 
-/** Ensure one repo's post-commit hook is present, re-adding it if it was lost (repos get
- *  re-cloned/reset, or another tool overwrites .git/hooks and commits stop queueing silently).
- *  Missing → write our standalone hook. Foreign hook (git-lfs/husky) → CHAIN onto it (never
- *  clobber). Already ours/chained → 'ok'. Moved/deleted repo → 'gone'. */
-async function ensureHook(repo: string): Promise<'ok' | 'reinstalled' | 'gone'> {
-  const paths = await hookPathFor(repo);
-  if (!paths) return 'gone';
-  if (existsSync(paths.hookPath)) {
-    const existing = readFileSync(paths.hookPath, 'utf-8');
-    if (existing.includes(HOOK_MARKER)) return 'ok';
-    appendFileSync(paths.hookPath, chainedBlock(repo)); // re-chain onto a foreign hook
-    log('INFO', 'watch_hook_rechained', { repo, hookPath: paths.hookPath });
-    return 'reinstalled';
-  }
-  mkdirSync(paths.hooksDir, { recursive: true });
-  writeFileSync(paths.hookPath, hookScript(repo));
-  chmodSync(paths.hookPath, 0o755);
-  log('INFO', 'watch_hook_reinstalled', { repo, hookPath: paths.hookPath });
-  return 'reinstalled';
-}
-
-/** Self-heal pass (runs on boot + every 5 min): re-add/re-chain the hook to every registered repo
- *  that lost it. Cheap: one `git rev-parse` + a stat per repo, writes only when actually needed. */
+/** Self-heal (boot + every 5 min): re-add/re-chain BOTH hooks in every registered repo that lost
+ *  them (re-clone, reset, or another tool overwriting .git/hooks). Cheap: rev-parse + stats. */
 async function selfHealHooks(): Promise<void> {
   const repos = registeredRepos();
   if (repos.length === 0) return;
   let reinstalled = 0, gone = 0;
   for (const repo of repos) {
-    const r = await ensureHook(repo);
-    if (r === 'reinstalled') reinstalled++;
-    else if (r === 'gone') gone++;
+    let wrote = false, missing = false;
+    for (const { name, kind } of WATCH_HOOKS) {
+      const paths = await hookPathFor(repo, name);
+      if (!paths) { missing = true; break; }
+      if (ensureOneHook(paths.hooksDir, paths.hookPath, repo, kind) === 'wrote') wrote = true;
+    }
+    if (missing) gone++;
+    else if (wrote) reinstalled++;
   }
   if (reinstalled || gone) {
-    out(`hook self-heal: ${reinstalled} re-added, ${gone} missing repo(s) — of ${repos.length} watched`);
+    out(`hook self-heal: ${reinstalled} repo(s) re-hooked, ${gone} missing — of ${repos.length} watched`);
     log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), gone: String(gone) });
   }
+}
+
+// ── CLAUDE.md pointer ─────────────────────────────────────────────────
+// After a report is written, upsert a fenced block in the repo-root CLAUDE.md listing the pending
+// ayin reports, so Claude Code reads them next session. Managed region only — the rest is untouched;
+// the file is created if absent. This block + ayin's report files are excluded from review + staging.
+
+const CLAUDE_BEGIN = '<!-- ayin:reports:begin -->';
+const CLAUDE_END = '<!-- ayin:reports:end -->';
+const AYIN_REPORT_RE = /^(CodeReview-[0-9a-f]+|AssetDiff-[0-9a-f]+|AYIN-REPORT-[A-Za-z]+-.+)\.md$/;
+
+function listRepoReports(repo: string): string[] {
+  try {
+    return readdirSync(repo)
+      .filter(f => AYIN_REPORT_RE.test(f))
+      .map(f => ({ f, m: statSync(join(repo, f)).mtimeMs }))
+      .sort((a, b) => b.m - a.m)
+      .slice(0, 12)
+      .map(x => x.f);
+  } catch { return []; }
+}
+
+function upsertClaudeReports(repo: string): void {
+  const reports = listRepoReports(repo);
+  const body = reports.length
+    ? reports.map(f => `- \`${f}\``).join('\n')
+    : '- (none pending)';
+  const block = `${CLAUDE_BEGIN}\n## ⚠ Ayin review notes — read before continuing\nAuto-generated by \`ayin watch\` (local review). Newest first; open the file for the findings.\n${body}\n${CLAUDE_END}`;
+  const claudePath = join(repo, 'CLAUDE.md');
+  let content = '';
+  try { content = existsSync(claudePath) ? readFileSync(claudePath, 'utf-8') : ''; } catch { return; }
+  if (content.includes(CLAUDE_BEGIN)) {
+    const before = content.slice(0, content.indexOf(CLAUDE_BEGIN));
+    const endIdx = content.indexOf(CLAUDE_END);
+    const after = endIdx >= 0 ? content.slice(endIdx + CLAUDE_END.length) : '';
+    content = `${before}${block}${after}`;
+  } else {
+    content = content.trim() ? `${content.replace(/\s*$/, '')}\n\n${block}\n` : `${block}\n`;
+  }
+  try { writeFileSync(claudePath, content); } catch { /* read-only tree — skip */ }
 }
 
 // ── review ───────────────────────────────────────────────────────────
@@ -293,8 +336,10 @@ async function unityAssetDiff(repo: string, commit: string): Promise<string | nu
 }
 
 function onlyReviewFiles(numstat: string): boolean {
+  // Skip commits that only touch ayin's own artifacts (else committing a review triggers a review
+  // of the review, forever): CodeReview-*, AssetDiff-*, AYIN-REPORT-*.md.
   const files = numstat.split('\n').filter(Boolean).map(l => l.split('\t')[2] || '');
-  return files.length > 0 && files.every(f => /(^|\/)(CodeReview|AssetDiff)-[0-9a-f]+\.md$/.test(f));
+  return files.length > 0 && files.every(f => /(^|\/)(CodeReview-[0-9a-f]+|AssetDiff-[0-9a-f]+|AYIN-REPORT-[A-Za-z]+-.+)\.md$/.test(f));
 }
 
 function buildReviewPrompt(meta: CommitMeta, diff: string, truncated: boolean, unityMd?: string | null): string {
@@ -416,6 +461,80 @@ ${unityMd ? `## Deterministic Unity asset diff\n\n→ **[AssetDiff-${meta.shortH
   writeFileSync(reportPath, header + review.trim() + '\n');
   out(`  → ${reportPath}`);
   log('INFO', 'watch_review_written', { repo, commit: meta.shortHash, report: reportPath });
+  upsertClaudeReports(repo);
+  return { status: 'reviewed', note: reportPath };
+}
+
+// ── merge review (post-merge / pull) ─────────────────────────────────
+// Explains what a pull/merge just brought in — the range prev(ORIG_HEAD)..HEAD — into
+// AYIN-REPORT-MERGE-<hash>.md in the repo root (so it shows in the client + gets picked up by
+// the CLAUDE.md pointer). Answers "what changed under me and what should I watch out for".
+
+function buildMergePrompt(range: string, oneline: string, stat: string, diff: string, truncated: boolean): string {
+  return `You are briefing a developer on what a \`git pull\`/merge just brought into their repo (range ${range}).
+Be concrete and skimmable. Cover: (1) a 2-4 sentence summary of what was pulled; (2) the notable
+changes grouped by area (features, fixes, refactors, deps, config/schema/protocol); (3) BREAKING or
+risky changes to watch — API/signature/schema changes, migrations, config that must change, anything
+that could break the puller's in-flight work; (4) any follow-up the developer likely needs to do
+(reinstall deps, run migrations, re-check a contract). If nothing risky, say so plainly.
+
+## Commits pulled
+${oneline || '(none)'}
+
+## Files changed
+\`\`\`
+${stat || '(none)'}
+\`\`\`
+
+## Diff${truncated ? ' (TRUNCATED — large merge; reason over the stat + what is shown)' : ''}
+\`\`\`diff
+${diff}
+\`\`\`
+
+Respond in clean markdown with sections: ## Summary · ## What changed · ## Watch out · ## Follow-ups.`;
+}
+
+async function reviewMerge(repo: string, commit: string, prev?: string): Promise<{ status: 'reviewed' | 'skipped' | 'gone'; note: string }> {
+  const meta = await gatherMeta(repo, commit);
+  if (!meta) return { status: 'gone', note: 'merge HEAD not found (rebased/gc?)' };
+  // Range that was pulled: ORIG_HEAD..HEAD when we captured it, else the merge's first-parent range.
+  const range = prev && prev.length >= 7 ? `${prev}..${commit}` : `${commit}^1..${commit}`;
+  const onelineRes = await git(repo, ['log', '--oneline', '--no-decorate', range], 20_000);
+  if (!onelineRes.ok || !onelineRes.stdout.trim()) {
+    return { status: 'skipped', note: 'nothing new pulled (fast-forward no-op or range empty)' };
+  }
+  const statRes = await git(repo, ['diff', '--stat', range], 20_000);
+  const diffRes = await git(repo, ['diff', range], MAX_DIFF_CHARS + 4096);
+  let diff = diffRes.stdout;
+  const truncated = diff.length > MAX_DIFF_CHARS;
+  if (truncated) {
+    const cut = diff.lastIndexOf('\ndiff --git', MAX_DIFF_CHARS);
+    diff = diff.substring(0, cut > MAX_DIFF_CHARS / 2 ? cut : MAX_DIFF_CHARS) + '\n\n… DIFF TRUNCATED …';
+  }
+  if (!diff.trim()) diff = '(no textual diff — merge of already-present objects)';
+
+  out(`explaining merge ${meta.shortHash} (${range})…`);
+  const review = await llmChat([
+    { role: 'system', content: 'You brief developers on what a pull/merge changed. Clean markdown, no preamble, no tool calls.' },
+    { role: 'user', content: buildMergePrompt(range, onelineRes.stdout.trim(), statRes.stdout.trim(), diff, truncated) },
+  ]);
+
+  const reportPath = join(repo, `AYIN-REPORT-MERGE-${meta.shortHash}.md`);
+  const header = `# Merge report — what \`${range}\` pulled in
+
+| | |
+|---|---|
+| **Into** | \`${meta.hash}\` (${meta.branch}) |
+| **Range** | \`${range}\` |
+| **Generated** | ${new Date().toISOString()} — ayin watch |
+
+---
+
+`;
+  writeFileSync(reportPath, header + review.trim() + '\n');
+  out(`  → ${reportPath}`);
+  log('INFO', 'watch_merge_written', { repo, commit: meta.shortHash, report: reportPath });
+  upsertClaudeReports(repo);
   return { status: 'reviewed', note: reportPath };
 }
 
@@ -471,7 +590,9 @@ async function processBacklog(retryState: Map<string, { attempts: number; nextTr
     const retry = retryState.get(key);
 
     try {
-      const result = await reviewCommit(entry.repo, entry.commit);
+      const result = entry.kind === 'merge'
+        ? await reviewMerge(entry.repo, entry.commit, entry.prev)
+        : await reviewCommit(entry.repo, entry.commit);
       appendFileSync(PROCESSED_FILE, JSON.stringify({ key, ts: Date.now(), ...result }) + '\n');
       processed.add(key);
       retryState.delete(key);
