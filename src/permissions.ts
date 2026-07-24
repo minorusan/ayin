@@ -21,6 +21,9 @@ import { log } from './log.js';
 import { HEADLESS } from './ui.js';
 
 const SKIP_PERMISSIONS = process.argv.includes('--dangerously-skip-permissions');
+// Read-only mode (env AYIN_READONLY=1): hard-deny anything outside the safe read whitelist,
+// even in headless. For callers that must NUDGE, never edit (e.g. the premortem-hound doggo).
+const READONLY = process.env.AYIN_READONLY === '1';
 
 interface WhitelistEntry {
   tool: string;
@@ -79,6 +82,11 @@ export async function checkPermission(
   params: Record<string, string>,
   reason?: string,
 ): Promise<PermissionResult> {
+  if (READONLY) {
+    const ok = isWhitelisted(tool, params);
+    log('INFO', ok ? 'permission_readonly_allow' : 'permission_readonly_deny', { tool });
+    return ok ? 'allow' : 'deny';
+  }
   if (SKIP_PERMISSIONS || HEADLESS) {
     log('INFO', 'permission_skip', { tool });
     return 'allow';

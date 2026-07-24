@@ -19,6 +19,7 @@ import { estimateSessionTokens } from './tokens.js';
 import { loadHistory, pushEntry } from './history.js';
 import { runAgent, interruptAgent, enqueueAgentMessage } from './agent.js';
 import { startPromptServer } from './prompt-server.js';
+import { acquireLlm, type LlmHold } from './resource-client.js';
 import { checkForUpdate } from './updater.js';
 import { getSessionArtifacts, readArtifact } from './artifacts.js';
 import { renderMarkdown } from './markdown.js';
@@ -407,6 +408,14 @@ async function runHeadless(): Promise<void> {
     process.exit(1);
   }
 
+  // Coder authority (AYIN_ACQUIRE_LLM=1): take the llm resource so the backend swaps gemma → the
+  // coder model (qwen) for this run. Sliding grant + unref'd keepalive → auto-released when the
+  // process exits; we also release explicitly on normal completion so gemma reverts promptly.
+  let llmHold: LlmHold = 'no-resource-layer';
+  if (process.env.AYIN_ACQUIRE_LLM === '1') {
+    llmHold = await acquireLlm('ayin -p (coder authority)');
+  }
+
   // Resolve the active model (gemma/qwen) → dialect before the first round.
   await refreshActiveModel();
 
@@ -415,6 +424,8 @@ async function runHeadless(): Promise<void> {
   } catch (err) {
     process.stderr.write(`ayin: agent error — ${err instanceof Error ? err.message : err}\n`);
     process.exit(1);
+  } finally {
+    if (typeof llmHold === 'object') { try { await llmHold.release(); } catch { /* autoreleased on process exit */ } }
   }
 
   await disconnect();

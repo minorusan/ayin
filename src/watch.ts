@@ -287,12 +287,20 @@ async function reviewCommit(repo: string, commit: string): Promise<{ status: 're
   }
   if (!diff.trim()) diff = '(empty diff — merge or metadata-only commit)';
 
+  // Review output dir — a folder if AYIN_REVIEW_DIR is set (absolute, or relative to the repo);
+  // else the repo root (back-compat). Reports + asset diffs are written here together, so the
+  // relative AssetDiff link in the review header still resolves.
+  const reviewDir = process.env.AYIN_REVIEW_DIR
+    ? (process.env.AYIN_REVIEW_DIR.startsWith('/') ? process.env.AYIN_REVIEW_DIR : join(repo, process.env.AYIN_REVIEW_DIR))
+    : repo;
+  if (reviewDir !== repo) mkdirSync(reviewDir, { recursive: true });
+
   // Unity repos only: deterministic object-level asset diff → its OWN file next to the review
   // (AssetDiff-<shortHash>.md), and fed to the reviewer as ground truth.
   const unityMd = await unityAssetDiff(repo, commit);
   let assetDiffPath: string | null = null;
   if (unityMd) {
-    assetDiffPath = join(repo, `AssetDiff-${meta.shortHash}.md`);
+    assetDiffPath = join(reviewDir, `AssetDiff-${meta.shortHash}.md`);
     writeFileSync(assetDiffPath, `# Unity Asset Diff — ${meta.subject}
 
 | | |
@@ -315,7 +323,7 @@ ${unityMd}
     { role: 'user', content: buildReviewPrompt(meta, diff, truncated, unityMd) },
   ]);
 
-  const reportPath = join(repo, `CodeReview-${meta.shortHash}.md`);
+  const reportPath = join(reviewDir, `CodeReview-${meta.shortHash}.md`);
   const header = `# Code Review — ${meta.subject}
 
 | | |
