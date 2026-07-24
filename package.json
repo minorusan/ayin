@@ -1,6 +1,6 @@
 {
   "name": "@maradel/ayin",
-  "version": "1.0.158",
+  "version": "1.0.159",
   "description": "Ayin coding agent (vendored from egregor; LLM via Maradel backend → gemma)",
   "type": "module",
   "main": "dist/index.js",

@@ -585,11 +585,16 @@ const MAX_STAGE_BYTES = 2 * 1024 * 1024; // never stage a file bigger than this 
 
 // Never stage (secrets + ayin's own artifacts + CLAUDE.md pointer).
 const SECRET_RE = /(^|\/)(\.env(\.[^/]+)?|[^/]*\.(pem|key|p12|pfx|keystore)|id_rsa|id_ed25519|[^/]*(secret|credential)[^/]*)$/i;
+// Infra the developer manages by hand — never auto-staged, and excluded from the review trigger:
+// git hooks, Unity ProjectSettings/ + UserSettings/, and editor/IDE settings (.vscode/.idea/.vs,
+// .csproj/.sln/.user/.vsconfig). Deterministic so it holds regardless of the model's judgement.
+const NEVER_STAGE_RE = /(^|\/)(ProjectSettings|UserSettings|\.vscode|\.idea|\.vs|hooks)(\/|$)|\.(csproj|sln|user|vsconfig)$/i;
 function isStageable(path: string): boolean {
   const base = path.split('/').pop() || path;
   if (AYIN_REPORT_RE.test(base)) return false;
   if (base === 'CLAUDE.md') return false;
   if (SECRET_RE.test(path)) return false;
+  if (NEVER_STAGE_RE.test(path)) return false;
   return true;
 }
 
@@ -601,17 +606,21 @@ function saveWorktreeState(s: WorktreeState): void {
   try { writeFileSync(WORKTREE_STATE_FILE, JSON.stringify(s, null, 2)); } catch { /* best effort */ }
 }
 
-// ayin's own outputs — excluded from the unstaged-change fingerprint (pathspec) so writing a report
-// or the CLAUDE.md pointer never re-triggers the pass, and from staging (isStageable).
-const AYIN_EXCLUDE_PATHSPEC = ['CLAUDE.md', 'AYIN-REPORT-*.md', 'CodeReview-*.md', 'AssetDiff-*.md']
-  .map(p => `:(exclude,glob)${p}`).concat([':(exclude,glob)**/AYIN-REPORT-*.md', ':(exclude,glob)**/CodeReview-*.md']);
+// Paths excluded from the unstaged-change fingerprint AND the review diff: ayin's own outputs (so
+// writing a report/CLAUDE.md never re-triggers the pass) + the never-stage infra (ProjectSettings/
+// UserSettings/IDE/hooks — the dev owns those). Matches isStageable / NEVER_STAGE_RE in intent.
+const EXCLUDE_PATHSPEC = [
+  'CLAUDE.md', 'AYIN-REPORT-*.md', 'CodeReview-*.md', 'AssetDiff-*.md',
+  'ProjectSettings/**', 'UserSettings/**', '.vscode/**', '.idea/**', '.vs/**',
+  '*.csproj', '*.sln', '*.user', '*.vsconfig',
+].flatMap(g => [`:(exclude,glob)${g}`, `:(exclude,glob)**/${g}`]);
 
 /** Fingerprint of the UNSTAGED work only — `git diff` (working tree vs index, NOT --cached) plus
  *  new untracked files — with ayin's own artifacts + CLAUDE.md excluded. So the big (LLM) review
  *  fires only when the user's unstaged changes actually change: staging/unstaging alone doesn't
  *  trip it, and the dog writing its own report/CLAUDE.md never re-triggers itself. */
 async function worktreeFingerprint(repo: string): Promise<string> {
-  const diff = await git(repo, ['diff', '--', '.', ...AYIN_EXCLUDE_PATHSPEC], 400_000);
+  const diff = await git(repo, ['diff', '--', '.', ...EXCLUDE_PATHSPEC], 400_000);
   const others = await git(repo, ['ls-files', '--others', '--exclude-standard']);
   const untracked = others.stdout.split('\n').filter(Boolean).filter(isStageable).sort().join('\n');
   return createHash('sha1').update(`${diff.stdout}\n--untracked--\n${untracked}`).digest('hex');
@@ -649,9 +658,14 @@ function commitText(c: NonNullable<WorktreePlan['commit']>): string {
 const WORKTREE_SYS = 'You are a senior engineer triaging a teammate\'s uncommitted work. You respond with ONE json code block and nothing else.';
 function buildWorktreePrompt(files: string[], status: string, diff: string, truncated: boolean): string {
   return `A developer has uncommitted changes. Decide what to STAGE vs leave unstaged, draft a commit
-message, and review for dangerous code. Meaningful product/logic/test/doc changes → stage:true.
-Debug scaffolding, stray prints/logs, commented-out experiments, throwaway/scratch files, editor
-cruft → stage:false. When unsure, stage:false (safer).
+message, and review for dangerous code.
+
+MEANINGFUL → stage:true: C# source (.cs); animation assets (.anim / .controller /
+.overrideController); ScriptableObjects & data assets (.asset); plus normal source, tests, docs.
+NOT meaningful → stage:false: debug scaffolding, stray prints/logs (Debug.Log/console.log),
+commented-out experiments, throwaway/scratch files, editor cruft. When unsure, stage:false (safer).
+(Git hooks, Unity ProjectSettings/UserSettings, and editor/IDE files are already filtered out — you
+won't see them; never propose staging them.)
 
 ## Changed files
 ${files.map(f => `- ${f}`).join('\n')}
@@ -717,7 +731,7 @@ async function reviewWorktree(repo: string): Promise<void> {
   const files = statusRes.stdout.split('\n').filter(Boolean).map(l => l.slice(3)).filter(isStageable);
   if (files.length === 0) return;
 
-  let diff = (await git(repo, ['diff', 'HEAD'], MAX_WORKTREE_DIFF + 4096)).stdout;
+  let diff = (await git(repo, ['diff', 'HEAD', '--', '.', ...EXCLUDE_PATHSPEC], MAX_WORKTREE_DIFF + 4096)).stdout;
   const truncated = diff.length > MAX_WORKTREE_DIFF;
   if (truncated) diff = diff.slice(0, MAX_WORKTREE_DIFF) + '\n\n… DIFF TRUNCATED …';
 
