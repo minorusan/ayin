@@ -345,7 +345,8 @@ standalone build removed all of it:
 - **`tokens.ts`** — no Netzach discovery; tries `${keliBaseUrl}/api/estimate`, else chars/4.
 - **`updater.ts`** — no private registry. The update check is **opt-in** via
   `AYIN_UPDATE_REGISTRY`; unset (default) → it never contacts any registry.
-- **`package.json`** — dropped the `@egregor/*` dependencies; renamed `@maradel/ayin`.
+- **`package.json`** — dropped the `@egregor/*` dependencies; package name is `ayin` (neutral
+  standalone; was `@maradel/ayin`). See `docs/TODO.md` for the path to a fully clean standalone.
 
 What's genuinely new vs. the upstream doc: the **LLM manager + dialects** (model-agnostic
 core), **`str_replace`**, **`explore`**, and **`docs_search`**.

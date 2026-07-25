@@ -13,7 +13,7 @@ import { log } from './log.js';
 // https://registry.npmjs.org/) to enable it. Empty by default → the check is skipped, so
 // a fresh open-source checkout never phones home to any registry.
 const REGISTRY = process.env.AYIN_UPDATE_REGISTRY ?? '';
-const PACKAGE_NAME = process.env.AYIN_UPDATE_PACKAGE ?? '@maradel/ayin';
+const PACKAGE_NAME = process.env.AYIN_UPDATE_PACKAGE ?? 'ayin';
 
 function getCurrentVersion(): string {
   try {
