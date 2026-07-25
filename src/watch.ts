@@ -882,11 +882,18 @@ async function processBacklog(retryState: Map<string, { attempts: number; nextTr
     const key = entryKey(entry);
     try {
       const result = await mineSession(entry.transcript || '', entry.cwd || entry.repo || '');
+      // Transcript not on disk yet (lazy flush by Claude Code)? Retry a few times before giving up
+      // instead of permanently marking it gone — so a moment's timing never loses a session.
+      if (result.status === 'gone') {
+        const attempts = (retryState.get(key)?.attempts ?? 0) + 1;
+        if (attempts < MAX_REVIEW_ATTEMPTS) { retryState.set(key, { attempts, nextTryAt: Date.now() + 20_000 * attempts }); continue; }
+      }
       appendFileSync(PROCESSED_FILE, JSON.stringify({ key, ts: Date.now(), ...result }) + '\n');
     } catch (err) {
       appendFileSync(PROCESSED_FILE, JSON.stringify({ key, ts: Date.now(), status: 'failed', note: (err instanceof Error ? err.message : String(err)).slice(0, 200) }) + '\n');
     }
     processed.add(key);
+    retryState.delete(key);
   }
 
   if (reviewEntries.length === 0) return;
