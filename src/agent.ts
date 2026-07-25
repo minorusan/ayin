@@ -18,6 +18,8 @@ import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { cancelActiveThinking } from './connection.js';
 import { llmChat, parseToolCalls, renderToolCall, renderToolResult } from './llm/manager.js';
+import { llmCall } from './llm.js';
+import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution } from './tools.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
 import { getGoal } from './goal.js';
@@ -342,6 +344,11 @@ function buildMessages(round: number, maxRounds: number): Message[] {
     systemContent += `\n\nCurrent task: ${currentGoal}`;
   }
 
+  // Auto-research grounding for this turn (web search ran before the base call, per the trigger).
+  if (researchContext) {
+    systemContent += `\n\n${researchContext}`;
+  }
+
   // Programmatic fact tracker — no LLM, just concatenated explore results.
   if (gatheredFacts.length > 0) {
     systemContent += `\n\nFacts gathered so far (${gatheredFacts.length} explore calls):\n`;
@@ -456,6 +463,55 @@ function isSimilarText(a: string, b: string): boolean {
   return overlap / smaller.size > 0.7;
 }
 
+// ── auto-research grounding ───────────────────────────────────────────
+// Near-deterministic: if the prompt contains grounded/citing/citation/research, run a web search
+// BEFORE the base call and pre-prompt its result into the turn — so gemma answers grounded, with
+// citations, scientific-methods-first. Query is formulated from the prompt + the user's stack
+// (SYSTEM_INFO env, with a baked default). Opt out with AYIN_RESEARCH=0.
+const RESEARCH_TRIGGER = /(grounded|citing|citation|research)/i;
+const SYSTEM_INFO_DEFAULT =
+  'Unity3D (visualize anything — 3D/AR; embeddable into Flutter), Flutter (desktop + web UI), ' +
+  'Node/TS backend, Arduino (embedded). Hardware: an RTX 3090 eGPU LLM lab on a dedicated i3 NUC; ' +
+  'two i7 laptops (Windows + macOS); a Raspberry Pi — distributed systems are feasible.';
+function systemInfo(): string { return process.env.SYSTEM_INFO || SYSTEM_INFO_DEFAULT; }
+
+let researchContext = ''; // pre-prompted into the base call for this turn; reset each runResearch
+
+async function runResearch(userInput: string): Promise<void> {
+  researchContext = '';
+  if (process.env.AYIN_RESEARCH === '0' || !RESEARCH_TRIGGER.test(userInput)) return;
+  try {
+    setAgentStatus('Researching (grounding)...');
+    // 1) formulate ONE focused, scientific-leaning search query from the request + the user's stack.
+    let query = userInput;
+    try {
+      const q = (await llmCall(
+        `The user wants a grounded, cited answer. Extract ONE concise web-search query (scientific/` +
+        `technical framing) for their request, mindful of their stack.\nRequest: ${userInput}\n` +
+        `Stack: ${systemInfo()}\nReturn ONLY the query on one line, no preamble.`,
+      )).trim().split('\n')[0].replace(/^["']|["']$/g, '').slice(0, 200);
+      if (q.length > 3) query = q;
+    } catch { /* formulation failed — fall back to the raw prompt as the query */ }
+    // 2) web search (SearXNG → DuckDuckGo) → real hits + sources.
+    const results = await webSearch(query);
+    // 3) pre-prompt the base call: grounded, scientific→household, tailored to the user's stack.
+    researchContext =
+      `<research-grounding>\nThe user asked for a grounded / researched answer, so a web search was run first.\n\n` +
+      `Research topic: ${query}\n\n${results}\n\n` +
+      `When you answer:\n` +
+      `- Lead with SCIENTIFIC methods of solving the problem; THEN review practical/household methods.\n` +
+      `- Cite the sources above (title + URL) for the claims you use.\n` +
+      `- Tailor recommendations to the user's stack + hardware: ${systemInfo()}\n` +
+      `</research-grounding>`;
+    log('INFO', 'research_grounding', { query: query.slice(0, 120) });
+  } catch (err) {
+    log('WARN', 'research_failed', { error: err instanceof Error ? err.message : String(err) });
+    researchContext = '';
+  } finally {
+    setAgentStatus('');
+  }
+}
+
 export async function runAgent(userInput: string): Promise<void> {
   currentGoal = userInput;
   recordPrompt(userInput); // consolidated per-session record (prompts + tools + answers)
@@ -479,6 +535,9 @@ export async function runAgent(userInput: string): Promise<void> {
   ctaDelivered = false;
   ctaTarget = extractCTA(userInput);
   if (ctaTarget) log('INFO', 'cta_extracted', { target: ctaTarget });
+
+  // Auto-research grounding (deterministic trigger) — web search BEFORE the base call, pre-prompted.
+  await runResearch(userInput);
 
   const maxRounds = getMaxRounds();
   roundLoop: for (let round = 0; round < maxRounds; round++) {

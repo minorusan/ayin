@@ -120,6 +120,13 @@ configured): `web_search`, `docs_search`, `codex`, `jira`, `fixme`. See the READ
 - **`str_replace`** is the preferred edit tool — a single-unique-match find/replace that
   touches only the targeted block. `write_file` is for new files / deliberate full rewrites
   (regenerating a large file from memory risks dropping content).
+- **Auto-research grounding** (`agent.ts#runResearch`): near-deterministic — if the prompt contains
+  `grounded`/`citing`/`citation`/`research`, ayin runs a `web_search` BEFORE the base LLM call and
+  **pre-prompts the result into the turn** (a `<research-grounding>` block in the system context), so
+  the answer is grounded + cited, **scientific methods first, then practical/household**, tailored to
+  the user's stack. The search query is LLM-formulated from the prompt + the user's stack, read from
+  the **`SYSTEM_INFO`** env var (a baked default describes the Unity/Flutter/Node-TS/Arduino + RTX-3090
+  eGPU/laptops/Pi setup). Opt out with `AYIN_RESEARCH=0`.
 - **`web_search`** (`tools/web-search.ts`) mirrors maradel's pipeline (`backend/src/tasks/webSearch.ts`),
   in-process and dependency-free: **SearXNG** (keyless self-hosted metasearch, JSON API) PRIMARY →
   **DuckDuckGo HTML** fallback → **DDG Instant Answer** last resort; rank + dedup → fetch top 4 pages →
