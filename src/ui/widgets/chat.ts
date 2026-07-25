@@ -103,10 +103,14 @@ export class ChatLog {
     this.box.bottom = row;
   }
 
-  /** True when the view is at (or past) the bottom — i.e. following live output. */
+  /** True when the view is following live output: either the content fits (nothing to scroll) or
+   *  we're at the bottom. Content-fits must count as "at bottom" — else getScrollPerc returns 0 and
+   *  we'd wrongly disengage follow on a short transcript. */
   private atBottom(): boolean {
-    const b = this.box as unknown as { getScrollPerc?: () => number };
-    return (b.getScrollPerc?.() ?? 100) >= 100;
+    const b = this.box as unknown as { getScrollPerc?: () => number; getScrollHeight?: () => number; height?: number; iheight?: number };
+    const viewH = (Number(b.height ?? 0)) - (Number(b.iheight ?? 0));
+    if ((b.getScrollHeight?.() ?? 0) <= viewH) return true; // fits → always following
+    return (b.getScrollPerc?.() ?? 100) >= 99;
   }
 
   scrollHalfPage(dir: 1 | -1): void {
@@ -173,11 +177,17 @@ export class ChatLog {
     if (tail.length) lines.push('', ...tail);
 
     const padLines = Math.max(0, chatHeight - lines.length);
-    const b = this.box as unknown as { getScroll?: () => number; scrollTo?: (i: number) => void };
-    const prevScroll = b.getScroll?.() ?? 0; // remember the user's position BEFORE content changes
+    const b = this.box as unknown as { childBase?: number; scroll?: (n: number) => void };
+    const prevBase = b.childBase ?? 0; // the top visible line BEFORE content changes
     this.box.setContent([...Array(padLines).fill(''), ...lines].join('\n'));
-    if (this.stick) this.box.setScrollPerc(100); // following live → snap to newest
-    else b.scrollTo?.(prevScroll); // scrolled up → keep the user exactly where they were
+    if (this.stick) {
+      this.box.setScrollPerc(100); // following live → snap to newest
+    } else {
+      // Scrolled up: keep the user exactly where they were. Restore childBase DIRECTLY (not via
+      // scrollTo, whose alwaysScroll math fought the user under frequent redraws) then clamp.
+      b.childBase = prevBase;
+      b.scroll?.(0);
+    }
     render();
   }
 
