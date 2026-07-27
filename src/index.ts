@@ -452,7 +452,7 @@ onInput(async (text: string) => {
         if (isSessionLocked()) { addMessage('system', 'Already locked. /unlock releases it.'); return; }
         const err = await lockSession();
         if (err) { addMessage('system', `/lock failed: ${err}`); return; }
-        addMessage('system', 'Locked 🔒 — this session holds the model until you /quit, /unlock, or stop responding for 10 minutes.');
+        addMessage('system', 'Locked ⚿ — this session holds the model until you /quit, /unlock, or stop responding for 10 minutes.');
         return;
       }
       case '/unlock':

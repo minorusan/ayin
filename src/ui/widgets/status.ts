@@ -1,4 +1,12 @@
 /**
+ * GLYPH RULE — read before adding any symbol to this bar.
+ * Only BMP characters with `Emoji_Presentation=false` are allowed. blessed reports
+ * `strWidth` 1 for a padlock (U+1F512) while every modern terminal draws it 2 cells wide, so ONE emoji makes this
+ * one-row box overflow, wrap, and then smartCSR's cell diff re-emits shifted rows — the visible
+ * result is the input bar swallowing the thinking line and fragments appearing duplicated. It has
+ * bitten this file twice: U+1F512 (padlock, for /lock) and U+23F3 (hourglass, for the queue), now
+ * U+26BF and U+29D7. `npm run check:glyphs` enforces the rule so there is no third time.
+ *
  * StatusBar — the one-row bar at the very bottom:
  *   connection · model · gpu · tokens · llm phase · update hint  ⟩⟩  cwd (branch)
  *
@@ -150,8 +158,8 @@ export class StatusBar {
       const m = this.state.model;
       const narrow = (screen.width as number) < 100;
       const short = (n: string) => (narrow ? n.replace(/:.*$/, '') : n); // qwen3-coder:30b → qwen3-coder
-      // 🔒 = /lock: this session holds the model until it exits or stops responding (10-min TTL).
-      const lock = m.locked ? '🔒 ' : '';
+      // U+26BF = /lock: this session holds the model until it exits or stops responding (10-min TTL).
+      const lock = m.locked ? '⚿ ' : '';
       const glyph = m.swapping ? '⇆' : m.booked ? '⬢' : '⬡';
       const color = m.swapping ? theme.warn : m.booked ? theme.accent : theme.muted;
       // Mid-swap, say it as a transition — "gemma4:26b→qwen3.6:27b loading" — so the bar can never
@@ -189,7 +197,7 @@ export class StatusBar {
 
     // Why your reply is slow: the shared GPU slot is busy and you may be behind N other calls.
     // ayin's own calls are LOW priority on that scheduler, so waiting is normal, not a hang —
-    // seeing `⏳ embed +3` beats staring at an indistinguishable spinner.
+    // seeing `⧗ embed +3` beats staring at an indistinguishable spinner.
     // Authority first: it answers "who decides the model", which is NOT the same question as "why
     // is this slow" — conflating them is exactly the confusion this pair of segments exists to end.
     const auth = this.state.authority;
@@ -206,12 +214,12 @@ export class StatusBar {
         parts.push(`{${theme.ok}-fg}▸ generating{/}`);
       } else if (q.ownPosition) {
         const color = q.ownPosition > 2 ? theme.err : theme.warn;
-        parts.push(`{${color}-fg}⏳ you: #${q.ownPosition}/${q.ownOf}{/}`);
+        parts.push(`{${color}-fg}⧗ you: #${q.ownPosition}/${q.ownOf}{/}`);
       } else {
         const held = q.running ? `${q.running}${q.runningForMs > 3000 ? ` ${Math.round(q.runningForMs / 1000)}s` : ''}` : 'idle';
         const behind = q.depth > 0 ? ` +${q.depth}` : '';
         const color = q.depth > 2 ? theme.err : q.depth > 0 ? theme.warn : theme.muted;
-        parts.push(`{${color}-fg}⏳ ${held}${behind}{/}`);
+        parts.push(`{${color}-fg}⧗ ${held}${behind}{/}`);
       }
     }
 

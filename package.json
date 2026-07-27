@@ -1,6 +1,6 @@
 {
   "name": "ayin",
-  "version": "1.0.183",
+  "version": "1.0.184",
   "description": "A small, model-agnostic terminal coding agent — an agentic loop in your shell against a self-hosted LLM (Ollama or any OpenAI-compatible endpoint).",
   "type": "module",
   "main": "dist/index.js",
@@ -20,7 +20,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "prepublishOnly": "tsc"
+    "prepublishOnly": "tsc",
+    "check:glyphs": "node tool/check-glyphs.mjs",
+    "prebuild": "node tool/check-glyphs.mjs"
   },
   "dependencies": {
     "blessed": "^0.1.81",
