@@ -17,7 +17,7 @@ import { refreshActiveModel } from './llm/manager.js';
 import { getSummaryText, getSummary, resetSummary } from './summary.js';
 import { estimateSessionTokens } from './tokens.js';
 import { loadHistory, pushEntry } from './history.js';
-import { runAgent, interruptAgent, enqueueAgentMessage } from './agent.js';
+import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation } from './agent.js';
 import { startPromptServer } from './prompt-server.js';
 import { acquireLlm, type LlmHold } from './resource-client.js';
 import { handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
@@ -509,6 +509,19 @@ onInput(async (text: string) => {
           const s = getSummary();
           s.summary = checkpoint.summary;
           s.recent = checkpoint.recent;
+
+          // …and into the two places that actually matter, which the old code never touched:
+          //  1. the AGENT's window — the only history buildMessages reads. Without this the model
+          //     resumes with no idea what the session was about.
+          //  2. the CHAT transcript — repaint it, or the screen still shows the session you left
+          //     while claiming to have resumed another one.
+          const restored = restoreConversation(checkpoint.recent);
+          clearChat();
+          addMessage('system', `── resumed ${(resolveSessionId(targetId) ?? targetId).slice(0, 8)} · ${restored} turns replayed below ──`);
+          for (const turn of checkpoint.recent) {
+            if (turn.role === 'user' || turn.role === 'assistant') addMessage(turn.role, turn.content);
+          }
+          addMessage('system', '── end of restored history · new turns continue this session ──');
           // Say what was actually restored — "resumed" with an empty window is a lie you only
           // discover two turns later.
           const rid = (resolveSessionId(targetId) ?? targetId).slice(0, 8);

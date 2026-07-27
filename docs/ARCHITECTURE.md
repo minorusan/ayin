@@ -466,6 +466,15 @@ can finish — see the warning in `SETUP.md`.
   summary from the sidecar, the last 20 turns replayed from the record. **Tool calls are excluded
   from the replay** — they're in the record to read, but replaying them would spend the context
   budget on output the model already acted on.
+  - **What a restore actually restores** (all three, since two were missing): the **agent's
+    `conversationWindow`** via `restoreConversation()` — the ONLY history `buildMessages` reads, and
+    previously module-private with no way in, so a resumed session gave the model *nothing*; the
+    **chat transcript**, repainted between `── resumed <id> · N turns replayed below ──` and
+    `── end of restored history ──`, because otherwise the screen still showed the session you left;
+    and the summary store. Related finding: `buildMessages` read `getSummary()` into a variable it
+    never used, so the rolling summary had never reached the model at all (and `updateSummary` is
+    disabled — "was hallucinating"). It is now injected when non-empty, which is what makes a
+    restored summary worth anything.
   - **A PICKER, not a printed list.** `/resume` opens the shared `dialog.ts` overlay — ↑/↓, Enter
     restores, Esc changes nothing. Each row is two lines: the **goal** as the label (falling back to
     the first prompt) and the detail you actually weigh underneath —

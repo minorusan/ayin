@@ -317,9 +317,32 @@ function pushToWindow(role: string, content: string): void {
   }
 }
 
+/**
+ * Load prior turns into the agent's window — what makes `/resume` actually resume.
+ *
+ * `conversationWindow` is the ONLY source of history `buildMessages` reads, and it was
+ * module-private with no way in: a resume restored the summary store (which nothing reads) and left
+ * the model with an empty window, so it had no idea what the session had been about. The chat
+ * transcript is repainted separately by the caller — this is the model's side.
+ */
+export function restoreConversation(turns: Array<{ role: string; content: string }>): number {
+  conversationWindow.length = 0;
+  const max = getWindowSize();
+  for (const t of turns.slice(-max)) {
+    if (t.role !== 'user' && t.role !== 'assistant') continue; // tool traffic is not replayed
+    conversationWindow.push({ role: t.role, content: t.content });
+  }
+  log('INFO', 'conversation_restored', { turns: String(conversationWindow.length) });
+  return conversationWindow.length;
+}
+
 function buildMessages(round: number, maxRounds: number): Message[] {
   const summary = getSummary();
   const messages: Message[] = [];
+  // NOTE: `summary.summary` was read here and then never used — the rolling summary has not reached
+  // the model for as long as that line existed, and `updateSummary` is disabled besides ("was
+  // hallucinating"), so it is empty for new sessions. It IS injected below when non-empty, which is
+  // what makes a RESTORED summary from `/resume` mean something.
 
   let systemContent = toolsSystemPrompt();
 
@@ -364,6 +387,11 @@ function buildMessages(round: number, maxRounds: number): Message[] {
   }
 
   // Auto-research grounding for this turn (web search ran before the base call, per the trigger).
+  // A rolling summary carried in from a resumed session — prior context the window can't hold.
+  if (summary.summary) {
+    systemContent += `\n\nContext from earlier in this session (restored):\n${summary.summary}`;
+  }
+
   if (diagramContext) {
     systemContent += `\n\n${diagramContext}`;
   }
