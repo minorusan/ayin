@@ -62,10 +62,18 @@ ayin update               # fetch + install the newest build
 ayin update --check       # report only, install nothing
 ```
 
-`ayin update` resolves the registry from `--registry` → `AYIN_UPDATE_REGISTRY` → whatever npm
-itself is configured with, and shells out to `npm i -g` so a half-finished download can never
-replace a working binary. If the global prefix isn't writable it tells you to re-run with `sudo`.
-Running from a source checkout, it says so — there, updating is `git pull && npm run build`.
+`ayin update` resolves the registry from `--registry` → `AYIN_UPDATE_REGISTRY` →
+`/set update-registry <url>` (persisted per machine) → npm's own configured registry, and shells out
+to `npm i -g` so a half-finished download can never replace a working binary. If the global prefix
+isn't writable it tells you to re-run with `sudo`. Running from a source checkout, it says so —
+there, updating is `git pull && npm run build`.
+
+> **`ayin` is a taken name on public npm, and that package is not this one.** `ayin update` therefore
+> **refuses** to fall back to registry.npmjs.org: a machine whose npm defaulted to the public
+> registry resolved `latest` to a stranger's `0.0.2`, and only the "local build is ahead" check
+> stopped it — `--force` would have installed someone else's code over the agent. Point it at your
+> own registry once with `/set update-registry http://<host>:4873`. Passing
+> `--registry https://registry.npmjs.org/` explicitly is still honoured, with a warning.
 
 The status bar carries `↑ vX available` when the registry has a newer build (checked at boot and
 every 10 min). It only ever asks a **private** registry — `AYIN_UPDATE_REGISTRY`, or npm's own

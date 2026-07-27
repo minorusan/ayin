@@ -5,13 +5,18 @@
  * The registry is resolved in this order, and NEVER guessed:
  *   1. `--registry <url>` on the command line
  *   2. `AYIN_UPDATE_REGISTRY`
- *   3. whatever npm itself is configured with (`npm config get registry`) — on this LAN that is
- *      the nuk's private Verdaccio (see maradel `utils/verdaccio/README.md`), which is where
- *      `ayin` and `maradel-beacon` are published.
+ *   3. `updateRegistry` in `~/.ayin-cli/prompts.json` (`/set update-registry <url>`) — the durable
+ *      per-machine answer, independent of whatever npm happens to be pointed at
+ *   4. npm's own configured registry (`npm config get registry`)
  *
- * The passive startup check stays OPT-IN (steps 1-2 only): a fresh open-source checkout must not
- * phone home to a registry nobody asked about. `ayin update` is an explicit command, so it may
- * fall through to npm's own configured registry.
+ * …and step 4 is REFUSED when it resolves to public npmjs. `ayin` is a taken name there and that
+ * package is not this build: a machine whose npm defaulted to registry.npmjs.org resolved `latest`
+ * to a stranger's 0.0.2, and only the "local build is ahead" check stopped it — `--force` would
+ * have replaced the agent with someone else's code. Explicit `--registry <public url>` is still
+ * honoured, with a warning, because that is the user saying it on purpose.
+ *
+ * The passive startup check follows the same order minus the npmjs fallback, so a fresh
+ * open-source checkout never phones home to a registry nobody asked about.
  */
 
 import { execFile } from 'node:child_process';
@@ -19,6 +24,7 @@ import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setStatus } from './ui.js';
+import { getConfigString } from './prompts.js';
 import { log } from './log.js';
 
 const REGISTRY = process.env.AYIN_UPDATE_REGISTRY ?? '';
@@ -46,6 +52,21 @@ function compareVersions(a: string, b: string): number {
 }
 
 /**
+ * `ayin` IS A TAKEN NAME ON PUBLIC NPM. Observed in the wild: `ayin update` on a machine whose npm
+ * pointed at registry.npmjs.org resolved `latest` to a stranger's **0.0.2**. Only the
+ * "local build is ahead" check stopped it; `--force` would have installed someone else's package
+ * over the agent. So the public registry is never used implicitly — not for the passive check, and
+ * not for an actual install. Explicit `--registry https://registry.npmjs.org/` is still honoured
+ * (with a warning), because an explicit instruction is the user's call.
+ */
+function isPublicRegistry(url: string): boolean {
+  return /(^|\/\/)(registry\.)?(npmjs\.(org|com)|yarnpkg\.com)/i.test(url);
+}
+
+/** Where the update registry came from, so a surprising answer is never unexplained. */
+type RegistrySource = 'flag' | 'env' | 'ayin config' | 'npm config' | 'none';
+
+/**
  * Which registry the PASSIVE check may talk to.
  *
  * `AYIN_UPDATE_REGISTRY` if set. Otherwise npm's own configured registry — but only when it is a
@@ -58,9 +79,10 @@ async function passiveRegistry(): Promise<string | null> {
   if (process.env.AYIN_UPDATE_CHECK === '0') return null;
   if (REGISTRY) return REGISTRY;
   if (passiveRegistryCache !== undefined) return passiveRegistryCache;
+  const configured = getConfigString('updateRegistry');
+  if (configured) { passiveRegistryCache = configured; return configured; }
   const npmReg = await npmConfiguredRegistry();
-  const isPublic = !npmReg || /(^|\/\/)(registry\.)?npmjs\.(org|com)/i.test(npmReg);
-  passiveRegistryCache = isPublic ? null : npmReg;
+  passiveRegistryCache = !npmReg || isPublicRegistry(npmReg) ? null : npmReg;
   return passiveRegistryCache;
 }
 
@@ -163,14 +185,47 @@ export async function runUpdate(argv: string[]): Promise<void> {
 
   const current = getCurrentVersion();
   const tag = flag('tag') ?? 'latest';
-  const registry = flag('registry') ?? (REGISTRY || (await npmConfiguredRegistry()));
 
+  // Resolve the registry, remembering WHERE it came from — the difference between an explicit
+  // instruction and a fallback decides whether the public registry is allowed.
+  let registry = flag('registry');
+  let source: RegistrySource = registry ? 'flag' : 'none';
+  if (!registry && REGISTRY) { registry = REGISTRY; source = 'env'; }
   if (!registry) {
-    process.stderr.write('ayin update: no registry configured. Pass --registry <url>, set AYIN_UPDATE_REGISTRY, or point npm at one.\n');
-    process.exit(1);
+    const configured = getConfigString('updateRegistry');
+    if (configured) { registry = configured; source = 'ayin config'; }
+  }
+  if (!registry) {
+    const npmReg = await npmConfiguredRegistry();
+    if (npmReg) { registry = npmReg; source = 'npm config'; }
   }
 
-  process.stdout.write(`ayin ${current}  ·  registry ${registry}\n`);
+  if (!registry) {
+    process.stderr.write('ayin update: no registry configured. Pass --registry <url>, set AYIN_UPDATE_REGISTRY, or run /set update-registry <url> in the TUI.\n');
+    process.exit(1);
+    return;
+  }
+
+  // The guard. `ayin` exists on public npm and is not us; a fallback must never reach it.
+  if (isPublicRegistry(registry) && source !== 'flag') {
+    process.stderr.write(
+      `ayin update: refusing to update from the PUBLIC npm registry (${registry}, from ${source}).\n` +
+      `             "ayin" is a taken name there and that package is not this build — installing it\n` +
+      `             would replace your agent with a stranger's code.\n` +
+      `             Point it at the registry your build comes from, once:\n` +
+      `               /set update-registry http://<your-registry>:4873      (persists in ~/.ayin-cli)\n` +
+      `             or per-run:  ayin update --registry http://<your-registry>:4873\n` +
+      `             or export AYIN_UPDATE_REGISTRY.\n` +
+      `             If you really do want the public package, pass --registry ${registry} explicitly.\n`,
+    );
+    process.exit(1);
+    return;
+  }
+  if (isPublicRegistry(registry)) {
+    process.stdout.write(`⚠ using the PUBLIC npm registry by explicit request — "ayin" there is not necessarily your build.\n`);
+  }
+
+  process.stdout.write(`ayin ${current}  ·  registry ${registry} (${source})\n`);
 
   let latest: string | null;
   try {

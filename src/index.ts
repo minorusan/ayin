@@ -439,7 +439,7 @@ onInput(async (text: string) => {
         }
         const key = parts[1];
         const value = parts.slice(2).join(' ');
-        const keyMap: Record<string, string> = { 'openai-key': 'openAiKey', 'keli-url': 'keliUrl' };
+        const keyMap: Record<string, string> = { 'openai-key': 'openAiKey', 'keli-url': 'keliUrl', 'update-registry': 'updateRegistry' };
         const configKey = keyMap[key] ?? key;
         setConfigValue(configKey, value);
         addMessage('system', `Set ${key} ✓`);
@@ -478,6 +478,7 @@ onInput(async (text: string) => {
         addMessage('system', '/resume <sessionId> — restore a specific session');
         addMessage('system', '/clear — clear chat');
         addMessage('system', '/set keli-url <http://host:9100> — point ayin at the Maradel backend (gemma) on the LAN');
+        addMessage('system', '/set update-registry <http://host:4873> — where `ayin update` looks (public npm is refused: "ayin" there is someone else)');
         addMessage('system', '/set openai-key <sk-...> — configure OpenAI API key');
         addMessage('system', '/reset — restore default prompts');
         addMessage('system', '/quit — exit');
