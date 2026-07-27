@@ -102,6 +102,22 @@ committing a review never triggers a review of the review.
 To keep it running on macOS: `nohup ayin watch --repo <repo> &`, or wrap it in a launchd
 agent with `KeepAlive` — the daemon is safe to kill and restart at any point.
 
+**Repo hygiene** — alongside the hooks, `ayin watch` maintains two managed blocks in every watched
+repo (and re-asserts them in the 5-min self-heal, so a reset or fresh clone gets them back):
+
+- `.gitignore` — a `# >>> ayin:local-cruft >>>` block ignoring the local dev cruft that must never
+  be committed: ayin's own `AYIN-REPORT-*` / `CodeReview-*` / `AssetDiff-*` reports, `system_specs.md`
+  / `.txt` (machine hardware dumps — hostname/serial/UUID), `STUDY_PERF-*/` scratch notes,
+  `.claude/hooks/`, and the local-only `Assets/LiveOpsHub` + `Assets/Plugins/AltTester` folders.
+- `CLAUDE.md` **and** `GEMINI.md` — an `<!-- ayin:hygiene:begin -->` block quoting the same list as
+  an instruction, so Claude Code / Gemini CLI don't stage those paths either. The same two files
+  also carry the `<!-- ayin:reports:begin -->` pointer to pending reports.
+
+Only the fenced regions are touched — the rest of each file is yours, and a file is written only
+when its bytes actually change. `AYIN_WATCH_HYGIENE=0` turns the whole thing off. Note that
+`.gitignore` only affects *untracked* files: cruft already tracked in the repo needs a one-time
+`git rm --cached`.
+
 **Unity repos** (`Assets/` + `ProjectSettings/`) get **two files per commit**:
 `CodeReview-<hash>.md` (the LLM review) and `AssetDiff-<hash>.md` — a **deterministic asset
 diff** from the external `unity_asset_diff` tool: object-level changes with full hierarchy

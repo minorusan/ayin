@@ -18,6 +18,10 @@
  *     write CodeReview-<shortHash>.md into the repo root.
  *   - Commits that only touch CodeReview-*.md files are skipped — otherwise committing a
  *     review would trigger a review of the review, forever.
+ *   - Alongside the hooks (and re-asserted by the same 5-min self-heal) each watched repo gets
+ *     two managed blocks: the local-cruft ignore list in .gitignore, and the same list as an
+ *     instruction — plus the pending-report pointer — in CLAUDE.md and GEMINI.md. Fenced
+ *     regions only, written just when the bytes change. AYIN_WATCH_HYGIENE=0 opts out.
  */
 
 import { spawn } from 'node:child_process';
@@ -220,6 +224,8 @@ async function installHook(repo: string): Promise<void> {
     out(r === 'wrote' ? `${name} hook set: ${paths.hookPath}` : `${name} hook already present`);
     log('INFO', 'watch_hook_installed', { repo, hook: name, result: r });
   }
+  // Repo hygiene rides along with the hooks: the .gitignore cruft block + the agent-file instruction.
+  if (ensureHygiene(repo)) out(`hygiene: local-cruft block written (.gitignore${AGENT_FILES.map(f => ` + ${f}`).join('')})`);
   // Register the repo (the set the daemon watches + self-heals + reviews the working tree of).
   const repos = existsSync(REPOS_FILE) ? JSON.parse(readFileSync(REPOS_FILE, 'utf-8')) : {};
   repos[repo] = { installedAt: new Date().toISOString() };
@@ -237,7 +243,7 @@ function registeredRepos(): string[] {
 async function selfHealHooks(): Promise<void> {
   const repos = registeredRepos();
   if (repos.length === 0) return;
-  let reinstalled = 0, gone = 0;
+  let reinstalled = 0, gone = 0, hygiene = 0;
   for (const repo of repos) {
     let wrote = false, missing = false;
     for (const { name, kind } of WATCH_HOOKS) {
@@ -245,19 +251,26 @@ async function selfHealHooks(): Promise<void> {
       if (!paths) { missing = true; break; }
       if (ensureOneHook(paths.hooksDir, paths.hookPath, repo, kind) === 'wrote') wrote = true;
     }
-    if (missing) gone++;
-    else if (wrote) reinstalled++;
+    if (missing) { gone++; continue; }
+    if (wrote) reinstalled++;
+    // Same self-heal cadence for the hygiene blocks — a reset/checkout that dropped them restores
+    // them here. Idempotent: writes nothing (and logs nothing) when they're already in place.
+    if (ensureHygiene(repo)) hygiene++;
   }
-  if (reinstalled || gone) {
-    out(`hook self-heal: ${reinstalled} repo(s) re-hooked, ${gone} missing — of ${repos.length} watched`);
-    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), gone: String(gone) });
+  if (reinstalled || gone || hygiene) {
+    out(`hook self-heal: ${reinstalled} repo(s) re-hooked, ${hygiene} re-hygiened, ${gone} missing — of ${repos.length} watched`);
+    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), hygiene: String(hygiene), gone: String(gone) });
   }
 }
 
-// ── CLAUDE.md pointer ─────────────────────────────────────────────────
-// After a report is written, upsert a fenced block in the repo-root CLAUDE.md listing the pending
-// ayin reports, so Claude Code reads them next session. Managed region only — the rest is untouched;
-// the file is created if absent. This block + ayin's report files are excluded from review + staging.
+// ── agent-file pointer (CLAUDE.md + GEMINI.md) ────────────────────────
+// After a report is written, upsert a fenced block in the repo-root agent instruction files listing
+// the pending ayin reports, so the next Claude Code / Gemini CLI session reads them. Managed region
+// only — the rest of each file is untouched; a file is created if absent. These blocks + ayin's
+// report files are excluded from review + staging (see EXCLUDE_PATHSPEC / isStageable).
+
+/** The repo-root instruction files ayin maintains — one per coding agent that reads a repo file. */
+const AGENT_FILES = ['CLAUDE.md', 'GEMINI.md'];
 
 const CLAUDE_BEGIN = '<!-- ayin:reports:begin -->';
 const CLAUDE_END = '<!-- ayin:reports:end -->';
@@ -274,24 +287,118 @@ function listRepoReports(repo: string): string[] {
   } catch { return []; }
 }
 
-function upsertClaudeReports(repo: string): void {
+/** Replace a fenced managed region in `content` (or append it), returning the new content.
+ *  Everything outside the fence is preserved byte-for-byte. */
+function upsertBlock(content: string, begin: string, end: string, block: string): string {
+  if (content.includes(begin)) {
+    const before = content.slice(0, content.indexOf(begin));
+    const endIdx = content.indexOf(end);
+    const after = endIdx >= 0 ? content.slice(endIdx + end.length) : '';
+    return `${before}${block}${after}`;
+  }
+  return content.trim() ? `${content.replace(/\s*$/, '')}\n\n${block}\n` : `${block}\n`;
+}
+
+/** Write only if the bytes actually change. The self-heal runs every 5 min over every watched repo —
+ *  an unconditional write would churn mtimes (and, for a tracked file, the worktree) forever. */
+function writeIfChanged(path: string, content: string): boolean {
+  try {
+    if (existsSync(path) && readFileSync(path, 'utf-8') === content) return false;
+    writeFileSync(path, content);
+    return true;
+  } catch { return false; } // read-only tree — skip
+}
+
+function upsertAgentReports(repo: string): void {
   const reports = listRepoReports(repo);
   const body = reports.length
     ? reports.map(f => `- \`${f}\``).join('\n')
     : '- (none pending)';
   const block = `${CLAUDE_BEGIN}\n## ⚠ Ayin review notes — read before continuing\nAuto-generated by \`ayin watch\` (local review). Newest first; open the file for the findings.\n${body}\n${CLAUDE_END}`;
-  const claudePath = join(repo, 'CLAUDE.md');
-  let content = '';
-  try { content = existsSync(claudePath) ? readFileSync(claudePath, 'utf-8') : ''; } catch { return; }
-  if (content.includes(CLAUDE_BEGIN)) {
-    const before = content.slice(0, content.indexOf(CLAUDE_BEGIN));
-    const endIdx = content.indexOf(CLAUDE_END);
-    const after = endIdx >= 0 ? content.slice(endIdx + CLAUDE_END.length) : '';
-    content = `${before}${block}${after}`;
-  } else {
-    content = content.trim() ? `${content.replace(/\s*$/, '')}\n\n${block}\n` : `${block}\n`;
+  for (const name of AGENT_FILES) {
+    const path = join(repo, name);
+    let content = '';
+    try { content = existsSync(path) ? readFileSync(path, 'utf-8') : ''; } catch { continue; }
+    writeIfChanged(path, upsertBlock(content, CLAUDE_BEGIN, CLAUDE_END, block));
   }
-  try { writeFileSync(claudePath, content); } catch { /* read-only tree — skip */ }
+}
+
+// ── repo hygiene: local-cruft ignores ─────────────────────────────────
+// Installed alongside the hooks (and re-asserted by the same 5-min self-heal): a managed block in
+// the repo's .gitignore listing the local dev cruft that must never be committed — ayin's own
+// reports, machine hardware dumps, per-ticket scratch notes, local hook scripts, local-only tooling
+// folders — plus the same list, as an instruction, in CLAUDE.md and GEMINI.md so an agent working
+// the repo does not stage them either. Both are managed regions: everything outside is untouched.
+// Set AYIN_WATCH_HYGIENE=0 to leave a repo's .gitignore / agent files alone.
+
+const HYGIENE_ENABLED = process.env.AYIN_WATCH_HYGIENE !== '0';
+
+const IGNORE_BEGIN = '# >>> ayin:local-cruft >>>';
+const IGNORE_END = '# <<< ayin:local-cruft <<<';
+
+/** The never-commit list. One source of truth: rendered as .gitignore patterns below, and quoted
+ *  verbatim into the agent files so Claude/Gemini see the same list they must not stage. */
+const LOCAL_CRUFT = `# --- Local dev cruft: never commit ---
+# ayin local review output
+AYIN-REPORT-*.md
+CodeReview-*.md
+AssetDiff-*.md
+# machine hardware report (sensitive — hostname / serial / UUID)
+system_specs.md
+system_specs.txt
+# per-ticket research / scratch notes
+STUDY_PERF-*/
+# Claude Code local hook scripts
+.claude/hooks/
+# Local-only tooling folders (not part of the shipped game)
+/Assets/LiveOpsHub/
+/Assets/LiveOpsHub.meta
+/Assets/Plugins/AltTester/
+/Assets/Plugins/AltTester.meta`;
+
+const HYGIENE_BEGIN = '<!-- ayin:hygiene:begin -->';
+const HYGIENE_END = '<!-- ayin:hygiene:end -->';
+
+/** Upsert the managed ignore block in <repo>/.gitignore. Creates the file if absent. */
+function upsertCruftIgnore(repo: string): boolean {
+  const path = join(repo, '.gitignore');
+  let content = '';
+  try { content = existsSync(path) ? readFileSync(path, 'utf-8') : ''; } catch { return false; }
+  const block = `${IGNORE_BEGIN}\n${LOCAL_CRUFT}\n${IGNORE_END}`;
+  return writeIfChanged(path, upsertBlock(content, IGNORE_BEGIN, IGNORE_END, block));
+}
+
+/** Upsert the same never-commit list, as an instruction, in each agent file. */
+function upsertCruftInstruction(repo: string): boolean {
+  const block = `${HYGIENE_BEGIN}
+## 🚫 Never commit these — local dev cruft
+Maintained by \`ayin watch\` (mirrors the \`ayin:local-cruft\` block in \`.gitignore\`). These paths are
+local to this machine: never \`git add\` them, never include them in a commit you make on my behalf.
+
+\`\`\`gitignore
+${LOCAL_CRUFT}
+\`\`\`
+${HYGIENE_END}`;
+  let wrote = false;
+  for (const name of AGENT_FILES) {
+    const path = join(repo, name);
+    let content = '';
+    try { content = existsSync(path) ? readFileSync(path, 'utf-8') : ''; } catch { continue; }
+    if (writeIfChanged(path, upsertBlock(content, HYGIENE_BEGIN, HYGIENE_END, block))) wrote = true;
+  }
+  return wrote;
+}
+
+/** Assert repo hygiene: the .gitignore block + the agent-file instruction. Idempotent and silent
+ *  when already in place, so the 5-min self-heal is near-free. Never throws. */
+function ensureHygiene(repo: string): boolean {
+  if (!HYGIENE_ENABLED) return false;
+  const ignoreWrote = upsertCruftIgnore(repo);
+  const agentWrote = upsertCruftInstruction(repo);
+  if (ignoreWrote || agentWrote) {
+    log('INFO', 'watch_hygiene_written', { repo, gitignore: String(ignoreWrote), agentFiles: String(agentWrote) });
+  }
+  return ignoreWrote || agentWrote;
 }
 
 // ── danger push ───────────────────────────────────────────────────────
@@ -506,7 +613,7 @@ ${unityMd ? `## Deterministic Unity asset diff\n\n→ **[AssetDiff-${meta.shortH
   writeFileSync(reportPath, header + review.trim() + '\n');
   out(`  → ${reportPath}`);
   log('INFO', 'watch_review_written', { repo, commit: meta.shortHash, report: reportPath });
-  upsertClaudeReports(repo);
+  upsertAgentReports(repo);
   // Dangerous → ping the phone. "Needs attention" is the reviewer's bad verdict.
   if (/needs attention/i.test(review)) {
     await sendDangerPush(`⚠ Ayin: review flags ${repoName(repo)}`, `"${meta.subject}" (${meta.shortHash}) — Needs attention. See CodeReview-${meta.shortHash}.md`);
@@ -517,7 +624,7 @@ ${unityMd ? `## Deterministic Unity asset diff\n\n→ **[AssetDiff-${meta.shortH
 // ── merge review (post-merge / pull) ─────────────────────────────────
 // Explains what a pull/merge just brought in — the range prev(ORIG_HEAD)..HEAD — into
 // AYIN-REPORT-MERGE-<hash>.md in the repo root (so it shows in the client + gets picked up by
-// the CLAUDE.md pointer). Answers "what changed under me and what should I watch out for".
+// the agent-file pointer). Answers "what changed under me and what should I watch out for".
 
 function buildMergePrompt(range: string, oneline: string, stat: string, diff: string, truncated: boolean): string {
   return `You are briefing a developer on what a \`git pull\`/merge just brought into their repo (range ${range}).
@@ -585,7 +692,7 @@ async function reviewMerge(repo: string, commit: string, prev?: string): Promise
   writeFileSync(reportPath, header + review.trim() + '\n');
   out(`  → ${reportPath}`);
   log('INFO', 'watch_merge_written', { repo, commit: meta.shortHash, report: reportPath });
-  upsertClaudeReports(repo);
+  upsertAgentReports(repo);
   if (/^VERDICT:\s*RISKY/im.test(review)) {
     await sendDangerPush(`⚠ Ayin: risky pull in ${repoName(repo)}`, `${range} brought in breaking/risky changes — see AYIN-REPORT-MERGE-${meta.shortHash}.md`);
   }
@@ -614,14 +721,14 @@ async function mineSession(transcript: string, cwd: string): Promise<{ status: '
 // unstaged work, stages what's meaningful + unstages debug/junk (NO commit, NO push), drafts a
 // conventional-commit message into .git/COMMIT_EDITMSG, and writes AYIN-REPORT-SMELLS-<ts>.md
 // (dangerous ad-hoc solutions, heavy violations, logging suggestions). So you open Fork to ready
-// chores. Fingerprint (ayin's own artifacts + CLAUDE.md excluded) means it's near-free when idle.
+// chores. Fingerprint (ayin's own artifacts + agent files + .gitignore excluded) means it's near-free when idle.
 
 const WORKTREE_REVIEW_MS = 10 * 60 * 1000;
 const WORKTREE_STATE_FILE = join(WATCH_DIR, 'worktree-state.json');
 const MAX_WORKTREE_DIFF = 80_000;
 const MAX_STAGE_BYTES = 2 * 1024 * 1024; // never stage a file bigger than this (blobs/binaries)
 
-// Never stage (secrets + ayin's own artifacts + CLAUDE.md pointer).
+// Never stage (secrets + ayin's own artifacts + the agent-file pointers + the .gitignore hygiene block).
 const SECRET_RE = /(^|\/)(\.env(\.[^/]+)?|[^/]*\.(pem|key|p12|pfx|keystore)|id_rsa|id_ed25519|[^/]*(secret|credential)[^/]*)$/i;
 // Infra the developer manages by hand — never auto-staged, and excluded from the review trigger:
 // git hooks, Unity ProjectSettings/ + UserSettings/, and editor/IDE settings (.vscode/.idea/.vs,
@@ -630,7 +737,10 @@ const NEVER_STAGE_RE = /(^|\/)(ProjectSettings|UserSettings|Packages|\.vscode|\.
 function isStageable(path: string): boolean {
   const base = path.split('/').pop() || path;
   if (AYIN_REPORT_RE.test(base)) return false;
-  if (base === 'CLAUDE.md') return false;
+  // ayin's own managed files — the agent-file pointers and the .gitignore hygiene block. The dev
+  // decides when those get committed; auto-staging them would commit ayin's bookkeeping for them.
+  if (AGENT_FILES.includes(base)) return false;
+  if (base === '.gitignore') return false;
   if (SECRET_RE.test(path)) return false;
   if (NEVER_STAGE_RE.test(path)) return false;
   return true;
@@ -645,18 +755,18 @@ function saveWorktreeState(s: WorktreeState): void {
 }
 
 // Paths excluded from the unstaged-change fingerprint AND the review diff: ayin's own outputs (so
-// writing a report/CLAUDE.md never re-triggers the pass) + the never-stage infra (ProjectSettings/
+// writing a report / an agent file / the .gitignore block never re-triggers the pass) + the never-stage infra (ProjectSettings/
 // UserSettings/IDE/hooks — the dev owns those). Matches isStageable / NEVER_STAGE_RE in intent.
 const EXCLUDE_PATHSPEC = [
-  'CLAUDE.md', 'AYIN-REPORT-*.md', 'CodeReview-*.md', 'AssetDiff-*.md',
+  'CLAUDE.md', 'GEMINI.md', '.gitignore', 'AYIN-REPORT-*.md', 'CodeReview-*.md', 'AssetDiff-*.md',
   'ProjectSettings/**', 'UserSettings/**', 'Packages/**', '.vscode/**', '.idea/**', '.vs/**',
   '*.csproj', '*.sln', '*.user', '*.vsconfig', '*.txt',
 ].flatMap(g => [`:(exclude,glob)${g}`, `:(exclude,glob)**/${g}`]);
 
 /** Fingerprint of the UNSTAGED work only — `git diff` (working tree vs index, NOT --cached) plus
- *  new untracked files — with ayin's own artifacts + CLAUDE.md excluded. So the big (LLM) review
+ *  new untracked files — with ayin's own artifacts + agent files + .gitignore excluded. So the big (LLM) review
  *  fires only when the user's unstaged changes actually change: staging/unstaging alone doesn't
- *  trip it, and the dog writing its own report/CLAUDE.md never re-triggers itself. */
+ *  trip it, and the dog writing its own report / agent-file / ignore block never re-triggers itself. */
 async function worktreeFingerprint(repo: string): Promise<string> {
   const diff = await git(repo, ['diff', '--', '.', ...EXCLUDE_PATHSPEC], 400_000);
   const others = await git(repo, ['ls-files', '--others', '--exclude-standard']);
@@ -803,7 +913,7 @@ async function reviewWorktree(repo: string): Promise<void> {
   writeFileSync(reportPath, buildSmellReport(plan, raw, { staged, unstaged }));
   out(`  → ${reportPath} (staged ${staged}, unstaged ${unstaged}) — NO commit`);
   log('INFO', 'worktree_reviewed', { repo, staged: String(staged), unstaged: String(unstaged), parsed: String(!!plan) });
-  upsertClaudeReports(repo);
+  upsertAgentReports(repo);
   const high = (plan?.smells || []).filter(s => (s.severity || '').toLowerCase() === 'high');
   if (high.length) {
     const first = high[0];

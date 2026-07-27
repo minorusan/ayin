@@ -174,8 +174,23 @@ The moving parts, designed to survive interruption at any point:
   the deterministic `unity_asset_diff` (`commit^ → commit`, `--md`) object-level change map — as a
   second file next to the review; the review links to it and the reviewer receives its content.
   Tool at `~/tools/unity_asset_diff.py` or `AYIN_UNITY_DIFF`; missing tool → one-line note.
+- **Agent-file pointer**: after a report is written, a fenced `<!-- ayin:reports:begin -->` block
+  in the repo-root **`CLAUDE.md` *and* `GEMINI.md`** lists the pending reports (newest 12), so the
+  next Claude Code / Gemini CLI session reads them. Managed region only — the rest of each file is
+  untouched; a missing file is created.
+- **Repo hygiene** (installed with the hooks, re-asserted by the same 5-min self-heal): a fenced
+  `# >>> ayin:local-cruft >>>` block in the repo's **`.gitignore`** listing local dev cruft that must
+  never be committed (ayin's own reports, `system_specs.*`, `STUDY_PERF-*/`, `.claude/hooks/`, the
+  local-only `Assets/LiveOpsHub` + `Assets/Plugins/AltTester` tooling folders), plus the same list —
+  as an instruction — in an `<!-- ayin:hygiene:begin -->` block in `CLAUDE.md` and `GEMINI.md`, so an
+  agent working the repo doesn't stage them either. Writes only when the bytes change (the self-heal
+  is otherwise a no-op), so it never churns mtimes. `AYIN_WATCH_HYGIENE=0` disables it.
+  *Note:* `.gitignore` only affects **untracked** files — cruft already tracked in a repo still needs
+  a manual `git rm --cached`.
 - **Guards**: commits touching only `CodeReview-*.md`/`AssetDiff-*.md` are skipped (no
-  review-of-review loop);
+  review-of-review loop); the agent files and `.gitignore` are excluded from the working-tree
+  fingerprint, the review diff, and auto-staging — so ayin writing its own blocks never re-triggers
+  a pass and never commits its own bookkeeping;
   vanished commits (rebase/gc) are ledgered as `gone`; LLM/backend failures retry with
   linear backoff up to 5 attempts, then are ledgered as `failed`.
 
@@ -302,7 +317,8 @@ src/
 ├── watch.ts            repo watcher daemon: post-commit → CodeReview, post-merge → AYIN-REPORT-MERGE
 │                       (what a pull brought in); 10-min working-tree pass → autostage meaningful /
 │                       unstage junk (NO commit) + .git/COMMIT_EDITMSG + AYIN-REPORT-SMELLS; upserts a
-│                       CLAUDE.md report pointer; chains onto foreign hooks; 5-min hook self-heal
+│                       CLAUDE.md + GEMINI.md report pointer and the .gitignore local-cruft block;
+│                       chains onto foreign hooks; 5-min hook + hygiene self-heal
 ├── rag.ts              grounded Q&A corpus generator (explore → synthesize → logs resource store)
 ├── resource-client.ts  backend resource door (POST /resource/<name>) + shared llm-authority dance
 ├── agent.ts            the agent loop (build → call → parse → execute → loop)
