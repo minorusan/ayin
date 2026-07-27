@@ -20,6 +20,21 @@ let inFlightRequestId = '';
 function setInFlightRequestId(id: string): void { inFlightRequestId = id; }
 export function currentRequestId(): string { return inFlightRequestId; }
 
+/**
+ * The authority token of a LOCKED session (`/lock`), or '' when unlocked.
+ *
+ * Sent with every generation so the backend can put this session at the FRONT of the shared GPU
+ * queue: `/api/generate` is LOW priority by default (background agent work must yield to a human),
+ * and the token is what proves we are entitled to more. Asking for priority without the token is
+ * ignored — otherwise any client could promote itself past user chat.
+ *
+ * Set from model-picker.ts on lock/unlock; kept module-level to avoid an import cycle
+ * (model-picker → resource-client → connection).
+ */
+let lockAuthority = '';
+export function setRequestAuthority(token: string): void { lockAuthority = token; }
+export function currentRequestAuthority(): string { return lockAuthority; }
+
 import { takePendingImages } from './image.js';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -125,6 +140,8 @@ export async function llmChat(
       setInFlightRequestId(requestId);
 
       const body: Record<string, unknown> = { messages, temperature: 0.7, requestId };
+      // Locked session → ask for the front of the queue, and prove we may have it.
+      if (lockAuthority) { body.authority = lockAuthority; body.priority = 'high'; }
       if (THINKING_MODE) body.thinking = true;
       if (images.length) body.images = images;
 

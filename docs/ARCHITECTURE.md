@@ -342,6 +342,12 @@ tree knows about the internals). Design rules:
   bar can flash `🔒⇆ a→b` for one poll tick; verified against the daemon log that no `model.load.*`
   follows). Verified: 9 assertions — holder recorded, ~10m TTL not 30, model preserved, keepalive
   slides the expiry, unlock frees it.
+  **A lock also buys QUEUE PRIORITY.** ayin's `/api/generate` calls are LOW priority by design, so a
+  locked session would still sit behind every habit. While locked, ayin sends its authority token
+  plus `priority:"high"`; the backend grants HIGH only when that token matches the current holder, so
+  priority is proven, never self-declared, and it drops back to LOW the instant the lock ends.
+  Measured with the GPU busy: an unlocked request sent FIRST finished in 237.5s, a locked one sent
+  1.2s LATER finished in 62.0s.
 - **Model picker + booking** (`/model` → `model-picker.ts`, catalog in `llm-status.ts`): the
   interactive counterpart to headless `AYIN_ACQUIRE_LLM=1`. Bare `/model` opens the **popup** —
   the same overlay the tool-permission prompt uses (`dialog.ts`) — listing every chat model the

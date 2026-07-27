@@ -22,6 +22,7 @@
 import { addMessage, setAgentStatus } from './ui.js';
 import { showDialog, type DialogOption } from './dialog.js';
 import { acquireLlm, resourceOp, type LlmHold } from './resource-client.js';
+import { setRequestAuthority } from './connection.js';
 import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
 import { refreshActiveModel, activeModelId } from './llm/manager.js';
 import { log } from './log.js';
@@ -66,6 +67,9 @@ export async function lockSession(): Promise<string> {
     modelHold = hold;
   }
   locked = true;
+  // From here every generation carries the token, so the backend can promote this session to the
+  // front of the GPU queue instead of leaving it in the LOW band behind every habit.
+  setRequestAuthority((modelHold as { token: string }).token);
 
   // Gaining `ayin` ownership applies the coder policy, which would swap the model. Put it back.
   if (wanted && cat && wanted !== cat.coderModel) {
@@ -79,6 +83,7 @@ export async function lockSession(): Promise<string> {
 /** Release the lock (and the booking it took). */
 export async function unlockSession(): Promise<void> {
   locked = false;
+  setRequestAuthority(''); // back to the LOW band immediately, before the grant is even released
   await releaseModelHold();
   log('INFO', 'session_unlocked', {});
 }
@@ -90,6 +95,8 @@ export function isModelBooked(): boolean {
 export async function releaseModelHold(): Promise<void> {
   const h = modelHold;
   modelHold = null;
+  locked = false;
+  setRequestAuthority(''); // a stale token would just be ignored, but never send one
   if (h && typeof h === 'object') await h.release().catch(() => {});
 }
 
