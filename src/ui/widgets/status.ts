@@ -26,9 +26,11 @@ export interface StatusState {
   /** live LLM phase from the backend llm resource event stream (null = idle, segment hidden).
    *  ttlMs makes it a transient blip that auto-clears (event acknowledgements). */
   llm: { phase: LlmPhaseName; detail?: string; ttlMs?: number } | null;
-  /** The model actually serving this session. `booked` = we hold the llm authority (/model).
-   *  `swapping` = the backend is mid-reload, so the name is the TARGET, not what's resident. */
-  model: { name: string; booked: boolean; swapping: boolean } | null;
+  /** The model serving this session. `booked` = we hold the llm authority (/model).
+   *  `swapping` = the backend is mid-reload, so `name` is the TARGET and `loaded` is what is
+   *  actually in VRAM — both are shown, because naming only the target reads as "all good, qwen"
+   *  while gemma is still the thing answering (or nothing is, for the next minute). */
+  model: { name: string; loaded?: string; booked: boolean; swapping: boolean } | null;
   /** Shared-GPU telemetry from the backend host (null = unknown / no card → segment hidden). */
   gpu: { util: number; usedMiB: number; totalMiB: number; tempC: number } | null;
   /** The backend's single-slot LLM scheduler: what holds the GPU and how many calls wait behind
@@ -142,10 +144,15 @@ export class StatusBar {
     if (this.state.model) {
       const m = this.state.model;
       const narrow = (screen.width as number) < 100;
-      const name = narrow ? m.name.replace(/:.*$/, '') : m.name; // qwen3-coder:30b → qwen3-coder
+      const short = (n: string) => (narrow ? n.replace(/:.*$/, '') : n); // qwen3-coder:30b → qwen3-coder
       const glyph = m.swapping ? '⇆' : m.booked ? '⬢' : '⬡';
       const color = m.swapping ? theme.warn : m.booked ? theme.accent : theme.muted;
-      parts.push(`{${color}-fg}${glyph} ${name}{/}`);
+      // Mid-swap, say it as a transition — "gemma4:26b→qwen3.6:27b loading" — so the bar can never
+      // claim a model that isn't serving you yet.
+      const label = m.swapping && m.loaded
+        ? `${short(m.loaded)}→${short(m.name)} loading`
+        : short(m.name);
+      parts.push(`{${color}-fg}${glyph} ${label}{/}`);
     }
 
     // Shared-GPU load — util, VRAM, temp. Colored by VRAM pressure (the thing that OOMs a swap).

@@ -28,6 +28,7 @@ import { log } from '../log.js';
 import type { LlmMessage, ModelDialect, ParseAllResult, ParsedToolCall } from './types.js';
 import { GemmaDialect } from './dialects/gemma.js';
 import { QwenDialect } from './dialects/qwen.js';
+import { narrateWait } from '../wait-narrator.js';
 
 // Registered dialects, in match-priority order. The first whose matches() returns
 // true for the active model wins; DEFAULT is used until the model id is known.
@@ -88,11 +89,15 @@ export function renderToolCall(call: ParsedToolCall): string { return activeDial
 export function renderToolResult(body: string): string { return activeDialect().renderToolResult(body); }
 
 // ── Transport façade (model-agnostic; implemented in connection.ts) ──
+// Both wrap the call in the WAIT NARRATOR (wait-narrator.ts), so any wait — a model swap, the
+// backend's single-slot queue, or generation itself — is reported on the thinking line instead of
+// an indistinguishable "Thinking··". This is the one place every ayin LLM call passes through, so
+// wiring it here covers the agent loop, goal derivation, judges and summaries at once.
 export async function llmChat(messages: LlmMessage[]): Promise<string> {
   ensureRefreshed();
-  return transportChat(messages);
+  return narrateWait('thinking', () => transportChat(messages));
 }
 export async function llmCall(prompt: string): Promise<string> {
   ensureRefreshed();
-  return transportCall(prompt);
+  return narrateWait('thinking', () => transportCall(prompt));
 }

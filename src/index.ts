@@ -309,12 +309,34 @@ async function handleFixCommand(arg: string): Promise<void> {
 // One poll of the llm resource's read ops feeds both segments. It survives backend restarts on its
 // own (every failure just clears the segments and the next tick retries), and the interval is
 // unref'd so it never keeps the process alive.
+// Launching ayin through the machine's launcher BOOKS the coder model, which evicts the shared one
+// — so a swap is usually already in flight before the TUI even paints, and the first reply pays for
+// it. Say so once, when it starts and when it lands: being told "qwen" while gemma is still the
+// resident model (or nothing is) is the single most confusing state in the whole UI.
+let announcedSwapTo: string | null = null;
+
 function startModelStatusPoll(): void {
   if (HEADLESS) return;
   startLlmStatusPoll(({ catalog, gpu, queue }) => {
+    if (catalog) {
+      const swapping = catalog.loadedModel !== catalog.activeModel;
+      if (swapping && announcedSwapTo !== catalog.activeModel) {
+        announcedSwapTo = catalog.activeModel;
+        addMessage('system', `Backend is loading ${catalog.activeModel} (${catalog.loadedModel} still resident) — ~17GB out, ~16GB in. Your first reply waits for it.`);
+        addMessage('system', 'Launching ayin books the coder model. /model to see the queue and pick another; the shared model needs no load.');
+      } else if (!swapping && announcedSwapTo) {
+        addMessage('system', `${catalog.loadedModel} is resident now.`);
+        announcedSwapTo = null;
+      }
+    }
     setStatus({
       model: catalog
-        ? { name: catalog.activeModel, booked: isModelBooked(), swapping: catalog.loadedModel !== catalog.activeModel }
+        ? {
+          name: catalog.activeModel,
+          loaded: catalog.loadedModel,
+          booked: isModelBooked(),
+          swapping: catalog.loadedModel !== catalog.activeModel,
+        }
         : null,
       gpu,
       queue: queue ? { running: queue.running, runningForMs: queue.runningForMs, depth: queue.depth } : null,

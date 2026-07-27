@@ -305,6 +305,26 @@ tree knows about the internals). Design rules:
   until resident, 180s budget) — it narrates progress and gives up with a message rather than
   hanging the TUI. The dialect re-resolves after the swap (`refreshActiveModel`). See "one door
   to every resource" — ayin never touches Ollama and never picks a model by itself.
+- **The wait narrator** (`wait-narrator.ts`, wired into `llm/manager.ts` so EVERY call is covered —
+  agent rounds, goal derivation, judges, summaries). The thinking line used to say a cheerful
+  `Thinking··` for two minutes with no hint why. Now it reports the shared GPU's actual state,
+  refreshed every 2s, with the elapsed clock intact (the state deliberately stays `thinking`,
+  because the indicator restarts its clock on a state *change* and the number you want is how long
+  you have really been waiting):
+  ```
+  ▍ ⠹ thinking · ⇆ loading qwen3.6:27b (gemma4:26b still resident)        1m04s
+  ▍ ⠹ thinking · ⏳ GPU: chatOnce 47s · 5 waiting — ayin queues last       2m11s
+  ▍ ⠹ thinking · ▸ GPU: chatOnce 12s                                        38s
+  ```
+  Facts only, never attribution — it reports what holds the card, not a guess about whose job it
+  is, because from here that is unknowable and a confident wrong answer is worse than a plain one.
+  The "ayin queues last (low priority)" clause appears only after 20s, when you've earned the
+  explanation. Two cached read ops per 2s; skipped entirely in headless.
+- **Swap announcement + honest model segment.** Launching ayin through the machine launcher *books
+  the coder model*, so a ~17GB-out/~16GB-in swap is usually already in flight before the TUI paints
+  — and the bar naming only the TARGET reads as "all good, qwen" while gemma is still the thing
+  answering. The segment now says `⇆ gemma4:26b→qwen3.6:27b loading` during a swap, and the
+  transition is announced once in the transcript when it starts and once when the model lands.
 - **GPU queue in the status bar** — `⏳ chatOnce 6s +2` (amber past 1 waiter, red past 2): what
   holds the backend's shared LLM slot, for how long, and how many calls are behind it. This exists
   because a slow turn and a *queued* turn used to look identical. On that box **one slot serializes
