@@ -11,7 +11,17 @@ import { setGlobalDispatcher, Agent } from 'undici';
 // gemma4 with thinking on long prompts can take 10+ min; lift Node's 300s default.
 setGlobalDispatcher(new Agent({ headersTimeout: 30 * 60 * 1000, bodyTimeout: 30 * 60 * 1000 }));
 
+/**
+ * The id of the generation currently in flight, so the wait narrator can locate it in the backend's
+ * GPU queue and report a real position. Module-level because the narrator watches from the side —
+ * threading it through every call site would touch the whole agent loop for a status string.
+ */
+let inFlightRequestId = '';
+function setInFlightRequestId(id: string): void { inFlightRequestId = id; }
+export function currentRequestId(): string { return inFlightRequestId; }
+
 import { takePendingImages } from './image.js';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -108,7 +118,13 @@ export async function llmChat(
     const timeout = setTimeout(() => controller.abort(), 600_000);
 
     try {
-      const body: Record<string, unknown> = { messages, temperature: 0.7 };
+      // A correlation id per attempt, so the wait narrator can find THIS request in the backend's
+      // GPU queue and report an actual position ("queued #4/6") instead of just the total depth.
+      // Backends that don't know the field ignore it.
+      const requestId = `${randomUUID().slice(0, 8)}`;
+      setInFlightRequestId(requestId);
+
+      const body: Record<string, unknown> = { messages, temperature: 0.7, requestId };
       if (THINKING_MODE) body.thinking = true;
       if (images.length) body.images = images;
 

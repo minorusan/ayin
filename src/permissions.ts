@@ -94,9 +94,6 @@ export async function checkPermission(
   if (isWhitelisted(tool, params)) return 'allow';
 
   const primaryValue = getPrimaryParam(tool, params);
-  const preview = primaryValue.length > 50
-    ? primaryValue.substring(0, 47) + '...'
-    : primaryValue;
 
   // Build prefix options for "allow all starting with..."
   const prefixParts = primaryValue.split(/\s+/);
@@ -115,25 +112,36 @@ export async function checkPermission(
   ];
 
   for (const prefix of prefixOptions) {
-    options.push({ label: `Allow all ${tool} starting with "${prefix}"` });
+    options.push({ label: `Allow all ${tool} starting with "${prefix}"`, note: 'prefix' });
   }
 
-  options.push({ label: 'Deny (stop agent)', key: 'n' });
+  options.push({ label: 'Deny (stop agent)', key: 'n', danger: true });
 
-  const reasonLine = reason ? `\n${reason.substring(0, 120)}` : '';
+  // Structured, not concatenated: the tool is the question, the path/command is the TARGET (shown in
+  // full and wrapped — a truncated "/Users/…/clea…" tells you nothing about what you're approving),
+  // and the agent's reason is the body. The dialog wraps each part and sizes itself to fit.
+  const size = tool === 'write_file' && params.content !== undefined
+    ? `${(params.content.length / 1024).toFixed(1)} KB`
+    : '';
   const choice = await showDialog(
-    `${tool}: ${preview}${reasonLine}`,
+    `Allow ${tool}?`,
     options,
+    {
+      target: primaryValue || '(no argument)',
+      subtitle: size ? `writing ${size}` : undefined,
+      body: reason || undefined,
+      footer: '↑↓ select · Enter confirm · Esc = deny',
+    },
   );
 
   if (choice === -1 || choice === options.length - 1) {
-    log('INFO', 'permission_denied', { tool, param: preview });
+    log('INFO', 'permission_denied', { tool, param: primaryValue.slice(0, 200) });
     return 'deny';
   }
 
   if (choice === 0) {
     // Allow once — no whitelist change
-    log('INFO', 'permission_allow_once', { tool, param: preview });
+    log('INFO', 'permission_allow_once', { tool, param: primaryValue.slice(0, 200) });
     return 'allow';
   }
 

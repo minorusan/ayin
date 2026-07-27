@@ -103,9 +103,43 @@ export interface QueueInfo {
   /** Label of the call holding the slot right now (`chatOnce`, `embed`, `swapChatModel`, `gpu:…`). */
   running: string | null;
   runningForMs: number;
+  /** Correlation tag of the running job (`ayin:<id>` for our own calls), '' if untagged. */
+  runningTag?: string;
   /** How many calls are waiting behind it. */
   depth: number;
-  waiting: Array<{ label: string; priority: string; waitingMs: number }>;
+  /** IN THE ORDER THEY WILL RUN — so an entry's index is its real place in line. */
+  waiting: Array<{ label: string; priority: string; waitingMs: number; tag?: string }>;
+}
+
+/** Who owns the llm resource right now — the authority, not the model. */
+export interface AuthorityInfo {
+  holder: string;
+  expiresAt: number;
+  depth: number;
+}
+
+/**
+ * Where OUR in-flight request sits in the backend's queue, matched by the correlation id ayin sent
+ * with it. `position` is 1-based among the waiters; `running` means it has the slot and is generating.
+ * null when we have nothing in flight or the backend doesn't carry tags (older build).
+ */
+export function findOwnPlace(q: QueueInfo | null, requestId: string): { running: boolean; position: number; of: number; aheadOfUs: string[] } | null {
+  if (!q || !requestId) return null;
+  const mine = `ayin:${requestId}`;
+  if (q.runningTag === mine) return { running: true, position: 0, of: q.depth, aheadOfUs: [] };
+  const idx = q.waiting.findIndex((w) => w.tag === mine);
+  if (idx < 0) return null;
+  return {
+    running: false,
+    position: idx + 1,
+    of: q.waiting.length,
+    aheadOfUs: q.waiting.slice(0, idx).map((w) => w.label),
+  };
+}
+
+/** The current authority holder, or null (free / unreachable). Never throws. */
+export async function fetchAuthority(): Promise<AuthorityInfo | null> {
+  return (await resourceOp('llm', 'authority.current', {}, 4_000)) as AuthorityInfo | null;
 }
 
 /** Current GPU telemetry + scheduler state. Never throws. */
@@ -137,7 +171,7 @@ export function resolveModelName(input: string, catalog: ModelCatalog): string |
  * process open. Returns a stop function.
  */
 export function startLlmStatusPoll(
-  onUpdate: (u: { catalog: ModelCatalog | null; gpu: GpuInfo | null; queue: QueueInfo | null }) => void,
+  onUpdate: (u: { catalog: ModelCatalog | null; gpu: GpuInfo | null; queue: QueueInfo | null; authority: AuthorityInfo | null }) => void,
   everyMs = 5_000,
 ): () => void {
   let stopped = false;
@@ -147,10 +181,10 @@ export function startLlmStatusPoll(
     if (stopped || running) return;
     running = true;
     try {
-      const [catalog, g] = await Promise.all([fetchCatalog(), fetchGpu()]);
-      if (!stopped) onUpdate({ catalog, gpu: g.gpu, queue: g.queue });
+      const [catalog, g, authority] = await Promise.all([fetchCatalog(), fetchGpu(), fetchAuthority()]);
+      if (!stopped) onUpdate({ catalog, gpu: g.gpu, queue: g.queue, authority });
     } catch {
-      if (!stopped) onUpdate({ catalog: null, gpu: null, queue: null }); // never show stale truth
+      if (!stopped) onUpdate({ catalog: null, gpu: null, queue: null, authority: null }); // never show stale truth
     } finally {
       running = false;
     }

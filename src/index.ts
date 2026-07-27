@@ -12,7 +12,7 @@ import {
   screen, addMessage, setStatus, setAgentStatus, clearChat,
   onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
 } from './ui.js';
-import { connect, disconnect, onConnectionChange, isConnected } from './connection.js';
+import { connect, disconnect, onConnectionChange, isConnected, currentRequestId } from './connection.js';
 import { refreshActiveModel } from './llm/manager.js';
 import { getSummaryText, getSummary, resetSummary } from './summary.js';
 import { estimateSessionTokens } from './tokens.js';
@@ -21,7 +21,7 @@ import { runAgent, interruptAgent, enqueueAgentMessage } from './agent.js';
 import { startPromptServer } from './prompt-server.js';
 import { acquireLlm, type LlmHold } from './resource-client.js';
 import { handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
-import { startLlmStatusPoll } from './llm-status.js';
+import { startLlmStatusPoll, findOwnPlace } from './llm-status.js';
 import { startUpdateWatch, checkForUpdate } from './updater.js';
 import {
   createRequest, acknowledgeRejections, readRejection, listRequests,
@@ -317,7 +317,8 @@ let announcedSwapTo: string | null = null;
 
 function startModelStatusPoll(): void {
   if (HEADLESS) return;
-  startLlmStatusPoll(({ catalog, gpu, queue }) => {
+  startLlmStatusPoll(({ catalog, gpu, queue, authority }) => {
+    const own = findOwnPlace(queue, currentRequestId());
     if (catalog) {
       const swapping = catalog.loadedModel !== catalog.activeModel;
       if (swapping && announcedSwapTo !== catalog.activeModel) {
@@ -339,7 +340,24 @@ function startModelStatusPoll(): void {
         }
         : null,
       gpu,
-      queue: queue ? { running: queue.running, runningForMs: queue.runningForMs, depth: queue.depth } : null,
+      queue: queue
+        ? {
+          running: queue.running,
+          runningForMs: queue.runningForMs,
+          depth: queue.depth,
+          // Our own place in line, matched by the correlation id sent with the in-flight request.
+          ...(own ? { ownPosition: own.position, ownOf: own.of, ownRunning: own.running } : {}),
+        }
+        : null,
+      authority: authority
+        ? {
+          holder: authority.holder,
+          expiresInMs: Math.max(0, authority.expiresAt - Date.now()),
+          // The launcher, the watcher and a dispatched code agent all hold as `ayin` — our family,
+          // not necessarily this session. Never claim more than that.
+          mine: authority.holder === 'ayin',
+        }
+        : null,
     });
   });
 }

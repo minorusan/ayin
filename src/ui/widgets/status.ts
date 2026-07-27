@@ -34,8 +34,12 @@ export interface StatusState {
   /** Shared-GPU telemetry from the backend host (null = unknown / no card → segment hidden). */
   gpu: { util: number; usedMiB: number; totalMiB: number; tempC: number } | null;
   /** The backend's single-slot LLM scheduler: what holds the GPU and how many calls wait behind
-   *  it. Shown so a slow turn reads as "4th in line behind book_writer", not "ayin is slow". */
-  queue: { running: string | null; runningForMs: number; depth: number } | null;
+   *  it, plus OUR OWN place in line when a request of ours is queued. Shown so a slow turn reads as
+   *  "#4 of 6, behind book_writer", not "ayin is slow". */
+  queue: { running: string | null; runningForMs: number; depth: number; ownPosition?: number; ownOf?: number; ownRunning?: boolean } | null;
+  /** Who owns the llm resource — the AUTHORITY, which decides the model, NOT queue priority.
+   *  `mine` = an ayin-family holder (our launcher, the watcher, or a dispatched code agent). */
+  authority: { holder: string; expiresInMs: number; mine: boolean } | null;
   /** `/fix` queue: a headless Claude implementing a change to ayin itself, and any rejection
    *  files sitting unacknowledged in the repo. Rejections are LOUD — red, uppercase — because a
    *  refused fix is silent otherwise and would just look like nothing happened. */
@@ -69,6 +73,7 @@ export class StatusBar {
     model: null,
     gpu: null,
     queue: null,
+    authority: null,
     fix: null,
   };
 
@@ -183,12 +188,29 @@ export class StatusBar {
     // Why your reply is slow: the shared GPU slot is busy and you may be behind N other calls.
     // ayin's own calls are LOW priority on that scheduler, so waiting is normal, not a hang —
     // seeing `⏳ embed +3` beats staring at an indistinguishable spinner.
+    // Authority first: it answers "who decides the model", which is NOT the same question as "why
+    // is this slow" — conflating them is exactly the confusion this pair of segments exists to end.
+    const auth = this.state.authority;
+    if (auth) {
+      const mins = Math.max(0, Math.round(auth.expiresInMs / 60000));
+      const color = auth.mine ? theme.accent : theme.muted;
+      parts.push(`{${color}-fg}⚑ ${auth.holder}${mins > 0 ? ` ${mins}m` : ''}{/}`);
+    }
+
     const q = this.state.queue;
     if (q && (q.running || q.depth > 0)) {
-      const held = q.running ? `${q.running}${q.runningForMs > 3000 ? ` ${Math.round(q.runningForMs / 1000)}s` : ''}` : 'idle';
-      const behind = q.depth > 0 ? ` +${q.depth}` : '';
-      const color = q.depth > 2 ? theme.err : q.depth > 0 ? theme.warn : theme.muted;
-      parts.push(`{${color}-fg}⏳ ${held}${behind}{/}`);
+      // Our own position when we have a request in flight — the honest answer to "am I stuck?".
+      if (q.ownRunning) {
+        parts.push(`{${theme.ok}-fg}▸ generating{/}`);
+      } else if (q.ownPosition) {
+        const color = q.ownPosition > 2 ? theme.err : theme.warn;
+        parts.push(`{${color}-fg}⏳ you: #${q.ownPosition}/${q.ownOf}{/}`);
+      } else {
+        const held = q.running ? `${q.running}${q.runningForMs > 3000 ? ` ${Math.round(q.runningForMs / 1000)}s` : ''}` : 'idle';
+        const behind = q.depth > 0 ? ` +${q.depth}` : '';
+        const color = q.depth > 2 ? theme.err : q.depth > 0 ? theme.warn : theme.muted;
+        parts.push(`{${color}-fg}⏳ ${held}${behind}{/}`);
+      }
     }
 
     // A fix in flight, then the loud one. Rejections stay up until `/fix clear`.

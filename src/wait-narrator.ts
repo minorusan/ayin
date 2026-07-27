@@ -24,7 +24,8 @@
  */
 
 import { HEADLESS, setAgentState } from './ui.js';
-import { fetchCatalog, fetchGpu, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
+import { fetchCatalog, fetchGpu, findOwnPlace, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
+import { currentRequestId } from './connection.js';
 
 const POLL_MS = 2_000;
 /** Only blame the priority band once the wait is clearly not just "the model is thinking". */
@@ -39,7 +40,16 @@ function compose(what: string, cat: ModelCatalog | null, q: QueueInfo | null, gp
     bits.push(`⇆ loading ${cat.activeModel} (${cat.loadedModel} still resident)`);
   }
 
-  if (q?.running) {
+  // OUR OWN PLACE IN LINE — the number that actually answers "why am I still waiting?". Matched by
+  // the correlation id sent with this request, so it is our request, not a guess about the queue.
+  const mine = findOwnPlace(q, currentRequestId());
+  if (mine?.running) {
+    bits.push(`▸ generating${cat ? ` on ${cat.loadedModel}` : ''}`);
+  } else if (mine) {
+    const behind = mine.aheadOfUs.length ? ` behind ${mine.aheadOfUs.slice(0, 2).join(', ')}${mine.aheadOfUs.length > 2 ? '…' : ''}` : '';
+    bits.push(`⏳ queued #${mine.position}/${mine.of}${behind}`);
+  } else if (q?.running) {
+    // No tag match (older backend, or our call hasn't reached the queue yet) — report the facts.
     const secs = Math.round(q.runningForMs / 1000);
     bits.push(q.depth > 0
       ? `⏳ GPU: ${q.running} ${secs}s · ${q.depth} waiting`
@@ -50,8 +60,10 @@ function compose(what: string, cat: ModelCatalog | null, q: QueueInfo | null, gp
 
   if (!bits.length) return what;
 
-  // The honest "why", once the wait is long enough that you deserve it.
-  const why = waitedMs > WHY_AFTER_MS && q && q.depth > 0 ? ' — ayin queues last (low priority)' : '';
+  // The honest "why", once the wait is long enough that you deserve it. Being overtaken is the
+  // ayin-specific pathology: /api/generate is LOW priority, so a later habit call runs first.
+  const overtaken = mine && !mine.running && mine.aheadOfUs.length > 0;
+  const why = waitedMs > WHY_AFTER_MS && (overtaken || (q && q.depth > 0)) ? ' — ayin queues last (low priority)' : '';
   return `${what} · ${bits.join(' · ')}${why}`;
 }
 
