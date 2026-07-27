@@ -22,7 +22,11 @@ import { startPromptServer } from './prompt-server.js';
 import { acquireLlm, type LlmHold } from './resource-client.js';
 import { handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
 import { startLlmStatusPoll } from './llm-status.js';
-import { checkForUpdate } from './updater.js';
+import { startUpdateWatch, checkForUpdate } from './updater.js';
+import {
+  createRequest, acknowledgeRejections, readRejection, listRequests,
+  snapshot as fixSnapshot, startFixSupervisor, repoPath as ayinRepoPath,
+} from './fix.js';
 import { getSessionArtifacts, readArtifact } from './artifacts.js';
 import { renderMarkdown } from './markdown.js';
 import { HEADLESS } from './ui.js';
@@ -246,6 +250,61 @@ onConnectionChange((state) => {
 // is released on /quit and on SIGINT/SIGTERM; a hard kill lets the backend grant TTL-expire (the
 // keepalive is unref'd, so it stops on exit).
 
+// ── /fix — ayin fixing itself via headless Claude ─────────────────────
+// The queue, the detached agent and the boot recovery live in fix.ts; this is only the command
+// surface and the status-bar plumbing.
+
+function refreshFixStatus(): void {
+  const s = fixSnapshot();
+  setStatus({ fix: { running: !!s.running, queued: s.queued, rejected: s.rejected.length } });
+}
+
+async function handleFixCommand(arg: string): Promise<void> {
+  const t = arg.trim();
+  const s = fixSnapshot();
+
+  // `/fix` — the board: what's running, what's waiting, what was refused.
+  if (!t) {
+    const repo = ayinRepoPath();
+    addMessage('system', repo ? `Fix repo: ${repo}` : 'No ayin source checkout found — /fix needs one (set AYIN_REPO).');
+    if (s.running) addMessage('system', `Running: ${s.running.id} — ${s.running.prompt}`);
+    if (s.queued) addMessage('system', `Queued: ${s.queued}`);
+    for (const id of s.rejected) {
+      const body = readRejection(id) ?? '';
+      const why = body.split('\n').find((l) => l.trim() && !l.startsWith('#') && !l.startsWith('---')) ?? '(see the file)';
+      addMessage('system', `REJECTED ${id}: ${why.slice(0, 160)}`);
+    }
+    if (!s.running && !s.queued && !s.rejected.length) {
+      const recent = listRequests(3);
+      if (recent.length) for (const r of recent) addMessage('system', `${r.status.padEnd(8)} ${r.id}  ${r.prompt.slice(0, 80)}`);
+      else addMessage('system', 'No fixes yet. Usage: /fix <what should change about ayin>');
+    }
+    addMessage('system', '/fix <prompt> — request a change · /fix show <id> — read a rejection · /fix clear — acknowledge rejections');
+    return;
+  }
+
+  if (t === 'clear' || t === 'ack') {
+    const n = acknowledgeRejections();
+    addMessage('system', n ? `Acknowledged ${n} rejection(s) — moved to fixes/archive/.` : 'No rejections to clear.');
+    refreshFixStatus();
+    return;
+  }
+
+  if (t.startsWith('show')) {
+    const id = t.slice(4).trim() || s.rejected[s.rejected.length - 1];
+    const body = id ? readRejection(id) : null;
+    addMessage('system', body ? `── rejection ${id} ──\n${body}` : `No rejection found${id ? ` for ${id}` : ''}.`);
+    return;
+  }
+
+  // Anything else is the request itself.
+  const res = createRequest(t);
+  if ('error' in res) { addMessage('system', `/fix: ${res.error}`); return; }
+  addMessage('system', `Fix ${res.id} queued — headless Claude will implement it, then commit + publish (or write a rejection).`);
+  addMessage('system', 'It runs detached: closing ayin does not stop it, and an interrupted run is requeued on the next start.');
+  refreshFixStatus();
+}
+
 // ── Live model + GPU in the status bar ────────────────────────────────
 // One poll of the llm resource's read ops feeds both segments. It survives backend restarts on its
 // own (every failure just clears the segments and the next tick retries), and the interval is
@@ -295,6 +354,9 @@ onInput(async (text: string) => {
         return;
       case '/model':
         await handleModelCommand(text.slice('/model'.length));
+        return;
+      case '/fix':
+        await handleFixCommand(text.slice('/fix'.length));
         return;
       case '/clear':
         clearChat();
@@ -386,6 +448,8 @@ onInput(async (text: string) => {
         addMessage('system', '/goal <text> — set the session goal (shown in cursive above the chat); /goal clear to unset');
         addMessage('system', '/model — popup: pick from the models the backend has installed (Enter reloads the GPU with it)');
         addMessage('system', '/model <name|qwen|gemma> — switch straight away; a non-shared model stays booked until you /quit');
+        addMessage('system', '/fix <prompt> — headless Claude changes ayin itself, then commits + publishes (or writes a rejection)');
+        addMessage('system', '/fix · /fix show <id> · /fix clear — the fix board, read a rejection, acknowledge rejections');
         addMessage('system', '/summary — show session summary (Esc to close)');
         addMessage('system', '/resume — list sessions for this version');
         addMessage('system', '/resume <sessionId> — restore a specific session');
@@ -525,6 +589,14 @@ async function runInteractive(): Promise<void> {
 
   // Always-on model + GPU segments (polled from the llm resource's read ops).
   startModelStatusPoll();
+
+  // /fix supervisor: recovers anything that was in flight when we last died, drains the queue, and
+  // keeps the fix/rejection segments current. Notes land in the chat as they happen.
+  // A finished fix may have published a new version — re-check immediately rather than waiting
+  // out the 10-minute update poll.
+  startFixSupervisor((note) => { addMessage('system', note); refreshFixStatus(); void checkForUpdate(); });
+  setInterval(refreshFixStatus, 10_000).unref?.();
+  refreshFixStatus();
   addMessage('system', `ayin v${getVersion()}`);
   addMessage('system', process.cwd());
 
@@ -539,7 +611,9 @@ async function runInteractive(): Promise<void> {
   screen.render();
 
   // Check for updates (non-blocking)
-  checkForUpdate().catch(() => {});
+  // "↑ vX available" in the status bar — at boot and every 10 min, so a fix published from this
+  // session (or another machine) surfaces without a restart.
+  startUpdateWatch();
 
   try {
     await connect();

@@ -45,21 +45,55 @@ function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-/** Passive check on startup — opt-in, best-effort, never blocks or throws. */
+/**
+ * Which registry the PASSIVE check may talk to.
+ *
+ * `AYIN_UPDATE_REGISTRY` if set. Otherwise npm's own configured registry — but only when it is a
+ * private one. A checkout pointed at public npmjs gets NO passive check: `ayin` is a plausible
+ * public name, so that would both phone home uninvited and risk advertising a stranger's package
+ * as "your update". Set `AYIN_UPDATE_CHECK=0` to switch it off entirely.
+ */
+let passiveRegistryCache: string | null | undefined;
+async function passiveRegistry(): Promise<string | null> {
+  if (process.env.AYIN_UPDATE_CHECK === '0') return null;
+  if (REGISTRY) return REGISTRY;
+  if (passiveRegistryCache !== undefined) return passiveRegistryCache;
+  const npmReg = await npmConfiguredRegistry();
+  const isPublic = !npmReg || /(^|\/\/)(registry\.)?npmjs\.(org|com)/i.test(npmReg);
+  passiveRegistryCache = isPublic ? null : npmReg;
+  return passiveRegistryCache;
+}
+
+/**
+ * Passive check — best-effort, never blocks or throws. Sets the `↑ vX available` hint in the
+ * status bar. Called at startup and then on a slow timer, so a fix published from this very
+ * session (or from another machine) shows up without a restart.
+ */
 export async function checkForUpdate(): Promise<void> {
-  if (!REGISTRY) return; // opt-in only (AYIN_UPDATE_REGISTRY unset) — never phones home by default
+  const registry = await passiveRegistry();
+  if (!registry) return;
   const current = getCurrentVersion();
 
   try {
-    const latest = await fetchDistTag(REGISTRY, PACKAGE_NAME, 'latest');
+    const latest = await fetchDistTag(registry, PACKAGE_NAME, 'latest');
     if (!latest) return;
     if (compareVersions(current, latest) < 0) {
-      setStatus({ update: `v${latest} available` });
+      setStatus({ update: `v${latest} available — ayin update` });
       log('INFO', 'update_available', { current, latest });
+    } else {
+      setStatus({ update: null }); // we just updated (or the tag moved back) — drop a stale hint
     }
   } catch {
     // Silent — update check is best-effort
   }
+}
+
+/** Re-check every `everyMs` (default 10 min). Unref'd; returns a stop function. */
+export function startUpdateWatch(everyMs = 10 * 60 * 1000): () => void {
+  void checkForUpdate();
+  const timer = setInterval(() => { void checkForUpdate(); }, everyMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 // ── `ayin update` ─────────────────────────────────────────────────────

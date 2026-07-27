@@ -67,8 +67,30 @@ itself is configured with, and shells out to `npm i -g` so a half-finished downl
 replace a working binary. If the global prefix isn't writable it tells you to re-run with `sudo`.
 Running from a source checkout, it says so — there, updating is `git pull && npm run build`.
 
-The passive "vX available" hint in the status bar stays **opt-in** (`AYIN_UPDATE_REGISTRY`): a
-fresh checkout never contacts a registry you didn't configure.
+The status bar carries `↑ vX available` when the registry has a newer build (checked at boot and
+every 10 min). It only ever asks a **private** registry — `AYIN_UPDATE_REGISTRY`, or npm's own
+configured registry when that isn't public npmjs — so a fresh checkout never phones home uninvited
+and can't be told a stranger's `ayin` package is your update. `AYIN_UPDATE_CHECK=0` turns it off.
+
+### `/fix` — ayin fixing itself
+
+From inside the TUI:
+
+```
+/fix the status bar should show the git branch in bold
+```
+
+ayin writes the request into its own codebase (`fixes/fix-<id>.md`) and runs **headless Claude
+Code** over the source checkout. Claude implements it — typecheck, build, docs, version bump,
+commit, publish — or writes `fixes/rejection-<id>.md` saying what it would need instead, and stops.
+
+- `/fix` — the board: what's running, what's queued, what was refused
+- `/fix show <id>` — read a rejection · `/fix clear` — acknowledge them
+- A bold red **FIX REJECTED** sits in the status bar until you acknowledge it.
+
+Runs are **detached and queued on disk**: closing ayin doesn't stop one, and a run interrupted by a
+crash or a power cut is requeued automatically at the next start. Requires a source checkout
+(`AYIN_REPO`) and the `claude` binary (`AYIN_CLAUDE_BIN`).
 
 ## Tools
 

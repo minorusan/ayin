@@ -31,6 +31,10 @@ export interface StatusState {
   model: { name: string; booked: boolean; swapping: boolean } | null;
   /** Shared-GPU telemetry from the backend host (null = unknown / no card → segment hidden). */
   gpu: { util: number; usedMiB: number; totalMiB: number; tempC: number } | null;
+  /** `/fix` queue: a headless Claude implementing a change to ayin itself, and any rejection
+   *  files sitting unacknowledged in the repo. Rejections are LOUD — red, uppercase — because a
+   *  refused fix is silent otherwise and would just look like nothing happened. */
+  fix: { running: boolean; queued: number; rejected: number } | null;
 }
 
 /** Each phase owns its animation: frames + how many base ticks (80ms) per frame + color.
@@ -59,6 +63,7 @@ export class StatusBar {
     llm: null,
     model: null,
     gpu: null,
+    fix: null,
   };
 
   constructor() {
@@ -81,14 +86,17 @@ export class StatusBar {
     if (HEADLESS) return;
     Object.assign(this.state, partial);
 
+    // Animate only while something is moving (an LLM phase, or a fix being worked on); the ticker
+    // stops itself when nothing is — idle costs zero CPU.
+    const wantsTicker = !!this.state.llm || !!this.state.fix?.running;
+    if (wantsTicker && !this.unTick) {
+      this.unTick = onTick((t) => { this.tick = t; this.redraw(); });
+    } else if (!wantsTicker && this.unTick) {
+      this.unTick();
+      this.unTick = null;
+    }
+
     if ('llm' in partial) {
-      // Animate only while a phase is showing; the ticker stops itself when idle.
-      if (this.state.llm && !this.unTick) {
-        this.unTick = onTick((t) => { this.tick = t; this.redraw(); });
-      } else if (!this.state.llm && this.unTick) {
-        this.unTick();
-        this.unTick = null;
-      }
       // Transient blips (✓ done / ⚠ warning) clear themselves — unless something replaced them.
       if (this.blipTimer) { clearTimeout(this.blipTimer); this.blipTimer = null; }
       if (this.state.llm?.ttlMs) {
@@ -159,6 +167,17 @@ export class StatusBar {
         ? '' : ` ${this.state.llm.phase}`;
       const detail = this.state.llm.detail ? ` {${theme.muted}-fg}${this.state.llm.detail}{/}` : '';
       parts.push(`{${look.color}-fg}${frame}${label}{/}${detail}`);
+    }
+
+    // A fix in flight, then the loud one. Rejections stay up until `/fix clear`.
+    const fix = this.state.fix;
+    if (fix && (fix.running || fix.queued > 0)) {
+      const q = fix.queued > 0 ? ` +${fix.queued}` : '';
+      const frame = fix.running ? ['⚒', '⚒', ' '][Math.floor(this.tick / 4) % 3] : '·';
+      parts.push(`{${theme.tool}-fg}${frame} fix${fix.running ? 'ing' : ' queued'}${q}{/}`);
+    }
+    if (fix && fix.rejected > 0) {
+      parts.push(`{${theme.err}-fg}{bold}FIX REJECTED${fix.rejected > 1 ? ` (${fix.rejected})` : ''}{/bold}{/}`);
     }
 
     if (this.state.update) parts.push(`{${theme.warn}-fg}↑ ${this.state.update}{/}`);
