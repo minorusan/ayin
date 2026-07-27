@@ -348,6 +348,11 @@ tree knows about the internals). Design rules:
   priority is proven, never self-declared, and it drops back to LOW the instant the lock ends.
   Measured with the GPU busy: an unlocked request sent FIRST finished in 237.5s, a locked one sent
   1.2s LATER finished in 62.0s.
+  **Interactive sessions AUTO-LOCK on boot** (`AYIN_AUTOLOCK=0` opts out). A human at a keyboard
+  should not have to know a command to avoid starving: without it a session sits in LOW behind every
+  habit, which produced `GPU: chatOnce 306s · 1 waiting` and then a client abort at 10m surfaced as
+  `fetch failed`. Auto-lock also pins the model, stopping the gemma↔qwen flapping another consumer's
+  ownership change causes mid-session. Headless runs do NOT auto-lock — unattended work yields.
 - **Model picker + booking** (`/model` → `model-picker.ts`, catalog in `llm-status.ts`): the
   interactive counterpart to headless `AYIN_ACQUIRE_LLM=1`. Bare `/model` opens the **popup** —
   the same overlay the tool-permission prompt uses (`dialog.ts`) — listing every chat model the

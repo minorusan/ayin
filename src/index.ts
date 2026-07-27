@@ -733,6 +733,19 @@ async function runInteractive(): Promise<void> {
   // Always-on model + GPU segments (polled from the llm resource's read ops).
   startModelStatusPoll();
 
+  // AUTO-LOCK. An interactive session is a human waiting at a keyboard, so it takes the priority
+  // band by default instead of sitting in LOW behind every habit — the failure mode that produced
+  // "GPU: chatOnce 306s · 1 waiting" and then a 10-minute client abort reported as `fetch failed`.
+  // It also pins the model, which stops the gemma↔qwen flapping mid-session that another consumer's
+  // ownership change would otherwise cause. Self-releasing (10-min TTL + 2-min keepalive), released
+  // on /quit, and opt-out with AYIN_AUTOLOCK=0 for a session that should yield to background work.
+  if (process.env.AYIN_AUTOLOCK !== '0') {
+    void lockSession().then((err) => {
+      if (err) addMessage('system', `Could not take the priority lock: ${err} — /lock to retry.`);
+      else addMessage('system', 'Locked ⚿ — priority band + model pinned for this session (/unlock to yield).');
+    });
+  }
+
   // /fix supervisor: recovers anything that was in flight when we last died, drains the queue, and
   // keeps the fix/rejection segments current. Notes land in the chat as they happen.
   // A finished fix may have published a new version — re-check immediately rather than waiting

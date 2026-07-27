@@ -130,7 +130,11 @@ export async function llmChat(
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const controller = new AbortController();
     activeLlmController = controller;
-    const timeout = setTimeout(() => controller.abort(), 600_000);
+    // 20 min, not 10. The old ceiling fired while the request was still QUEUED — not stuck — and
+    // undici surfaces an abort as `TypeError: fetch failed`, so a plain wait was reported as a
+    // network error. The backend's own undici allows 30 min; this stays under it so a real hang is
+    // still bounded.
+    const timeout = setTimeout(() => controller.abort(), 20 * 60_000);
 
     try {
       // A correlation id per attempt, so the wait narrator can find THIS request in the backend's
@@ -189,6 +193,10 @@ export async function llmChat(
         msg.includes('Keli 504');
 
       const aborted = controller.signal.aborted && !transient;
+      if (controller.signal.aborted && transient) {
+        // Our abort, dressed up as a network failure by undici. Say which it was.
+        throw new Error('gave up after 20 min — the request was still waiting for the shared GPU, not stuck. /lock puts this session in the priority band.');
+      }
       if (!transient || aborted || attempt >= MAX_ATTEMPTS) throw err;
 
       fileLog('WARN', 'llm_transient_error_retrying', { attempt: String(attempt), error: msg.substring(0, 200), waitMs: String(RETRY_DELAY_MS) });
