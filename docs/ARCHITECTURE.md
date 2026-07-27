@@ -296,6 +296,23 @@ tree knows about the internals). Design rules:
   `▍ ⠹ label··  12s` (state-colored gutter, spinner, pulsing label, breathing ellipsis,
   elapsed). Drive it explicitly with `setAgentState(state, label)`; the legacy
   `setAgentStatus(text)` still works and infers the state from the text.
+- **Goal display — switchable** (`widgets/chat.ts`, `AYIN_GOAL_VIEW`): `both` (default) · `card` ·
+  `watermark` · `line` · `off`. Treatments can be compared without a rebuild.
+  - **`card`** — a bordered OBJECTIVE panel above the input. Width follows the longest wrapped row
+    (so a short goal gets a short card), wraps to at most 3 rows, and the border arithmetic is
+    asserted: body is `"│ " + w + " │"` = `w+4` cells, so the top fill is `w - TITLE.length - 1`.
+    Verified aligned at 17/37/73 cells.
+    ```
+    ╭─ OBJECTIVE ───────────────────────╮
+    │ Improve maradel status LLM window │
+    ╰───────────────────────────────────╯
+    ```
+  - **`watermark`** — a faint `ᵍᵒᵃˡ …` line above **every assistant turn**, so the anchor is visible
+    while *reading* the answer, not only while typing. One line, hard-truncated: it must never push
+    the answer down the screen.
+  - **The terminal tab** always carries it (`ayin · <goal>`, via `screen.title` → OSC), even when the
+    view is `off` — with several sessions open the tab bar is the only way to tell them apart without
+    switching. A shell that rewrites the title on every prompt will fight it.
 - **Session goal** (`goal.ts` + `widgets/chat.ts`): a one-line, auto-determined **direction**
   for the session — the anti-wander anchor. On the first user message `refreshGoal()` makes one
   cheap LLM call (the `goal` prompt) that distils the user's intent into a stable one-liner;

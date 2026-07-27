@@ -14,6 +14,26 @@ import { theme } from '../theme.js';
 import { ThinkingIndicator, type AgentState } from './thinking.js';
 import { getGoal, onGoalChange } from '../../goal.js';
 
+/** OBJECTIVE card: label + how many wrapped rows of goal text it may grow to. */
+const TITLE = 'OBJECTIVE';
+const MAX_CARD_ROWS = 3;
+
+/**
+ * Put the goal in the TERMINAL TAB. With several ayin sessions open, the tab bar is the only place
+ * you can tell them apart without switching — so the tab carries what this session is for, and
+ * falls back to the bare name when there's no goal yet.
+ *
+ * blessed emits the OSC title sequence when `screen.title` is assigned. Some terminals only honour
+ * it if the shell isn't rewriting the title on every prompt.
+ */
+function syncTerminalTitle(): void {
+  if (HEADLESS) return;
+  const goal = getGoal();
+  try {
+    screen.title = goal ? `ayin · ${goal.length > 60 ? `${goal.slice(0, 59)}…` : goal}` : 'ayin';
+  } catch { /* a terminal that refuses the title is not worth an exception */ }
+}
+
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
 export interface Message {
@@ -44,15 +64,32 @@ export class ChatLog {
         style: { fg: theme.text, bg: theme.bg },
       });
     this.indicator = new ThinkingIndicator(() => this.redraw());
-    onGoalChange(() => this.redraw()); // goal line lives in this box; re-render when it changes
+    onGoalChange(() => {
+      this.redraw(); // the goal display lives in this box
+      syncTerminalTitle(); // …and in the terminal tab, so the goal is readable from the tab bar
+    });
+    syncTerminalTitle();
   }
 
-  /** The goal line, shown in cursive+dim at the BOTTOM of the chat — just above the thinking
-   *  indicator and the input, so it sits in the user's eyeline while they type/watch ayin think.
-   *  Null when no goal is set. blessed can't do italic (its attr model has no italic bit — see
-   *  docs), so "cursive" is a Unicode Mathematical-Italic transform of the letters; a genuine
-   *  slant that needs no terminal italic support. Truncated by RAW length (pre-transform)
-   *  because each italic glyph is a surrogate pair — String#length would over-count. */
+  /**
+   * How the session goal is displayed. Switchable at runtime (`AYIN_GOAL_VIEW`) so the treatments
+   * can be compared without a rebuild:
+   *
+   *   card       a bordered OBJECTIVE panel above the input        (default)
+   *   watermark  a faint ᵍᵒᵃˡ line above every assistant turn
+   *   both       card + watermark  ← what's on now
+   *   line       the original one-line Unicode math-italic cursive
+   *   off        no goal display (the terminal tab still carries it)
+   */
+  private goalView(): 'card' | 'watermark' | 'both' | 'line' | 'off' {
+    const v = (process.env.AYIN_GOAL_VIEW ?? 'both').toLowerCase();
+    return v === 'card' || v === 'watermark' || v === 'line' || v === 'off' ? v : 'both';
+  }
+
+  /** The original treatment: one cursive+dim line. blessed has no italic attribute (its attr model
+   *  has no italic bit), so "cursive" is a Unicode Mathematical-Italic transform — a real slant with
+   *  no terminal support needed. Truncated by RAW length (pre-transform) because each italic glyph
+   *  is a surrogate pair, so String#length would over-count. */
   private goalLine(): string | null {
     const goal = getGoal();
     if (!goal) return null;
@@ -60,6 +97,53 @@ export class ChatLog {
     let raw = `Goal: ${goal}`;
     if (raw.length > maxCols) raw = raw.slice(0, maxCols - 1) + '…';
     return ` {${theme.muted}-fg}${escapeBlessedTags(toItalic(raw))}{/}`;
+  }
+
+  /**
+   * The OBJECTIVE card — a bordered panel just above the input. Sized to the goal (wrapped, up to
+   * MAX_CARD_ROWS lines) and never wider than the chat, so a long goal grows the box instead of
+   * being clipped mid-word.
+   */
+  private goalCard(): string[] {
+    const goal = getGoal();
+    if (!goal) return [];
+    const avail = Math.max(24, Number(screen.width ?? 80) - 6);
+    const inner = Math.min(avail, 76);
+    const words = goal.split(/\s+/);
+    const rows: string[] = [];
+    let line = '';
+    for (const w of words) {
+      const word = w.length > inner ? w.slice(0, inner) : w;
+      if (!line) line = word;
+      else if (line.length + 1 + word.length <= inner) line += ` ${word}`;
+      else { rows.push(line); line = word; }
+      if (rows.length >= MAX_CARD_ROWS) break;
+    }
+    if (line && rows.length < MAX_CARD_ROWS) rows.push(line);
+    if (!rows.length) return [];
+    // Width is driven by the longest wrapped row, so a short goal gets a short card.
+    const w = Math.max(...rows.map((r) => r.length), TITLE.length + 4);
+    const frame = (s: string) => ` {${theme.accentDim}-fg}${s}{/}`;
+    // Border arithmetic, spelled out because an off-by-one here is visible as a ragged card:
+    // body is "│ " + w + " │" = w+4 cells, so the top must be "╭─ TITLE " (TITLE+3+1) + fill + "╮".
+    const out = [frame(`╭─ ${TITLE} ${'─'.repeat(Math.max(0, w - TITLE.length - 1))}╮`)];
+    for (const r of rows) {
+      const pad = ' '.repeat(Math.max(0, w - r.length));
+      out.push(`${frame('│')} {${theme.subtle}-fg}${escapeBlessedTags(r)}{/}${pad} ${frame('│').trim()}`);
+    }
+    out.push(frame(`╰${'─'.repeat(w + 2)}╯`));
+    return out;
+  }
+
+  /** The watermark — a faint `ᵍᵒᵃˡ …` line above an assistant turn, so the anchor is visible at the
+   *  moment of READING, not only while typing. One line, hard-truncated: it must never push the
+   *  answer down the screen. */
+  private goalWatermark(): string | null {
+    const goal = getGoal();
+    if (!goal) return null;
+    const maxCols = Math.max(20, Math.min(Number(screen.width ?? 80) - 8, 72));
+    const text = goal.length > maxCols ? `${goal.slice(0, maxCols - 1)}…` : goal;
+    return `  {${theme.faint}-fg}ᵍᵒᵃˡ ${escapeBlessedTags(text)}{/}`;
   }
 
   add(role: MessageRole, content: string): void {
@@ -152,6 +236,12 @@ export class ChatLog {
         }
       } else if (msg.role === 'assistant') {
         lines.push('');
+        // The goal watermark rides above the answer, so the anchor is in view while READING it.
+        const view = this.goalView();
+        if (view === 'watermark' || view === 'both') {
+          const wm = this.goalWatermark();
+          if (wm) lines.push(wm);
+        }
         const rendered = renderMarkdown(msg.content).split('\n');
         rendered.forEach((line, i) => {
           lines.push(i === 0 ? `{${theme.accent}-fg}◉{/} ${line}` : `  ${line}`);
@@ -167,12 +257,13 @@ export class ChatLog {
       }
     }
 
-    // The goal (cursive) and the thinking indicator live at the very BOTTOM of the chat, just
-    // above the input — goal first, indicator under it — so both stay in the user's eyeline.
-    const goalLine = this.goalLine();
+    // The goal and the thinking indicator live at the very BOTTOM of the chat, just above the
+    // input — goal first, indicator under it — so both stay in the user's eyeline.
+    const view = this.goalView();
     const indicatorLine = this.indicator.line();
     const tail: string[] = [];
-    if (goalLine) tail.push(goalLine);
+    if (view === 'card' || view === 'both') tail.push(...this.goalCard());
+    else if (view === 'line') { const l = this.goalLine(); if (l) tail.push(l); }
     if (indicatorLine) tail.push(` ${indicatorLine}`);
     if (tail.length) lines.push('', ...tail);
 
