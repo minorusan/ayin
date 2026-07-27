@@ -22,7 +22,7 @@
 import { addMessage, setAgentStatus } from './ui.js';
 import { showDialog, type DialogOption } from './dialog.js';
 import { acquireLlm, resourceOp, type LlmHold } from './resource-client.js';
-import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog } from './llm-status.js';
+import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
 import { refreshActiveModel, activeModelId } from './llm/manager.js';
 import { log } from './log.js';
 
@@ -42,6 +42,13 @@ export async function releaseModelHold(): Promise<void> {
 function gpuLine(g: GpuInfo | null): string {
   if (!g) return 'gpu n/a';
   return `gpu ${g.util}% · ${(g.usedMiB / 1024).toFixed(1)}/${(g.totalMiB / 1024).toFixed(0)}G · ${g.tempC}°C`;
+}
+
+/** " · queue: chatOnce 12s +3 waiting" — empty when the shared slot is free. */
+function queueLine(q: QueueInfo | null): string {
+  if (!q || (!q.running && q.depth === 0)) return '';
+  const held = q.running ? `${q.running} ${Math.round(q.runningForMs / 1000)}s` : 'idle';
+  return ` · queue: ${held}${q.depth > 0 ? ` +${q.depth} waiting` : ''}`;
 }
 
 function noteFor(m: ModelCatalog['models'][number], cat: ModelCatalog): string {
@@ -134,7 +141,7 @@ export async function switchModel(model: string, cat: ModelCatalog): Promise<boo
 /** The popup: pick a model from what the backend actually has installed. */
 export async function openModelPicker(): Promise<void> {
   setAgentStatus('Reading the model catalog…');
-  const [cat, gpu] = await Promise.all([fetchCatalog({ force: true }), fetchGpu()]);
+  const [cat, telemetry] = await Promise.all([fetchCatalog({ force: true }), fetchGpu()]);
   setAgentStatus('');
 
   if (!cat || cat.models.length === 0) {
@@ -149,7 +156,9 @@ export async function openModelPicker(): Promise<void> {
     'Model',
     options,
     {
-      subtitle: `${isModelBooked() ? 'booked by you' : 'shared'} · ${gpuLine(gpu)} · ${statusSource()}`,
+      // The queue line matters here: picking a model when 4 calls are already waiting means the
+      // swap itself queues behind them, so the reload will feel slow for reasons that aren't yours.
+      subtitle: `${isModelBooked() ? 'booked by you' : 'shared'} · ${gpuLine(telemetry.gpu)}${queueLine(telemetry.queue)} · ${statusSource()}`,
       selected: activeIdx,
       footer: '↑↓ select · Enter reload · Esc cancel',
     },

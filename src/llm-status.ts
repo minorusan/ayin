@@ -91,10 +91,27 @@ export async function fetchCatalog(opts: { force?: boolean } = {}): Promise<Mode
   return catalogFromStatus(); // older backend (no `models` op) → roles only
 }
 
-/** Current GPU telemetry, or null (no card visible / backend unreachable). Never throws. */
-export async function fetchGpu(): Promise<GpuInfo | null> {
-  const r = await resourceOp('llm', 'gpu', {}, 4_000) as { gpu?: GpuInfo | null } | null;
-  return r?.gpu ?? null;
+/**
+ * The backend's single-slot LLM scheduler. EVERY model call on that box — chat, habits,
+ * embeddings, model swaps, Chatterbox TTS — goes through one slot, ordered by priority then FIFO,
+ * and ayin's own calls are LOW priority (the backend's `/api/generate` is
+ * `withOllamaPriority("low")`), so they are overtaken by every habit that arrives while they wait.
+ * Knowing this is the difference between "ayin is slow" and "ayin is 4th in line behind
+ * book_writer".
+ */
+export interface QueueInfo {
+  /** Label of the call holding the slot right now (`chatOnce`, `embed`, `swapChatModel`, `gpu:…`). */
+  running: string | null;
+  runningForMs: number;
+  /** How many calls are waiting behind it. */
+  depth: number;
+  waiting: Array<{ label: string; priority: string; waitingMs: number }>;
+}
+
+/** Current GPU telemetry + scheduler state. Never throws. */
+export async function fetchGpu(): Promise<{ gpu: GpuInfo | null; queue: QueueInfo | null }> {
+  const r = await resourceOp('llm', 'gpu', {}, 4_000) as { gpu?: GpuInfo | null; queue?: QueueInfo } | null;
+  return { gpu: r?.gpu ?? null, queue: r?.queue ?? null };
 }
 
 /** Resolve what the user typed (`qwen`, `gemma`, or a full `qwen3-coder:30b`) to a catalog model.
@@ -120,7 +137,7 @@ export function resolveModelName(input: string, catalog: ModelCatalog): string |
  * process open. Returns a stop function.
  */
 export function startLlmStatusPoll(
-  onUpdate: (u: { catalog: ModelCatalog | null; gpu: GpuInfo | null }) => void,
+  onUpdate: (u: { catalog: ModelCatalog | null; gpu: GpuInfo | null; queue: QueueInfo | null }) => void,
   everyMs = 5_000,
 ): () => void {
   let stopped = false;
@@ -130,10 +147,10 @@ export function startLlmStatusPoll(
     if (stopped || running) return;
     running = true;
     try {
-      const [catalog, gpu] = await Promise.all([fetchCatalog(), fetchGpu()]);
-      if (!stopped) onUpdate({ catalog, gpu });
+      const [catalog, g] = await Promise.all([fetchCatalog(), fetchGpu()]);
+      if (!stopped) onUpdate({ catalog, gpu: g.gpu, queue: g.queue });
     } catch {
-      if (!stopped) onUpdate({ catalog: null, gpu: null }); // never show stale truth
+      if (!stopped) onUpdate({ catalog: null, gpu: null, queue: null }); // never show stale truth
     } finally {
       running = false;
     }

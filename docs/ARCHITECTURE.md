@@ -305,6 +305,15 @@ tree knows about the internals). Design rules:
   until resident, 180s budget) — it narrates progress and gives up with a message rather than
   hanging the TUI. The dialect re-resolves after the swap (`refreshActiveModel`). See "one door
   to every resource" — ayin never touches Ollama and never picks a model by itself.
+- **GPU queue in the status bar** — `⏳ chatOnce 6s +2` (amber past 1 waiter, red past 2): what
+  holds the backend's shared LLM slot, for how long, and how many calls are behind it. This exists
+  because a slow turn and a *queued* turn used to look identical. On that box **one slot serializes
+  every model call** — chat, habits, embeddings, model swaps, Chatterbox TTS — ordered by priority
+  then FIFO, and ayin's own calls are **LOW** priority (the backend's `/api/generate` is
+  `withOllamaPriority("low")`), so a normal-priority habit call that arrives *later* still runs
+  first. Measured on the live box: an ayin-class `chatOnce` that had waited 33s sat at **position
+  120 of 120**, behind 119 normal-priority `embed` calls. A one-word answer took 4m27s with no model
+  swap involved. Knowing this is the difference between "ayin is broken" and "ayin is last in line".
 - **Model + GPU in the status bar** (`llm-status.ts` + `widgets/status.ts`): two always-on
   segments — `⬢ qwen3.6:27b` (accent = booked by us · `⬡` muted = the shared model · `⇆` amber =
   mid-swap) and `gpu 43% 19.2/24G 61°C` (colored by VRAM pressure: >75% amber, >90% red). Fed by

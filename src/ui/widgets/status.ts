@@ -31,6 +31,9 @@ export interface StatusState {
   model: { name: string; booked: boolean; swapping: boolean } | null;
   /** Shared-GPU telemetry from the backend host (null = unknown / no card → segment hidden). */
   gpu: { util: number; usedMiB: number; totalMiB: number; tempC: number } | null;
+  /** The backend's single-slot LLM scheduler: what holds the GPU and how many calls wait behind
+   *  it. Shown so a slow turn reads as "4th in line behind book_writer", not "ayin is slow". */
+  queue: { running: string | null; runningForMs: number; depth: number } | null;
   /** `/fix` queue: a headless Claude implementing a change to ayin itself, and any rejection
    *  files sitting unacknowledged in the repo. Rejections are LOUD — red, uppercase — because a
    *  refused fix is silent otherwise and would just look like nothing happened. */
@@ -63,6 +66,7 @@ export class StatusBar {
     llm: null,
     model: null,
     gpu: null,
+    queue: null,
     fix: null,
   };
 
@@ -167,6 +171,17 @@ export class StatusBar {
         ? '' : ` ${this.state.llm.phase}`;
       const detail = this.state.llm.detail ? ` {${theme.muted}-fg}${this.state.llm.detail}{/}` : '';
       parts.push(`{${look.color}-fg}${frame}${label}{/}${detail}`);
+    }
+
+    // Why your reply is slow: the shared GPU slot is busy and you may be behind N other calls.
+    // ayin's own calls are LOW priority on that scheduler, so waiting is normal, not a hang —
+    // seeing `⏳ embed +3` beats staring at an indistinguishable spinner.
+    const q = this.state.queue;
+    if (q && (q.running || q.depth > 0)) {
+      const held = q.running ? `${q.running}${q.runningForMs > 3000 ? ` ${Math.round(q.runningForMs / 1000)}s` : ''}` : 'idle';
+      const behind = q.depth > 0 ? ` +${q.depth}` : '';
+      const color = q.depth > 2 ? theme.err : q.depth > 0 ? theme.warn : theme.muted;
+      parts.push(`{${color}-fg}⏳ ${held}${behind}{/}`);
     }
 
     // A fix in flight, then the loud one. Rejections stay up until `/fix clear`.

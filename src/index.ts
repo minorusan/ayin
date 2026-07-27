@@ -311,12 +311,13 @@ async function handleFixCommand(arg: string): Promise<void> {
 // unref'd so it never keeps the process alive.
 function startModelStatusPoll(): void {
   if (HEADLESS) return;
-  startLlmStatusPoll(({ catalog, gpu }) => {
+  startLlmStatusPoll(({ catalog, gpu, queue }) => {
     setStatus({
       model: catalog
         ? { name: catalog.activeModel, booked: isModelBooked(), swapping: catalog.loadedModel !== catalog.activeModel }
         : null,
       gpu,
+      queue: queue ? { running: queue.running, runningForMs: queue.runningForMs, depth: queue.depth } : null,
     });
   });
 }
