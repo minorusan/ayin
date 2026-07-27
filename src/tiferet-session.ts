@@ -50,6 +50,11 @@ const SESSIONS_DIR = join(homedir(), '.ayin-cli', 'sessions');
 const RECENT_TURNS = 20;
 const MAX_CONTENT = 4000;
 
+/**
+ * What the `/resume` picker shows for one session. The cheap fields come from a bounded scan of the
+ * record; the `rich` block requires parsing every line plus the checkpoint sidecar, so it is only
+ * computed for the rows actually being displayed (see listSessions).
+ */
 export interface CliSessionMeta {
   sessionId: string;
   title: string | null;
@@ -58,6 +63,33 @@ export interface CliSessionMeta {
   createdAt: string;
   /** Which directory the session ran in — the thing `/resume` scopes on. */
   cwd: string;
+  /** Present only for the sessions a listing actually returns (`limit`). */
+  rich?: SessionRich;
+}
+
+/** The detail worth reading before you commit to resuming something. */
+export interface SessionRich {
+  /** The session's own goal, as it checkpointed it — the best one-line answer to "what was this?". */
+  goal: string | null;
+  /** Prompts you sent / answers you got back. */
+  prompts: number;
+  answers: number;
+  toolCalls: number;
+  /** Distinct tools, most-used first — "read_file×12, bash×4" tells you what kind of session it was. */
+  tools: Array<{ name: string; count: number }>;
+  /** Files the session WROTE (write_file / str_replace), deduped — the blast radius it had. */
+  filesWritten: string[];
+  /** Artifacts captured (from the checkpoint; artifacts.ts keys them per run, not on disk by id). */
+  artifactCount: number;
+  /** Characters of restorable context, and the usual chars/4 token estimate. */
+  contextChars: number;
+  approxTokens: number;
+  /** Wall-clock first → last event. */
+  durationMs: number;
+  /** Size of the record on disk. */
+  bytes: number;
+  /** False when the session never checkpointed (pre-1.0.180 sessions): turns restore, summary won't. */
+  hasCheckpoint: boolean;
 }
 
 export interface CliSessionCheckpoint {
@@ -156,13 +188,99 @@ function titleFrom(first: RecordLine | null): string | null {
 }
 
 /**
+ * The expensive half: parse every line of one record and merge the checkpoint sidecar. Bounded in
+ * memory (chunked read, counters only — never retains the lines), but O(events), so it runs ONLY for
+ * the sessions a listing is about to show.
+ */
+function richStats(id: string, scan: { lines: number; bytes: number }, createdAt: string, updatedAt: string): SessionRich {
+  const toolCounts = new Map<string, number>();
+  const filesWritten = new Set<string>();
+  let prompts = 0, answers = 0, toolCalls = 0;
+
+  const CHUNK = 256 * 1024;
+  let fd: number | null = null;
+  try {
+    fd = openSync(recordPath(id), 'r');
+    const buf = Buffer.allocUnsafe(CHUNK);
+    let carry = '';
+    let pos = 0;
+    const bytes = scan.bytes;
+    const handle = (raw: string): void => {
+      const ev = parseLine(raw) as (RecordLine & { params?: string }) | null;
+      if (!ev) return;
+      if (ev.kind === 'prompt') prompts++;
+      else if (ev.kind === 'answer') answers++;
+      else if (ev.kind === 'tool') {
+        toolCalls++;
+        const t = ev.tool ?? 'unknown';
+        toolCounts.set(t, (toolCounts.get(t) ?? 0) + 1);
+        // `params` is a flat "key=value, key=value" preview; a write's path is the interesting part.
+        if (t === 'write_file' || t === 'str_replace') {
+          const m = /path=([^,]+)/.exec(ev.params ?? '');
+          if (m) filesWritten.add(m[1].trim());
+        }
+      }
+    };
+    while (pos < bytes) {
+      const n = readSync(fd, buf, 0, Math.min(CHUNK, bytes - pos), pos);
+      if (n <= 0) break;
+      pos += n;
+      const parts = (carry + buf.toString('utf8', 0, n)).split('\n');
+      carry = parts.pop() ?? '';
+      for (const p of parts) if (p) handle(p);
+    }
+    if (carry.trim()) handle(carry);
+  } catch {
+    /* partial stats beat no stats */
+  } finally {
+    if (fd !== null) { try { closeSync(fd); } catch { /* gone */ } }
+  }
+
+  // The sidecar carries what the record cannot: the goal and the rolling summary.
+  let goal: string | null = null;
+  let contextChars = 0;
+  let artifactCount = 0;
+  let hasCheckpoint = false;
+  try {
+    if (existsSync(checkpointPath(id))) {
+      const side = JSON.parse(readFileSync(checkpointPath(id), 'utf8')) as Partial<CliSessionCheckpoint> & { goal?: string; artifactCount?: number };
+      hasCheckpoint = true;
+      goal = side.goal?.trim() || null;
+      artifactCount = side.artifactCount ?? 0;
+      contextChars = (side.summary?.length ?? 0)
+        + (side.recent ?? []).reduce((a, r) => a + (r.content?.length ?? 0), 0);
+    }
+  } catch { /* corrupt sidecar → treat as absent */ }
+
+  return {
+    goal,
+    prompts,
+    answers,
+    toolCalls,
+    tools: [...toolCounts.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
+    filesWritten: [...filesWritten],
+    artifactCount,
+    contextChars,
+    approxTokens: Math.round(contextChars / 4),
+    durationMs: Math.max(0, Date.parse(updatedAt) - Date.parse(createdAt)),
+    bytes: scan.bytes,
+    hasCheckpoint,
+  };
+}
+
+/**
  * Sessions on this machine, newest first. Scoped to `cwd` (default: the current directory) unless
  * `all` is set. Files that can't be read or parsed are skipped, not fatal.
+ *
+ * TWO PHASES on purpose: a cheap bounded scan of every record decides what matches and how to sort,
+ * then the expensive per-event stats run only for the `limit` rows that will actually be shown. A
+ * store with a dozen multi-megabyte sessions must not pay for detail nobody sees.
  */
-export async function listSessions(opts: { cwd?: string; all?: boolean; limit?: number } = {}): Promise<CliSessionMeta[]> {
+export async function listSessions(opts: { cwd?: string; all?: boolean; limit?: number; rich?: boolean } = {}): Promise<CliSessionMeta[]> {
   const wantCwd = opts.all ? null : (opts.cwd ?? process.cwd());
-  const out: CliSessionMeta[] = [];
+  const out: Array<CliSessionMeta & { _scan: { lines: number; bytes: number } }> = [];
 
+  // Phase 1 — cheap: enough to filter and sort.
   for (const id of listRecordIds()) {
     const scan = scanRecord(recordPath(id));
     if (!scan || !scan.first) continue;
@@ -177,11 +295,18 @@ export async function listSessions(opts: { cwd?: string; all?: boolean; limit?: 
       updatedAt: last?.ts ?? first?.ts ?? new Date(0).toISOString(),
       messageCount: scan.lines,
       cwd,
+      _scan: { lines: scan.lines, bytes: scan.bytes },
     });
   }
 
   out.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-  return opts.limit ? out.slice(0, opts.limit) : out;
+  const shown = opts.limit ? out.slice(0, opts.limit) : out;
+
+  // Phase 2 — expensive, and only for what's shown.
+  return shown.map((s) => {
+    const { _scan, ...meta } = s;
+    return opts.rich === false ? meta : { ...meta, rich: richStats(s.sessionId, _scan, s.createdAt, s.updatedAt) };
+  });
 }
 
 /** Resolve a full id or an unambiguous prefix. null when unknown or ambiguous. */
@@ -252,14 +377,19 @@ export async function syncSession(
   rawArtifacts: Artifact[],
   _readArtifactFn: (a: Artifact) => string,
   cwd: string,
+  goal?: string,
 ): Promise<void> {
   const id = sessionId;
   if (!id) return;
   try {
     mkdirSync(SESSIONS_DIR, { recursive: true });
-    const payload: CliSessionCheckpoint & { artifactCount: number } = {
+    // The GOAL is checkpointed here because the append-only record has no place for it — it logs
+    // prompts, tools and answers, never session state. Without this the picker can only show a
+    // session's first prompt, which is often a throwaway question rather than what it became about.
+    const payload: CliSessionCheckpoint & { artifactCount: number; goal: string } = {
       version: VERSION,
       cwd: cwd || process.cwd(),
+      goal: goal ?? '',
       summary,
       recent: recent.slice(-RECENT_TURNS),
       artifacts: [],

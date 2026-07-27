@@ -467,6 +467,7 @@ function triggerSync(): void {
     getSessionArtifacts(),
     readArtifact,
     process.cwd(),
+    getGoal(), // the record has no place for session state; the picker needs it to label a session
   ).catch(() => {});
 }
 

@@ -21,6 +21,7 @@ import { runAgent, interruptAgent, enqueueAgentMessage } from './agent.js';
 import { startPromptServer } from './prompt-server.js';
 import { acquireLlm, type LlmHold } from './resource-client.js';
 import { handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
+import { showDialog } from './dialog.js';
 import { startLlmStatusPoll, findOwnPlace } from './llm-status.js';
 import { startUpdateWatch, checkForUpdate } from './updater.js';
 import {
@@ -369,6 +370,49 @@ function startModelStatusPoll(): void {
 // The last `/resume` listing, so `/resume 2` can mean "the second one you just showed me". The old
 // command printed [1] [2] [3] and then only accepted a full uuid — numbers you could not use.
 let resumeList: CliSessionMeta[] = [];
+
+/**
+ * One `/resume` row. The GOAL is the label when the session recorded one — it is what the session
+ * became about, whereas the first prompt is often a throwaway question ("Hey! What model are you?").
+ * The second line is the detail you actually weigh before resuming: when, how much work, what kind
+ * of work, how much context comes back, and whether a summary exists at all.
+ */
+function sessionRow(s: CliSessionMeta, showDir: boolean): { label: string; note: string; sub: string } {
+  const r = s.rich;
+  const label = r?.goal || s.title || '(no prompt recorded)';
+  const bits: string[] = [relativeWhen(s.updatedAt)];
+  if (r) {
+    bits.push(`${r.prompts} turn${r.prompts === 1 ? '' : 's'}`);
+    if (r.toolCalls) bits.push(`${r.toolCalls} tools`);
+    if (r.tools.length) bits.push(r.tools.slice(0, 2).map((t) => `${t.name}×${t.count}`).join(' '));
+    if (r.filesWritten.length) bits.push(`${r.filesWritten.length} file${r.filesWritten.length === 1 ? '' : 's'} written`);
+    if (r.artifactCount) bits.push(`${r.artifactCount} artifacts`);
+    bits.push(r.contextChars ? `~${(r.approxTokens / 1000).toFixed(1)}k ctx` : 'no summary');
+    if (r.durationMs > 60_000) bits.push(`${Math.round(r.durationMs / 60_000)}m long`);
+  } else {
+    bits.push(`${s.messageCount} events`);
+  }
+  bits.push(s.sessionId.slice(0, 8));
+  if (showDir && s.cwd !== process.cwd()) bits.push(s.cwd);
+  return {
+    label,
+    // A goal-labelled row hides its first prompt; say so, since they can differ a lot.
+    note: r?.goal && s.title && s.title !== r.goal ? '(goal)' : '',
+    sub: bits.join(' · '),
+  };
+}
+
+/** "12m ago" / "3h ago" / "2d ago 14:20" — a picker row wants recency, not a full timestamp. */
+function relativeWhen(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return 'unknown';
+  const mins = Math.round((Date.now() - t) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 60 * 24) return `${Math.round(mins / 60)}h ago`;
+  const d = new Date(t);
+  return `${Math.round(mins / (60 * 24))}d ago ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
 let busy = false;
 
 onInput(async (text: string) => {
@@ -424,26 +468,31 @@ onInput(async (text: string) => {
             return;
           }
 
-          // No argument (or `all`) → show the list. The INDEX is usable: /resume 2.
+          // No argument (or `all`) → the PICKER: the same overlay `/model` and the permission
+          // prompt use. ↑/↓ to choose, Enter restores, Esc cancels. A printed list you then have to
+          // retype a number from isn't a chooser.
+          let targetId: string;
           if (!arg || wantAll) {
             resumeList = sessions;
-            addMessage('system', wantAll
-              ? `Sessions on this machine (newest first) — /resume <n> or <id>:`
-              : `Sessions in ${process.cwd()} (newest first) — /resume <n> or <id>:`);
-            sessions.forEach((s, i) => {
-              const when = new Date(s.updatedAt).toLocaleString();
-              const where = wantAll && s.cwd !== process.cwd() ? `  ${s.cwd}` : '';
-              addMessage('system', `[${i + 1}] ${s.sessionId.slice(0, 12)}  ${when}  ${s.messageCount} events  ${s.title ?? '(no title)'}${where}`);
-            });
-            return;
+            const picked = await showDialog(
+              wantAll ? 'Resume a session (all directories)' : 'Resume a session',
+              sessions.map((s) => sessionRow(s, wantAll)),
+              {
+                subtitle: wantAll ? 'every directory on this machine' : process.cwd(),
+                selected: 0, // newest first, so the top row is almost always the one you want
+                footer: '↑↓ choose · Enter resume · Esc cancel',
+              },
+            );
+            if (picked < 0 || !sessions[picked]) return; // cancelled — say nothing, change nothing
+            targetId = sessions[picked].sessionId;
+          } else {
+            // An argument still works: a 1-based index from the last listing, or an id / id-prefix.
+            const asIndex = /^\d+$/.test(arg) ? Number(arg) : 0;
+            const fromIndex = asIndex >= 1 && asIndex <= (resumeList.length || sessions.length)
+              ? (resumeList[asIndex - 1] ?? sessions[asIndex - 1])
+              : null;
+            targetId = fromIndex ? fromIndex.sessionId : arg;
           }
-
-          // An argument: a 1-based index from the last listing, or an id / id-prefix.
-          const asIndex = /^\d+$/.test(arg) ? Number(arg) : 0;
-          const fromIndex = asIndex >= 1 && asIndex <= (resumeList.length || sessions.length)
-            ? (resumeList[asIndex - 1] ?? sessions[asIndex - 1])
-            : null;
-          const targetId = fromIndex ? fromIndex.sessionId : arg;
 
           const checkpoint = await loadSessionCheckpoint(targetId);
           if (!checkpoint) {

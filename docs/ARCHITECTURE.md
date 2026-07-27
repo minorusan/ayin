@@ -466,6 +466,19 @@ can finish — see the warning in `SETUP.md`.
   summary from the sidecar, the last 20 turns replayed from the record. **Tool calls are excluded
   from the replay** — they're in the record to read, but replaying them would spend the context
   budget on output the model already acted on.
+  - **A PICKER, not a printed list.** `/resume` opens the shared `dialog.ts` overlay — ↑/↓, Enter
+    restores, Esc changes nothing. Each row is two lines: the **goal** as the label (falling back to
+    the first prompt) and the detail you actually weigh underneath —
+    `12m ago · 8 turns · 19 tools · read_file×12 bash×4 · 2 files written · 3 artifacts · ~1.3k ctx · 40m long · a1b2c3d4`.
+    A row labelled by goal is marked `(goal)` when its first prompt differed.
+  - **The goal is checkpointed** (`syncSession(..., goal)`): the append-only record logs prompts,
+    tools and answers and has no place for session state, so without this the picker could only show
+    a session's first prompt — often a throwaway ("Hey! What model are you?") rather than what the
+    session became.
+  - **Two-phase listing.** A cheap bounded scan of every record decides what matches and how to sort;
+    the per-event stats (`SessionRich`) run **only for the rows about to be shown** (`limit`), so a
+    store with several multi-megabyte sessions doesn't pay for detail nobody sees. `rich: false`
+    skips it entirely.
   - **Scoped to the directory.** `/resume` lists the sessions recorded in the cwd; `/resume all`
     widens it and shows each session's directory. Restoring one from elsewhere says so.
   - **`/resume <n>`** takes the list number, `/resume <id-prefix>` an id; an **ambiguous prefix is

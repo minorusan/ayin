@@ -22,6 +22,9 @@ export interface DialogOption {
   key?: string;   // optional hotkey, e.g. 'a' for Allow
   note?: string;  // dim right-hand detail, e.g. "30B · Q4_K_M · active"
   danger?: boolean; // renders red — for Deny / destructive choices
+  /** A dim SECOND line under the label, for rows that carry metadata worth reading (a session's
+   *  turns / tools / context size). Doubles the row height, so the visible window halves. */
+  sub?: string;
 }
 
 export interface DialogOpts {
@@ -77,6 +80,12 @@ export function wrapPlain(text: string, width: number): string[] {
   return out;
 }
 
+/** Single-line plain truncate with an ellipsis — for metadata that must not wrap. */
+function truncPlain(s: string, width: number): string {
+  const w = Math.max(8, width);
+  return s.length > w ? `${s.slice(0, w - 1)}…` : s;
+}
+
 export function showDialog(
   question: string,
   options: DialogOption[],
@@ -88,7 +97,9 @@ export function showDialog(
     if (top < 0) top = 0;
     let resolved = false;
 
-    const rows = Math.min(options.length, MAX_ROWS);
+    // A `sub` line doubles an option's height, so the visible window halves.
+    const perRow = options.some((o) => o.sub) ? 2 : 1;
+    const rows = Math.min(options.length, Math.max(1, Math.floor(MAX_ROWS / perRow)));
     const footer = opts.footer ?? '↑↓ select · Enter confirm · Esc cancel';
 
     // ── width: wide enough for the content, never wider than the screen ──
@@ -96,7 +107,11 @@ export function showDialog(
     // the geometry below can never go negative.
     const screenW = Number(screen.width) > 20 ? Number(screen.width) : 80;
     const screenH = Number(screen.height) > 6 ? Number(screen.height) : 24;
-    const longestOption = Math.max(0, ...options.map((o) => o.label.length + (o.note ? o.note.length + 4 : 0)));
+    const longestOption = Math.max(
+      0,
+      ...options.map((o) => o.label.length + (o.note ? o.note.length + 4 : 0)),
+      ...options.map((o) => (o.sub ? o.sub.length + 6 : 0)),
+    );
     const want = Math.max(question.length, footer.length, opts.subtitle?.length ?? 0, longestOption) + 8;
     const width = Math.max(Math.min(MIN_WIDTH, screenW - 4), Math.min(want, MAX_WIDTH, screenW - 4));
     const inner = width - 4; // borders + one space of padding each side
@@ -109,7 +124,7 @@ export function showDialog(
 
     // Height must fit the terminal. The reason (body) is the least critical text, so it is what
     // gets cut — the question, the target and the choices always stay whole and reachable.
-    const fixed = qLines.length + subLines.length + targetLines.length + rows + 4; // + blanks/footer/border
+    const fixed = qLines.length + subLines.length + targetLines.length + rows * perRow + 4; // + blanks/footer/border
     const roomForBody = Math.max(0, (screenH - 4) - fixed);
     let bodyTruncated = false;
     if (bodyLines.length > roomForBody) {
@@ -172,6 +187,9 @@ export function showDialog(
         const label = sel ? `{bold}{${labelColor}-fg}${opt.label}{/}{/bold}` : `{${labelColor}-fg}${opt.label}{/}`;
         const note = opt.note ? `  {${theme.faint}-fg}${opt.note}{/}` : '';
         lines.push(`${prefix} ${hotkey}${label}${note}`);
+        // The metadata line: indented under the label, dim, and brighter on the selected row so the
+        // selection reads as one two-line block rather than two unrelated rows.
+        if (opt.sub) lines.push(`     {${sel ? theme.muted : theme.faint}-fg}${truncPlain(opt.sub, inner - 6)}{/}`);
       }
       lines.push('');
       const more = options.length > rows ? `  {${theme.faint}-fg}${selected + 1}/${options.length}{/}` : '';
