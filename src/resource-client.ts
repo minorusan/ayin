@@ -33,11 +33,23 @@ export type LlmHold = { token: string; release: () => Promise<void> } | 'busy' |
  * caller decides whether to defer (watch) or bail. 'no-resource-layer' → backend unreachable
  * or predates the resource layer: proceed best-effort on the served model.
  */
-export async function acquireLlm(reason: string): Promise<LlmHold> {
-  const grant = await resourceOp('llm', 'authority.enqueue', { holder: 'ayin', reason }, 5_000);
+export async function acquireLlm(
+  reason: string,
+  opts: { ttlMs?: number; keepaliveMs?: number; force?: boolean } = {},
+): Promise<LlmHold> {
+  const grant = await resourceOp('llm', 'authority.enqueue', {
+    holder: 'ayin',
+    reason,
+    ...(opts.ttlMs ? { ttlMs: opts.ttlMs } : {}),
+    ...(opts.force ? { force: true } : {}),
+  }, 5_000);
   if (grant && grant.granted) {
-    // Slide the 30-min grant for long runs, like the launcher does.
-    const keepalive = setInterval(() => { void resourceOp('llm', 'authority.enqueue', { holder: 'ayin' }, 5_000); }, 10 * 60 * 1000);
+    // Slide the grant for long runs, like the launcher does. A SHORT ttl with a fast keepalive is
+    // what makes `/lock` self-releasing: stop responding and the grant lapses on its own.
+    const every = opts.keepaliveMs ?? 10 * 60 * 1000;
+    const keepalive = setInterval(() => {
+      void resourceOp('llm', 'authority.enqueue', { holder: 'ayin', ...(opts.ttlMs ? { ttlMs: opts.ttlMs } : {}) }, 5_000);
+    }, every);
     keepalive.unref();
     let released = false;
     return {

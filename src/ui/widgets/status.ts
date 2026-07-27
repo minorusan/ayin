@@ -30,7 +30,7 @@ export interface StatusState {
    *  `swapping` = the backend is mid-reload, so `name` is the TARGET and `loaded` is what is
    *  actually in VRAM — both are shown, because naming only the target reads as "all good, qwen"
    *  while gemma is still the thing answering (or nothing is, for the next minute). */
-  model: { name: string; loaded?: string; booked: boolean; swapping: boolean } | null;
+  model: { name: string; loaded?: string; booked: boolean; swapping: boolean; locked?: boolean } | null;
   /** Shared-GPU telemetry from the backend host (null = unknown / no card → segment hidden). */
   gpu: { util: number; usedMiB: number; totalMiB: number; tempC: number } | null;
   /** The backend's single-slot LLM scheduler: what holds the GPU and how many calls wait behind
@@ -150,6 +150,8 @@ export class StatusBar {
       const m = this.state.model;
       const narrow = (screen.width as number) < 100;
       const short = (n: string) => (narrow ? n.replace(/:.*$/, '') : n); // qwen3-coder:30b → qwen3-coder
+      // 🔒 = /lock: this session holds the model until it exits or stops responding (10-min TTL).
+      const lock = m.locked ? '🔒 ' : '';
       const glyph = m.swapping ? '⇆' : m.booked ? '⬢' : '⬡';
       const color = m.swapping ? theme.warn : m.booked ? theme.accent : theme.muted;
       // Mid-swap, say it as a transition — "gemma4:26b→qwen3.6:27b loading" — so the bar can never
@@ -157,7 +159,7 @@ export class StatusBar {
       const label = m.swapping && m.loaded
         ? `${short(m.loaded)}→${short(m.name)} loading`
         : short(m.name);
-      parts.push(`{${color}-fg}${glyph} ${label}{/}`);
+      parts.push(`{${color}-fg}${lock}${glyph} ${label}{/}`);
     }
 
     // Shared-GPU load — util, VRAM, temp. Colored by VRAM pressure (the thing that OOMs a swap).

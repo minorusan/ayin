@@ -330,6 +330,18 @@ tree knows about the internals). Design rules:
   `.git/HEAD` (handles a `.git` *file* for submodules/worktrees; detached HEAD → short sha) and
   cached 2s so the per-tick status redraw doesn't hammer the fs.
 
+- **`/lock` / `/unlock`** (`model-picker.ts#lockSession`) — hold this session's model until the
+  client exits or stops responding. The enforcement IS the grant TTL, which is why it needs no
+  server-side session tracking: the hold is taken with a **10-minute** ttl and refreshed every
+  **2 minutes** while ayin is alive. Quit cleanly (or `/unlock`) → released at once; die, hang or lose
+  the network → the grant lapses within 10 minutes and the backend reverts on its own. Nothing can be
+  left locked by a process that no longer exists. Shown as **🔒** beside the model in the status bar.
+  Because gaining the `ayin` authority applies the coder-model policy, the lock immediately re-pins
+  whatever was ALREADY serving — locking must not change your model. That re-pin lands in the same
+  second and `swapChatModel` coalesces onto the already-resident target, so no real load occurs (the
+  bar can flash `🔒⇆ a→b` for one poll tick; verified against the daemon log that no `model.load.*`
+  follows). Verified: 9 assertions — holder recorded, ~10m TTL not 30, model preserved, keepalive
+  slides the expiry, unlock frees it.
 - **Model picker + booking** (`/model` → `model-picker.ts`, catalog in `llm-status.ts`): the
   interactive counterpart to headless `AYIN_ACQUIRE_LLM=1`. Bare `/model` opens the **popup** —
   the same overlay the tool-permission prompt uses (`dialog.ts`) — listing every chat model the

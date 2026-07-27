@@ -20,7 +20,7 @@ import { loadHistory, pushEntry } from './history.js';
 import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation } from './agent.js';
 import { startPromptServer } from './prompt-server.js';
 import { acquireLlm, type LlmHold } from './resource-client.js';
-import { handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
+import { handleModelCommand, releaseModelHold, isModelBooked, lockSession, unlockSession, isSessionLocked } from './model-picker.js';
 import { showDialog } from './dialog.js';
 import { startLlmStatusPoll, findOwnPlace } from './llm-status.js';
 import { startUpdateWatch, checkForUpdate } from './updater.js';
@@ -340,6 +340,7 @@ function startModelStatusPoll(): void {
           loaded: catalog.loadedModel,
           booked: isModelBooked(),
           swapping: catalog.loadedModel !== catalog.activeModel,
+          locked: isSessionLocked(),
         }
         : null,
       gpu,
@@ -444,6 +445,20 @@ onInput(async (text: string) => {
         return;
       case '/model':
         await handleModelCommand(text.slice('/model'.length));
+        return;
+      case '/lock': {
+        // Hold the model for this session: short TTL + fast keepalive, so it self-releases if this
+        // client dies rather than stranding the GPU. See model-picker.ts#lockSession.
+        if (isSessionLocked()) { addMessage('system', 'Already locked. /unlock releases it.'); return; }
+        const err = await lockSession();
+        if (err) { addMessage('system', `/lock failed: ${err}`); return; }
+        addMessage('system', 'Locked 🔒 — this session holds the model until you /quit, /unlock, or stop responding for 10 minutes.');
+        return;
+      }
+      case '/unlock':
+        if (!isSessionLocked()) { addMessage('system', 'Not locked.'); return; }
+        await unlockSession();
+        addMessage('system', 'Unlocked — the backend may reclaim the model.');
         return;
       case '/fix':
         await handleFixCommand(text.slice('/fix'.length));
@@ -576,6 +591,7 @@ onInput(async (text: string) => {
         addMessage('system', '/model <name|qwen|gemma> — switch straight away; a non-shared model stays booked until you /quit');
         addMessage('system', '/fix <prompt> — headless Claude changes ayin itself, then commits + publishes (or writes a rejection)');
         addMessage('system', '/fix · /fix show <id> · /fix clear — the fix board, read a rejection, acknowledge rejections');
+        addMessage('system', '/lock — hold the model for this session (self-releases 10 min after you stop responding) · /unlock');
         addMessage('system', '/summary — show session summary (Esc to close)');
         addMessage('system', '/resume — list this directory\'s sessions (newest first) · /resume all for every directory');
         addMessage('system', '/resume <n>|<id> — restore one by list number or id prefix; new turns append to its record');

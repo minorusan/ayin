@@ -29,6 +29,60 @@ import { log } from './log.js';
 /** The session's booking. Held until /quit, /model <shared>, or process exit (grant TTL). */
 let modelHold: LlmHold | null = null;
 
+/**
+ * `/lock` — hold this session's model until the client exits or stops responding.
+ *
+ * The mechanism is the grant TTL itself, which is why it needs no server-side session tracking: the
+ * hold is taken with a SHORT 10-minute ttl and refreshed every 2 minutes while ayin is alive. Quit
+ * cleanly and it is released immediately; die, hang, or lose the network and the grant simply lapses
+ * within 10 minutes and the backend reverts on its own. Nothing can be left locked forever by a
+ * process that no longer exists.
+ *
+ * Taking the `ayin` authority normally flips the model to the backend's coder default, so a lock
+ * re-pins whatever you were ALREADY on — locking must not change the model out from under you.
+ */
+const LOCK_TTL_MS = 10 * 60 * 1000;
+const LOCK_KEEPALIVE_MS = 2 * 60 * 1000;
+let locked = false;
+
+export function isSessionLocked(): boolean {
+  return locked && isModelBooked();
+}
+
+/** Take the lock. Returns '' on success, else a human reason. */
+export async function lockSession(): Promise<string> {
+  const cat = await fetchCatalog({ force: true });
+  const wanted = cat?.activeModel; // pin what is serving RIGHT NOW, not the coder default
+  if (!isModelBooked()) {
+    setAgentStatus('Locking the model…');
+    const hold = await acquireLlm('ayin /lock (held while this session lives)', {
+      ttlMs: LOCK_TTL_MS,
+      keepaliveMs: LOCK_KEEPALIVE_MS,
+      force: true, // a human at the keyboard outranks background work of equal or lower rank
+    });
+    setAgentStatus('');
+    if (hold === 'busy') return 'the GPU is held by a higher authority right now — try again shortly';
+    if (hold === 'no-resource-layer') return 'backend has no resource layer (or is unreachable)';
+    modelHold = hold;
+  }
+  locked = true;
+
+  // Gaining `ayin` ownership applies the coder policy, which would swap the model. Put it back.
+  if (wanted && cat && wanted !== cat.coderModel) {
+    const token = (modelHold as { token: string }).token;
+    await resourceOp('llm', 'setModel', { model: wanted, authority: token }, 10_000);
+  }
+  log('INFO', 'session_locked', { model: wanted ?? '?', ttlMinutes: String(LOCK_TTL_MS / 60000) });
+  return '';
+}
+
+/** Release the lock (and the booking it took). */
+export async function unlockSession(): Promise<void> {
+  locked = false;
+  await releaseModelHold();
+  log('INFO', 'session_unlocked', {});
+}
+
 export function isModelBooked(): boolean {
   return !!modelHold && typeof modelHold === 'object';
 }
