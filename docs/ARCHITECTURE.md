@@ -459,6 +459,27 @@ can finish — see the warning in `SETUP.md`.
 - **`artifacts.ts`** — every tool output is saved under `~/.ayin-cli/artifacts/` and browsable
   in the TUI (`Ctrl+O`); chat shows a 2-line preview.
 - **`history.ts`** — persistent prompt history.
+- **Sessions + `/resume`** (`tiferet-session.ts` reads, `session-record.ts` writes). Every run appends
+  one JSON line per prompt / tool call / answer to `~/.ayin-cli/sessions/<id>.jsonl`, each line
+  carrying its `cwd`; `syncSession()` (called each turn by the agent) keeps a
+  `<id>.checkpoint.json` sidecar with the rolling summary. `/resume` rebuilds context from both:
+  summary from the sidecar, the last 20 turns replayed from the record. **Tool calls are excluded
+  from the replay** — they're in the record to read, but replaying them would spend the context
+  budget on output the model already acted on.
+  - **Scoped to the directory.** `/resume` lists the sessions recorded in the cwd; `/resume all`
+    widens it and shows each session's directory. Restoring one from elsewhere says so.
+  - **`/resume <n>`** takes the list number, `/resume <id-prefix>` an id; an **ambiguous prefix is
+    refused** rather than resolved to the wrong session.
+  - **Not version-scoped.** It used to be (`sessions/cli/<VERSION>`), which made every release hide
+    all prior sessions — the UI literally said "No sessions found for this version".
+  - **Bounded reads:** listing is one chunked pass per record (newline count + first/last complete
+    line), so a multi-megabyte session costs the same memory as a small one. A torn final line (power
+    cut mid-append) is counted and skipped, never fatal.
+  - History note: this module was a **stub** — `listSessions()` returned `[]`, `loadSessionCheckpoint()`
+    returned `null`, `syncSession()` was empty — so `/resume` could never restore anything while the
+    records piled up on disk. Verified after the rewrite: 15 assertions incl. per-dir scoping across
+    three directories, an ambiguous-prefix refusal, a torn tail, an empty file, and a 14.9 MB /
+    60,002-event record listed in 30 ms.
 - **`updater.ts` — self-update (`ayin update`)**. Registry resolution is explicit and never
   guessed: `--registry <url>` → `AYIN_UPDATE_REGISTRY` → npm's own configured registry. It compares
   the running version against the registry's `latest` (or `--tag`), then shells out to

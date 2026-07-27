@@ -40,6 +40,8 @@ import {
   initSession,
   listSessions,
   loadSessionCheckpoint,
+  resolveSessionId,
+  type CliSessionMeta,
   setSessionId,
   SESSION_NAMESPACE,
 } from './tiferet-session.js';
@@ -364,6 +366,9 @@ function startModelStatusPoll(): void {
 
 // ── Input handler ───────────────────────────────────────────────────
 
+// The last `/resume` listing, so `/resume 2` can mean "the second one you just showed me". The old
+// command printed [1] [2] [3] and then only accepted a full uuid — numbers you could not use.
+let resumeList: CliSessionMeta[] = [];
 let busy = false;
 
 onInput(async (text: string) => {
@@ -406,41 +411,59 @@ onInput(async (text: string) => {
         showSummaryOverlay();
         return;
       case '/resume': {
-        if (busy) return;
-        addMessage('system', `Loading sessions from ${SESSION_NAMESPACE}...`);
+        // Sessions are scoped to THIS directory by default — a session from another repo is noise,
+        // and restoring one silently loads another codebase's context. `/resume all` widens it.
+        const arg = text.slice('/resume'.length).trim();
+        const wantAll = arg === 'all' || arg === '-a';
         try {
-          const sessions = await listSessions();
+          const sessions = await listSessions(wantAll ? { all: true, limit: 15 } : { limit: 10 });
           if (sessions.length === 0) {
-            addMessage('system', 'No sessions found for this version.');
+            addMessage('system', wantAll
+              ? 'No sessions recorded on this machine yet.'
+              : `No sessions recorded in ${process.cwd()} — try /resume all.`);
             return;
           }
-          const arg = text.split(' ')[1]; // /resume <sessionId>
-          let targetId: string;
-          if (arg) {
-            targetId = arg;
-          } else {
-            // List sessions and prompt user to pick
+
+          // No argument (or `all`) → show the list. The INDEX is usable: /resume 2.
+          if (!arg || wantAll) {
+            resumeList = sessions;
+            addMessage('system', wantAll
+              ? `Sessions on this machine (newest first) — /resume <n> or <id>:`
+              : `Sessions in ${process.cwd()} (newest first) — /resume <n> or <id>:`);
             sessions.forEach((s, i) => {
-              const ts = new Date(s.updatedAt).toLocaleString();
-              const title = s.title || '(no title)';
-              addMessage('system', `[${i + 1}] ${s.sessionId.substring(0, 16)}  ${ts}  ${title}`);
+              const when = new Date(s.updatedAt).toLocaleString();
+              const where = wantAll && s.cwd !== process.cwd() ? `  ${s.cwd}` : '';
+              addMessage('system', `[${i + 1}] ${s.sessionId.slice(0, 12)}  ${when}  ${s.messageCount} events  ${s.title ?? '(no title)'}${where}`);
             });
-            addMessage('system', 'Use /resume <sessionId> to restore a session.');
             return;
           }
+
+          // An argument: a 1-based index from the last listing, or an id / id-prefix.
+          const asIndex = /^\d+$/.test(arg) ? Number(arg) : 0;
+          const fromIndex = asIndex >= 1 && asIndex <= (resumeList.length || sessions.length)
+            ? (resumeList[asIndex - 1] ?? sessions[asIndex - 1])
+            : null;
+          const targetId = fromIndex ? fromIndex.sessionId : arg;
+
           const checkpoint = await loadSessionCheckpoint(targetId);
           if (!checkpoint) {
-            addMessage('system', `Session ${targetId} has no checkpoint.`);
+            addMessage('system', `No session matches "${arg}" (ambiguous prefix, or nothing recorded). /resume to list.`);
             return;
           }
-          setSessionId(targetId);
+          if (checkpoint.cwd && checkpoint.cwd !== process.cwd()) {
+            addMessage('system', `Note: that session ran in ${checkpoint.cwd} — you are in ${process.cwd()}.`);
+          }
+          setSessionId(resolveSessionId(targetId) ?? targetId);
           resetSummary();
           clearGoal(); // goal belongs to the session; re-seeds from the next message
           // Restore summary and recent into current session state
           const s = getSummary();
           s.summary = checkpoint.summary;
           s.recent = checkpoint.recent;
-          addMessage('system', `Resumed session ${targetId.substring(0, 16)} (${checkpoint.artifacts.length} artifacts, synced ${new Date(checkpoint.syncedAt).toLocaleTimeString()})`);
+          // Say what was actually restored — "resumed" with an empty window is a lie you only
+          // discover two turns later.
+          const rid = (resolveSessionId(targetId) ?? targetId).slice(0, 8);
+          addMessage('system', `Resumed ${rid} — ${checkpoint.recent.length} turns of context${checkpoint.summary ? ' + rolling summary' : ' (no summary was checkpointed)'}. New turns append to the same record.`);
           if (checkpoint.summary) {
             addMessage('system', `Context: ${checkpoint.summary.substring(0, 200)}`);
           }
@@ -492,8 +515,8 @@ onInput(async (text: string) => {
         addMessage('system', '/fix <prompt> — headless Claude changes ayin itself, then commits + publishes (or writes a rejection)');
         addMessage('system', '/fix · /fix show <id> · /fix clear — the fix board, read a rejection, acknowledge rejections');
         addMessage('system', '/summary — show session summary (Esc to close)');
-        addMessage('system', '/resume — list sessions for this version');
-        addMessage('system', '/resume <sessionId> — restore a specific session');
+        addMessage('system', '/resume — list this directory\'s sessions (newest first) · /resume all for every directory');
+        addMessage('system', '/resume <n>|<id> — restore one by list number or id prefix; new turns append to its record');
         addMessage('system', '/clear — clear chat');
         addMessage('system', '/set keli-url <http://host:9100> — point ayin at the Maradel backend (gemma) on the LAN');
         addMessage('system', '/set update-registry <http://host:4873> — where `ayin update` looks (public npm is refused: "ayin" there is someone else)');
