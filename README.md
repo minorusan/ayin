@@ -49,6 +49,27 @@ KELI_URL=http://localhost:9100 node dist/index.js -p "Explain what src/agent.ts 
 **Full instructions — including the three ways to connect an LLM — are in
 [`SETUP.md`](SETUP.md).**
 
+### Installing from a registry
+
+If ayin is published to an npm registry (a private one is fine — that is how it's distributed on
+the author's LAN), you can skip the checkout entirely:
+
+```bash
+npm i -g ayin --registry http://<registry-host>:4873
+ayin                      # TUI
+ayin version              # what you're running
+ayin update               # fetch + install the newest build
+ayin update --check       # report only, install nothing
+```
+
+`ayin update` resolves the registry from `--registry` → `AYIN_UPDATE_REGISTRY` → whatever npm
+itself is configured with, and shells out to `npm i -g` so a half-finished download can never
+replace a working binary. If the global prefix isn't writable it tells you to re-run with `sudo`.
+Running from a source checkout, it says so — there, updating is `git pull && npm run build`.
+
+The passive "vX available" hint in the status bar stays **opt-in** (`AYIN_UPDATE_REGISTRY`): a
+fresh checkout never contacts a registry you didn't configure.
+
 ## Tools
 
 ayin's loop calls these tools (each is a unique name; the model invokes them by name):

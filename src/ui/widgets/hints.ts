@@ -17,7 +17,7 @@ export interface SlashCommand {
 
 const COMMANDS: SlashCommand[] = [
   { name: '/goal',    description: 'Set the session goal (shown in cursive above the chat) · /goal clear' },
-  { name: '/model',   description: 'Book the model for this session — /model qwen (coder) · /model gemma (shared)' },
+  { name: '/model',   description: 'Pick the served model (popup) · /model <name> to switch straight away' },
   { name: '/summary', description: 'Show session summary (Esc to close)' },
   { name: '/resume',  description: 'Continue previous chat session' },
   { name: '/clear',   description: 'Clear chat' },

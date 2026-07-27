@@ -1,5 +1,10 @@
 /**
- * StatusBar — the one-row bar at the very bottom: connection · tokens · update hint · cwd.
+ * StatusBar — the one-row bar at the very bottom:
+ *   connection · model · gpu · tokens · llm phase · update hint  ⟩⟩  cwd (branch)
+ *
+ * `model` and `gpu` are always-on facts fed by the llm-status poll (src/llm-status.ts) — you should
+ * never have to ask which model is answering you or whether the card is busy. Both segments hide
+ * themselves when unknown rather than showing a stale or fake value.
  */
 
 import blessed from 'blessed';
@@ -21,6 +26,11 @@ export interface StatusState {
   /** live LLM phase from the backend llm resource event stream (null = idle, segment hidden).
    *  ttlMs makes it a transient blip that auto-clears (event acknowledgements). */
   llm: { phase: LlmPhaseName; detail?: string; ttlMs?: number } | null;
+  /** The model actually serving this session. `booked` = we hold the llm authority (/model).
+   *  `swapping` = the backend is mid-reload, so the name is the TARGET, not what's resident. */
+  model: { name: string; booked: boolean; swapping: boolean } | null;
+  /** Shared-GPU telemetry from the backend host (null = unknown / no card → segment hidden). */
+  gpu: { util: number; usedMiB: number; totalMiB: number; tempC: number } | null;
 }
 
 /** Each phase owns its animation: frames + how many base ticks (80ms) per frame + color.
@@ -47,6 +57,8 @@ export class StatusBar {
     cwd: process.cwd(),
     update: null,
     llm: null,
+    model: null,
+    gpu: null,
   };
 
   constructor() {
@@ -112,6 +124,27 @@ export class StatusBar {
     if (this.state.connection === 'connected') parts.push(`{${theme.ok}-fg}●{/} connected`);
     else if (this.state.connection === 'connecting') parts.push(`{${theme.warn}-fg}◐{/} connecting`);
     else parts.push(`{${theme.err}-fg}●{/} disconnected`);
+
+    // The model is a permanent fact of the session, not an event: always shown once known.
+    // ⬢ = booked by us (we hold the llm authority) · ⬡ = the shared model · ⇆ = mid-swap.
+    if (this.state.model) {
+      const m = this.state.model;
+      const narrow = (screen.width as number) < 100;
+      const name = narrow ? m.name.replace(/:.*$/, '') : m.name; // qwen3-coder:30b → qwen3-coder
+      const glyph = m.swapping ? '⇆' : m.booked ? '⬢' : '⬡';
+      const color = m.swapping ? theme.warn : m.booked ? theme.accent : theme.muted;
+      parts.push(`{${color}-fg}${glyph} ${name}{/}`);
+    }
+
+    // Shared-GPU load — util, VRAM, temp. Colored by VRAM pressure (the thing that OOMs a swap).
+    if (this.state.gpu) {
+      const g = this.state.gpu;
+      const vramPct = g.totalMiB > 0 ? Math.round((g.usedMiB / g.totalMiB) * 100) : 0;
+      const color = vramPct > 90 ? theme.err : vramPct > 75 ? theme.warn : theme.ok;
+      const vram = `${(g.usedMiB / 1024).toFixed(1)}/${(g.totalMiB / 1024).toFixed(0)}G`;
+      const temp = (screen.width as number) < 100 ? '' : ` ${g.tempC}°C`;
+      parts.push(`{${color}-fg}gpu ${g.util}% ${vram}${temp}{/}`);
+    }
 
     if (this.state.tokens) {
       const pct = Math.round((this.state.tokens.used / this.state.tokens.total) * 100);

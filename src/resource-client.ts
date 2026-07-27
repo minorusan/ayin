@@ -23,7 +23,9 @@ export async function resourceOp(resource: string, op: string, params: Record<st
   }
 }
 
-export type LlmHold = { release: () => Promise<void> } | 'busy' | 'no-resource-layer';
+/** A granted hold. `token` is the authority token — required by every ACTION op on the llm
+ *  resource (generate, setModel); read ops are open. */
+export type LlmHold = { token: string; release: () => Promise<void> } | 'busy' | 'no-resource-layer';
 
 /**
  * Take the backend llm resource as the `ayin` authority (ownership.gained → the backend swaps
@@ -39,6 +41,7 @@ export async function acquireLlm(reason: string): Promise<LlmHold> {
     keepalive.unref();
     let released = false;
     return {
+      token: String(grant.token),
       release: async () => {
         if (released) return;
         released = true;

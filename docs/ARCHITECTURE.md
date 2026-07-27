@@ -275,13 +275,43 @@ tree knows about the internals). Design rules:
   `.git/HEAD` (handles a `.git` *file* for submodules/worktrees; detached HEAD → short sha) and
   cached 2s so the per-tick status redraw doesn't hammer the fs.
 
-- **Model booking** (`/model`, `index.ts`): the interactive counterpart to headless
-  `AYIN_ACQUIRE_LLM=1`. `/model qwen` takes the backend llm resource as the `ayin` authority
-  (backend swaps gemma → `config.skills.coderModel`, default qwen-coder) and **holds it for the
-  whole session** — released on `/model gemma`, `/quit`, or SIGINT/SIGTERM (a hard kill lets the
-  grant TTL-expire; the keepalive is unref'd). `busy` → another authority holds the GPU, try
-  again. The active dialect re-resolves after the swap (`refreshActiveModel`). See "one door to
-  every resource" — this never side-doors the GPU.
+- **Model picker + booking** (`/model` → `model-picker.ts`, catalog in `llm-status.ts`): the
+  interactive counterpart to headless `AYIN_ACQUIRE_LLM=1`. Bare `/model` opens the **popup** —
+  the same overlay the tool-permission prompt uses (`dialog.ts`) — listing every chat model the
+  backend has installed, polled live from the llm resource, each row annotated
+  (`27.8B · Q4_K_M · 17.3G · shared/coder · ● active`) with the active one pre-selected;
+  **Enter initiates the reload**, Esc changes nothing. `/model <name|qwen|gemma>` skips the popup
+  (role words resolve to whatever the backend has in that role; anything else is a substring of an
+  installed tag, longest match wins).
+  Switching to a NON-shared model takes the llm resource as the `ayin` authority and calls the
+  guarded `setModel` action with that token, **holding the booking for the whole session**;
+  switching to the SHARED model is a **release**, not a set — the backend reverts to gemma when
+  the stack empties. Released on `/quit` and SIGINT/SIGTERM (a hard kill lets the grant
+  TTL-expire; the keepalive is unref'd). `busy` → another authority holds the GPU, try again.
+  A swap costs 30-60s of VRAM churn, so the wait is explicit and bounded (poll `loadedModel`
+  until resident, 180s budget) — it narrates progress and gives up with a message rather than
+  hanging the TUI. The dialect re-resolves after the swap (`refreshActiveModel`). See "one door
+  to every resource" — ayin never touches Ollama and never picks a model by itself.
+- **Model + GPU in the status bar** (`llm-status.ts` + `widgets/status.ts`): two always-on
+  segments — `⬢ qwen3.6:27b` (accent = booked by us · `⬡` muted = the shared model · `⇆` amber =
+  mid-swap) and `gpu 43% 19.2/24G 61°C` (colored by VRAM pressure: >75% amber, >90% red). Fed by
+  a 5s poll of the llm resource's **read ops** (`{op:'models'}`, `{op:'gpu'}` — open, no authority
+  needed), which is the only door to a loopback-only Ollama and to a GPU that may not even be on
+  this machine. The poll is self-healing (any failure clears the segments and the next tick
+  retries — never a stale value, never a thrown error into the TUI), never stacks overlapping
+  requests, and its interval is unref'd. A backend that predates the `models` op degrades to the
+  two role models via `{op:'status'}`. Under 100 columns the model tag and the GPU temperature
+  are dropped so the bar still fits. **Tech debt** — see `docs/TechDebt.md`.
+
+## Popup overlay (`dialog.ts`)
+
+One popup implementation, shared by the tool-permission prompt and the model picker, so both look
+and behave identically: a question, an optional dim subtitle, selectable rows with an optional
+right-hand note, and a footer legend. ↑/↓ (or k/j) move, Enter picks, Esc cancels (`-1`), a row's
+hotkey picks it directly. The **input bar is blurred while the popup is up** and refocused on
+close, so keystrokes can't leak into the prompt buffer. Lists longer than 12 rows **scroll a
+window** rather than growing off-screen (a 40-model catalog must not outgrow the terminal), and
+colors come from `theme.ts` like every other widget.
 
 ## Permissions (`permissions.ts`)
 
@@ -301,6 +331,16 @@ can finish — see the warning in `SETUP.md`.
 - **`artifacts.ts`** — every tool output is saved under `~/.ayin-cli/artifacts/` and browsable
   in the TUI (`Ctrl+O`); chat shows a 2-line preview.
 - **`history.ts`** — persistent prompt history.
+- **`updater.ts` — self-update (`ayin update`)**. Registry resolution is explicit and never
+  guessed: `--registry <url>` → `AYIN_UPDATE_REGISTRY` → npm's own configured registry. It compares
+  the running version against the registry's `latest` (or `--tag`), then shells out to
+  `npm install -g` — deliberately not clever, so an interrupted download leaves the working binary
+  untouched (`--check` reports only, `--force` reinstalls the same version). It refuses early with
+  a `sudo ayin update` hint when the global prefix isn't writable (it is `/usr` on the nuk), and
+  warns when the running ayin is a **source checkout**, where a global install changes nothing and
+  the real update is `git pull && npm run build`. `ayin version` prints the running version.
+  Subcommands that print to stdout (`update`, `version`, `watch`, `rag`, `rag-mine`) are listed in
+  `ui/headless.ts#NO_TUI_COMMANDS` so blessed never grabs the terminal out from under them.
 - **`tokens.ts`** — context-meter estimate: tries `${keliBaseUrl}/api/estimate`, falls back to
   a chars/4 heuristic.
 - **`tiferet-session.ts`** — in the standalone build this is a **local stub**: a per-run
@@ -366,8 +406,10 @@ standalone build removed all of it:
   goes straight to the resolved HTTP endpoint; the remote-request path is a stub.
 - **`tiferet-session.ts`** — a local per-run session id; no remote checkpoint sync.
 - **`tokens.ts`** — no Netzach discovery; tries `${keliBaseUrl}/api/estimate`, else chars/4.
-- **`updater.ts`** — no private registry. The update check is **opt-in** via
-  `AYIN_UPDATE_REGISTRY`; unset (default) → it never contacts any registry.
+- **`updater.ts`** — no hardcoded registry. The *passive* startup check is **opt-in** via
+  `AYIN_UPDATE_REGISTRY`; unset (default) → it never contacts any registry. The explicit
+  **`ayin update`** command may additionally fall through to npm's own configured registry
+  (see "Self-update" below).
 - **`package.json`** — dropped the `@egregor/*` dependencies; package name is `ayin` (neutral
   standalone; was `@maradel/ayin`). See `docs/TODO.md` for the path to a fully clean standalone.
 

@@ -1,6 +1,6 @@
 {
   "name": "ayin",
-  "version": "1.0.170",
+  "version": "1.0.171",
   "description": "A small, model-agnostic terminal coding agent — an agentic loop in your shell against a self-hosted LLM (Ollama or any OpenAI-compatible endpoint).",
   "type": "module",
   "main": "dist/index.js",
@@ -8,9 +8,19 @@
     "ayin": "./dist/index.js",
     "tg-auth": "./dist/tg-auth-cmd.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "SETUP.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "registry": "http://192.168.0.229:4873"
+  },
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "prepublishOnly": "tsc"
   },
   "dependencies": {
     "blessed": "^0.1.81",

@@ -13,13 +13,15 @@ import {
   onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
 } from './ui.js';
 import { connect, disconnect, onConnectionChange, isConnected } from './connection.js';
-import { refreshActiveModel, activeModelId } from './llm/manager.js';
+import { refreshActiveModel } from './llm/manager.js';
 import { getSummaryText, getSummary, resetSummary } from './summary.js';
 import { estimateSessionTokens } from './tokens.js';
 import { loadHistory, pushEntry } from './history.js';
 import { runAgent, interruptAgent, enqueueAgentMessage } from './agent.js';
 import { startPromptServer } from './prompt-server.js';
 import { acquireLlm, type LlmHold } from './resource-client.js';
+import { handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
+import { startLlmStatusPoll } from './llm-status.js';
 import { checkForUpdate } from './updater.js';
 import { getSessionArtifacts, readArtifact } from './artifacts.js';
 import { renderMarkdown } from './markdown.js';
@@ -239,54 +241,25 @@ onConnectionChange((state) => {
 });
 
 // ── Model authority (/model) ──────────────────────────────────────────
-// Interactive booking of the coder model: `/model qwen` takes the llm resource as the `ayin`
-// authority (backend swaps gemma → qwen-coder) and HOLDS it for the whole session; `/model gemma`
-// releases it. The hold is released on /quit and on SIGINT/SIGTERM; a hard kill lets the backend
-// grant TTL-expire (the keepalive is unref'd, so it stops on exit).
-let modelHold: LlmHold | null = null;
+// `/model` opens the picker popup; `/model <name>` switches straight away. Booking the GPU (the
+// `ayin` authority on the backend llm resource) and the swap wait live in model-picker.ts. The hold
+// is released on /quit and on SIGINT/SIGTERM; a hard kill lets the backend grant TTL-expire (the
+// keepalive is unref'd, so it stops on exit).
 
-async function releaseModelHold(): Promise<void> {
-  const h = modelHold;
-  modelHold = null;
-  if (h && typeof h === 'object') await h.release().catch(() => {});
-}
-
-async function handleModelCommand(arg: string): Promise<void> {
-  const t = arg.trim().toLowerCase();
-  const held = modelHold && typeof modelHold === 'object';
-
-  if (!t) {
-    addMessage('system', `Model: ${activeModelId() || '(resolving…)'}${held ? ' — booked by you until quit' : ' (shared)'}`);
-    addMessage('system', '/model qwen — book the coder model (qwen) for this session; holds the GPU until you quit');
-    addMessage('system', '/model gemma — release back to the shared model (gemma)');
-    return;
-  }
-
-  if (t === 'qwen' || t === 'coder') {
-    if (held) { addMessage('system', 'qwen is already booked for this session.'); return; }
-    addMessage('system', 'Booking qwen — requesting the coder authority from the backend…');
-    setAgentStatus('Switching to qwen…');
-    const hold = await acquireLlm('interactive /model qwen (held for session)');
-    setAgentStatus('');
-    if (hold === 'busy') { addMessage('system', 'GPU is busy — another authority holds the model right now. Try /model qwen again shortly.'); return; }
-    if (hold === 'no-resource-layer') { addMessage('system', 'Backend has no resource layer (or is unreachable) — cannot switch the model from here.'); return; }
-    modelHold = hold;
-    await new Promise((r) => setTimeout(r, 1500)); // let the backend load qwen before re-resolving
-    await refreshActiveModel().catch(() => {});
-    addMessage('system', `Booked ${activeModelId() || 'qwen-coder'} — held until you /quit (or /model gemma).`);
-    return;
-  }
-
-  if (t === 'gemma' || t === 'chat' || t === 'release') {
-    if (!held) { addMessage('system', 'Nothing booked — the shared model (gemma) is already served.'); return; }
-    await releaseModelHold();
-    await new Promise((r) => setTimeout(r, 1000));
-    await refreshActiveModel().catch(() => {});
-    addMessage('system', `Released — back to the shared model (${activeModelId() || 'gemma'}).`);
-    return;
-  }
-
-  addMessage('system', `Unknown model "${arg.trim()}". Use: /model qwen  ·  /model gemma`);
+// ── Live model + GPU in the status bar ────────────────────────────────
+// One poll of the llm resource's read ops feeds both segments. It survives backend restarts on its
+// own (every failure just clears the segments and the next tick retries), and the interval is
+// unref'd so it never keeps the process alive.
+function startModelStatusPoll(): void {
+  if (HEADLESS) return;
+  startLlmStatusPoll(({ catalog, gpu }) => {
+    setStatus({
+      model: catalog
+        ? { name: catalog.activeModel, booked: isModelBooked(), swapping: catalog.loadedModel !== catalog.activeModel }
+        : null,
+      gpu,
+    });
+  });
 }
 
 // ── Input handler ───────────────────────────────────────────────────
@@ -411,7 +384,8 @@ onInput(async (text: string) => {
         return;
       case '/help':
         addMessage('system', '/goal <text> — set the session goal (shown in cursive above the chat); /goal clear to unset');
-        addMessage('system', '/model qwen|gemma — book qwen-coder for this session (held until quit) or release to the shared model');
+        addMessage('system', '/model — popup: pick from the models the backend has installed (Enter reloads the GPU with it)');
+        addMessage('system', '/model <name|qwen|gemma> — switch straight away; a non-shared model stays booked until you /quit');
         addMessage('system', '/summary — show session summary (Esc to close)');
         addMessage('system', '/resume — list sessions for this version');
         addMessage('system', '/resume <sessionId> — restore a specific session');
@@ -465,6 +439,17 @@ async function main(): Promise<void> {
     // Repo watcher daemon — no TUI, no agent loop. See src/watch.ts.
     const { runWatch } = await import('./watch.js');
     await runWatch(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === 'update') {
+    // Self-update from the configured npm registry (the nuk's private Verdaccio on this LAN).
+    // No TUI: it's a plain command that prints and exits. See src/updater.ts.
+    const { runUpdate } = await import('./updater.js');
+    await runUpdate(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === 'version' || process.argv[2] === '--version' || process.argv[2] === '-v') {
+    process.stdout.write(`${getVersion()}\n`);
     return;
   }
   if (process.argv[2] === 'rag') {
@@ -537,6 +522,9 @@ async function runInteractive(): Promise<void> {
   // fed by the backend llm resource's SSE event stream, reconnects on its own.
   const { subscribeLlmPhase } = await import('./llm-events.js');
   subscribeLlmPhase((p) => setStatus({ llm: p.phase ? { phase: p.phase, detail: p.detail } : null }));
+
+  // Always-on model + GPU segments (polled from the llm resource's read ops).
+  startModelStatusPoll();
   addMessage('system', `ayin v${getVersion()}`);
   addMessage('system', process.cwd());
 

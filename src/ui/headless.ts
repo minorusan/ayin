@@ -4,9 +4,18 @@
  * here and builds real blessed elements only when a TUI is actually wanted.
  */
 
+/** Subcommands that are plain stdout commands, not the TUI — blessed must never grab the
+ *  terminal for these (it would swallow their output and leave the tty in a raw state). */
+const NO_TUI_COMMANDS = new Set([
+  'watch',      // watch daemon
+  'rag',        // rag corpus generator
+  'rag-mine',   // episodic RAG miner
+  'update',     // self-update from the registry
+  'version', '--version', '-v',
+]);
+
 export const HEADLESS = process.argv.some(a => a === '-p' || a === '--prompt' || a === '--non-interactive')
-  || process.argv[2] === 'watch'  // watch daemon has no TUI
-  || process.argv[2] === 'rag';   // rag corpus generator has no TUI
+  || NO_TUI_COMMANDS.has(process.argv[2]);
 
 export const THINKING_MODE = process.argv.includes('--thinking');
 
