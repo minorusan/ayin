@@ -70,14 +70,27 @@ register it in `manager.ts`'s `DIALECTS`. A few lines.
 ## Agent loop (`agent.ts`)
 
 1. User input → added to the conversation window + rolling summary.
-2. Build messages: **system prompt** (persona + tool list + the dialect's tool-call format) +
-   **rolling summary** + the **last N messages** (small, stable context).
+2. Build messages: **system prompt** (persona + **served-model identity** + tool list + the
+   dialect's tool-call format) + **rolling summary** + the **last N messages** (small, stable
+   context).
 3. Call the LLM (via the manager).
 4. **Parse** the response for tool calls (`parser.ts`). A response may contain several calls
    (coder models often chain read → edit → run); they execute in order, each result fed back.
 5. For each call: dedupe/loop-guard → **permission check** → execute → feed the result back as
    a `<tool_response>` turn → continue.
 6. Plain text (no tool calls) → display → done.
+
+**Served-model identity (`buildMessages`).** The system prompt names the served model
+(`activeModelId()`) and says explicitly that this is not Claude / ChatGPT / Gemini, and never to
+guess a vendor. This is not cosmetic. The prompt used to say *who* ayin is and nothing about *what
+it runs on*, and a distilled model primed by ~12k characters of agentic-harness prompt fills that
+gap confidently and differently every time: the same build answered "I'm Claude, developed by
+Anthropic" in one session and "Ayin, running on OpenAI's o3" in the next, while the **same model
+with no system prompt correctly said "I am Qwen, by Alibaba"**. Isolated by escalating the prompt
+one layer at a time — bare → one-line persona → full harness — the confabulation appears only with
+the full harness. ayin knows the real answer, so it states it; verified end-to-end against the
+backend's ownership log (it reported `gemma4:26b` on a run where ownership had gone to `guest`, so
+gemma really was serving).
 
 Headless mode adds guardrails for unattended runs: a **CTA tracker** (don't exit until the
 asked-for deliverable exists), a lightweight **judge** (is there enough evidence to answer?),

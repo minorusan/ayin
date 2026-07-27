@@ -17,7 +17,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { cancelActiveThinking } from './connection.js';
-import { llmChat, parseToolCalls, renderToolCall, renderToolResult } from './llm/manager.js';
+import { llmChat, parseToolCalls, renderToolCall, renderToolResult, activeModelId } from './llm/manager.js';
 import { llmCall } from './llm.js';
 import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution } from './tools.js';
@@ -322,6 +322,25 @@ function buildMessages(round: number, maxRounds: number): Message[] {
   const messages: Message[] = [];
 
   let systemContent = toolsSystemPrompt();
+
+  // WHAT it runs on, not just who it is.
+  //
+  // The prompt used to say "You are Ayin, a terminal coding agent" and nothing about the model.
+  // Asked "what model are you?", a distilled model primed by 12k chars of agentic-harness prompt
+  // fills that gap with a famous vendor and states it confidently: the same build claimed
+  // "Claude, developed by Anthropic" in one session and "OpenAI's o3" in the next. Ayin KNOWS the
+  // answer (the served model id) — so it says it. Verified: with this line qwen3.6 answers
+  // "Ayin, running on qwen3.6:27b served by the Maradel backend"; without it, it confabulates.
+  const servedModel = activeModelId();
+  if (servedModel) {
+    const identity =
+      `You are running on the local model "${servedModel}", served by the Maradel backend — you are ` +
+      `NOT Claude, ChatGPT, Gemini or any hosted assistant. If asked what model you are, answer: ` +
+      `Ayin running on ${servedModel}. Never guess a vendor or model name.`;
+    const anchored = systemContent.replace(/^(You are Ayin[^\n]*)/, `$1\n${identity}`);
+    // A custom system prompt (prompts.json) may not start that way — then just put it on top.
+    systemContent = anchored === systemContent ? `${identity}\n\n${systemContent}` : anchored;
+  }
 
   // Project expertise — detected from filesystem, injected at the top
   if (projectExpertise) {
