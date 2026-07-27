@@ -113,6 +113,7 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 | `str_replace` | Surgical single-match edit of an existing file | approval; **preferred for edits** |
 | `bash` | Run a shell command | approval (auto in headless) |
 | `explore` | A focused sub-investigation with its own mini agent loop | for "find/read X" questions |
+| `diagram` | **PlantUML diagram, validated in a loop** until it really parses | needs `plantuml` to verify + render |
 | `status` | Check progress of backgrounded tools | — |
 | `web_search` | Web search | optional — needs a search backend (see SETUP) |
 | `docs_search` | Semantic search over a project's docs | optional — needs a backend endpoint |
@@ -123,6 +124,42 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 The **core eight** (`read_file`, `grep`, `find_files`, `write_file`, `str_replace`, `bash`,
 `explore`, `status`) need nothing but Node + a POSIX shell. The rest are optional
 integrations you can ignore.
+
+### Diagrams — "I don't understand, explain better"
+
+Say that, or anything like it, and ayin draws the picture *before* it answers:
+
+```
+❯ I don't understand how the fix queue works — explain better
+Diagram: /home/you/project/i-don-t-understand-how-the-fix-queue-works.puml
+◉ …walks you through the diagram it just wrote…
+```
+
+Two ways in. The `diagram` tool the model can call, and a **deterministic trigger** — the phrases
+above (`diagram`, `visualise`, `puml`, `flowchart`, `explain better`, `don't understand`, `unclear`,
+`confused`, `draw`…) run the diagram pass *before* the base call and pre-prompt its result, so the
+answer is written around a picture that already exists. `AYIN_DIAGRAM=0` opts out.
+
+It's a **loop, not a one-shot**, because models get PlantUML syntax wrong often enough that a
+single-shot tool would mostly write broken files. Each round is validated by the real renderer
+(`plantuml -syntax`, which reports `ERROR / <line> / <message>`), and the error is fed back verbatim
+for repair — up to 4 rounds. So a returned diagram always parses; a failing one is saved as
+`*.invalid.puml` with the error, rather than reported as success.
+
+Output lands next to your work (`<subject-slug>.puml` + a rendered `.svg`), and is opened in VS Code
+when the `code` CLI is on PATH — otherwise it's simply left in place and referenced by path.
+
+- **Nothing leaves your machine.** PlantUML's public server would render in one HTTP call, but a
+  diagram of your architecture is exactly what not to POST to a third party. Rendering is local;
+  point `AYIN_PUML_SERVER` at your own PlantUML/Kroki instance if you want remote.
+- Without `plantuml` installed the file is still written, checked structurally, and clearly labelled
+  as unverified.
+- `!include` / `!includeurl` are stripped from generated source — PlantUML resolves those at render
+  time (reading local files, fetching URLs into the image), which is an exfiltration path for
+  anything that can influence the model's output.
+
+Env: `AYIN_PUML_BIN` · `AYIN_PUML_DIR` · `AYIN_PUML_RENDER` (`svg`|`png`|`0`) · `AYIN_PUML_OPEN`
+(`auto`|`0`).
 
 ## Repo watcher — automatic post-commit code review
 

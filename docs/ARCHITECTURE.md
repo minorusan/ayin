@@ -128,7 +128,7 @@ families.
 Each tool is `{ name, description, parameters, execute }`; the model calls it by its unique
 name. **Core** (no external deps): `read_file`, `grep`, `find_files`, `write_file`,
 `str_replace`, `bash`, `explore`, `status`. **Optional integrations** (inert unless
-configured): `web_search`, `docs_search`, `codex`, `jira`, `fixme`. See the README table.
+configured): `diagram`, `web_search`, `docs_search`, `codex`, `jira`, `fixme`. See the README table.
 
 - **`str_replace`** is the preferred edit tool — a single-unique-match find/replace that
   touches only the targeted block. `write_file` is for new files / deliberate full rewrites
@@ -140,6 +140,31 @@ configured): `web_search`, `docs_search`, `codex`, `jira`, `fixme`. See the READ
   the user's stack. The search query is LLM-formulated from the prompt + the user's stack, read from
   the **`SYSTEM_INFO`** env var (a baked default describes the Unity/Flutter/Node-TS/Arduino + RTX-3090
   eGPU/laptops/Pi setup). Opt out with `AYIN_RESEARCH=0`.
+- **`diagram`** (`tools/diagram.ts`) — a **validated** PlantUML generator with its own repair loop,
+  plus the **auto-diagram trigger** (`agent.ts#runDiagram`), the same shape as auto-research: the
+  phrases `diagram`/`visualise`/`puml`/`flowchart`/`explain better`/`don't understand`/`unclear`/
+  `confused`/`draw` run the diagram pass BEFORE the base call and pre-prompt a `<diagram>` block, so
+  the answer is written around a picture that already exists instead of promising one. `AYIN_DIAGRAM=0`
+  opts out. The user's words go to the tool **verbatim** as the subject — no paraphrasing LLM call,
+  because every call queues on one shared GPU slot and the loop may already cost 1-4 rounds.
+  - **Why a loop:** models get PlantUML syntax wrong often enough that one-shot generation mostly
+    writes broken files. Each round is validated by the real renderer — `plantuml -syntax` on stdin,
+    which answers `ERROR / <line> / <message>` or `<TYPE> / (<n> participants)` — and the error is fed
+    back verbatim for repair (max 4 rounds). **The validator is the ground truth**, so success is
+    never reported for a file that won't render; a diagram that won't converge is saved as
+    `*.invalid.puml` with the error in a comment.
+  - Writes `<slug>.puml` + a rendered `.svg` beside the work (`AYIN_PUML_DIR`, default cwd), opens it
+    in VS Code when the `code` CLI exists, else leaves it and reports the path.
+  - **Local only by design.** The public plantuml.com server would render in one HTTP call; a diagram
+    of your architecture is exactly what not to POST to a third party. `AYIN_PUML_SERVER` is the
+    opt-in for a self-hosted renderer. No `plantuml` at all → the file is still written and checked
+    structurally, labelled `unverified`.
+  - **`!include`/`!includeurl`/`!includesub` are stripped** from generated source: PlantUML resolves
+    them at render time (local file reads, URL fetches into the image), which is an exfiltration path
+    for anything that can influence model output.
+  - Verified end-to-end against the real model: a first-try `SEQUENCE (6 participants)` (re-validated
+    independently, SVG free of embedded error text), and the repair path forced with a stub validator
+    — two rejections fed back, success on round 3.
 - **`web_search`** (`tools/web-search.ts`) mirrors maradel's pipeline (`backend/src/tasks/webSearch.ts`),
   in-process and dependency-free: **SearXNG** (keyless self-hosted metasearch, JSON API) PRIMARY →
   **DuckDuckGo HTML** fallback → **DDG Instant Answer** last resort; rank + dedup → fetch top 4 pages →
