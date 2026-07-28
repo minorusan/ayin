@@ -38,12 +38,20 @@ import { llmChat } from '../llm/manager.js';
 import { llmCall } from '../llm.js';
 import { log } from '../log.js';
 import { getConfig, getPrompt } from '../prompts.js';
+import { prompts as promptsService, packagePath } from '../prompts-service.js';
 import { recentPrompts } from '../session-record.js';
 import { exploreExecute } from '../tools/explore.js';
 import { webSearch } from '../tools/web-search.js';
 import { pushActivity, setActivityDetail } from '../activity.js';
 import { addMessage, setAgentStatus } from '../ui.js';
 import { renderSurvey, surveyProject, type Survey } from './survey.js';
+
+/**
+ * The `plan` namespace — everything plan mode *says* to a model that is not the two big documents
+ * already in the `ayin` namespace: the two fixed exploration questions, the two "this API was not
+ * researched" notices the plan is instructed to act on, and the `<plan>` pre-prompt block.
+ */
+const planPrompts = promptsService.register('plan', packagePath('prompts', 'plan')).bundle;
 
 export interface PlanResult {
   path: string;
@@ -99,8 +107,7 @@ async function researchApis(apis: string[]): Promise<string> {
   let spent = 0;
   for (const api of apis) {
     if (spent >= budget) {
-      blocks.push(`### ${api}\nNOT RESEARCHED — the search budget (planApiSearches=${budget}) ran out. `
-        + `The plan must say so and make looking this up the first implementation step.`);
+      blocks.push(`### ${api}\n${planPrompts.get('apiResearchBudgetExhausted', { BUDGET: String(budget) })}`);
       continue;
     }
     setActivityDetail(`researching the ${api} API (current docs, not recall)`);
@@ -114,9 +121,7 @@ async function researchApis(apis: string[]): Promise<string> {
       const msg = err instanceof Error ? err.message : String(err);
       log('WARN', 'plan_api_research_failed', { api, error: msg });
       // An honest gap beats a confident guess: the plan says the lookup failed and makes it step one.
-      blocks.push(`### ${api}\nRESEARCH FAILED (${msg}). Treat every detail of this API as UNVERIFIED: `
-        + `the plan must make "fetch and read the current ${api} documentation" an explicit first step, and must `
-        + `not state endpoints, field names or auth flows as if they were known.`);
+      blocks.push(`### ${api}\n${planPrompts.get('apiResearchFailed', { ERROR: msg, API: api })}`);
     }
   }
   return blocks.join('\n\n');
@@ -134,10 +139,8 @@ async function exploreContext(userInput: string, features: string[], survey: Sur
   if (budget <= 0) return [];
   const subject = features.length ? features.join('; ') : userInput.slice(0, 400);
   const questions = [
-    `What already exists in this codebase that relates to: ${subject}? Name the actual files, the functions/classes, `
-    + `who calls them, and what they currently assume. Report file paths with what each one does.`,
-    `To implement: ${subject} — which existing files would have to change, and what is each one's current `
-    + `responsibility? Name concrete paths and the specific functions/blocks that would be touched.`,
+    planPrompts.get('exploreExisting', { SUBJECT: subject }),
+    planPrompts.get('exploreChanges', { SUBJECT: subject }),
   ].slice(0, budget);
 
   const findings: string[] = [];
@@ -236,13 +239,5 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
 
 /** The plan as the pre-prompt block for this turn's base call. */
 export function planContextBlock(plan: PlanResult): string {
-  return `<plan>\nThis request was large and cross-feature, so a PLAN was produced and written to disk `
-    + `BEFORE this turn: ${plan.path}\n\n${plan.body.slice(0, 12_000)}\n\n`
-    + `When you work:\n`
-    + `- FOLLOW this plan. It already contains the exploration, the affected files and the observability step.\n`
-    + `- Do NOT re-explore what the plan already establishes, and do NOT re-plan.\n`
-    + `- Work the steps in order. If a step turns out to be wrong, say which one and why, then adapt — do not silently drift.\n`
-    + `- Implement the logging/debug step too; it is part of the deliverable, not an optional extra.\n`
-    + `- Reference the plan file by path if you tell the user what you are doing.\n`
-    + `</plan>`;
+  return planPrompts.get('planContext', { PATH: plan.path, BODY: plan.body.slice(0, 12_000) });
 }

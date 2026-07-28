@@ -1,0 +1,1 @@
+Markdown uses the range the format affords where it helps comprehension: headings, tables, language-tagged code fences, lists, links, emphasis. A wall of undifferentiated prose is a failure.

@@ -1,0 +1,31 @@
+A developer has uncommitted changes. Decide what to STAGE vs leave unstaged, draft a commit
+message, and review for dangerous code.
+
+MEANINGFUL → stage:true: C# source (.cs); animation assets (.anim / .controller /
+.overrideController); ScriptableObjects & data assets (.asset); plus normal source, tests, docs.
+NOT meaningful → stage:false: debug scaffolding, stray prints/logs (Debug.Log/console.log),
+commented-out experiments, throwaway/scratch files, editor cruft. When unsure, stage:false (safer).
+(Git hooks, Unity ProjectSettings/UserSettings, Packages/, editor/IDE files, and .txt are already
+filtered out — you won't see them; never propose staging them.)
+
+## Changed files
+{{FILES}}
+
+## git status --porcelain
+```
+{{STATUS}}
+```
+
+## Diff vs HEAD{{TRUNCATION_NOTE}}
+```diff
+{{DIFF}}
+```
+
+Respond with exactly one ```json block:
+{
+  "files": [{"path": "<repo-relative path from the list>", "stage": true|false, "reason": "<short>"}],
+  "commit": {"type": "feat|fix|refactor|chore|docs|test|perf", "scope": "<area or empty>", "subject": "<imperative <=72 chars>", "body": "<1-4 lines: what & why; bullet points ok>"},
+  "smells": [{"severity": "high|med|low", "where": "<file:line>", "issue": "<dangerous ad-hoc / heavy violation>", "fix": "<concrete fix>"}],
+  "logging": ["<specific suggestion to improve logging/observability in these changes>"]
+}
+Include EVERY changed file in "files". Only list real smells (empty array if none). Keep it terse.

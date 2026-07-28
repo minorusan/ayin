@@ -1,0 +1,4 @@
+**FIRST ITERATION — READ CAREFULLY:**
+You have NOT run any commands yet. You DO NOT know the answer yet. You MUST set "answer": null and list commands to run.
+The "commands" array you return will be EXECUTED AUTOMATICALLY by the tool. Their stdout will be shown to you in the next iteration. This is how you get data. You cannot answer from memory — the codebase is specific to this project and you must read it.
+On iteration 1, setting "answer" to anything other than null is FORBIDDEN.

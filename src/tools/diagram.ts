@@ -35,6 +35,16 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { llmChat } from '../llm/manager.js';
 import { log } from '../log.js';
+import { prompts, packagePath } from '../prompts-service.js';
+
+/**
+ * This tool's prompt namespace — `prompts/diagram/*.txt`, materialized into the operator's local
+ * store at import time. INTERIM SHAPE: diagram is still a plain function, not a `BaseTool`, so it
+ * registers here at module scope instead of declaring `promptsSourceDir` and being handed a bundle
+ * by the registry. The namespace boundary is already correct; when diagram becomes a class the swap
+ * is mechanical — `diagramPrompts.get(...)` → `this.prompt(...)`.
+ */
+const diagramPrompts = prompts.register('diagram', packagePath('prompts', 'diagram')).bundle;
 
 const MAX_ROUNDS = 4;
 const PUML_BIN = process.env.AYIN_PUML_BIN || 'plantuml';
@@ -128,17 +138,6 @@ function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'diagram';
 }
 
-const RULES = [
-  'Return ONLY PlantUML source. No prose, no markdown fences, no explanation.',
-  'Start with @startuml and end with @enduml (or @startmindmap/@endmindmap for a mind map).',
-  'Pick the diagram type that actually fits: sequence for a flow over time, class for structure,',
-  'component for how parts connect, activity for a decision flow, state for a lifecycle.',
-  'Name real things from the codebase — files, functions, ops, events — not placeholders like "Foo".',
-  'Keep it readable: aim for 8-20 nodes. Split detail out rather than drawing everything.',
-  'Add short notes for anything non-obvious. Label every arrow with what actually flows.',
-  'No !include, no !includeurl, no external images or fonts — the diagram must render offline.',
-].join('\n');
-
 /**
  * The loop. `context` is optional grounding (facts the agent already gathered) — passing it makes
  * the difference between a generic picture and one that names your actual modules.
@@ -150,12 +149,19 @@ export async function makeDiagram(subject: string, opts: { kind?: string; contex
 
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     const repair = lastError
-      ? `\n\nYour previous attempt FAILED validation with:\n${lastError}\n\nHere it is — fix exactly that and return the corrected full source:\n${source}`
+      ? `\n\n${diagramPrompts.get('repair', { ERROR: lastError, SOURCE: source })}`
       : '';
-    const prompt =
-      `Draw a ${opts.kind ? `${opts.kind} ` : ''}PlantUML diagram that explains: ${subject}\n\n` +
-      (opts.context ? `Ground it in these facts about the actual code:\n${opts.context}\n\n` : '') +
-      `${RULES}${repair}`;
+    // Data-carrying vars go in LAST: `interpolate` rescans the whole string per key, so an
+    // earlier-inserted value holding a later `{{VAR}}` would be expanded. REPAIR carries the
+    // model's own previous output — the least trustworthy blob — so it is substituted last.
+    const prompt = diagramPrompts.get('draw', {
+      KIND: opts.kind ? `${opts.kind} ` : '',
+      SUBJECT: subject,
+      CONTEXT_BLOCK: opts.context
+        ? diagramPrompts.get('groundingContext', { CONTEXT: opts.context })
+        : '',
+      REPAIR: repair,
+    });
 
     let raw: string;
     try {
@@ -165,7 +171,7 @@ export async function makeDiagram(subject: string, opts: { kind?: string; contex
     }
 
     const extracted = extractPuml(raw);
-    if (!extracted) { lastError = 'no @startuml…@enduml block found in your reply — return ONLY the diagram source'; continue; }
+    if (!extracted) { lastError = diagramPrompts.get('noBlockError'); continue; }
     const { src, stripped } = stripIncludes(extracted);
     source = src;
     if (stripped.length) log('WARN', 'diagram_include_stripped', { count: String(stripped.length) });

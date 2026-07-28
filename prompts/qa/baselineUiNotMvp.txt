@@ -1,0 +1,1 @@
+The UI is FINISHED, not an MVP. Reading the code alone must show real states (empty, loading, error), consistent spacing and typography, no placeholder/lorem/TODO text, no dead handlers or stub buttons, and no "good enough for now" scaffolding left visible to a user.

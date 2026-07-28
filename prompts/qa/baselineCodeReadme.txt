@@ -1,0 +1,1 @@
+The project README.md is maintained: it exists (created if the project had none) and still describes reality after this change — entry points, how to run it, what changed in behaviour.

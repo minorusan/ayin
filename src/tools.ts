@@ -12,10 +12,11 @@ import { dirname, basename, resolve, join, isAbsolute, extname } from 'node:path
 import { homedir } from 'node:os';
 import { isImagePath, preprocessImage, addPendingImage } from './image.js';
 import { getPrompt } from './prompts.js';
+import { prompts } from './prompts-service.js';
+import { log } from './log.js';
+import type { Tool } from './tools/base.js';
 import { toolCallInstructions } from './llm/manager.js';
 import { jiraExecute } from './jira.js';
-import { codexExecute } from './codex.js';
-import { fixmeExecute } from './fixme.js';
 import { statusExecute } from './tools/status.js';
 import { exploreExecute } from './tools/explore.js';
 import { webSearch } from './tools/web-search.js';
@@ -162,13 +163,12 @@ function suggestSimilarPaths(missing: string, maxSuggestions = 3): string {
 }
 
 // ── Tool interface ──────────────────────────────────────────────────
+// Defined in tools/base.ts alongside BaseTool, so a tool package can implement the contract
+// without importing this module (which pulls in the whole registry). Re-exported here because
+// every existing call site imports `Tool` from './tools.js'.
 
-export interface Tool {
-  name: string;
-  description: string;
-  parameters: Array<{ name: string; type: string; description: string; required?: boolean }>;
-  execute(params: Record<string, string>): Promise<string>;
-}
+export type { Tool, ToolParameter } from './tools/base.js';
+export { BaseTool } from './tools/base.js';
 
 type DiffOp =
   | { type: 'equal'; line: string }
@@ -407,29 +407,6 @@ const tools: Tool[] = [
     },
   },
   {
-    name: 'fixme',
-    description: 'Rewrite the agent\'s personality/voice to match a user-requested style. The user says something like "talk like Yoda" or "respond like a pirate" — call this tool with that style description. It rewrites the system prompts via OpenAI and takes effect immediately. Use /reset to undo.',
-    parameters: [
-      { name: 'style', type: 'string', description: 'The personality or voice style to apply, e.g. "Master Yoda", "sarcastic British butler", "40 year old street hustler"', required: true },
-    ],
-    async execute(params) {
-      if (!params.style) return 'Error: style parameter required';
-      return fixmeExecute(params.style);
-    },
-  },
-  {
-    name: 'codex',
-    description: 'Spawn an OpenAI Codex agent to deeply research a hard problem. Use for complex questions that require reading many files, tracing logic across a codebase, or synthesizing information into a report. The agent runs autonomously and returns a markdown report when done. This takes 1-5 minutes — use only when the question is genuinely hard.',
-    parameters: [
-      { name: 'query', type: 'string', description: 'The research question or task for the codex agent. Be specific — include file paths, function names, or error messages if relevant.', required: true },
-      { name: 'cwd', type: 'string', description: 'Working directory for the agent (default: current directory)', required: false },
-      { name: 'timeout', type: 'number', description: 'Timeout in ms (default: 300000 = 5 min)', required: false },
-    ],
-    async execute(params) {
-      return codexExecute(params);
-    },
-  },
-  {
     name: 'jira',
     description: 'Query Jira using JQL (Jira Query Language). Use for: finding tickets, checking sprint status, listing issues by assignee/project/status, getting issue counts. Returns formatted issue list.',
     parameters: [
@@ -466,7 +443,7 @@ const tools: Tool[] = [
   },
   {
     name: 'status',
-    description: 'Check the status of background tool tasks. Shows all tasks that went background (took >20s), their current status (running/completed/failed), how long they have been running, and a preview of their result once done. Call this to check on long-running tools like codex or web_search.',
+    description: 'Check the status of background tool tasks. Shows all tasks that went background (took >20s), their current status (running/completed/failed), how long they have been running, and a preview of their result once done. Call this to check on long-running tools like explore or web_search.',
     parameters: [],
     async execute(params) {
       return statusExecute(params);
@@ -493,6 +470,36 @@ const tools: Tool[] = [
 
 const toolMap = new Map<string, Tool>();
 for (const t of tools) toolMap.set(t.name, t);
+
+// ── prompt provisioning ─────────────────────────────────────────────
+// A tool ships its prompt texts next to its own code and declares that directory. Here — at
+// registration, once, at boot — ayin copies anything missing into the operator's local store and
+// hands the tool back a bundle bound to LOCAL. The tool then loads by id and never learns where
+// the files actually are, which is what lets tools live in their own repo.
+//
+// Materialization NEVER overwrites a local file, so an operator's edit survives every upgrade;
+// a newly shipped prompt id appears on the next boot. Failure to provision one tool must not take
+// the agent down — the tool throws a clear error if it later asks for a prompt it never got.
+
+function provisionToolPrompts(list: Tool[]): void {
+  for (const t of list) {
+    if (!t.promptsSourceDir || typeof t.bindPrompts !== 'function') continue;
+    try {
+      const { bundle, materialized } = prompts.register(t.name, t.promptsSourceDir);
+      t.bindPrompts(bundle);
+      if (materialized.length > 0) {
+        log('INFO', 'prompts_materialized', { tool: t.name, ids: materialized.join(',') });
+      }
+    } catch (err) {
+      log('WARN', 'prompts_provision_failed', {
+        tool: t.name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
+provisionToolPrompts(tools);
 
 export function getTool(name: string): Tool | undefined {
   return toolMap.get(name);

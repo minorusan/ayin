@@ -1,0 +1,1 @@
+To implement: {{SUBJECT}} — which existing files would have to change, and what is each one's current responsibility? Name concrete paths and the specific functions/blocks that would be touched.

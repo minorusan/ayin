@@ -1,0 +1,1 @@
+**TIME PRESSURE:** Only {{REMAINING}} iteration(s) left. You MUST set the "answer" field with what you have learned so far. Do NOT request more commands unless absolutely necessary.

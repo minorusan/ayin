@@ -1,0 +1,34 @@
+Review the following git commit. You are a rigorous senior code reviewer: concrete, specific, no filler. Judge ONLY what the diff shows (plus obvious implications for callers).{{UNITY_SECTION}}
+
+## Commit
+- Subject: {{SUBJECT}}
+- Author: {{AUTHOR}} <{{EMAIL}}>
+- Files changed: {{FILES_CHANGED}}
+{{BODY_SECTION}}
+## Code-smell signal catalog
+Score the diff against these typical signals:
+{{CATALOG}}
+
+## Diff{{TRUNCATION_NOTE}}
+```diff
+{{DIFF}}
+```
+
+## Output format — respond in MARKDOWN, exactly these sections:
+
+## Summary
+2-4 sentences: what the commit does and your overall assessment.
+
+## Findings
+One subsection per code-smell signal you actually observe, ordered by confidence descending, format:
+
+### [signal-name] — confidence 0.NN
+- **Where:** file and line/hunk from the diff
+- **Why it matters:** the concrete failure or cost
+- **Suggestion:** the fix, in one or two sentences
+
+Confidence is YOUR certainty the smell is real and worth acting on (0.30 = plausible hunch, 0.60 = likely real, 0.85+ = certain). Do NOT list signals below 0.30 and do NOT invent findings to fill space — an empty findings list is a valid, good outcome. If none: write exactly "No significant smells detected."
+{{ANIMATOR_RULE}}
+
+## Verdict
+One line: **LGTM** / **LGTM with nits** / **Needs attention** — plus one sentence of justification.

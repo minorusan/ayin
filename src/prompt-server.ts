@@ -5,22 +5,50 @@
  */
 
 import { createServer } from 'node:http';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { log } from './log.js';
-import { fixmeExecute } from './fixme.js';
-import { resetPromptsToDefaults } from './prompts.js';
+import { resetPromptsToDefaults, getPromptsDir as promptsDir } from './prompts.js';
+import { prompts, writeAtomic } from './prompts-service.js';
 
-const PROMPTS_FILE = join(homedir(), '.ayin-cli', 'prompts.json');
 const PORT = 7773;
 
+/**
+ * Prompt TEXT lives in `~/.ayin-cli/prompts/<namespace>/<id>.txt` (see prompts-service.ts), not in
+ * prompts.json. The editor still speaks one JSON document, so we project the file store into that
+ * shape — keys are `<namespace>/<id>` so a tool's prompts are editable here too — and fan a save
+ * back out to the individual files. The files stay the source of truth; this is just a view.
+ */
 function readPrompts(): string {
-  try {
-    return readFileSync(PROMPTS_FILE, 'utf-8');
-  } catch {
-    return '{}';
+  const doc: Record<string, { description: string; content: string }> = {};
+  for (const ns of prompts.list()) {
+    for (const id of ns.ids) {
+      doc[`${ns.namespace}/${id}`] = {
+        description: `${ns.namespace} · ${id}`,
+        content: prompts.bundle(ns.namespace).get(id),
+      };
+    }
   }
+  return JSON.stringify(doc, null, 2);
+}
+
+/** Fan a saved document back out to the individual prompt files. Returns ids written. */
+function writePrompts(body: string): string[] {
+  const doc = JSON.parse(body) as Record<string, { content?: unknown }>;
+  const written: string[] = [];
+  for (const [key, val] of Object.entries(doc)) {
+    const slash = key.indexOf('/');
+    if (slash < 1) continue; // not a namespaced prompt key — ignore
+    const ns = key.slice(0, slash);
+    const id = key.slice(slash + 1);
+    const content = val?.content;
+    if (typeof content !== 'string') continue;
+    const dir = join(promptsDir(), ns);
+    if (!existsSync(dir)) continue; // never invent a namespace from the browser
+    writeAtomic(join(dir, `${id}.txt`), content.endsWith('\n') ? content : content + '\n');
+    written.push(key);
+  }
+  return written;
 }
 
 const HTML = `<!DOCTYPE html>
@@ -176,45 +204,14 @@ export function startPromptServer(): void {
       req.on('data', (chunk) => { body += chunk; });
       req.on('end', () => {
         try {
-          JSON.parse(body); // validate
-          writeFileSync(PROMPTS_FILE, body, 'utf-8');
+          const written = writePrompts(body);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end('{"ok":true}');
-          log('INFO', 'prompts_saved', { size: String(body.length) });
+          log('INFO', 'prompts_saved', { ids: written.join(','), count: String(written.length) });
         } catch (e) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(`{"error":"${e instanceof Error ? e.message : 'invalid json'}"}`);
         }
-      });
-      return;
-    }
-
-    if (req.url === '/api/fixme' && req.method === 'POST') {
-      let body = '';
-      req.on('data', (chunk) => { body += chunk; });
-      req.on('end', () => {
-        let style: string;
-        try {
-          style = (JSON.parse(body) as { style?: string }).style ?? '';
-        } catch {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end('{"error":"invalid json"}');
-          return;
-        }
-        if (!style) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end('{"error":"style field required"}');
-          return;
-        }
-        fixmeExecute(style).then((msg) => {
-          const ok = !msg.startsWith('Error:');
-          res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(ok ? { ok: true, message: msg } : { error: msg }));
-          log('INFO', 'api_fixme', { style: style.slice(0, 60), ok: String(ok) });
-        }).catch((err) => {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
-        });
       });
       return;
     }

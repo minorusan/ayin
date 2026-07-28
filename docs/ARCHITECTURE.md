@@ -407,6 +407,30 @@ The moving parts, designed to survive interruption at any point:
   vanished commits (rebase/gc) are ledgered as `gone`; LLM/backend failures retry with
   linear backoff up to 5 attempts, then are ledgered as `failed`.
 
+## Prompts (`prompts-service.ts`, `prompts.ts`, `prompts/`)
+
+Prompt text never lives in source. Each package ships its prompts as `.txt` files beside its code —
+ayin's own in `prompts/ayin/`, a tool's in `<tool-package>/prompts/` — and the operator's editable
+copy lives at `~/.ayin-cli/prompts/<namespace>/<id>.txt`, which is the only thing read at call time.
+
+`prompts.register(namespace, sourceDir)` copies any locally-missing id from SOURCE to LOCAL and
+returns a `PromptBundle` bound to LOCAL. Copies are atomic (temp file + `rename`), so an interrupted
+run leaves either the old prompt or the new one, never a truncated one. **Materialization never
+overwrites** — a local file is the operator's; a newly shipped id appears on the next boot; an edited
+one is untouched. `restoreDefaults()` is the only overwriting path and is explicit.
+
+Tools receive their bundle by **injection**: the registry reads `tool.promptsSourceDir`, materializes,
+then calls `tool.bindPrompts(bundle)`. `BaseTool#prompt(id, vars)` reads through it. A tool therefore
+depends only on an interface ayin provides — not on the service singleton, not on `~/.ayin-cli` — which
+is what allows tool packages to live in their own public or private repos. A tool with no bundle throws
+a clear error rather than running on empty text.
+
+Variables are `{{UPPER_SNAKE}}`. An unknown id throws. `config` (numeric knobs, the OpenAI key) stays
+in `~/.ayin-cli/prompts.json` — settings are not prompts. Installs predating the file store are
+migrated on first run: prompt entries move out of `prompts.json` into `.txt` files (operator edits
+preserved), and the original is kept as `prompts.json.pre-filestore`. The `:7773` editor UI projects
+the file store into one JSON document keyed `<namespace>/<id>` and fans saves back out to the files.
+
 ## Retrieval
 
 None. ayin finds code the agentic way — `grep`, `find_files`, `read_file` and `explore`. The
@@ -668,9 +692,11 @@ can finish — see the warning in `SETUP.md`.
 
 - **`summary.ts`** — a rolling session summary, updated each exchange via the LLM and injected
   into every call as compact context.
-- **`prompts.ts`** — reads `~/.ayin-cli/prompts.json` on every access (live edits apply
-  immediately). Holds `config` (windowSize, maxToolRounds, …), the `system` prompt, and the
-  `summarizer` prompt. The tool-call format is supplied by the active dialect, not hardcoded.
+- **`prompts.ts`** — registers ayin's own prompt namespace and exposes `getPrompt(id, vars)`. Holds
+  `config` (windowSize, maxToolRounds, …) in `~/.ayin-cli/prompts.json`, read on every access so live
+  edits apply immediately. Prompt TEXT is in `.txt` files, not here — see the Prompts section. The
+  tool-call format is supplied by the active dialect, not hardcoded.
+- **`prompts-service.ts`** — the SOURCE→LOCAL materializer and `PromptBundle` provider.
 - **`prompt-server.ts`** — optional local web UI for editing those prompts.
 - **`artifacts.ts`** — every tool output is saved under `~/.ayin-cli/artifacts/` and browsable
   in the TUI (`Ctrl+O`); chat shows a 2-line preview.
@@ -774,8 +800,12 @@ src/
 ├── summary.ts          rolling session summary
 ├── goal.ts             auto-determined session goal (anti-wander anchor; LLM-distilled, cursive)
 ├── git.ts              current-branch lookup for the status bar (reads .git/HEAD, 2s cache)
-├── prompts.ts          ~/.ayin-cli/prompts.json (read every access) + /set values
+├── prompts.ts          ayin's prompt namespace + config in ~/.ayin-cli/prompts.json + /set values
+├── prompts-service.ts  prompt file store: source→local materialization, PromptBundle injection
 ├── prompt-server.ts    optional web UI for prompts
+├── prompts/ayin/*.txt  (repo root) ayin's own prompt texts — source of truth, copied to local
+├── prompts/qa/*.txt    (repo root) the QA gate's baseline criteria — the operator's standing bar
+├── prompts/plan/*.txt  (repo root) plan mode's exploration questions, API-gap notices, <plan> block
 ├── artifacts.ts        save/browse tool outputs
 ├── history.ts          prompt history
 ├── tokens.ts           context-meter estimate

@@ -35,7 +35,12 @@ import { createHash } from 'node:crypto';
 import { llmChat, refreshActiveModel } from './llm/manager.js';
 import { connect, keliBaseUrl } from './connection.js';
 import { acquireLlm, type LlmHold } from './resource-client.js';
+import { prompts, packagePath } from './prompts-service.js';
 import { log } from './log.js';
+
+/** The watcher's own prompts (SOURCE: `<pkg>/prompts/watch`), materialized into the local store at
+ *  import time. Every reviewer instruction the daemon sends lives there as a `.txt`, not here. */
+const watchPrompts = prompts.register('watch', packagePath('prompts', 'watch')).bundle;
 
 const WATCH_DIR = join(homedir(), '.ayin-cli', 'watch');
 const QUEUE_FILE = join(WATCH_DIR, 'queue.jsonl');
@@ -53,12 +58,8 @@ const HOOK_MARKER = 'ayin-watch post-commit hook';
 
 // Shared reviewer discipline (Unity): a reviewer must not claim an animator binding is "missing"
 // from a prefab it merely grepped by name — a true fact about the wrong prefab is worse than a lie.
-const ANIMATOR_EXISTENCE_RULE =
-  'Existence discipline (Unity): never assert a state/param/clip/object "does not exist" or "is not ' +
-  'in <prefab>" unless you resolved the binding chain (clip → its AnimatorController → the GameObject ' +
-  'whose Animator uses it → the prefab/scene that instantiates it). If you can\'t resolve it, say ' +
-  '"unverified: <what\'s unresolved>" — never "missing". Don\'t report a fact about a plausibly-named ' +
-  'prefab as if it were the binding target.';
+// The text is one prompt file (`watch/animatorExistenceRule`) injected into both reviewers.
+const animatorRule = (): string => watchPrompts.get('animatorExistenceRule');
 
 /** Typical code-smell signals the reviewer scores. Kept as data so the list is one place. */
 export const SMELL_SIGNALS: Array<{ name: string; hint: string }> = [
@@ -490,43 +491,20 @@ function onlyReviewFiles(numstat: string): boolean {
 
 function buildReviewPrompt(meta: CommitMeta, diff: string, truncated: boolean, unityMd?: string | null): string {
   const catalog = SMELL_SIGNALS.map(s => `- **${s.name}** — ${s.hint}`).join('\n');
-  const unitySection = unityMd
-    ? `\n## Deterministic Unity asset diff (tool-generated, object-level — trust this over raw YAML)\n${unityMd}\n`
-    : '';
-  return `Review the following git commit. You are a rigorous senior code reviewer: concrete, specific, no filler. Judge ONLY what the diff shows (plus obvious implications for callers).${unitySection}
-
-## Commit
-- Subject: ${meta.subject}
-- Author: ${meta.author} <${meta.email}>
-- Files changed: ${meta.filesChanged}
-${meta.body ? `- Message body:\n${meta.body}\n` : ''}
-## Code-smell signal catalog
-Score the diff against these typical signals:
-${catalog}
-
-## Diff${truncated ? ' (TRUNCATED — very large commit; review what is shown and flag the size itself under mixed-concerns if warranted)' : ''}
-\`\`\`diff
-${diff}
-\`\`\`
-
-## Output format — respond in MARKDOWN, exactly these sections:
-
-## Summary
-2-4 sentences: what the commit does and your overall assessment.
-
-## Findings
-One subsection per code-smell signal you actually observe, ordered by confidence descending, format:
-
-### [signal-name] — confidence 0.NN
-- **Where:** file and line/hunk from the diff
-- **Why it matters:** the concrete failure or cost
-- **Suggestion:** the fix, in one or two sentences
-
-Confidence is YOUR certainty the smell is real and worth acting on (0.30 = plausible hunch, 0.60 = likely real, 0.85+ = certain). Do NOT list signals below 0.30 and do NOT invent findings to fill space — an empty findings list is a valid, good outcome. If none: write exactly "No significant smells detected."
-${ANIMATOR_EXISTENCE_RULE}
-
-## Verdict
-One line: **LGTM** / **LGTM with nits** / **Needs attention** — plus one sentence of justification.`;
+  // The two optional sections are their own prompt ids (the store has no conditionals); the
+  // newlines that join them to the body stay here, since only the code knows they are separators.
+  return watchPrompts.get('commitReview', {
+    UNITY_SECTION: unityMd ? `\n${watchPrompts.get('commitReviewUnity', { UNITY_MD: unityMd })}\n` : '',
+    BODY_SECTION: meta.body ? `${watchPrompts.get('commitReviewBody', { BODY: meta.body })}\n` : '',
+    TRUNCATION_NOTE: truncated ? ` ${watchPrompts.get('commitReviewTruncated')}` : '',
+    CATALOG: catalog,
+    ANIMATOR_RULE: animatorRule(),
+    SUBJECT: meta.subject,
+    AUTHOR: meta.author,
+    EMAIL: meta.email,
+    FILES_CHANGED: String(meta.filesChanged),
+    DIFF: diff,
+  });
 }
 
 async function reviewCommit(repo: string, commit: string): Promise<{ status: 'reviewed' | 'skipped' | 'gone'; note: string }> {
@@ -580,7 +558,7 @@ ${unityMd}
 
   out(`reviewing ${meta.shortHash} "${meta.subject}" (${meta.filesChanged} files)…`);
   const review = await llmChat([
-    { role: 'system', content: 'You are a rigorous senior code reviewer. You respond in clean markdown, no preamble, no tool calls.' },
+    { role: 'system', content: watchPrompts.get('commitReviewSystem') },
     { role: 'user', content: buildReviewPrompt(meta, diff, truncated, unityMd) },
   ]);
 
@@ -622,29 +600,14 @@ ${unityMd ? `## Deterministic Unity asset diff\n\n→ **[AssetDiff-${meta.shortH
 // the agent-file pointer). Answers "what changed under me and what should I watch out for".
 
 function buildMergePrompt(range: string, oneline: string, stat: string, diff: string, truncated: boolean): string {
-  return `You are briefing a developer on what a \`git pull\`/merge just brought into their repo (range ${range}).
-Be concrete and skimmable. Cover: (1) a 2-4 sentence summary of what was pulled; (2) the notable
-changes grouped by area (features, fixes, refactors, deps, config/schema/protocol); (3) BREAKING or
-risky changes to watch — API/signature/schema changes, migrations, config that must change, anything
-that could break the puller's in-flight work; (4) any follow-up the developer likely needs to do
-(reinstall deps, run migrations, re-check a contract). If nothing risky, say so plainly.
-
-## Commits pulled
-${oneline || '(none)'}
-
-## Files changed
-\`\`\`
-${stat || '(none)'}
-\`\`\`
-
-## Diff${truncated ? ' (TRUNCATED — large merge; reason over the stat + what is shown)' : ''}
-\`\`\`diff
-${diff}
-\`\`\`
-
-Respond in clean markdown with sections: ## Summary · ## What changed · ## Watch out · ## Follow-ups.
-${ANIMATOR_EXISTENCE_RULE}
-END with a final line that is EXACTLY one of: \`VERDICT: RISKY\` (breaking/risky changes the puller must act on) or \`VERDICT: OK\`.`;
+  return watchPrompts.get('mergeReport', {
+    TRUNCATION_NOTE: truncated ? ` ${watchPrompts.get('mergeReportTruncated')}` : '',
+    ANIMATOR_RULE: animatorRule(),
+    RANGE: range,
+    ONELINE: oneline || '(none)',
+    STAT: stat || '(none)',
+    DIFF: diff,
+  });
 }
 
 async function reviewMerge(repo: string, commit: string, prev?: string): Promise<{ status: 'reviewed' | 'skipped' | 'gone'; note: string }> {
@@ -668,7 +631,7 @@ async function reviewMerge(repo: string, commit: string, prev?: string): Promise
 
   out(`explaining merge ${meta.shortHash} (${range})…`);
   const review = await llmChat([
-    { role: 'system', content: 'You brief developers on what a pull/merge changed. Clean markdown, no preamble, no tool calls.' },
+    { role: 'system', content: watchPrompts.get('mergeReportSystem') },
     { role: 'user', content: buildMergePrompt(range, onelineRes.stdout.trim(), statRes.stdout.trim(), diff, truncated) },
   ]);
 
@@ -781,39 +744,13 @@ function commitText(c: NonNullable<WorktreePlan['commit']>): string {
   return c.body ? `${head}\n\n${c.body}\n` : `${head}\n`;
 }
 
-const WORKTREE_SYS = 'You are a senior engineer triaging a teammate\'s uncommitted work. You respond with ONE json code block and nothing else.';
 function buildWorktreePrompt(files: string[], status: string, diff: string, truncated: boolean): string {
-  return `A developer has uncommitted changes. Decide what to STAGE vs leave unstaged, draft a commit
-message, and review for dangerous code.
-
-MEANINGFUL → stage:true: C# source (.cs); animation assets (.anim / .controller /
-.overrideController); ScriptableObjects & data assets (.asset); plus normal source, tests, docs.
-NOT meaningful → stage:false: debug scaffolding, stray prints/logs (Debug.Log/console.log),
-commented-out experiments, throwaway/scratch files, editor cruft. When unsure, stage:false (safer).
-(Git hooks, Unity ProjectSettings/UserSettings, Packages/, editor/IDE files, and .txt are already
-filtered out — you won't see them; never propose staging them.)
-
-## Changed files
-${files.map(f => `- ${f}`).join('\n')}
-
-## git status --porcelain
-\`\`\`
-${status.trim()}
-\`\`\`
-
-## Diff vs HEAD${truncated ? ' (TRUNCATED)' : ''}
-\`\`\`diff
-${diff}
-\`\`\`
-
-Respond with exactly one \`\`\`json block:
-{
-  "files": [{"path": "<repo-relative path from the list>", "stage": true|false, "reason": "<short>"}],
-  "commit": {"type": "feat|fix|refactor|chore|docs|test|perf", "scope": "<area or empty>", "subject": "<imperative <=72 chars>", "body": "<1-4 lines: what & why; bullet points ok>"},
-  "smells": [{"severity": "high|med|low", "where": "<file:line>", "issue": "<dangerous ad-hoc / heavy violation>", "fix": "<concrete fix>"}],
-  "logging": ["<specific suggestion to improve logging/observability in these changes>"]
-}
-Include EVERY changed file in "files". Only list real smells (empty array if none). Keep it terse.`;
+  return watchPrompts.get('worktreeReview', {
+    TRUNCATION_NOTE: truncated ? ` ${watchPrompts.get('worktreeReviewTruncated')}` : '',
+    FILES: files.map(f => `- ${f}`).join('\n'),
+    STATUS: status.trim(),
+    DIFF: diff,
+  });
 }
 
 function buildSmellReport(plan: WorktreePlan | null, raw: string, applied: { staged: number; unstaged: number }): string {
@@ -863,7 +800,7 @@ async function reviewWorktree(repo: string): Promise<void> {
 
   out(`reviewing working tree of ${repo} (${files.length} files)…`);
   const raw = await llmChat([
-    { role: 'system', content: WORKTREE_SYS },
+    { role: 'system', content: watchPrompts.get('worktreeReviewSystem') },
     { role: 'user', content: buildWorktreePrompt(files, statusRes.stdout, diff, truncated) },
   ]);
   const plan = parseWorktreePlan(raw);

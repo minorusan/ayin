@@ -16,6 +16,16 @@ import { llmChat } from '../llm/manager.js';
 import { spawnShell, killTree } from '../shell.js';
 import { log } from '../log.js';
 import { addMessage } from '../ui.js';
+import { prompts, packagePath } from '../prompts-service.js';
+
+/**
+ * This tool's prompt namespace — `prompts/explore/*.txt`, materialized into the operator's local
+ * store at import time. INTERIM SHAPE: explore is still a plain function, not a `BaseTool`, so it
+ * registers here at module scope instead of declaring `promptsSourceDir` and being handed a bundle
+ * by the registry. The namespace boundary is already correct; when explore becomes a class the swap
+ * is mechanical — `explorePrompts.get(...)` → `this.prompt(...)`.
+ */
+const explorePrompts = prompts.register('explore', packagePath('prompts', 'explore')).bundle;
 
 const MAX_ITERATIONS = 12;
 const COMMAND_TIMEOUT = 30_000;
@@ -141,100 +151,30 @@ function buildPrompt(
 
   const remaining = MAX_ITERATIONS - iteration + 1;
   const pressureNote = remaining <= 3
-    ? `\n**TIME PRESSURE:** Only ${remaining} iteration(s) left. You MUST set the "answer" field with what you have learned so far. Do NOT request more commands unless absolutely necessary.`
+    ? `\n${explorePrompts.get('timePressure', { REMAINING: String(remaining) })}`
     : '';
 
   const firstIterNote = iteration === 1
-    ? `\n**FIRST ITERATION — READ CAREFULLY:**
-You have NOT run any commands yet. You DO NOT know the answer yet. You MUST set "answer": null and list commands to run.
-The "commands" array you return will be EXECUTED AUTOMATICALLY by the tool. Their stdout will be shown to you in the next iteration. This is how you get data. You cannot answer from memory — the codebase is specific to this project and you must read it.
-On iteration 1, setting "answer" to anything other than null is FORBIDDEN.`
+    ? `\n${explorePrompts.get('firstIteration')}`
     : '';
 
-  return `You are answering a focused question for another agent. Use shell commands to gather data, then return the DATA itself.
+  const contextBlock = context
+    ? `\n${explorePrompts.get('callerContext', { CONTEXT: context })}`
+    : '';
 
-Working directory: ${cwd}
-
-**QUESTION TO ANSWER:**
-${question}
-${context ? `\n**Context provided by caller:**\n${context}\n` : ''}
-**Iteration:** ${iteration}/${MAX_ITERATIONS}${pressureNote}${firstIterNote}
-
-**Your previous steps in this investigation:**
-${historyText}
-
-**Allowed commands (read-only):** ls, cat, head, tail, grep, find, git show, git log, git blame, git branch, git grep, wc
-
-**This codebase can be ANY language** (TypeScript, JavaScript, Python, Go, C#, Rust, …). Do NOT
-assume file extensions. To find a symbol, grep the whole tree WITHOUT an --include filter, e.g.
-\`grep -rnI --exclude-dir={.git,node_modules,'dist*','*.bak*',build,vendor,target} "symbolName" .\`
-(ALWAYS exclude vendor/build/backup dirs — node_modules, dist*, *.bak*, build — or the output is
-noise; the same applies to \`find\`). If you don't know the language yet, run \`ls\` first.
-Prefer READING FILE CONTENT (cat/head/grep -A) over listing file names — a list of paths is not
-an answer; the code inside them is.
-
-**How commands work:**
-When you list commands in the "commands" array, the tool RUNS them in the shell and shows you their stdout on the next iteration. You MUST run commands to get data — you cannot know the answer from memory. Never claim you "cannot execute commands" — YES YOU CAN, by listing them in the "commands" array.
-
-**CRITICAL — commit your answer as soon as you have the data:**
-If your "previous steps" above already contain the file content / grep output / git output that
-answers the question, DO NOT run more commands. Immediately set "answer" to those verbatim excerpts
-and confidence 0.8+. Searching again after you already found it wastes iterations and fails the task.
-
-**How "answer" works:**
-Your "answer" field is pasted VERBATIM into the caller's context. The caller cannot see your commands, reasoning, or this conversation. They only see what you put in "answer". If the question asks "run git log", the answer MUST be the actual stdout from that git log command — not the command itself, not a description. Run the command first, THEN put its output in the answer.
-
-Examples of GOOD and BAD answers (language-neutral):
-
-Question: "Show the body of the exploreExecute function"
-BAD answer: "The function is at line 298 in tools/explore.ts"
-GOOD answer:
-\`\`\`
-File: tools/explore.ts
-Lines 298-312:
-export async function exploreExecute(params) {
-  const question = params.question;
-  ...
-}
-\`\`\`
-
-Question: "Run git log --format='%aN %ae' -10 -- path/to/file"
-BAD answer: "I ran git log and found 10 commits by various authors"
-GOOD answer:
-\`\`\`
-Jane Dev jane@example.com
-Jane Dev jane@example.com
-Sam Coder sam@example.com
-... (actual verbatim output)
-\`\`\`
-
-Question: "Find every place that sets activeChatModel to null"
-BAD answer: "activeChatModel is set to null in 3 places"
-GOOD answer:
-\`\`\`
-Line 22: activeChatModel = ...;  // in setActiveChatModel()
-Line 118: loadedChatModel = null;  // in doSwap()
-Line 245: loadedChatModel = null;  // in unloadChatModelVram()
-\`\`\`
-
-**Respond in STRICT JSON only:**
-{
-  "reasoning": "What I just learned from commands (for my own tracking)",
-  "commands": ["cmd1", "cmd2"],
-  "confidence": 0.5,
-  "answer": null
-}
-
-**Confidence rules:**
-- 0.3 = I have located the target but haven't extracted its content yet
-- 0.5 = I have partial content in "answer"
-- 0.7+ = "answer" contains the complete data the question asked for
-- Do NOT set confidence >= 0.7 unless "answer" contains actual data (file content, git output, code excerpts, file:line locations). Metadata descriptions like "I found X" do NOT count.
-
-**Rules:**
-- Maximum 2 commands per iteration.
-- Answer field can be up to 3000 characters — use it to include real data, not meta descriptions.
-- Return ONLY raw JSON. No markdown fences around the JSON. No prose before or after.`;
+  // Data-carrying vars are substituted LAST: `interpolate` rescans the whole string per key, so an
+  // earlier-inserted value containing a later `{{VAR}}` would be expanded. Command output is the
+  // biggest untrusted blob, so it goes in after everything else.
+  return explorePrompts.get('investigate', {
+    CWD: cwd,
+    MAX_ITERATIONS: String(MAX_ITERATIONS),
+    ITERATION: String(iteration),
+    PRESSURE_NOTE: pressureNote,
+    FIRST_ITER_NOTE: firstIterNote,
+    QUESTION: question,
+    CONTEXT_BLOCK: contextBlock,
+    HISTORY: historyText,
+  });
 }
 
 /**
@@ -323,7 +263,7 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     let response: string;
     try {
       response = await llmChat([
-        { role: 'system', content: 'You are a focused codebase investigator. You only respond with JSON. No prose, no markdown.' },
+        { role: 'system', content: explorePrompts.get('investigatorSystem') },
         { role: 'user', content: prompt },
       ]);
     } catch (err) {

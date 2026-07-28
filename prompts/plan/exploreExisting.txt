@@ -1,0 +1,1 @@
+What already exists in this codebase that relates to: {{SUBJECT}}? Name the actual files, the functions/classes, who calls them, and what they currently assume. Report file paths with what each one does.

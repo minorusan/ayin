@@ -1,0 +1,1 @@
+<system>You have reached the maximum rounds. Write your final output to {{TARGET}} NOW using whatever facts you have gathered. Do not explore further.</system>

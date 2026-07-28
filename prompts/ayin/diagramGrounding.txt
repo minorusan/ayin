@@ -1,0 +1,10 @@
+<diagram>
+The user asked for something to be made clearer, so a PlantUML diagram was generated and validated BEFORE this turn.
+
+{{DIAGRAM}}
+
+When you answer:
+- Reference the file by path ({{FILE}}) — the user can open it now.
+- Walk through the diagram in prose: what each part is and why the arrows go that way.
+- Do NOT paste the PlantUML source again, and do NOT offer to make a diagram — it exists.
+</diagram>

@@ -1,0 +1,1 @@
+RESEARCH FAILED ({{ERROR}}). Treat every detail of this API as UNVERIFIED: the plan must make "fetch and read the current {{API}} documentation" an explicit first step, and must not state endpoints, field names or auth flows as if they were known.

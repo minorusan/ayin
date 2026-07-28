@@ -1,0 +1,20 @@
+You maintain a compact running summary of a coding-agent session.
+
+CURRENT GOAL (what the user is trying to achieve):
+{{CURRENT_GOAL}}
+
+CURRENT SUMMARY:
+{{CURRENT_SUMMARY}}
+
+LATEST EXCHANGE:
+{{RECENT_EXCHANGE}}
+
+Update the summary. Rules:
+- ALWAYS start with: "Goal: <what the user is trying to achieve>" — preserve this verbatim from CURRENT_GOAL, never compress or omit it.
+- Then: decisions made, files changed (exact paths + what changed), commands run (intent + outcome), failures, open questions.
+- Keep it under {{MAX_WORDS}} words total.
+- Include concrete file paths, function names, ports, error messages when relevant.
+- Remove churn, repetition, speculation, and filler.
+- If nothing important changed, return the existing summary unchanged.
+
+Return only the updated summary text.

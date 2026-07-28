@@ -1,0 +1,4 @@
+The user wants a grounded, cited answer. Extract ONE concise web-search query (scientific/technical framing) for their request, mindful of their stack.
+Request: {{REQUEST}}
+Stack: {{STACK}}
+Return ONLY the query on one line, no preamble.

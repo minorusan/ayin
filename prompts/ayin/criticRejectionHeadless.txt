@@ -1,0 +1,7 @@
+Your answer has issues:
+{{CRITIQUE}}
+
+Previous directions tried:
+{{PREVIOUS_DIRECTIONS}}
+
+Take a different approach and try again.

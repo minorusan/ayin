@@ -125,8 +125,10 @@ you want it to work on** — its tools use the current working directory.
 
 ## 5. Configuration
 
-All runtime config + prompts live in **`~/.ayin-cli/prompts.json`** (created on first run,
-re-read on every access — edits apply immediately). Set values from the TUI:
+Runtime **config** lives in **`~/.ayin-cli/prompts.json`** (created on first run, re-read on every
+access — edits apply immediately). **Prompt text** lives in **`~/.ayin-cli/prompts/<namespace>/<id>.txt`**
+— one file per prompt, copied there from the shipped defaults on first run and never overwritten
+afterwards, so your edits survive every upgrade. Set config values from the TUI:
 
 | Command | Effect |
 |---------|--------|
@@ -147,10 +149,18 @@ re-read on every access — edits apply immediately). Set values from the TUI:
 | `planMinChars` | 2000 | plan mode: prompt size that triggers the cross-feature triage (`0` disables) |
 | `planExploreCalls` | 2 | plan mode: `explore` passes spent gathering context (each is real GPU time) |
 
-…and the prompt text: `system` / `summarizer` / `goal`, plus `qaCriteria`, `qaReview` (the QA gate's two
-calls) and `planTriage`, `planDocument` (plan mode's). Rewriting those changes the bar ayin holds itself
-to, which is the point of them living here. The tool-call **format** block is injected by the active
-**dialect** (see `docs/ARCHITECTURE.md`), so you normally don't touch it.
+### Editing prompts
+
+Prompt text is **not** in `prompts.json`. Each prompt is its own file under
+`~/.ayin-cli/prompts/ayin/`: `system.txt`, `summarizer.txt`, `goal.txt`, `qaCriteria.txt`,
+`qaReview.txt` (the QA gate's two calls), `planTriage.txt`, `planDocument.txt` (plan mode's). Tools
+that ship prompts get their own namespace directory alongside. Edit a file and the next call uses it —
+no rebuild, no restart. Rewriting these changes the bar ayin holds itself to, which is the point.
+
+Placeholders are `{{UPPER_SNAKE}}` and are filled by ayin; leave the ones you don't understand alone.
+The tool-call **format** block is injected by the active **dialect** (see `docs/ARCHITECTURE.md`), so
+you normally don't touch it. The shipped originals stay untouched in the package's `prompts/` folder;
+upgrading never overwrites a file you edited, and only adds prompts that are genuinely new.
 
 Kill switches, when you want the behaviour gone for one run rather than tuned:
 `AYIN_QA=0` (no QA gate) · `AYIN_PLAN=0` (no plan mode) · `AYIN_PLAN_DIR` (where plans are written) ·

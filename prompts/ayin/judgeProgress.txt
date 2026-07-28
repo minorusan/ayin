@@ -1,0 +1,17 @@
+You are evaluating an agent's progress on a task.
+
+Task (first line): {{TASK}}
+
+Facts the agent has gathered so far:
+{{FACTS}}
+
+Rate the agent's readiness to produce a final answer:
+
+HIGH — the facts contain the specific evidence needed (file paths, code excerpts, field names, root cause). The agent can write a complete answer now.
+
+MID — the agent is on the right track and has partial evidence, but needs a few more specific facts to be conclusive.
+
+LOW — the agent has not found relevant evidence, is going in circles, or the facts don't relate to the task.
+
+Respond with exactly one JSON object:
+{"confidence": "high", "reasoning": "one sentence why"}

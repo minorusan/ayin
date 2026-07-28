@@ -1,0 +1,1 @@
+Single responsibility is kept: each file/module changed here does ONE job. A module mixing unrelated concerns (transport + rendering + persistence), or a function that grew several jobs, is a failure — name the split that should happen.

@@ -28,7 +28,7 @@ import { log } from './log.js';
 import { checkPermission } from './permissions.js';
 import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
 import { recordPrompt, recordTool, recordAnswer } from './session-record.js';
-import { getConfig } from './prompts.js';
+import { getConfig, getPrompt } from './prompts.js';
 import { getRules } from './rules.js';
 import { syncSession, getSessionId } from './tiferet-session.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
@@ -160,11 +160,10 @@ async function runCritic(proposedAnswer: string, facts: string[]): Promise<strin
   // Stage 1: Unanchored peer — different persona activates different MoE experts
   let peerConclusion: string;
   try {
-    const peerPrompt = `You are a senior software architect with deep experience in runtime failure analysis and system lifecycle design. You specialize in identifying root causes by tracing registration, initialization, and teardown flows.
-
-Given ONLY these facts, what is the most likely root cause of the error? Do not speculate beyond the facts. One paragraph.
-${signalsText}
-${factsText.substring(0, 5000)}`;
+    const peerPrompt = getPrompt('criticPeerAnalysis', {
+      SIGNALS: signalsText,
+      FACTS: factsText.substring(0, 5000),
+    });
 
     const peerResponse = await llmChat([{ role: 'user', content: peerPrompt }]);
     peerConclusion = peerResponse.trim();
@@ -179,31 +178,20 @@ ${factsText.substring(0, 5000)}`;
   // Code compares scores. Like a blind evaluation.
   try {
     const ratePrompt = (persona: string, explanation: string) =>
-      `${persona}
-
-Rate how well this explanation is supported by the evidence. Score 1-10.
-
-EVIDENCE:
-${factsText.substring(0, 3000)}
-${signalsText}
-
-EXPLANATION:
-${explanation.substring(0, 1500)}
-
-Score 1-10 where:
-1-3 = contradicts evidence or unsupported claims
-4-6 = partially supported, some gaps or speculation
-7-10 = well supported by specific evidence
-
-Respond with just the number and one sentence why.`;
+      getPrompt('criticArbiterRating', {
+        PERSONA: persona,
+        EVIDENCE: factsText.substring(0, 3000),
+        SIGNALS: signalsText,
+        EXPLANATION: explanation.substring(0, 1500),
+      });
 
     const [originalResponse, peerResponse] = await Promise.all([
       llmChat([{ role: 'user', content: ratePrompt(
-        'You are a QA engineer who evaluates technical claims strictly against evidence. You flag any claim that is not directly supported by the provided facts. Speculation without evidence scores low.',
+        getPrompt('criticArbiterPersona'),
         proposedAnswer
       ) }]),
       llmChat([{ role: 'user', content: ratePrompt(
-        'You are a QA engineer who evaluates technical claims strictly against evidence. You flag any claim that is not directly supported by the provided facts. Speculation without evidence scores low.',
+        getPrompt('criticArbiterPersona'),
         peerConclusion
       ) }]),
     ]);
@@ -240,7 +228,10 @@ Respond with just the number and one sentence why.`;
 async function isCircling(newDirection: string): Promise<boolean> {
   if (directions.length === 0) return false;
 
-  const prompt = `Previous directions tried:\n${directions.map((d, i) => `${i + 1}. ${d.substring(0, 150)}`).join('\n')}\n\nNew direction:\n${newDirection.substring(0, 150)}\n\nIs the new direction essentially the same as any previous one? YES or NO.`;
+  const prompt = getPrompt('criticCircleCheck', {
+    PREVIOUS_DIRECTIONS: directions.map((d, i) => `${i + 1}. ${d.substring(0, 150)}`).join('\n'),
+    NEW_DIRECTION: newDirection.substring(0, 150),
+  });
 
   try {
     const response = await llmChat([{ role: 'user', content: prompt }]);
@@ -258,23 +249,10 @@ async function callJudge(task: string, facts: string[]): Promise<JudgeVerdict> {
   if (facts.length === 0) return { confidence: 'low', reasoning: 'No facts gathered yet.' };
 
   const factsText = facts.map((f, i) => `${i + 1}. ${f}`).join('\n\n');
-  const prompt = `You are evaluating an agent's progress on a task.
-
-Task (first line): ${task.split('\n')[0]}
-
-Facts the agent has gathered so far:
-${factsText}
-
-Rate the agent's readiness to produce a final answer:
-
-HIGH — the facts contain the specific evidence needed (file paths, code excerpts, field names, root cause). The agent can write a complete answer now.
-
-MID — the agent is on the right track and has partial evidence, but needs a few more specific facts to be conclusive.
-
-LOW — the agent has not found relevant evidence, is going in circles, or the facts don't relate to the task.
-
-Respond with exactly one JSON object:
-{"confidence": "high", "reasoning": "one sentence why"}`;
+  const prompt = getPrompt('judgeProgress', {
+    TASK: task.split('\n')[0],
+    FACTS: factsText,
+  });
 
   try {
     const response = await llmChat([{ role: 'user', content: prompt }]);
@@ -541,23 +519,18 @@ async function runResearch(userInput: string): Promise<void> {
     let query = userInput;
     try {
       const q = (await llmCall(
-        `The user wants a grounded, cited answer. Extract ONE concise web-search query (scientific/` +
-        `technical framing) for their request, mindful of their stack.\nRequest: ${userInput}\n` +
-        `Stack: ${systemInfo()}\nReturn ONLY the query on one line, no preamble.`,
+        getPrompt('researchQuery', { REQUEST: userInput, STACK: systemInfo() }),
       )).trim().split('\n')[0].replace(/^["']|["']$/g, '').slice(0, 200);
       if (q.length > 3) query = q;
     } catch { /* formulation failed — fall back to the raw prompt as the query */ }
     // 2) web search (SearXNG → DuckDuckGo) → real hits + sources.
     const results = await webSearch(query);
     // 3) pre-prompt the base call: grounded, scientific→household, tailored to the user's stack.
-    researchContext =
-      `<research-grounding>\nThe user asked for a grounded / researched answer, so a web search was run first.\n\n` +
-      `Research topic: ${query}\n\n${results}\n\n` +
-      `When you answer:\n` +
-      `- Lead with SCIENTIFIC methods of solving the problem; THEN review practical/household methods.\n` +
-      `- Cite the sources above (title + URL) for the claims you use.\n` +
-      `- Tailor recommendations to the user's stack + hardware: ${systemInfo()}\n` +
-      `</research-grounding>`;
+    researchContext = getPrompt('researchGrounding', {
+      QUERY: query,
+      RESULTS: results,
+      STACK: systemInfo(),
+    });
     log('INFO', 'research_grounding', { query: query.slice(0, 120) });
   } catch (err) {
     log('WARN', 'research_failed', { error: err instanceof Error ? err.message : String(err) });
@@ -605,14 +578,10 @@ async function runDiagram(userInput: string): Promise<void> {
       .filter(Boolean).join('\n\n').slice(0, 4000);
     const r = await makeDiagram(userInput, { context: context || undefined });
     if (!r.ok) { log('WARN', 'auto_diagram_failed', { error: (r.error ?? '').slice(0, 120) }); return; }
-    diagramContext =
-      `<diagram>\nThe user asked for something to be made clearer, so a PlantUML diagram was generated ` +
-      `and validated BEFORE this turn.\n\n${formatDiagramResult(r)}\n\n` +
-      `When you answer:\n` +
-      `- Reference the file by path (${r.file}) — the user can open it now.\n` +
-      `- Walk through the diagram in prose: what each part is and why the arrows go that way.\n` +
-      `- Do NOT paste the PlantUML source again, and do NOT offer to make a diagram — it exists.\n` +
-      `</diagram>`;
+    diagramContext = getPrompt('diagramGrounding', {
+      DIAGRAM: formatDiagramResult(r),
+      FILE: String(r.file),
+    });
     addMessage('system', `Diagram: ${r.file}${r.image ? ` (rendered ${r.image})` : ''}`);
     log('INFO', 'auto_diagram', { file: r.file ?? '', kind: r.kind ?? '', rounds: String(r.rounds) });
   } catch (err) {
@@ -724,7 +693,7 @@ export async function runAgent(userInput: string): Promise<void> {
       if (HEADLESS) {
         // CTA gate — if there's a deliverable the model hasn't produced, don't exit
         if (ctaTarget && !ctaDelivered && round < maxRounds - 2) {
-          pushToWindow('user', `<system>You have not yet written your deliverable to ${ctaTarget}. Call write_file with your final output now.</system>`);
+          pushToWindow('user', getPrompt('ctaReminder', { TARGET: ctaTarget }));
           log('INFO', 'cta_reminder_on_text', { round: String(round), target: ctaTarget });
           continue;
         }
@@ -868,7 +837,7 @@ export async function runAgent(userInput: string): Promise<void> {
           addMessage('system', `Denied (read-only): ${name}`);
           const denyCall = renderToolCall({ name, params });
           pushToWindow('assistant', textPrefix ? `${textPrefix}\n\n${denyCall}` : denyCall);
-          pushToWindow('user', renderToolResult(`${name} is unavailable in read-only mode. Investigate using only read_file, grep, and find_files — do not write files or run shell/bash. Then report your findings.`));
+          pushToWindow('user', renderToolResult(getPrompt('readonlyDenied', { TOOL: name })));
           continue roundLoop;
         }
         addMessage('system', `Denied: ${name}(${paramPreview})`);
@@ -879,7 +848,7 @@ export async function runAgent(userInput: string): Promise<void> {
         try {
           const explanation = await llmChat([{
             role: 'user',
-            content: `You tried to call ${name}(${paramPreview}) but the user denied permission.\n\nExplain briefly:\n1. What you were trying to do and why\n2. Alternative approaches the user could approve\n3. What to do next\n\nBe concise — 3-4 sentences.`,
+            content: getPrompt('permissionDeniedExplain', { TOOL: name, PARAMS: paramPreview }),
           }]);
           if (!interrupted) {
             addMessage('assistant', explanation);
@@ -925,13 +894,16 @@ export async function runAgent(userInput: string): Promise<void> {
                 // subsequent calls (e.g. `bash` to verify the rejected write) are stale.
                 addMessage('system', `[critic direction ${directions.length}/${MAX_DIRECTIONS}: ${newDirection.substring(0, 80)}]`);
                 pushToWindow('assistant', `[write_file reviewed — revision needed]`);
-                pushToWindow('user', renderToolResult(`Your answer has issues:\n${criticResult}\n\nPrevious directions tried:\n${directions.map((d, i) => `${i + 1}. ${d.substring(0, 100)}`).join('\n')}\n\nTake a different approach and try again.`));
+                pushToWindow('user', renderToolResult(getPrompt('criticRejectionHeadless', {
+                  CRITIQUE: criticResult,
+                  PREVIOUS_DIRECTIONS: directions.map((d, i) => `${i + 1}. ${d.substring(0, 100)}`).join('\n'),
+                })));
                 continue roundLoop;
               } else {
                 // Interactive: report to user
                 addMessage('system', `[critic found issues — reporting to user]`);
                 pushToWindow('assistant', `[write_file reviewed — issues found]`);
-                pushToWindow('user', renderToolResult(`Your answer has issues:\n${criticResult}\n\nExplain to the user what you tried, why the critic rejected it, and what directions you could take next.`));
+                pushToWindow('user', renderToolResult(getPrompt('criticRejectionInteractive', { CRITIQUE: criticResult })));
                 continue roundLoop;
               }
             }
@@ -1039,7 +1011,7 @@ export async function runAgent(userInput: string): Promise<void> {
       // CTA just delivered — tell the model it's done. This prevents the
       // "write then re-write to confirm" loop Gemma4 falls into.
       if (ctaJustDelivered) {
-        pushToWindow('user', `<system>Deliverable written to ${ctaTarget}. You are done. Reply with a final one-line confirmation and STOP — do not re-write the same file.</system>`);
+        pushToWindow('user', getPrompt('ctaDeliveredStop', { TARGET: ctaTarget }));
         log('INFO', 'cta_exit_hint', { target: ctaTarget });
       }
 
@@ -1094,7 +1066,7 @@ export async function runAgent(userInput: string): Promise<void> {
     addMessage('system', `[max rounds — forcing final write to ${ctaTarget}]`);
 
     // Ask the model to write whatever it has
-    pushToWindow('user', `<system>You have reached the maximum rounds. Write your final output to ${ctaTarget} NOW using whatever facts you have gathered. Do not explore further.</system>`);
+    pushToWindow('user', getPrompt('ctaForceWrite', { TARGET: ctaTarget }));
     try {
       const finalResponse = await llmChat(buildMessages(maxRounds - 1, maxRounds));
       const finalCall = parseToolCalls(finalResponse).toolCalls[0] ?? null;
@@ -1148,19 +1120,11 @@ async function handleMaxRounds(userInput: string, maxRounds: number): Promise<vo
 
       const reflection = await llmChat([{
         role: 'user',
-        content: `You were working on: "${userInput}"
-
-You used all ${maxRounds} rounds. Here is recent context:
-
-${recentWork}
-
-Write a self-audit:
-1. COMPLETED: What you fully finished
-2. IN PROGRESS: What you started but did not finish
-3. NOT STARTED: What still needs to be done
-4. TO CONTINUE: The exact prompt someone should run next to continue this task
-
-Be specific and actionable. This audit will be read by the user to decide next steps.`,
+        content: getPrompt('selfAudit', {
+          TASK: userInput,
+          MAX_ROUNDS: String(maxRounds),
+          RECENT_WORK: recentWork,
+        }),
       }]);
 
       process.stdout.write('\n--- SELF-AUDIT ---\n');
@@ -1198,18 +1162,11 @@ async function handleInterrupt(userInput: string, roundsSoFar: number): Promise<
 
     const summary = await llmChat([{
       role: 'user',
-      content: `You were working on: "${userInput}"
-
-You completed ${roundsSoFar} tool rounds before being interrupted. Here's what happened:
-
-${recentWork}
-
-Provide a brief status report:
-1. What you were trying to do
-2. What you accomplished so far
-3. What remains to be done
-
-Be concise — 3-5 sentences max.`,
+      content: getPrompt('interruptReport', {
+        TASK: userInput,
+        ROUNDS: String(roundsSoFar),
+        RECENT_WORK: recentWork,
+      }),
     }]);
 
     if (interrupted) {

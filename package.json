@@ -10,6 +10,7 @@
   },
   "files": [
     "dist",
+    "prompts",
     "README.md",
     "SETUP.md",
     "LICENSE"
@@ -23,7 +24,9 @@
     "prepublishOnly": "tsc",
     "check:glyphs": "node tool/check-glyphs.mjs",
     "check:gates": "node tool/check-gates.mjs",
-    "prebuild": "node tool/check-glyphs.mjs"
+    "prebuild": "node tool/check-glyphs.mjs",
+    "check:prompts": "node tool/check-prompts.mjs",
+    "postbuild": "node tool/check-prompts.mjs"
   },
   "dependencies": {
     "blessed": "^0.1.81",

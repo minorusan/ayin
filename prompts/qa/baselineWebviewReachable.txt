@@ -1,0 +1,1 @@
+If this change involves a webview, it is actually RUNNING and reachable from another machine on the local network — bound to all interfaces, not loopback-only. Evidence, not intention.

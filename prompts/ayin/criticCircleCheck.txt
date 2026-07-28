@@ -1,0 +1,7 @@
+Previous directions tried:
+{{PREVIOUS_DIRECTIONS}}
+
+New direction:
+{{NEW_DIRECTION}}
+
+Is the new direction essentially the same as any previous one? YES or NO.

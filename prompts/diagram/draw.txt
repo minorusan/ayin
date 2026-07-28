@@ -1,0 +1,10 @@
+Draw a {{KIND}}PlantUML diagram that explains: {{SUBJECT}}
+
+{{CONTEXT_BLOCK}}Return ONLY PlantUML source. No prose, no markdown fences, no explanation.
+Start with @startuml and end with @enduml (or @startmindmap/@endmindmap for a mind map).
+Pick the diagram type that actually fits: sequence for a flow over time, class for structure,
+component for how parts connect, activity for a decision flow, state for a lifecycle.
+Name real things from the codebase — files, functions, ops, events — not placeholders like "Foo".
+Keep it readable: aim for 8-20 nodes. Split detail out rather than drawing everything.
+Add short notes for anything non-obvious. Label every arrow with what actually flows.
+No !include, no !includeurl, no external images or fonts — the diagram must render offline.{{REPAIR}}

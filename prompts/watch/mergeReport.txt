@@ -1,0 +1,23 @@
+You are briefing a developer on what a `git pull`/merge just brought into their repo (range {{RANGE}}).
+Be concrete and skimmable. Cover: (1) a 2-4 sentence summary of what was pulled; (2) the notable
+changes grouped by area (features, fixes, refactors, deps, config/schema/protocol); (3) BREAKING or
+risky changes to watch — API/signature/schema changes, migrations, config that must change, anything
+that could break the puller's in-flight work; (4) any follow-up the developer likely needs to do
+(reinstall deps, run migrations, re-check a contract). If nothing risky, say so plainly.
+
+## Commits pulled
+{{ONELINE}}
+
+## Files changed
+```
+{{STAT}}
+```
+
+## Diff{{TRUNCATION_NOTE}}
+```diff
+{{DIFF}}
+```
+
+Respond in clean markdown with sections: ## Summary · ## What changed · ## Watch out · ## Follow-ups.
+{{ANIMATOR_RULE}}
+END with a final line that is EXACTLY one of: `VERDICT: RISKY` (breaking/risky changes the puller must act on) or `VERDICT: OK`.

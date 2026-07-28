@@ -20,8 +20,16 @@
 import { llmChat } from '../llm/manager.js';
 import { log } from '../log.js';
 import { getPrompt } from '../prompts.js';
+import { prompts as promptsService, packagePath } from '../prompts-service.js';
 import { recentPrompts } from '../session-record.js';
 import type { ChangedFile } from './probes.js';
+
+/**
+ * The `qa` namespace — the baseline bar's text. It is the operator's standing standard, which makes
+ * it the single most tunable thing in the gate, so it lives in `prompts/qa/*.txt` and is read on
+ * every call. A missing id throws: a silently blank criterion is a bar the change cannot fail.
+ */
+const qaPrompts = promptsService.register('qa', packagePath('prompts', 'qa')).bundle;
 
 export type Dimension = 'ui' | 'webview' | 'code' | 'docs' | 'api' | 'intent';
 
@@ -45,54 +53,19 @@ export function dimensionsOf(files: ChangedFile[], webviewApplies: boolean, apiA
   return dims;
 }
 
-const BASELINE: Array<{ id: string; dimension: Dimension; text: string }> = [
-  {
-    id: 'ui-not-mvp',
-    dimension: 'ui',
-    text: 'The UI is FINISHED, not an MVP. Reading the code alone must show real states (empty, loading, error), '
-      + 'consistent spacing and typography, no placeholder/lorem/TODO text, no dead handlers or stub buttons, '
-      + 'and no "good enough for now" scaffolding left visible to a user.',
-  },
-  {
-    id: 'webview-reachable',
-    dimension: 'webview',
-    text: 'If this change involves a webview, it is actually RUNNING and reachable from another machine on the '
-      + 'local network — bound to all interfaces, not loopback-only. Evidence, not intention.',
-  },
-  {
-    id: 'code-srp',
-    dimension: 'code',
-    text: 'Single responsibility is kept: each file/module changed here does ONE job. A module mixing unrelated '
-      + 'concerns (transport + rendering + persistence), or a function that grew several jobs, is a failure — '
-      + 'name the split that should happen.',
-  },
-  {
-    id: 'code-readme',
-    dimension: 'code',
-    text: 'The project README.md is maintained: it exists (created if the project had none) and still describes '
-      + 'reality after this change — entry points, how to run it, what changed in behaviour.',
-  },
-  {
-    id: 'api-researched',
-    dimension: 'api',
-    text: 'This change talks to a third-party API, so it must match the CURRENT published API — not an API '
-      + 'remembered from training data. Base URL, auth scheme, endpoint paths, parameter and field names, and '
-      + 'version must be the ones the vendor documents TODAY, and the code must handle the failures a real '
-      + 'service produces (non-2xx, 401/403, 429 with rate limiting, timeouts). If nothing in this change shows '
-      + 'the current API was actually looked up — no cited docs, no fresh research, no verified live call — that '
-      + 'is a failure: a plausible-looking integration against a renamed field or a deprecated endpoint fails '
-      + 'only in production.',
-  },
-  {
-    id: 'docs-rich',
-    dimension: 'docs',
-    text: 'Markdown uses the range the format affords where it helps comprehension: headings, tables, '
-      + 'language-tagged code fences, lists, links, emphasis. A wall of undifferentiated prose is a failure.',
-  },
+/** The standing bar: criterion id → dimension it applies to → the `qa` prompt id holding its text. */
+const BASELINE: Array<{ id: string; dimension: Dimension; prompt: string }> = [
+  { id: 'ui-not-mvp', dimension: 'ui', prompt: 'baselineUiNotMvp' },
+  { id: 'webview-reachable', dimension: 'webview', prompt: 'baselineWebviewReachable' },
+  { id: 'code-srp', dimension: 'code', prompt: 'baselineCodeSrp' },
+  { id: 'code-readme', dimension: 'code', prompt: 'baselineCodeReadme' },
+  { id: 'api-researched', dimension: 'api', prompt: 'baselineApiResearched' },
+  { id: 'docs-rich', dimension: 'docs', prompt: 'baselineDocsRich' },
 ];
 
 function baselineFor(dims: Set<Dimension>): Criterion[] {
-  return BASELINE.filter((b) => dims.has(b.dimension)).map((b) => ({ ...b, source: 'baseline' as const }));
+  return BASELINE.filter((b) => dims.has(b.dimension))
+    .map((b) => ({ id: b.id, dimension: b.dimension, text: qaPrompts.get(b.prompt), source: 'baseline' as const }));
 }
 
 /** Pull `{"criteria":[…]}` out of whatever the model wrapped it in. */
