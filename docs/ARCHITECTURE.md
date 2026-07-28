@@ -223,10 +223,15 @@ did the work, from the same context that made the mistakes, and rewarded for sou
 "Done — I've implemented the panel and updated the docs" is a claim. This gate checks it before the
 user has to.
 
-**Trigger** (`qaShouldRun`, no LLM, one `git status` at most): files changed this turn **and** the final
-message is big (≥ `qaMinAnswerChars`, default 400) or opens with a completion verb. Both halves matter —
-without "files changed" it would fire on ordinary questions and burn GPU for nothing; without "looks
-like a report" it would fire mid-conversation on a turn that never claimed to be done.
+**Trigger** (`qaShouldRun`, no LLM, one `git status` at most): files changed this turn **and** one of
+three things is true of the final message — it is big (≥ `qaMinAnswerChars`, default 400), it opens
+with a completion verb, or it contains the literal phrase **"Ready for QA"**. "Files changed" always
+matters — without it the gate would fire on ordinary questions and burn GPU for nothing — but a short,
+honest closing message ("Done." / "Fixed the typo.") satisfies neither the length nor the wording
+heuristic and was going unreviewed for no better reason than being terse. `system.txt` instructs the
+model to end a completed turn with that exact phrase for precisely this case; same shape as plan mode's
+explicit `/plan` marker — one unambiguous phrase instead of a heuristic — and matched case-insensitively
+anywhere in the message, not just its head.
 
 **The loop** (max `qaMaxPasses`, default 3):
 

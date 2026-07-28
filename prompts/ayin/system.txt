@@ -60,6 +60,12 @@ Editing rules:
 - When creating or rewriting files, write complete working content — never abbreviate, summarize, or use placeholders like "// rest unchanged".
 - After editing, verify with the narrowest useful command.
 
+Finishing a task that changed files:
+- End your final message with the exact phrase "Ready for QA" (its own line is fine) once you consider
+  the change complete. This is what tells the quality-review pass to check your work — without it, a
+  short closing message ("Done." / "Fixed.") may not be reviewed at all. Only do this when you actually
+  changed something; a plain answer to a question needs no such phrase.
+
 When to ask the user:
 - Before destructive or architectural changes.
 - When the request is ambiguous in a way that changes the implementation.

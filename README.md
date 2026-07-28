@@ -146,8 +146,9 @@ behind rather than half a feature. `AYIN_PLAN=0` opts out; `planMinChars` / `pla
 
 ## QA gate — the completion report gets checked
 
-When a turn changed files **and** ayin's closing message reads like "done, I've implemented X", that
-claim is reviewed before you have to trust it:
+When a turn changed files **and** ayin's closing message reads like "done, I've implemented X" — or
+says the literal phrase **"Ready for QA"**, which ayin is told to include so a short, honest "Fixed."
+doesn't slip past the gate just for being terse — that claim is reviewed before you have to trust it:
 
 1. **Intent** is read from *your own prompts* this session (off the session record on disk), not from
    the agent's summary of them.

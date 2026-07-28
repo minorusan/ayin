@@ -101,6 +101,17 @@ export function qaChangedFiles(): ChangedFile[] {
 /** A completion report opens by saying it is done. Checked on the head of the message only. */
 const COMPLETION_RE = /\b(done|complete[d]?|implemented|added|created|updated|fixed|shipped|finished|verified|working now|all set|ready)\b/i;
 
+/**
+ * The explicit marker, same shape as plan mode's `/plan`: one unambiguous phrase instead of a length
+ * or wording heuristic. `system.txt` instructs the model to end a completed turn with this exact
+ * phrase — it exists because a short, honest closing message ("Done." / "Fixed the typo.") is neither
+ * long enough nor phrased like `COMPLETION_RE` expects, and was going unreviewed for no reason other
+ * than being terse. Case-insensitive and not word-bounded on "qa" (a model might write "ready for QA"
+ * or "Ready for qa") — the literal phrase is deliberately distinctive enough that nothing else would
+ * plausibly contain it by accident.
+ */
+const QA_READY_RE = /ready for qa/i;
+
 export function qaEnabled(): boolean {
   return process.env.AYIN_QA !== '0' && getConfig('qaMaxPasses', 3) > 0;
 }
@@ -117,8 +128,11 @@ export function qaShouldRun(finalText: string): { run: boolean; why: string; fil
   const head = finalText.slice(0, 240);
   const big = finalText.length >= minChars;
   const reportsCompletion = COMPLETION_RE.test(head) && finalText.length >= 80;
-  if (!big && !reportsCompletion) return { run: false, why: 'final message is not a completion report', files };
-  return { run: true, why: big ? `big final message (${finalText.length} chars)` : 'final message reports completion', files };
+  // Checked over the WHOLE message, not just the head — the instruction is to put it at the end.
+  const explicitlyReady = QA_READY_RE.test(finalText);
+  if (!big && !reportsCompletion && !explicitlyReady) return { run: false, why: 'final message is not a completion report', files };
+  const why = explicitlyReady ? '"Ready for QA" marker' : big ? `big final message (${finalText.length} chars)` : 'final message reports completion';
+  return { run: true, why, files };
 }
 
 // ── the loop ──────────────────────────────────────────────────────────

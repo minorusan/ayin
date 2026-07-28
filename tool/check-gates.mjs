@@ -160,6 +160,18 @@ writeFileSync(planDoc, '# Plan\n');
 q.qaNoteTouched(planDoc);
 ok(!q.qaShouldRun(`Done. ${'x'.repeat(500)}`).files.some((f) => f.path === planDoc), 'a plan document is not reviewed as its own artifact');
 
+// ── the "Ready for QA" marker: files changed + the phrase, regardless of length ──
+// A short, honest closing message ("Done." / "Fixed the typo.") was going unreviewed for no reason
+// other than being terse and not phrased like COMPLETION_RE expects. system.txt now instructs the
+// model to end a completed turn with this exact phrase; these pin the trigger side of that contract.
+const shortReady = q.qaShouldRun('Fixed. Ready for QA');
+ok(shortReady.run === true, 'a SHORT message with the marker still runs', shortReady.why);
+ok(/marker/i.test(shortReady.why), 'the reason names the marker, not length or wording');
+const shortNoMarker = q.qaShouldRun('Fixed.');
+ok(shortNoMarker.run === false, 'the same short message WITHOUT the marker still does not run');
+ok(q.qaShouldRun('ready for qa').run === true, 'the marker is case-insensitive');
+ok(q.qaShouldRun('Everything is Ready for QA now, take a look.').run === true, 'the marker fires anywhere in the message, not just the end');
+
 // ── the indication: a gate must be visible while it spends your GPU ──
 console.log('\ngate visibility');
 const ui = await import(`file://${join(DIST, 'ui.js')}`);
