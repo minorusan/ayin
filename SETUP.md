@@ -78,8 +78,8 @@ The adapter (`examples/ollama-adapter.mjs`) honours these env vars: `OLLAMA_MODE
 ### Option B — A Maradel / keli-shaped backend
 
 If you already run a backend that serves the `/api/generate` + `/api/status` contract
-(e.g. the Maradel backend, which proxies Ollama and adds extras like `docs_search`), just
-point ayin at it — no adapter needed:
+(e.g. a backend that proxies Ollama and adds extras), just point ayin at it — no adapter
+needed:
 
 ```bash
 KELI_URL=http://<backend-host>:9100 node dist/index.js
@@ -140,9 +140,21 @@ re-read on every access — edits apply immediately). Set values from the TUI:
 | `windowSize` | 20 | messages of history kept in the LLM context |
 | `maxToolRounds` | 10 | max tool calls per task (interactive; headless runs longer) |
 | `summaryMaxWords` | 180 | rolling-summary length cap |
+| `qaMaxPasses` | 3 | QA gate: max review→fix passes after a completion report (`0` disables) |
+| `qaMinAnswerChars` | 400 | how big a closing message counts as a completion report |
+| `pollMinIntervalMs` | 15000 | tool guard: minimum gap between identical polls of `status` |
+| `pollMaxPerTurn` | 6 | tool guard: identical polls allowed per turn before the call is blocked |
+| `planMinChars` | 2000 | plan mode: prompt size that triggers the cross-feature triage (`0` disables) |
+| `planExploreCalls` | 2 | plan mode: `explore` passes spent gathering context (each is real GPU time) |
 
-…and the `system` / `summarizer` prompt text. The tool-call **format** block is injected by
-the active **dialect** (see `docs/ARCHITECTURE.md`), so you normally don't touch it.
+…and the prompt text: `system` / `summarizer` / `goal`, plus `qaCriteria`, `qaReview` (the QA gate's two
+calls) and `planTriage`, `planDocument` (plan mode's). Rewriting those changes the bar ayin holds itself
+to, which is the point of them living here. The tool-call **format** block is injected by the active
+**dialect** (see `docs/ARCHITECTURE.md`), so you normally don't touch it.
+
+Kill switches, when you want the behaviour gone for one run rather than tuned:
+`AYIN_QA=0` (no QA gate) · `AYIN_PLAN=0` (no plan mode) · `AYIN_PLAN_DIR` (where plans are written) ·
+`AYIN_QA_PORT` / `AYIN_QA_PORT_DENY` (force or exclude a port in the webview reachability probe).
 
 ---
 
@@ -155,8 +167,6 @@ inert:
 - **`web_search`** — needs a search backend. Not portable as shipped (the original shelled
   out to a host-specific binary); route it through your backend's web-search endpoint, or
   ignore it.
-- **`docs_search`** — semantic search over a project's docs; needs a backend exposing
-  `POST /api/docs/search`. Ignore it if you don't run one.
 - **`codex`** — hands a hard research task to the OpenAI **Codex CLI**; needs that CLI
   installed and an OpenAI key (`OPENAI_API_KEY`, or `~/.egregor/config.env`, or
   `/set openai-key`).

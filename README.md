@@ -116,7 +116,6 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 | `diagram` | **PlantUML diagram, validated in a loop** until it really parses | needs `plantuml` to verify + render |
 | `status` | Check progress of backgrounded tools | — |
 | `web_search` | Web search | optional — needs a search backend (see SETUP) |
-| `docs_search` | Semantic search over a project's docs | optional — needs a backend endpoint |
 | `codex` | Hand a hard research task to the OpenAI Codex CLI | optional — needs Codex installed + a key |
 | `jira` | Run a JQL query | optional — needs Jira creds |
 | `fixme` | Rewrite ayin's own persona prompts in a requested style | fun/meta |
@@ -124,6 +123,58 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 The **core eight** (`read_file`, `grep`, `find_files`, `write_file`, `str_replace`, `bash`,
 `explore`, `status`) need nothing but Node + a POSIX shell. The rest are optional
 integrations you can ignore.
+
+Every tool lives **inside this repo** — a static array in `src/tools.ts`, resolved by unique name, with
+no plugin directory and no runtime discovery. Adding one means adding a `Tool` there and shipping a
+build; the upside is that a release cannot half-work because a plugin was missing.
+
+**Repeats are policed** (`tool-guard.ts`). A second identical call in one turn is skipped with the
+result you already have; a third is **blocked for the rest of the turn** and named in the system prompt
+so it can't scroll out of view; a call you *denied* is dead immediately. Polling is the one legitimate
+repeat, so `status` keeps working — rate-limited, with an explicit "don't poll again for Ns", capped at
+6 per turn. A blocked `bash` call is told its way out: `sleep 5; <command>` is a different call and runs.
+
+## Plan mode — big requests get a plan first
+
+A prompt of 2000+ characters is triaged in one cheap call: is this actually cross-feature? If it is,
+ayin surveys the project, explores the relevant code, and writes **`ayin-plan-<timestamp>.md`** —
+reasoning, existing context, dependencies, **third-party API research**, **gaps** (each with how to
+resolve it, never a guess), a files-to-change table, ordered steps, **log coverage and debugging**, and
+risks.
+
+**If the work touches somebody else's API, looking it up is mandatory.** The same triage call names the
+services involved, and each is researched on the web *before the plan is written* — current base URL,
+auth scheme, endpoints, rate limits, deprecations, with sources cited. This is the one thing a model must
+never answer from memory: auth schemes get replaced and fields renamed after training, so recalled API
+code looks perfectly reasonable, passes review, and fails only against the live service. If a lookup
+fails, the plan marks those details **UNVERIFIED** and makes reading the vendor's docs step one. The QA
+gate then enforces the other half: a change that talks to an external API and shows no sign the current
+API was checked is failed. Only then does your
+prompt reach the model, with the plan already in context.
+
+The plan is on disk *before* implementation starts, so an interrupted machine leaves the thinking
+behind rather than half a feature. `AYIN_PLAN=0` opts out; `planMinChars` / `planExploreCalls` tune it.
+
+## QA gate — the completion report gets checked
+
+When a turn changed files **and** ayin's closing message reads like "done, I've implemented X", that
+claim is reviewed before you have to trust it:
+
+1. **Intent** is read from *your own prompts* this session (off the session record on disk), not from
+   the agent's summary of them.
+2. **Acceptance criteria** are written *before* the changed files are looked at — a reviewer shown the
+   answer first invents criteria the answer passes. Standing bars apply by file kind: UI is never left
+   looking like an MVP; a webview is actually reachable from another machine; one responsibility per
+   module; a README exists and still matches; markdown uses the format's range.
+3. **Probes** measure what reading can't: a real HTTP GET on loopback *and* on the LAN address, so
+   "running but loopback-only" is caught — the failure that looks perfect on the machine that built it
+   and is invisible from your phone. Plus README staleness, markdown richness, structural SRP signals.
+4. **Verdict** — long investigation, short answer. Pass: one line. Fail: each issue names the file and
+   the fix, ayin repairs them and is reviewed again, up to 3 passes, then reports honestly what it could
+   not fix.
+
+`AYIN_QA=0` opts out; `qaMaxPasses` / `qaMinAnswerChars` tune it. The reviewer's prompts (`qaCriteria`,
+`qaReview`) live in `prompts.json` like every other prompt, so you can rewrite the bar yourself.
 
 ### Diagrams — "I don't understand, explain better"
 
@@ -154,6 +205,14 @@ when the `code` CLI is on PATH — otherwise it's simply left in place and refer
   point `AYIN_PUML_SERVER` at your own PlantUML/Kroki instance if you want remote.
 - Without `plantuml` installed the file is still written, checked structurally, and clearly labelled
   as unverified.
+- **Install a current PlantUML, not your distro's.** Because the validator is ground truth, a stale
+  renderer rejects source that is perfectly valid — Ubuntu 24.04 still ships 1.2020.2, which fails on
+  `!theme`, newer C4/mindmap syntax and much else, so the repair loop burns its rounds "fixing" code
+  that was never broken. Drop the release jar from
+  [plantuml/plantuml](https://github.com/plantuml/plantuml/releases) somewhere like
+  `/usr/local/lib/plantuml/plantuml.jar` with a one-line `exec java -Djava.awt.headless=true -jar …`
+  wrapper earlier on `PATH`, or just point `AYIN_PUML_BIN` at it. Needs a JRE, plus Graphviz (`dot`)
+  for class/component diagrams; sequence and mindmap diagrams render without it.
 - `!include` / `!includeurl` are stripped from generated source — PlantUML resolves those at render
   time (reading local files, fetching URLs into the image), which is an exfiltration path for
   anything that can influence the model's output.
@@ -213,28 +272,6 @@ paths (`MonoBehaviour at Path/To/Object · field old → new`) for prefabs/scene
 review links to it and the reviewer is fed its content as ground truth. Tool path:
 `~/tools/unity_asset_diff.py` or `AYIN_UNITY_DIFF`. Non-Unity repos never spawn it and get
 only the review file.
-
-## RAG corpus generator
-
-```bash
-ayin rag --repo /path/to/repo --questions "How does X work?" "Where is Y handled?"
-```
-
-For each question ayin runs a real investigation against the repo (explore: commands,
-excerpts) and synthesizes a detailed **grounded** markdown answer — every claim cites files
-and quotes code verbatim. After the initial questions are answered, it generates **5 more
-close-to-domain questions per initial question** and answers those too.
-
-A **fabrication guard** keeps the corpus honest: every code block the model "quotes" is
-verified against the investigation data; unverifiable blocks trigger one re-synthesis and are
-otherwise stripped with a visible warning (and `groundingWarnings` in the doc's meta).
-
-Every answer is saved through the backend **logs resource** (`rag.save`) into a per-repo
-store on the backend host (`~/.maradel/logs/rag/<repoKey>/<slug>.md` + `.json`) — the corpus
-for later chunking/vectorising/retrieval. Runs are resume-safe: docs already in the store are
-skipped on re-run, and generated follow-up questions are persisted before being answered, so
-an interrupted run re-uses the same set. The LLM is held as the `ayin` authority for the whole
-run and released on exit.
 
 ## Requirements
 

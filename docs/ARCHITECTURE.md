@@ -95,7 +95,148 @@ gemma really was serving).
 Headless mode adds guardrails for unattended runs: a **CTA tracker** (don't exit until the
 asked-for deliverable exists), a lightweight **judge** (is there enough evidence to answer?),
 an internal **critic** (sanity-check substantial `write_file` output against gathered facts),
-loop/duplicate detection, and a self-audit on hitting the round cap.
+and a self-audit on hitting the round cap.
+
+Three gates wrap the loop, each on a **deterministic trigger** — no model decides whether they run:
+
+| Gate | Fires when | Module |
+|---|---|---|
+| **Plan mode** | the incoming prompt is ≥ `planMinChars` **and** one triage call says it is cross-feature | `plan/` |
+| **Tool guard** | every tool call, always | `tool-guard.ts` |
+| **QA gate** | the turn changed files **and** the final message reads like a completion report | `qa/` |
+
+## Plan mode (`src/plan/`)
+
+A 2000-character request is usually several features wearing one paragraph. Handed straight to the
+round loop, the model starts on whichever sentence it read last, meets the coupling in round nine, and
+spends the rest of its budget repairing its own first guess.
+
+**Trigger.** `prompt.length ≥ planMinChars` (default 2000) → one cheap `planTriage` call: cross-feature
+or not? Length alone would drag every long bug report into planning; triage alone would cost an LLM
+call on every turn. Together: one extra call, only for genuinely big prompts. `AYIN_PLAN=0` opts out;
+`planMinChars: 0` disables it from `prompts.json`.
+
+**The plan, in order** — each step feeds the next:
+
+1. **Survey** (`plan/survey.ts`, no LLM) — what this project is, what it can already serve, and how
+   anything here can be *observed*. Bounded shell reads with vendor/build dirs excluded.
+2. **Third-party API research — MANDATORY, not the model's choice** (`researchApis`). The triage call
+   also returns `apis[]` (services, not libraries: "Stripe", not `stripe-node`), and every one of them
+   is looked up on the web *before the plan is written*, `planApiSearches` (default 3) searches total.
+   A third-party API is the one thing a model must never answer from memory: auth schemes get replaced,
+   fields renamed, endpoints deprecated, versions sunset — all after training — and code written from
+   recall looks entirely reasonable while failing against the live service. That is the most expensive
+   kind of wrong, because it survives review and a read-through and breaks in production against a
+   vendor you don't control. When a lookup fails, the plan says the details are **UNVERIFIED** and makes
+   reading the vendor's current docs step one; it never fills the gap from recall.
+3. **Explore** — `planExploreCalls` (default 2) fixed questions through the `explore` tool: what
+   already exists around this subject, and which files would have to change. Questions are fixed
+   rather than model-chosen because each call is its own agentic loop, i.e. real GPU time.
+4. **Document** (`planDocument`) — written to `ayin-plan-<timestamp>.md` in the cwd (`AYIN_PLAN_DIR`
+   overrides) with fixed sections: reasoning · context · **dependencies** · **third-party API research**
+   (cited, omitted only when no API is involved) · **gaps** · files-to-change table · steps · **log
+   coverage and debugging** · risks.
+5. The plan is pre-prompted into the turn as a `<plan>` block, the same mechanism as auto-research and
+   auto-diagram, with instructions not to re-plan or re-explore what it already establishes.
+
+Two sections earn their place. **Dependencies** must state, for a new webview specifically, what serves
+it, what builds it, *what interface it binds* and how it is reached from another machine — the survey
+supplies those gaps, so "add a settings page" in a project with no HTTP server and no bundler is
+identified as three tasks before anyone writes HTML. **Log coverage and debugging** names the project's
+existing logger, env switch and introspection route by name, because a plan that ends at "implement the
+feature" hands over a black box; if the survey found no facility, adding one becomes step 1.
+
+The document is on disk **before** implementation starts, so a machine that dies mid-feature leaves the
+thinking behind rather than only half the work.
+
+## Tool guard (`tool-guard.ts`)
+
+The previous duplicate detector answered every repeat with the same warning and let the model try
+again. A stuck model does not learn from a transient `<tool_response>`: it re-emits the identical call,
+gets the identical warning, and the transcript fills with `[Loop detected: status called again with
+same params]` five times over while two background tasks sit there running. **The warning was advice,
+and advice is not a rule.**
+
+So refusals **escalate and persist**:
+
+| Attempt | Non-pollable tool | Pollable tool (`status`) |
+|---|---|---|
+| 1st | runs | runs |
+| 2nd identical | skipped, told the result is already in context | runs + `[POLLING NOTICE]`, throttled under `pollMinIntervalMs` |
+| 3rd identical | **BLOCKED for the turn** | runs, still throttled |
+| past `pollMaxPerTurn` | — | **BLOCKED for the turn** |
+| after a user **deny** | **BLOCKED immediately, for the turn** | same |
+
+A block is written into the **system prompt** every round (`guardDirective()` → `<blocked-calls>`),
+where the model cannot scroll past it — that persistence is the actual fix. Two deliberate exemptions
+keep it from being a straitjacket: **polling is a legitimate repeat** (checking a backgrounded task IS
+the same call with the same parameters, on purpose), and a blocked `bash` call is told its escape
+hatch — `sleep 5; <command>` is a *different* call and runs, which is what "wait for the server to come
+up" actually needs. State is per-turn: a new user turn is a new intention.
+
+## QA gate (`src/qa/`)
+
+The agent's own last message is the least trustworthy thing it produces: written by the same model that
+did the work, from the same context that made the mistakes, and rewarded for sounding complete.
+"Done — I've implemented the panel and updated the docs" is a claim. This gate checks it before the
+user has to.
+
+**Trigger** (`qaShouldRun`, no LLM, one `git status` at most): files changed this turn **and** the final
+message is big (≥ `qaMinAnswerChars`, default 400) or opens with a completion verb. Both halves matter —
+without "files changed" it would fire on ordinary questions and burn GPU for nothing; without "looks
+like a report" it would fire mid-conversation on a turn that never claimed to be done.
+
+**The loop** (max `qaMaxPasses`, default 3):
+
+```
+intent → criteria (once per turn) → probes → review → pass? done
+                                                 ↘ fail? issues back to the agent,
+                                                   which fixes and reports again
+```
+
+- **Intent** comes from the user's OWN prompts this session, read off the session record on disk
+  (`recentPrompts()`), not the agent's summary of them — the paraphrase is exactly what drifts, and
+  reading from disk means it still works after a `/resume`.
+- **Criteria** (`qa/criteria.ts`) are derived **before the artifacts are seen** — a judge shown the
+  answer first writes criteria the answer happens to satisfy, the same anchoring trap the critic avoids
+  with its unanchored peer. Baseline bars are deterministic per changed file-kind (UI is never an MVP ·
+  a webview is reachable from another machine · one responsibility per module · README exists and is
+  maintained · markdown uses the format's range · **a third-party integration matches the API the vendor
+  documents today**), plus 3-6 intent criteria. Derived **once** per turn and reused, so the bar cannot
+  move while the agent chases it.
+- The **`api` bar** is the enforcement half of plan mode's research step. `probeThirdPartyApi` detects
+  the integration from the code — external hosts, credential-shaped env vars, `Bearer`/OAuth/`/v1/`
+  shapes, whether 429s are handled at all — and the criterion fails a change that shows no sign the
+  current API was actually looked up. Recalled API knowledge is the failure that passes every review and
+  breaks only against the live service.
+- **Probes** (`qa/probes.ts`, no LLM, read-only) supply the facts a reviewer cannot get by reading: a
+  real HTTP GET on loopback **and** on this machine's LAN address (so *up but loopback-only* is its own
+  verdict — a dev server bound to localhost looks perfect on the machine that built it and is invisible
+  from the phone in your hand); README presence and staleness against changed-code mtimes; markdown
+  richness counts; per-file structural SRP signals. It never starts a server: when the webview is down
+  it says so, and the *fix pass* — which has `bash` and the permission machinery — launches it.
+- **Review** (`qa/review.ts`) → `{verdict, summary, issues[]}`. **Long investigation, short answer**:
+  ≤2-sentence summary, every issue naming a file and a fix, because the next reader is the agent doing
+  the repair. Failing is expensive on a shared GPU, so it must be earned — no style preference, nothing
+  invisible in the artifacts or evidence, no scope the user never asked for.
+- **Fail** → issues pushed back as a system turn and the round budget rewound; the agent fixes and
+  reports again, and pass 2 reviews the repair.
+
+Bounded by construction: `qaMaxPasses` hard-caps the loop, and an LLM failure yields `unknown`, which
+never blocks the user — a QA gate that can hold a finished answer hostage would be a worse bug than the
+ones it catches. Every verdict is appended to the session record as it happens.
+
+Two exclusions worth knowing: the git snapshot uses `-unormal` (on a tree with stale backup
+directories, `-uall` enumerates thousands of files, twice per turn) and only real files reach the judge,
+because a collapsed untracked *directory* described as a file would be reported as "MISSING (deleted?)"
+— a fact that is simply false. `ayin-plan-*.md` is excluded too: the plan is an input to the change, not
+an artifact of it. The port probe skips the port derived from `keliBaseUrl()`, so it can never poke the
+model gateway.
+
+**Config** (`prompts.json` → `config`): `qaMaxPasses`, `qaMinAnswerChars`, `pollMinIntervalMs`,
+`pollMaxPerTurn`, `planMinChars`, `planExploreCalls`. **Prompts** (editable, same file): `qaCriteria`,
+`qaReview`, `planTriage`, `planDocument`. **Env:** `AYIN_QA=0`, `AYIN_PLAN=0`, `AYIN_PLAN_DIR`,
+`AYIN_QA_PORT`, `AYIN_QA_PORT_DENY`.
 
 ## Tool-call format & parser (`parser.ts`)
 
@@ -128,7 +269,7 @@ families.
 Each tool is `{ name, description, parameters, execute }`; the model calls it by its unique
 name. **Core** (no external deps): `read_file`, `grep`, `find_files`, `write_file`,
 `str_replace`, `bash`, `explore`, `status`. **Optional integrations** (inert unless
-configured): `diagram`, `web_search`, `docs_search`, `codex`, `jira`, `fixme`. See the README table.
+configured): `diagram`, `web_search`, `codex`, `jira`, `fixme`. See the README table.
 
 - **`str_replace`** is the preferred edit tool — a single-unique-match find/replace that
   touches only the targeted block. `write_file` is for new files / deliberate full rewrites
@@ -153,6 +294,16 @@ configured): `diagram`, `web_search`, `docs_search`, `codex`, `jira`, `fixme`. S
     back verbatim for repair (max 4 rounds). **The validator is the ground truth**, so success is
     never reported for a file that won't render; a diagram that won't converge is saved as
     `*.invalid.puml` with the error in a comment.
+  - **The renderer's version is therefore part of the contract.** Ground truth that is six years old
+    rejects valid modern source, and the loop cannot tell "you wrote it wrong" from "my parser is
+    too old" — it just spends its four rounds. Ubuntu 24.04's package is 1.2020.2 and fails on
+    `!theme plain` (measured: `ERROR / 1 / Syntax Error?` on the distro build, `SEQUENCE` on 1.2026.6),
+    so a current release jar shadowing the distro binary on `PATH` — or `AYIN_PUML_BIN` pointed at one —
+    is the supported setup. The `-syntax` contract this parser depends on is unchanged between those
+    versions (`ERROR/line/message` vs `TYPE/summary`, rc 200 vs 0), and startup stays ~0.15 s for
+    `-version`, ~0.26 s for `-syntax`, ~0.4 s for an SVG render, well inside the tool's 15/25/60 s
+    budgets. Graphviz (`dot`) is needed for class/component diagrams; sequence and mindmap render
+    without it.
   - Writes `<slug>.puml` + a rendered `.svg` beside the work (`AYIN_PUML_DIR`, default cwd), opens it
     in VS Code when the `code` CLI exists, else leaves it and reports the path.
   - **Local only by design.** The public plantuml.com server would render in one HTTP call; a diagram
@@ -178,7 +329,7 @@ configured): `diagram`, `web_search`, `docs_search`, `codex`, `jira`, `fixme`. S
   extensions) and self-limiting: it bails after 3 consecutive empty search rounds, and when
   the model keeps re-searching at low confidence despite having gathered real data, it
   returns that data verbatim instead of burning all iterations (callers can pass
-  \`thorough: 'true'\` — used by \`ayin rag\` — to let broad questions investigate longer before
+  \`thorough: 'true'\` to let broad questions investigate longer before
   that guard may fire). Vendor/build/backup dirs (\`node_modules\`, \`dist*\`, \`*.bak*\`, …) are
   excluded from its greps and from the guidance given to the model.
 
@@ -232,19 +383,14 @@ The moving parts, designed to survive interruption at any point:
   vanished commits (rebase/gc) are ledgered as `gone`; LLM/backend failures retry with
   linear backoff up to 5 attempts, then are ledgered as `failed`.
 
-## RAG corpus generator (`rag.ts`)
+## Retrieval
 
-`ayin rag --repo <path> --questions "q1" ["q2" …]` — per question: a **thorough explore**
-investigation (+ one gap-fill explore for the biggest missing piece), then synthesis into a
-detailed grounded markdown answer. A **fabrication guard** verifies every code fence in the
-answer against the investigation data (whitespace-collapsed line matching, ≥50% per fence);
-a failing draft is re-synthesized once, and still-fabricated blocks are stripped with a
-visible warning in the doc + `groundingWarnings` in the meta. After the initial questions,
-5 close-to-domain follow-ups are generated per initial question and answered the same way
-(the generated list is persisted on the parent doc's meta BEFORE answering — resume-safe).
-Docs are saved through the backend logs resource (`rag.save`, per-repo store on the backend
-host); already-stored questions are skipped on re-run, so resume = re-run the same command.
-The LLM is held as the `ayin` authority for the whole run.
+None. ayin finds code the agentic way — `grep`, `find_files`, `read_file` and `explore`. The
+earlier retrieval surfaces (a grounded Q&A corpus generator, transcript-mined episodes, and a
+`docs_search` tool over a specific backend's documentation index) were **removed**: each one
+was naive retrieval and each one hard-wired ayin to one operator's private backend. A
+redesigned retrieval layer is planned; until it lands, no code path in ayin embeds, indexes or
+retrieves anything.
 
 ## TUI (`src/ui/`)
 
@@ -556,7 +702,7 @@ can finish — see the warning in `SETUP.md`.
   a `sudo ayin update` hint when the global prefix isn't writable (it is `/usr` on the nuk), and
   warns when the running ayin is a **source checkout**, where a global install changes nothing and
   the real update is `git pull && npm run build`. `ayin version` prints the running version.
-  Subcommands that print to stdout (`update`, `version`, `watch`, `rag`, `rag-mine`) are listed in
+  Subcommands that print to stdout (`update`, `version`, `watch`) are listed in
   `ui/headless.ts#NO_TUI_COMMANDS` so blessed never grabs the terminal out from under them.
 - **`tokens.ts`** — context-meter estimate: tries `${keliBaseUrl}/api/estimate`, falls back to
   a chars/4 heuristic.
@@ -570,13 +716,12 @@ can finish — see the warning in `SETUP.md`.
 
 ```
 src/
-├── index.ts            entry; interactive vs headless (-p) vs `watch`/`rag`; overlays; input handling
+├── index.ts            entry; interactive vs headless (-p) vs `watch`; overlays; input handling
 ├── watch.ts            repo watcher daemon: post-commit → CodeReview, post-merge → AYIN-REPORT-MERGE
 │                       (what a pull brought in); 10-min working-tree pass → autostage meaningful /
 │                       unstage junk (NO commit) + .git/COMMIT_EDITMSG + AYIN-REPORT-SMELLS; upserts a
 │                       CLAUDE.md + GEMINI.md report pointer and the .gitignore local-cruft block;
 │                       chains onto foreign hooks; 5-min hook + hygiene self-heal
-├── rag.ts              grounded Q&A corpus generator (explore → synthesize → logs resource store)
 ├── resource-client.ts  backend resource door (POST /resource/<name>) + shared llm-authority dance
 ├── agent.ts            the agent loop (build → call → parse → execute → loop)
 ├── llm/
@@ -586,8 +731,19 @@ src/
 ├── connection.ts       transport: the keli-shaped endpoint + OpenAI fallback; KELI_URL resolver
 ├── parser.ts           lenient tool-call parser (multi-format)
 ├── shell.ts            cross-platform shell: /bin/bash (POSIX) · Git Bash/cmd (Windows) + killTree
-├── tools.ts            tool registry + the system prompt assembler
-├── tools/              explore.ts · docs-search.ts · status.ts · signals.ts · web-search.ts (SearXNG→DDG)
+├── tools.ts            tool registry (a static array — every tool ships inside this repo)
+│                       + the system prompt assembler
+├── tools/              explore.ts · status.ts · signals.ts · web-search.ts (SearXNG→DDG) ·
+│                       diagram.ts (validated PlantUML) · send-push.ts
+├── tool-guard.ts       per-turn repeat/deny/poll policy: warn → BLOCK → say so in the system prompt
+├── plan/               plan mode for big cross-feature prompts:
+│   ├── survey.ts       deterministic project survey (what it is, can serve, how it's observed)
+│   └── index.ts        size trigger + triage → survey → explore → ayin-plan-<ts>.md → pre-prompt
+├── qa/                 post-completion QA gate:
+│   ├── probes.ts       deterministic evidence: LAN reachability, README staleness, md richness, SRP
+│   ├── criteria.ts     acceptance criteria from the user's own prompts, before artifacts are seen
+│   ├── review.ts       one judged pass → {verdict, summary, issues[]}
+│   └── index.ts        the trigger, the turn state, the ≤3-pass fix loop, the verdict card
 ├── permissions.ts      approval dialogs + allow-lists
 ├── summary.ts          rolling session summary
 ├── goal.ts             auto-determined session goal (anti-wander anchor; LLM-distilled, cursive)
@@ -612,6 +768,13 @@ src/
 ├── markdown.ts / dialog.ts / log.ts   render + overlay + logging helpers
 ├── image.ts            image downscale for vision turns
 └── fixme.ts / jira.ts / codex.ts / tg-auth*.ts   optional integrations
+
+tool/
+├── check-glyphs.mjs    `prebuild` — blessed lies about emoji width; this fails the build on it
+└── check-gates.mjs     `npm run check:gates` — the deterministic halves of the three gates, against
+                        dist. Binds real sockets (that is the point: it caught a pooled-keep-alive
+                        socket making a live server look dead), so it is NOT in prebuild. Run it
+                        whenever you touch qa/, plan/ or tool-guard.ts.
 ```
 
 ## Decoupling from egregor (what was stripped)
@@ -631,4 +794,4 @@ standalone build removed all of it:
   standalone; was `@maradel/ayin`). See `docs/TODO.md` for the path to a fully clean standalone.
 
 What's genuinely new vs. the upstream doc: the **LLM manager + dialects** (model-agnostic
-core), **`str_replace`**, **`explore`**, and **`docs_search`**.
+core), **`str_replace`**, and **`explore`**.

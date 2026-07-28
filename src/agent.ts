@@ -33,6 +33,9 @@ import { getRules } from './rules.js';
 import { syncSession, getSessionId } from './tiferet-session.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { extractSignals } from './tools/signals.js';
+import { qaBeginTurn, qaNoteTouched, qaShouldRun, qaGate, qaShowCard } from './qa/index.js';
+import { guardBeginTurn, guardCheck, guardDirective, guardNoteDenied } from './tool-guard.js';
+import { planContextBlock, runPlan } from './plan/index.js';
 
 let interrupted = false;
 let immediateCancel = false;
@@ -107,8 +110,6 @@ function detectProjectExpertise(cwd: string): string {
 function getWindowSize(): number { return getConfig('windowSize', 12); }
 function getMaxRounds(): number { return HEADLESS ? 1000 : getConfig('maxToolRounds', 15); }
 
-const recentToolCalls: Array<{ name: string; paramsKey: string }> = [];
-const RECENT_TOOL_CALL_WINDOW = 5;
 let exploreCallCount = 0;
 const MAX_EXPLORE_CALLS = 5;
 const gatheredFacts: string[] = [];
@@ -118,21 +119,10 @@ const JUDGE_INTERVAL = 5;
 let totalToolCalls = 0;
 let judgeRoundsGranted = 0; // extra rounds granted by mid-confidence verdict
 
-function recordToolCall(name: string, params: Record<string, string>): boolean {
-  const paramsKey = Object.entries(params)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `${k}=${v}`)
-    .join('|');
-  const isDuplicate = recentToolCalls.some(c => c.name === name && c.paramsKey === paramsKey);
-  recentToolCalls.push({ name, paramsKey });
-  if (recentToolCalls.length > RECENT_TOOL_CALL_WINDOW) recentToolCalls.shift();
-  return isDuplicate;
-}
-
 /** Reset per-turn counters on new user turn */
 function resetCounters(): void {
   exploreCallCount = 0;
-  recentToolCalls.length = 0;
+  guardBeginTurn(); // repeat/deny/poll budget is per turn — see tool-guard.ts
   gatheredFacts.length = 0;
   judgeVerdict = null;
   totalToolCalls = 0;
@@ -392,6 +382,11 @@ function buildMessages(round: number, maxRounds: number): Message[] {
     systemContent += `\n\nContext from earlier in this session (restored):\n${summary.summary}`;
   }
 
+  // A plan produced before this turn (plan mode) — the agent's marching orders for a big request.
+  if (planContext) {
+    systemContent += `\n\n${planContext}`;
+  }
+
   if (diagramContext) {
     systemContent += `\n\n${diagramContext}`;
   }
@@ -406,6 +401,13 @@ function buildMessages(round: number, maxRounds: number): Message[] {
     gatheredFacts.forEach((fact, i) => {
       systemContent += `${i + 1}. ${fact}\n\n`;
     });
+  }
+
+  // Blocked / denied calls — a refusal that only lives in a tool_response scrolls out of the window
+  // and the model tries again. Here it is present every round for as long as the turn lasts.
+  const blockedDirective = guardDirective();
+  if (blockedDirective) {
+    systemContent += `\n\n<blocked-calls>\n${blockedDirective}\n</blocked-calls>`;
   }
 
   // Direction history — what the critic rejected, so the model doesn't repeat
@@ -589,6 +591,7 @@ const DIAGRAM_TRIGGER = new RegExp([
 ].join('|'), 'i');
 
 let diagramContext = ''; // pre-prompted into the base call for this turn
+let planContext = '';    // a plan produced before the turn (plan/index.ts), pre-prompted the same way
 
 async function runDiagram(userInput: string): Promise<void> {
   diagramContext = '';
@@ -629,6 +632,9 @@ export async function runAgent(userInput: string): Promise<void> {
   nudgeForQueuedMessage = false;
   let lastPrintedText = '';
   resetCounters();
+  // QA gate: snapshot what was already dirty BEFORE this turn touches anything, so pre-existing
+  // uncommitted work is never reviewed as if this turn produced it.
+  qaBeginTurn();
 
   // Detect project expertise once
   if (!projectExpertise) {
@@ -642,6 +648,12 @@ export async function runAgent(userInput: string): Promise<void> {
   ctaDelivered = false;
   ctaTarget = extractCTA(userInput);
   if (ctaTarget) log('INFO', 'cta_extracted', { target: ctaTarget });
+
+  // Plan mode (deterministic size trigger + one triage call) — a big cross-feature request gets a
+  // written plan BEFORE any work starts, and the plan goes into this turn's context.
+  planContext = '';
+  const plan = await runPlan(userInput, getGoal());
+  if (plan) planContext = planContextBlock(plan);
 
   // Auto-research grounding (deterministic trigger) — web search BEFORE the base call, pre-prompted.
   await runResearch(userInput);
@@ -738,6 +750,28 @@ export async function runAgent(userInput: string): Promise<void> {
 
       setAgentStatus('');
       triggerSync();
+
+      // ── QA gate ──────────────────────────────────────────────────────
+      // The model has just claimed it is finished. Deterministic condition: files changed this turn
+      // AND this message reads like a completion report. If it fails review, the issues go back into
+      // the loop as a system turn and the agent fixes them — capped at `qaMaxPasses`.
+      if (!interrupted) {
+        const gate = qaShouldRun(response);
+        log('INFO', 'qa_gate_condition', { run: String(gate.run), why: gate.why, files: String(gate.files.length) });
+        if (gate.run) {
+          const outcome = await qaGate(getGoal() || currentGoal, response, gate.files, () => interrupted);
+          qaShowCard(outcome.card);
+          if (outcome.action === 'fix' && outcome.feedback && !interrupted) {
+            pushToWindow('user', outcome.feedback);
+            // Give the repair a real runway: without this a gate that fires on the last round has
+            // no rounds left to fix anything. Bounded by qaMaxPasses, not by rounds.
+            round = Math.min(round, Math.max(0, maxRounds - 5));
+            log('INFO', 'qa_fix_pass', { pass: String(outcome.pass), issues: String(outcome.verdict?.issues.length ?? 0), roundReset: String(round) });
+            continue;
+          }
+        }
+      }
+
       await writeHandoff('text_output', currentGoal, round, maxRounds);
       log('INFO', 'agent_done', { round: String(round), hasText: String(!!parsed.text), ctaDelivered: String(ctaDelivered) });
       return;
@@ -794,13 +828,15 @@ export async function runAgent(userInput: string): Promise<void> {
         continue;
       }
 
-      if (recordToolCall(name, params)) {
+      // Repeat / refusal / polling policy (tool-guard.ts). A repeat is warned once, then BLOCKED for
+      // the turn and named in the system prompt — the old warn-every-time behaviour is what let the
+      // model re-emit the same call five times in a row. Polling a backgrounded task is exempt.
+      const guard = guardCheck(name, params);
+      if (!guard.allow) {
         setAgentStatus('');
-        const warnMsg = `You already ran ${name} with these exact parameters recently. The result is already in your context. Stop repeating — use those results, try a genuinely different approach, or ask the user for guidance.`;
-        addMessage('system', `[Loop detected: ${name} called again with same params]`);
-        pushToWindow('assistant', textPrefix ? `${textPrefix}\n[duplicate tool call blocked]` : '[duplicate tool call blocked]');
-        pushToWindow('user', renderToolResult(`WARNING: ${warnMsg}`));
-        log('WARN', 'duplicate_tool_call', { tool: name });
+        addMessage('system', `${name}: ${guard.label ?? 'blocked'}`);
+        pushToWindow('assistant', textPrefix ? `${textPrefix}\n[${name}: ${guard.label ?? 'blocked'}]` : `[${name}: ${guard.label ?? 'blocked'}]`);
+        pushToWindow('user', renderToolResult(guard.note ?? 'This call was blocked.'));
         continue;
       }
 
@@ -816,6 +852,10 @@ export async function runAgent(userInput: string): Promise<void> {
       setAgentStatus('');
       const permission = await checkPermission(name, params, textPrefix);
       if (permission === 'deny') {
+        // A refusal is remembered for the whole turn: this exact call is now dead, and the guard says
+        // so in the system prompt every round. Re-asking a denied call is the other half of the loop
+        // the warn-only detector used to allow.
+        guardNoteDenied(name, params);
         // Read-only mode (AYIN_READONLY=1): soft-deny — the tool is unavailable, but DON'T abort
         // the run the way an interactive user-deny does. Feed a denial result back and continue so
         // the model reports with read tools. Without this the doggo dies on its first bash/explore.
@@ -960,6 +1000,9 @@ export async function runAgent(userInput: string): Promise<void> {
       // gutter-block preview (raw braces in bash/grep output used to break blessed markup),
       // both closed by a ✓/✗ + duration footer.
       addMessage('tool', formatToolResultForChat(name, result, Date.now() - toolStarted));
+      // Artifact tracking for the QA gate. `bash`-driven changes are caught separately by the
+      // gate's git snapshot — this covers the tools whose target is known from the call itself.
+      if ((name === 'write_file' || name === 'str_replace') && params.path) qaNoteTouched(params.path);
       if (name === 'write_file') {
         // Track CTA delivery — if the write target matches the CTA, mark as delivered
         if (ctaTarget && !ctaDelivered && (params.path || '').includes(ctaTarget) && (params.content || '').length > 200) {
@@ -984,7 +1027,9 @@ export async function runAgent(userInput: string): Promise<void> {
 
       log('INFO', 'tool_result', { tool: name, resultLength: String(result.length) });
 
-      pushToWindow('user', renderToolResult(result.substring(0, 16000)));
+      // The guard's note (a polling notice) rides along with the real result — the model gets the
+      // information it asked for AND the rule about asking again, in the same message.
+      pushToWindow('user', renderToolResult(result.substring(0, 16000) + (guard.note ?? '')));
       pushMessage('assistant', `[tool: ${name}(${paramPreview})]`);
 
       // CTA just delivered — tell the model it's done. This prevents the

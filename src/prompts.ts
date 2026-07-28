@@ -15,6 +15,16 @@ const FALLBACK_PROMPTS = {
     maxToolRounds: 10,
     summaryMaxWords: 180,
     summaryRecentMessages: 6,
+    // QA gate (qa/) — 0 passes disables it entirely.
+    qaMaxPasses: 3,
+    qaMinAnswerChars: 400,
+    // Tool guard (tool-guard.ts) — polling is the one legitimate repeat.
+    pollMinIntervalMs: 15000,
+    pollMaxPerTurn: 6,
+    // Plan mode (plan/) — 0 chars disables it.
+    planMinChars: 2000,
+    planExploreCalls: 2,
+    planApiSearches: 3,
   },
   system: {
     description: 'Built-in fallback system prompt.',
@@ -133,6 +143,171 @@ Return an updated one-line goal. Rules:
 - If the new message doesn't change the direction, return the current goal unchanged.
 - If there is no discernible goal yet, restate the user's request as a crisp objective.
 Return only the single line.`,
+  },
+  qaCriteria: {
+    description: 'QA gate step 1 — distils the user\'s own prompts into acceptance criteria, BEFORE the artifacts are seen.',
+    content: `You are setting the acceptance criteria for a change a coding agent just made. You have NOT
+seen the change, and you must not ask for it — criteria written after seeing the answer are criteria the
+answer happens to pass.
+
+SESSION GOAL:
+{{GOAL}}
+
+WHAT THE USER ACTUALLY ASKED FOR, in their own words, oldest first:
+{{PROMPTS}}
+
+FILES THE AGENT CHANGED (paths and kinds only — you do not see their contents):
+{{FILES}}
+
+Write the criteria that this change must satisfy to count as DONE for THIS user. Rules:
+- 3 to 6 criteria. Each one specific enough that reading the changed files could prove or disprove it.
+- Derive them from what the user asked for — including things they asked for EARLIER in the session and
+  did not repeat. A requirement stated once still stands.
+- Prefer the user's own words for what "good" means. Do not import your own preferences.
+- No process criteria ("should have tests" unless they asked), no style opinions, no scope they never requested.
+
+Respond with exactly one JSON object and nothing else:
+{"criteria": ["…", "…", "…"]}`,
+  },
+  qaReview: {
+    description: 'QA gate step 2 — judges the artifacts against the criteria and the deterministic probe evidence.',
+    content: `You are the QA reviewer for a change a coding agent has just declared finished. Judge it against
+the criteria below, using the artifacts and the measured evidence. This is review pass {{PASS}}.
+
+SESSION GOAL:
+{{GOAL}}
+
+ACCEPTANCE CRITERIA (each has an id — cite it):
+{{CRITERIA}}
+
+MEASURED EVIDENCE (gathered by probes, not by a model — treat these as facts):
+{{EVIDENCE}}
+
+WHAT THE AGENT CLAIMED IT DID:
+{{ANSWER}}
+
+THE ARTIFACTS:
+{{ARTIFACTS}}
+
+How to judge:
+- Investigate thoroughly, ANSWER BRIEFLY. Your summary is at most two sentences.
+- FAIL only for something you can point at in the artifacts or the evidence. No speculation, no
+  "consider also", no style preference, no scope the user never asked for.
+- The evidence outranks the agent's claim. If it says the server is loopback-only or the README was not
+  touched, that is the truth regardless of what the report says.
+- A missing thing the criteria require IS a failure (no README where one is required, placeholder UI text,
+  a module that took on a second responsibility, a wall-of-prose markdown file).
+- Every issue must name the file and the concrete fix — the next reader is the agent doing the repair.
+- If everything the criteria demand is present, PASS. Do not invent work to look thorough.
+
+Respond with exactly one JSON object and nothing else:
+{"verdict": "pass" | "fail",
+ "summary": "at most two sentences",
+ "issues": [{"criterion": "<id>", "file": "<path>", "problem": "what is wrong", "fix": "what to do"}]}`,
+  },
+  planTriage: {
+    description: 'Plan mode step 0 — is this large request genuinely cross-feature / multi-feature?',
+    content: `Decide whether the request below needs a written plan before implementation starts.
+
+It NEEDS a plan when it spans several features or subsystems, mixes UI with backend work, introduces a
+new surface (a webview, a service, a data store), or contains several independently-shippable asks.
+
+It does NOT need a plan when it is one change described at length — a detailed bug report, a long
+explanation of a single feature, a paste of logs with one question, or a request to review something.
+
+REQUEST:
+{{REQUEST}}
+
+Also list every THIRD-PARTY API or external service the work would have to talk to — anything not
+running on the user's own machine: a vendor REST API, a SaaS product, an OAuth provider, a payment or
+messaging or maps or model provider. Name the service, not the library ("Stripe", not "stripe-node").
+List them even when the request only implies them, and leave the list empty when the work is purely
+local. This list is mandatory input to a fresh documentation lookup, so a missed API means the plan
+gets written from stale memory.
+
+Respond with exactly one JSON object and nothing else:
+{"complex": true|false,
+ "features": ["one line per independently-shippable piece of work"],
+ "apis": ["third-party service names, [] if none"],
+ "reason": "one sentence"}`,
+  },
+  planDocument: {
+    description: 'Plan mode step 2 — writes the plan document from the survey and the exploration findings.',
+    content: `Write the implementation plan for the request below. It will be saved as a markdown document and
+then handed to the agent that does the work — so it must be executable, concrete and honest about what is
+not yet known.
+
+SESSION GOAL:
+{{GOAL}}
+
+THE REQUEST:
+{{REQUEST}}
+
+EVERY PROMPT THIS SESSION, oldest first (earlier requirements still count):
+{{PROMPTS}}
+
+FEATURES IDENTIFIED:
+{{FEATURES}}
+
+PROJECT SURVEY (measured, not guessed — this is what the project actually is):
+{{SURVEY}}
+
+EXPLORATION FINDINGS (what already exists in the code):
+{{FINDINGS}}
+
+THIRD-PARTY APIS INVOLVED: {{APIS}}
+
+FRESH WEB RESEARCH ON THOSE APIS (fetched just now — this, not your memory, is the truth about them):
+{{API_RESEARCH}}
+
+Produce markdown with EXACTLY these sections, in this order:
+
+## Reasoning
+Why this is more than one piece of work, and the order the pieces must land in. Name the coupling that
+forces that order.
+
+## Context — what already exists
+What the exploration found: real files, real functions, what they currently assume. Cite paths.
+
+## Dependencies
+What must be present before the work starts. If any part of this is a NEW WEBVIEW, state explicitly what
+serves it, what builds it, on what interface it binds, and how it is reached from another machine on the
+local network — closing the webview gaps in the survey. Say plainly if a dependency has to be added.
+
+## Third-party API research
+MANDATORY whenever THIRD-PARTY APIS INVOLVED is not empty; omit the section entirely only when it is.
+Write it from the FRESH WEB RESEARCH above and nothing else. Per API: current base URL, current auth
+scheme (and how the credential is obtained and stored), the exact endpoints and fields this work needs,
+version and any deprecation or sunset date, rate limits and quotas, and the error responses the code must
+handle. **Cite the source URL for each claim.** Where the research did not answer something, say
+"UNVERIFIED — look up X first" and make that an early step; never fill the gap from memory. If the
+research failed outright, the first step of this plan is to read the vendor's current documentation, and
+this section says so instead of listing endpoints you recall.
+
+## Gaps and open questions
+What is genuinely unknown or undecided, and for each: how to resolve it (a command to run, a file to read,
+or a decision only the user can make). Never fill a gap with a guess — an unnamed assumption is the failure
+mode this section exists to prevent.
+
+## Files to change
+A markdown TABLE: | File | Current responsibility | Change |
+One row per file. Concrete paths from the exploration. Note where a change would break single
+responsibility and what should be split out instead.
+
+## Steps
+Numbered, ordered, each step independently verifiable. Say what proves each one worked.
+
+## Log coverage and debugging
+Use the survey's logging and debug facilities BY NAME. For each feature: what it logs, at what level,
+through which existing logger; which env switch or introspection route makes it observable; and the exact
+command that shows it working. If the survey found no facility, the plan's first step is to add one.
+
+## Risks
+What breaks at scale, under interruption, under concurrency, or when a dependency is down or slow. Include
+the blast radius: what else calls the code being changed.
+
+Rules: use the format's range — headings, tables, fenced code with a language tag, lists. Be specific;
+every claim traceable to the survey or the findings. No filler, no restating the request.`,
   },
 } as const;
 
