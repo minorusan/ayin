@@ -27,17 +27,20 @@ deferred items to make it a fully clean, shareable standalone project.
 ### Tests
 - [ ] Unit tests (currently none). Highest value, pure + easy:
   - `parser.ts` + `llm/dialects/*` — tool-call parsing (the `<value>` unwrap bug this caught late).
-  - `rag/mine.ts` — episode segmentation + verify + the automated-session filter.
   - `shell.ts` — platform shell selection.
 
-### RAG — decouple into its own daemon (design pending; see RAG-EPISODES.md)
-- [ ] Today RAG episode storage goes through the **maradel backend** (`resourceOp('logs',
-  'rag.episodes.append')`, `~/.maradel/logs/rag/`), tying RAG to a maradel install.
-- [ ] Make RAG a **separate daemon addressed by URL** (`AYIN_RAG_URL`): ayin (usable with any GPU)
-  points at a shared RAG service on the LAN; the store is a **portable directory** (zip-and-share to
-  a colleague); multiple ayin installs share one RAG. The seam is localized — `rag/store.ts` already
-  routes through one function; swap the target from the `logs` resource to the RAG daemon.
-- **Owner is rethinking the RAG design first** — do not start this refactor until that lands.
+### Retrieval — removed, redesign pending
+All retrieval was **deleted** from ayin: the `ayin rag` corpus generator, the `rag-mine` episode
+miner + its Claude Stop auto-farm hook, and the `docs_search` tool. Two reasons, both fatal:
+- **Naive.** Explore-then-synthesize prose docs and transcript-mined episodes, with no chunking
+  strategy, no embeddings, no retrieval, and no evaluation — a write-only pile.
+- **Private dependency.** Every store routed through one operator's backend (`logs` resource,
+  `~/.maradel/logs/rag/`) and `docs_search` dialed that backend's doc index. A public agent must
+  not require a private host to function.
+
+Whatever replaces it must be **addressed by URL** (`AYIN_RAG_URL`) with a neutral fallback, keep
+the store a **portable directory**, and be designed against a retrieval benchmark rather than by
+vibes. Do not restore any of the above.
 
 ### Misc
 - [ ] Normalize git author identity (commits appear as both `Kliment` and `Klyment` Shchukin).

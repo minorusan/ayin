@@ -304,7 +304,7 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   const question = params.question;
   const context = params.context || '';
   const cwd = process.cwd();
-  // thorough (rag corpus runs): let the investigation run long before the digest-commit guard
+  // thorough: let the investigation run long before the digest-commit guard
   // may cut it — broad "how does X work" questions legitimately need many read steps.
   const digestCommitAt = params.thorough === 'true' ? 9 : 4;
 

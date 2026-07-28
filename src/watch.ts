@@ -35,8 +35,6 @@ import { createHash } from 'node:crypto';
 import { llmChat, refreshActiveModel } from './llm/manager.js';
 import { connect, keliBaseUrl } from './connection.js';
 import { acquireLlm, type LlmHold } from './resource-client.js';
-import { segmentTranscript, verifyEpisodes, gitTop } from './rag/mine.js';
-import { appendEpisodes } from './rag/store.js';
 import { log } from './log.js';
 
 const WATCH_DIR = join(homedir(), '.ayin-cli', 'watch');
@@ -125,17 +123,14 @@ function readJsonl(path: string): Array<Record<string, unknown>> {
 
 interface QueueEntry {
   ts: number; repo: string; commit: string;
-  kind?: 'commit' | 'merge' | 'mine';
+  kind?: 'commit' | 'merge';
   prev?: string;             // merge: ORIG_HEAD
-  transcript?: string; cwd?: string; session?: string; // mine: from the Claude Stop hook
 }
 
-function entryKey(e: { repo?: string; commit?: string; kind?: string; session?: string; ts?: number }): string {
+function entryKey(e: { repo?: string; commit?: string; kind?: string; ts?: number }): string {
   // Commit keys stay `repo@commit` (back-compat with the ledger). Merge gets its own namespace so
-  // it can't dedup against a commit of the same hash. Mine is keyed per-marker (session+ts) so each
-  // Claude Stop re-mines the growing session; episode-level dedup lives in the store.
+  // it can't dedup against a commit of the same hash.
   if (e.kind === 'merge') return `${e.repo}@merge@${e.commit}`;
-  if (e.kind === 'mine') return `mine@${e.session || e.repo || 'anon'}@${e.ts}`;
   return `${e.repo}@${e.commit}`;
 }
 
@@ -699,23 +694,6 @@ async function reviewMerge(repo: string, commit: string, prev?: string): Promise
   return { status: 'reviewed', note: reportPath };
 }
 
-// ── episode mining (kind:"mine" — auto-farm on Claude Stop) ──────────
-// A user-level Claude Stop hook drops {kind:"mine", transcript, cwd} per stop; here we mine that
-// session's transcript into git-verified episodes and dedup-merge them into the repo's store.
-// Deterministic (no LLM) — so it's processed WITHOUT taking the GPU. Non-repo cwd → skipped.
-
-async function mineSession(transcript: string, cwd: string): Promise<{ status: 'reviewed' | 'skipped' | 'gone'; note: string }> {
-  if (!transcript || !existsSync(transcript)) return { status: 'gone', note: 'transcript missing' };
-  const repo = cwd ? gitTop(cwd) : '';
-  if (!repo) return { status: 'skipped', note: 'not a git repo — no verifiable episodes' };
-  const eps = verifyEpisodes(repo, segmentTranscript(transcript, repo));
-  if (eps.length === 0) return { status: 'skipped', note: 'no verified episodes yet' };
-  const { added, total, where } = await appendEpisodes(repo, eps);
-  if (added > 0) out(`mined ${repoName(repo)}: +${added} episode(s) → ${where} store now ${total}`);
-  log('INFO', 'watch_mined', { repo, added: String(added), total: String(total), where });
-  return { status: 'reviewed', note: `+${added} episodes (${where}, ${total})` };
-}
-
 // ── 10-min working-tree pass: autostage + smell review (the eGPU workhorse) ──
 // Every 10 min, per watched repo, IF the working tree changed since last check: qwen reviews the
 // unstaged work, stages what's meaningful + unstages debug/junk (NO commit, NO push), drafts a
@@ -983,29 +961,9 @@ async function processBacklog(retryState: Map<string, { attempts: number; nextTr
     const retry = retryState.get(entryKey(e));
     return !retry || Date.now() >= retry.nextTryAt;
   };
-  const mineEntries = queue.filter(e => e.kind === 'mine' && e.transcript && ready(e));
-  const reviewEntries = queue.filter(e => e.repo && e.commit && e.kind !== 'mine' && ready(e));
-  if (mineEntries.length === 0 && reviewEntries.length === 0) return;
-
-  // Mine pass FIRST — deterministic (no LLM), so Claude-Stop farming never swaps the GPU.
-  for (const entry of mineEntries) {
-    const key = entryKey(entry);
-    try {
-      const result = await mineSession(entry.transcript || '', entry.cwd || entry.repo || '');
-      // Transcript not on disk yet (lazy flush by Claude Code)? Retry a few times before giving up
-      // instead of permanently marking it gone — so a moment's timing never loses a session.
-      if (result.status === 'gone') {
-        const attempts = (retryState.get(key)?.attempts ?? 0) + 1;
-        if (attempts < MAX_REVIEW_ATTEMPTS) { retryState.set(key, { attempts, nextTryAt: Date.now() + 20_000 * attempts }); continue; }
-      }
-      appendFileSync(PROCESSED_FILE, JSON.stringify({ key, ts: Date.now(), ...result }) + '\n');
-    } catch (err) {
-      appendFileSync(PROCESSED_FILE, JSON.stringify({ key, ts: Date.now(), status: 'failed', note: (err instanceof Error ? err.message : String(err)).slice(0, 200) }) + '\n');
-    }
-    processed.add(key);
-    retryState.delete(key);
-  }
-
+  // Only commit/merge markers are actionable. Stale `kind:'mine'` markers from the removed
+  // episode-farming path carry no repo/commit, so they fall out here and are simply ignored.
+  const reviewEntries = queue.filter(e => e.repo && e.commit && ready(e));
   if (reviewEntries.length === 0) return;
 
   // One door: take the llm resource as `ayin` for the REVIEW batch (backend swaps gemma → qwen).

@@ -659,18 +659,6 @@ async function main(): Promise<void> {
     process.stdout.write(`${getVersion()}\n`);
     return;
   }
-  if (process.argv[2] === 'rag') {
-    // Grounded Q&A corpus generator — no TUI. See src/rag.ts.
-    const { runRag } = await import('./rag.js');
-    await runRag(process.argv.slice(3));
-    return;
-  }
-  if (process.argv[2] === 'rag-mine') {
-    // Phase 0 episodic RAG: mine Claude transcripts → git-verified problem→fix episodes. See src/rag/mine.ts.
-    const { runRagMine } = await import('./rag/mine.js');
-    await runRagMine(process.argv.slice(3));
-    return;
-  }
   loadRules(process.cwd());
   if (HEADLESS) {
     await runHeadless();

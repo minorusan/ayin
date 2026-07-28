@@ -1,6 +1,6 @@
 /**
  * Backend resource client — the one door to POST {keliBaseUrl}/resource/<name> {op, params},
- * plus the llm-authority acquisition dance shared by the watch daemon and `ayin rag`.
+ * plus the llm-authority acquisition dance used by the watch daemon.
  * (The interactive TUI path gets the same behavior from the machine-local launcher wrapper.)
  */
 

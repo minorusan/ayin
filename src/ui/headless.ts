@@ -8,8 +8,6 @@
  *  terminal for these (it would swallow their output and leave the tty in a raw state). */
 const NO_TUI_COMMANDS = new Set([
   'watch',      // watch daemon
-  'rag',        // rag corpus generator
-  'rag-mine',   // episodic RAG miner
   'update',     // self-update from the registry
   'version', '--version', '-v',
 ]);

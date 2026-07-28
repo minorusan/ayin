@@ -51,7 +51,7 @@ import { getConfigString } from './prompts.js';
  *
  * The backend usually runs on another machine on your LAN; where it isn't local, set the backend
  * address once (e.g. `/set keli-url http://<backend-host>:9100`) and it sticks across runs.
- * Both the LLM call and the docs_search tool use this resolver, so they never diverge.
+ * Every backend call goes through this resolver, so they never diverge.
  */
 export function keliBaseUrl(): string {
   return process.env.KELI_URL || getConfigString('keliUrl') || 'http://localhost:9100';

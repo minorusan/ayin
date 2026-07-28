@@ -19,7 +19,6 @@ import { fixmeExecute } from './fixme.js';
 import { statusExecute } from './tools/status.js';
 import { exploreExecute } from './tools/explore.js';
 import { webSearch } from './tools/web-search.js';
-import { docsSearchExecute } from './tools/docs-search.js';
 import { sendPushExecute } from './tools/send-push.js';
 import { diagramExecute } from './tools/diagram.js';
 
@@ -471,22 +470,6 @@ const tools: Tool[] = [
     parameters: [],
     async execute(params) {
       return statusExecute(params);
-    },
-  },
-  {
-    name: 'docs_search',
-    description:
-      "Semantic search over MARADEL'S OWN documentation (CLAUDE.md rules + docs/*.md: ARCHITECTURE, MEMORY, " +
-      'PROTOCOL, HABITS, TOOLS, CONNECTORS, TechDebt, etc.). Use this FIRST when working in the Maradel repo and ' +
-      'you need a concept, rule, architecture detail, protocol contract, or known tech-debt item — it understands ' +
-      'meaning, so you do not need exact keywords. Returns the most relevant doc sections with file + heading ' +
-      'citations. Prefer this over grepping docs or reading whole doc files. For CODE (not docs) use grep/explore.',
-    parameters: [
-      { name: 'query', type: 'string', description: 'What you want to know, in natural language (e.g. "how are tool names kept unique", "rule for shipping an app release")', required: true },
-      { name: 'k', type: 'number', description: 'Max sections to return (default 6, max 20)', required: false },
-    ],
-    async execute(params) {
-      return docsSearchExecute(params);
     },
   },
   {
