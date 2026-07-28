@@ -1,2 +1,14 @@
 node_modules/
 dist/
+
+# Local-only agent files. These name the operator's private LAN, paths and hardware; this repo is
+# PUBLIC. They must never be committed — see the "Public-repo hygiene" rule in CLAUDE.md.
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+docs/TechDebt.md
+docs/HANDOFF.md
+
+# NOT ignored on purpose: fixes/ — `/fix` tracks its own request files there (fixes/README.md is
+# committed). Gating that directory is audit remediation #1 and a behaviour change to make on purpose,
+# not a side effect of this ignore block.
