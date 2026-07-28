@@ -10,6 +10,23 @@
  *
  * Translates depth into width: each explore call is a focused mini-investigation
  * with clean context. Main agent calls explore many times to cover the tree.
+ *
+ * WHY IT LOOPED. `history` — the per-step reasoning + command + result log fed into the prompt — is
+ * capped at 4 entries to keep the context small. From iteration 5 onward the model could no longer SEE
+ * what it ran in steps 1-2, so it suggested them again, got the same answer again, and repeated until
+ * `MAX_ITERATIONS` ran out. A 12-round loop with a 4-round memory repeats itself BY CONSTRUCTION — no
+ * amount of "don't repeat yourself" in the prompt fixes an agent that has been made amnesiac about its
+ * own recent past. Fixed with `spent` (below): every command ever run this investigation, in full, for
+ * all 12 iterations, kept separately from the (still capped) narrative history. An exact repeat is
+ * refused before a shell is even spawned, and two consecutive iterations of "every suggested command
+ * was already spent" ends the investigation instead of running out the clock on refusals.
+ *
+ * "USELESS WITHOUT RAG ANYWAY." Correctly so, in one sense: this is a live, per-call grep/read
+ * investigation with no persisted memory ACROSS calls — it rediscovers the codebase every single time
+ * it runs. A per-project retrieval layer (embed once, recall across sessions) is a separate, much
+ * larger project — a nightly indexing pass, project-scoped storage, retrieval wired into the agent's
+ * context. It does not block this fix: an investigation that stops looping WITHIN itself is worth
+ * having even before it can remember anything between calls, and would still be worth having after.
  */
 
 import { llmChat } from '../llm/manager.js';
@@ -135,11 +152,46 @@ interface HistoryEntry {
   results: string[];
 }
 
+/** One command already run in this investigation: where, and whether it produced anything. */
+interface SpentCommand {
+  step: number;
+  bytes: number;
+}
+
+/**
+ * Commands are compared on their normalised text, so trivial whitespace differences do not read as a
+ * new search. Deliberately NOT semantic: `grep -rn "foo" .` and `grep -nr "foo" .` are different
+ * strings and both get to run once, because guessing that two shell commands are equivalent is how a
+ * guard starts blocking legitimate work.
+ */
+export function normalizeCommand(cmd: string): string {
+  return cmd.trim().replace(/\s+/g, ' ');
+}
+
+/**
+ * The anti-repeat memory, rendered for the prompt.
+ *
+ * THIS IS THE FIX FOR THE REAL LOOP. `history` is capped at the last 4 steps to keep the context
+ * small, so from iteration 5 onward the model could no longer SEE what it tried in steps 1-2 — and
+ * duly suggested them again. A 12-iteration loop with a 4-step memory repeats itself by construction;
+ * no amount of "please don't repeat" in the prompt can fix an agent that has been made amnesiac. So the
+ * command list is kept in full, forever, separately from the (capped) result history, and every
+ * iteration is told exactly what has already been spent.
+ */
+export function renderSpent(spent: Map<string, SpentCommand>): string {
+  if (spent.size === 0) return '';
+  const lines = [...spent.entries()].map(([cmd, s]) => `$ ${cmd}   → step ${s.step}, ${s.bytes > 0 ? `${s.bytes} bytes` : 'NOTHING'}`);
+  return `\n\nCOMMANDS ALREADY RUN IN THIS INVESTIGATION — do NOT run any of these again; an identical `
+    + `command is refused without executing, and one that returned NOTHING will return nothing again. `
+    + `Search somewhere else or with a different pattern:\n${lines.join('\n')}`;
+}
+
 function buildPrompt(
   question: string,
   context: string,
   cwd: string,
   history: HistoryEntry[],
+  spent: Map<string, SpentCommand>,
   iteration: number,
 ): string {
   const historyText = history.length === 0
@@ -173,7 +225,9 @@ function buildPrompt(
     FIRST_ITER_NOTE: firstIterNote,
     QUESTION: question,
     CONTEXT_BLOCK: contextBlock,
-    HISTORY: historyText,
+    // The full-history anti-repeat memory rides in HISTORY, appended after the capped step log —
+    // one placeholder, so no prompt file needs a new variable to get the fix.
+    HISTORY: historyText + renderSpent(spent),
   });
 }
 
@@ -254,11 +308,17 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   addMessage('system', `Exploring: ${question.substring(0, 80)}...`);
 
   const history: HistoryEntry[] = [];
+  // THE ACTUAL LOOP FIX. `history` is capped at 4 steps for context size, so from iteration 5 onward
+  // the model could no longer see what it ran in steps 1-2 and duly suggested them again — a
+  // 12-iteration loop with 4-step memory repeats by construction. `spent` never forgets: every command
+  // ever run this investigation, keyed by its normalised text, for the FULL 12 iterations.
+  const spent = new Map<string, SpentCommand>();
   let bestIteration: ExploreIteration | null = null;
   let emptyStreak = 0; // consecutive iterations where every command returned nothing → bail early
+  let repeatStreak = 0; // consecutive iterations where EVERY suggested command was already spent
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const prompt = buildPrompt(question, context, cwd, history, i + 1);
+    const prompt = buildPrompt(question, context, cwd, history, spent, i + 1);
 
     let response: string;
     try {
@@ -323,17 +383,29 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
       return iteration.reasoning || 'Investigation inconclusive: no commands suggested.';
     }
 
-    // Execute commands
+    // Execute commands. An EXACT repeat of something already run this investigation is refused
+    // WITHOUT spawning a shell — re-running `grep -rn foo .` a fourth time costs a process and 30s of
+    // timeout budget to learn nothing the model wasn't already told in `spent`.
     const results: string[] = [];
     let anyData = false;
+    let anyNewCommand = false;
     for (const cmd of iteration.commands) {
+      const key = normalizeCommand(cmd);
+      const already = spent.get(key);
+      if (already) {
+        results.push(`(already run at step ${already.step}, ${already.bytes > 0 ? `${already.bytes} bytes` : 'NOTHING'} — refused, not re-run)`);
+        continue;
+      }
+      anyNewCommand = true;
       if (!isAllowed(cmd)) {
         results.push(`(blocked: ${cmd.substring(0, 50)} not in allowed list)`);
+        spent.set(key, { step: i + 1, bytes: 0 });
         continue;
       }
       const output = await execCommand(cmd, cwd);
       const empty = !output || output === '(no output)' || output === '(timeout after 30s)' || output.trim().length === 0;
       if (!empty) anyData = true;
+      spent.set(key, { step: i + 1, bytes: empty ? 0 : output.length });
       log('INFO', 'explore_cmd', { iter: String(i + 1), cmd: cmd.substring(0, 120), bytes: String(output.length), empty: String(empty) });
       let trimmed = output;
       if (output.length > MAX_COMMAND_OUTPUT) {
@@ -343,6 +415,19 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
           : output.substring(0, MAX_COMMAND_OUTPUT);
       }
       results.push(trimmed);
+    }
+
+    // Repeat-guard: every suggested command was something already spent — the model is circling with
+    // nothing new to try. Without this it would run the loop out on refusals that cost zero shell
+    // calls but still burn LLM rounds, which is a slower version of the same loop.
+    repeatStreak = anyNewCommand ? 0 : repeatStreak + 1;
+    if (repeatStreak >= 2) {
+      log('WARN', 'explore_repeat_streak_bail', { iteration: String(i + 1) });
+      addMessage('system', `  → explore: circling on commands already run, stopping.`);
+      const digest = historyDigest(history);
+      return bestIteration?.answer
+        || (digest && capAnswer(`Found (from the searches run so far):\n\n${digest}`))
+        || `Explore is circling on the same searches for: "${question}" — stopped after ${i + 1} rounds. What was found: ${[...spent.keys()].slice(0, 8).join('; ')}`;
     }
 
     // Stuck-guard: if commands keep returning nothing, don't burn all 12 iterations.

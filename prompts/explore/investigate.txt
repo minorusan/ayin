@@ -10,6 +10,12 @@ Working directory: {{CWD}}
 **Your previous steps in this investigation:**
 {{HISTORY}}
 
+**Only your last few steps are shown above in full, but EVERY command you have ever run this
+investigation is remembered and listed if any appear under "COMMANDS ALREADY RUN" — an identical
+command from an earlier step still counts even if you can no longer see that step. Re-running one is
+refused without executing and wastes an iteration for nothing. If a search returned nothing, that path
+is a dead end — go somewhere else or change the pattern, don't repeat it hoping for a different result.**
+
 **Allowed commands (read-only):** ls, cat, head, tail, grep, find, git show, git log, git blame, git branch, git grep, wc
 
 **This codebase can be ANY language** (TypeScript, JavaScript, Python, Go, C#, Rust, …). Do NOT

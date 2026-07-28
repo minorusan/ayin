@@ -375,12 +375,27 @@ configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
 - **`explore`** is a sub-investigation with its own short LLM loop and clean context — good
   for "find/read X" questions; it translates depth into width. It is **language-agnostic**
   (identifier extraction + whole-tree grep with vendor/build dirs excluded — no assumed file
-  extensions) and self-limiting: it bails after 3 consecutive empty search rounds, and when
-  the model keeps re-searching at low confidence despite having gathered real data, it
-  returns that data verbatim instead of burning all iterations (callers can pass
-  \`thorough: 'true'\` to let broad questions investigate longer before
-  that guard may fire). Vendor/build/backup dirs (\`node_modules\`, \`dist*\`, \`*.bak*\`, …) are
-  excluded from its greps and from the guidance given to the model.
+  extensions) and self-limiting in three independent ways: it bails after 3 consecutive empty search
+  rounds; when the model keeps re-searching at low confidence despite having gathered real data, it
+  returns that data verbatim instead of burning all iterations (callers can pass `thorough: 'true'` to
+  let broad questions investigate longer before that guard may fire); and it never re-runs a command it
+  has already tried this investigation.
+  - **The command memory is FULL-HISTORY, not the capped one.** The per-step narrative log
+    (reasoning + command + result) is capped at 4 entries to keep the prompt small, and up to
+    `MAX_ITERATIONS` (12) rounds run — so from round 5 onward the model could no longer SEE what it ran
+    in rounds 1-2 and duly suggested them again, a loop that was guaranteed BY CONSTRUCTION, not a
+    quirk of any one model. `spent` (a `Map` keyed by normalised command text) remembers every command
+    for the full investigation, separately from the capped narrative: an exact repeat is refused
+    **before a shell is spawned** (`(already run at step N, … — refused, not re-run)`), and the prompt
+    is told explicitly which commands are spent and what each one returned. Two consecutive rounds
+    where every suggested command was already spent ends the investigation instead of running out the
+    12-round budget on refusals. Verified against a real (fake) backend and a real shell in
+    `tool/check-explore.mjs` — not a unit test of the memory in isolation, which would pass even if the
+    wiring into the loop were wrong.
+  - **This is a per-call investigation with no memory ACROSS calls** — it rediscovers the codebase
+    every time it runs. A per-project retrieval layer (embed once, recall across sessions) is a
+    separate, much larger project; it does not block this fix, since an investigation that stops
+    looping within itself is worth having regardless of what it can remember between calls.
 
 ## Repo watcher (`watch.ts`)
 
