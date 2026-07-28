@@ -2,8 +2,12 @@ node_modules/
 dist/
 
 # Local-only agent files. These name the operator's private LAN, paths and hardware; this repo is
-# PUBLIC. They must never be committed — see the "Public-repo hygiene" rule in CLAUDE.md.
-CLAUDE.md
+# PUBLIC. They must never be committed — see the "Public-repo hygiene" rule in CLAUDE.local.md.
+#
+# NOTE: `CLAUDE.md` itself IS committed and public — it is what a coding agent reads on a fresh
+# clone to set the project up, so ignoring it would defeat the point. Anything environment-specific
+# belongs in CLAUDE.local.md, which every agent also reads and which never leaves this machine.
+CLAUDE.local.md
 GEMINI.md
 AGENTS.md
 docs/TechDebt.md
