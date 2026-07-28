@@ -255,6 +255,14 @@ intent → criteria (once per turn) → probes → review → pass? done
   from the phone in your hand); README presence and staleness against changed-code mtimes; markdown
   richness counts; per-file structural SRP signals. It never starts a server: when the webview is down
   it says so, and the *fix pass* — which has `bash` and the permission machinery — launches it.
+- The reviewer sees the **whole final message** (16 k chars, more than any real report) and is told it is
+  *both* a claim and a deliverable. Two bugs lived here: the answer was clipped to 4 000 chars while
+  30 000 chars of file content were allowed — so a long report naming the URL to open at character 5 000
+  was invisible, and the gate then correctly reported the URL as missing — and the prompt framed the
+  message purely as an untrustworthy claim, so anything the user asked to be **told** (a URL, a command,
+  a port, an answer) was discounted for not being in the files. Now: information owed to the user counts
+  as delivered when it is in the message; claims about work owed to the repo are still checked against
+  the evidence.
 - **Review** (`qa/review.ts`) → `{verdict, summary, issues[]}`. **Long investigation, short answer**:
   ≤2-sentence summary, every issue naming a file and a fix, because the next reader is the agent doing
   the repair. Failing is expensive on a shared GPU, so it must be earned — no style preference, nothing

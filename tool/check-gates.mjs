@@ -233,6 +233,23 @@ ok(asText.startsWith('QA FAIL 1/3') && asText.includes('fixing…'), 'a card fla
 const styled = chat.formatGateCardForChat('fail', 'QA FAIL 1/3', ['[webview-reachable] server.ts — loopback only'], 'fixing…');
 ok(styled.includes('▣') && styled.includes('╰') && styled.includes('│'), 'and renders with the same gutter/footer as a tool card');
 
+// ── the review prompt must actually receive, and trust, the final message ──
+// Two bugs lived here: the answer was clipped to 4000 chars while 30 000 chars of file content were
+// allowed (so a long report naming a URL late was invisible), and the prompt framed the message purely
+// as an untrustworthy "claim", so the reviewer discounted things the user had asked to be TOLD and
+// reported them as never mentioned. Both are pinned.
+console.log('\nqa review prompt');
+{
+  const { readFileSync } = await import('node:fs');
+  const promptText = readFileSync(join(REPO, 'prompts/ayin/qaReview.txt'), 'utf8');
+  ok(promptText.includes('{{ANSWER}}'), 'the review prompt receives the final message');
+  ok(/COUNTS AS DELIVERY/i.test(promptText), 'and is told the message itself delivers what the user asked to be TOLD');
+  ok(/evidence outranks/i.test(promptText), 'while claims about WORK are still checked against the evidence');
+  const reviewSrc = readFileSync(join(REPO, 'src/qa/review.ts'), 'utf8');
+  const budget = Number(reviewSrc.match(/ANSWER_CHARS\s*=\s*([\d_]+)/)?.[1]?.replace(/_/g, '') ?? 0);
+  ok(budget >= 16_000, 'the final message is not clipped before the file artifacts are', `${budget} chars`);
+}
+
 // ── mouse: the wheel, and ONLY the wheel ─────────────────────────────
 // Booting the real (non-headless) TUI in a child and reading the escape codes it writes is the only
 // honest way to check this. `screen.on('mouse', …)` looks passive but makes blessed call

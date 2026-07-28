@@ -227,6 +227,18 @@ export async function runUpdate(argv: string[]): Promise<void> {
 
   process.stdout.write(`ayin ${current}  ·  registry ${registry} (${source})\n`);
 
+  // SAY THIS FIRST, ALWAYS. This note used to live further down, after the "already newest" and
+  // `--check` early returns — i.e. it never printed in the two cases where it was most needed. Someone
+  // ran `ayin update` repeatedly on a machine whose binary runs a source checkout, was told "already on
+  // the newest build" every time, and had no way to know that a global install cannot change what runs
+  // here. The one sentence that explains it has to come before any early return.
+  const sourceCheckout = existsSync(join(HERE, '..', '.git')) || existsSync(join(HERE, '..', 'tsconfig.json'));
+  if (sourceCheckout) {
+    process.stdout.write(`Note: this ayin runs from a source checkout (${join(HERE, '..')}).\n`);
+    process.stdout.write('      `ayin update` installs the GLOBAL package and cannot change this build —\n');
+    process.stdout.write('      to update what actually runs here: git pull && npm run build (then restart ayin).\n');
+  }
+
   let latest: string | null;
   try {
     latest = await fetchDistTag(registry, PACKAGE_NAME, tag);
@@ -252,14 +264,6 @@ export async function runUpdate(argv: string[]): Promise<void> {
 
   process.stdout.write(`${cmp < 0 ? 'Update available' : 'Reinstalling'}: ${current} → ${latest}\n`);
   if (has('check')) return;
-
-  // Running from a source checkout? A global install won't change THIS ayin — say so plainly
-  // instead of letting the user wonder why the version didn't move.
-  const sourceCheckout = existsSync(join(HERE, '..', '.git')) || existsSync(join(HERE, '..', 'tsconfig.json'));
-  if (sourceCheckout) {
-    process.stdout.write(`Note: this ayin runs from a source checkout (${join(HERE, '..')}).\n`);
-    process.stdout.write('      The global package will be updated; this checkout still needs git pull + npm run build.\n');
-  }
 
   const { prefix, writable } = await globalPrefixWritable();
   if (!writable && process.getuid?.() !== 0) {

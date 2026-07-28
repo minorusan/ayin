@@ -34,6 +34,16 @@ export interface QaVerdict {
 
 const PER_FILE_CHARS = 6000;
 const TOTAL_CHARS = 30_000;
+/**
+ * The agent's final message, in full for any realistic length.
+ *
+ * This was 4000 chars, which is backwards: 30 000 chars of file content were allowed while the one
+ * thing the gate is judging — the completion report — got clipped first. A long report that named the
+ * URL to open at character 5000 was invisible to the reviewer, which then correctly reported that the
+ * URL was nowhere to be found. The final message is the cheapest and most relevant context in the whole
+ * prompt; it should be the last thing trimmed, not the first.
+ */
+const ANSWER_CHARS = 16_000;
 
 /** The artifacts, clipped to a budget. Truncation is announced — never silently dropped. */
 export function renderArtifacts(files: ChangedFile[]): string {
@@ -108,7 +118,7 @@ export async function reviewArtifacts(
         CRITERIA: renderCriteria(criteria),
         EVIDENCE: renderEvidence(evidence),
         ARTIFACTS: renderArtifacts(evidence.files),
-        ANSWER: answer.slice(0, 4000),
+        ANSWER: answer.slice(0, ANSWER_CHARS),
       }),
     }]);
     const v = parseVerdict(raw);
