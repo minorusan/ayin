@@ -35,7 +35,19 @@ export type LlmHold = { token: string; release: () => Promise<void> } | 'busy' |
  */
 export async function acquireLlm(
   reason: string,
-  opts: { ttlMs?: number; keepaliveMs?: number; force?: boolean } = {},
+  opts: {
+    ttlMs?: number;
+    keepaliveMs?: number;
+    force?: boolean;
+    /**
+     * Called when the keepalive comes back with a NEW grant instead of a refresh — which means the
+     * old one is gone (the backend restarted and its in-memory authority stack went with it, or a
+     * higher authority preempted us). Two things are then broken silently: our token is dead, so
+     * anything sent with it is ignored; and the backend re-applied its per-holder MODEL policy, so a
+     * pinned model has been swapped away. The holder gets the new token and a chance to re-pin.
+     */
+    onRegrant?: (token: string, via: string) => void;
+  } = {},
 ): Promise<LlmHold> {
   const grant = await resourceOp('llm', 'authority.enqueue', {
     holder: 'ayin',
@@ -48,19 +60,40 @@ export async function acquireLlm(
     // what makes `/lock` self-releasing: stop responding and the grant lapses on its own.
     const every = opts.keepaliveMs ?? 10 * 60 * 1000;
     const keepalive = setInterval(() => {
-      void resourceOp('llm', 'authority.enqueue', { holder: 'ayin', ...(opts.ttlMs ? { ttlMs: opts.ttlMs } : {}) }, 5_000);
+      void resourceOp('llm', 'authority.enqueue', {
+        holder: 'ayin',
+        ...(opts.ttlMs ? { ttlMs: opts.ttlMs } : {}),
+      }, 5_000).then((r) => {
+        if (!r?.granted || !r.token) return;
+        // `refresh` = we still held it. Anything else is a NEW grant: rotate the token (the old one
+        // is dead) and let the holder re-assert whatever the grant used to guarantee.
+        if (r.via !== 'refresh' || r.token !== hold.token) {
+          hold.token = String(r.token);
+          opts.onRegrant?.(hold.token, String(r.via ?? 'unknown'));
+        }
+      });
     }, every);
     keepalive.unref();
     let released = false;
-    return {
+    const hold = {
       token: String(grant.token),
       release: async () => {
         if (released) return;
         released = true;
         clearInterval(keepalive);
-        await resourceOp('llm', 'authority.detach', { token: grant.token }, 5_000);
+        const r = await resourceOp('llm', 'authority.detach', { token: hold.token }, 5_000);
+        if (r?.released) return;
+        // Our token was replaced (a restart, or a preempt) and the keepalive hadn't noticed yet, so
+        // that detach freed nothing and the grant would sit there until its TTL. We ARE the `ayin`
+        // holder, so re-acquire to learn the live token and hand it back properly. Bounded: only when
+        // `ayin` still holds it, and only once.
+        const who = await resourceOp('llm', 'authority.current', {}, 5_000);
+        if (who?.holder !== 'ayin') return; // someone else owns it now — not ours to release
+        const fresh = await resourceOp('llm', 'authority.enqueue', { holder: 'ayin' }, 5_000);
+        if (fresh?.granted && fresh.token) await resourceOp('llm', 'authority.detach', { token: fresh.token }, 5_000);
       },
     };
+    return hold;
   }
   if (grant && grant.busy) return 'busy';
   return 'no-resource-layer';

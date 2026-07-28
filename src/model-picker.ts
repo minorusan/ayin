@@ -45,6 +45,8 @@ let modelHold: LlmHold | null = null;
 const LOCK_TTL_MS = 10 * 60 * 1000;
 const LOCK_KEEPALIVE_MS = 2 * 60 * 1000;
 let locked = false;
+/** The model the lock pinned — re-applied if the grant is ever replaced (see onRegrant). */
+let lockedModel = '';
 
 export function isSessionLocked(): boolean {
   return locked && isModelBooked();
@@ -60,6 +62,17 @@ export async function lockSession(): Promise<string> {
       ttlMs: LOCK_TTL_MS,
       keepaliveMs: LOCK_KEEPALIVE_MS,
       force: true, // a human at the keyboard outranks background work of equal or lower rank
+      // A backend restart wipes the in-memory authority stack, so the next keepalive returns a NEW
+      // grant instead of a refresh. Left alone that breaks the lock silently: the token we send for
+      // priority is dead, and the backend re-applied its coder-model policy over the pinned model.
+      // Re-assert both.
+      onRegrant: (token, via) => {
+        setRequestAuthority(locked ? token : '');
+        if (!locked) return;
+        addMessage('system', `Lock re-established after the backend dropped it (${via}) — re-pinning ${lockedModel || 'the model'}.`);
+        if (lockedModel) void resourceOp('llm', 'setModel', { model: lockedModel, authority: token }, 10_000);
+        log('INFO', 'lock_regranted', { via, model: lockedModel });
+      },
     });
     setAgentStatus('');
     if (hold === 'busy') return 'the GPU is held by a higher authority right now — try again shortly';
@@ -67,6 +80,7 @@ export async function lockSession(): Promise<string> {
     modelHold = hold;
   }
   locked = true;
+  lockedModel = wanted ?? '';
   // From here every generation carries the token, so the backend can promote this session to the
   // front of the GPU queue instead of leaving it in the LOW band behind every habit.
   setRequestAuthority((modelHold as { token: string }).token);
@@ -83,6 +97,7 @@ export async function lockSession(): Promise<string> {
 /** Release the lock (and the booking it took). */
 export async function unlockSession(): Promise<void> {
   locked = false;
+  lockedModel = '';
   setRequestAuthority(''); // back to the LOW band immediately, before the grant is even released
   await releaseModelHold();
   log('INFO', 'session_unlocked', {});
@@ -117,6 +132,9 @@ function noteFor(m: ModelCatalog['models'][number], cat: ModelCatalog): string {
   if (m.parameterSize) bits.push(m.parameterSize);
   if (m.quantization) bits.push(m.quantization);
   if (m.sizeBytes > 0) bits.push(`${(m.sizeBytes / 1024 ** 3).toFixed(1)}G`);
+  // The window this model actually gets. Showing one global figure for every row was simply wrong:
+  // the KV cost per token is architectural, so the backend sets it per model.
+  if (m.ctx) bits.push(`${Math.round(m.ctx / 1024)}k ctx`);
   if (m.name === cat.maradelModel) bits.push('shared');
   if (m.name === cat.coderModel) bits.push('coder');
   if (m.name === cat.activeModel) bits.push('● active');

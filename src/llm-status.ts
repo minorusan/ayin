@@ -35,6 +35,9 @@ export interface ModelEntry {
   quantization: string;
   sizeBytes: number;
   active: boolean;
+  /** The context window THIS model will actually get (per-model preset on the backend), not one
+   *  global number — a 24GB card cannot give every model the same window. */
+  ctx?: number;
 }
 
 export interface ModelCatalog {
