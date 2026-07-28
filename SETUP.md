@@ -160,11 +160,21 @@ afterwards, so your edits survive every upgrade. Set config values from the TUI:
 
 ### Editing prompts
 
-Prompt text is **not** in `prompts.json`. Each prompt is its own file under
-`~/.ayin-cli/prompts/ayin/`: `system.txt`, `summarizer.txt`, `goal.txt`, `qaCriteria.txt`,
-`qaReview.txt` (the QA gate's two calls), `planTriage.txt`, `planDocument.txt` (plan mode's). Tools
-that ship prompts get their own namespace directory alongside. Edit a file and the next call uses it —
-no rebuild, no restart. Rewriting these changes the bar ayin holds itself to, which is the point.
+Prompt text is **not** in `prompts.json`. Each prompt is its own `.txt` file under
+`~/.ayin-cli/prompts/<namespace>/`, one namespace per subsystem:
+
+| Namespace | Holds |
+|---|---|
+| `ayin` | the core loop — `system`, `summarizer`, `goal`, the QA/plan entry prompts, and the headless guardrails (critic, judge, CTA nudges, self-audit) |
+| `watch` | the `ayin watch` daemon's reviewers — post-commit, post-merge, working-tree |
+| `qa` | the QA gate's baseline criteria, one file each |
+| `plan` | plan mode's exploration + API-research prompts |
+| `explore` | the `explore` tool's investigation loop |
+| `diagram` | the `diagram` tool's authoring + repair prompts |
+
+Edit a file and the next call uses it — no rebuild, no restart. Rewriting these changes the bar ayin
+holds itself to, which is the point. `ls ~/.ayin-cli/prompts/*` is the current list; a namespace only
+appears once the code that owns it has run at least once.
 
 Placeholders are `{{UPPER_SNAKE}}` and are filled by ayin; leave the ones you don't understand alone.
 The tool-call **format** block is injected by the active **dialect** (see `docs/ARCHITECTURE.md`), so
@@ -187,11 +197,10 @@ inert:
 - **`web_search`** — needs a search backend. Not portable as shipped (the original shelled
   out to a host-specific binary); route it through your backend's web-search endpoint, or
   ignore it.
-- **`codex`** — hands a hard research task to the OpenAI **Codex CLI**; needs that CLI
-  installed and an OpenAI key (`OPENAI_API_KEY`, or `~/.egregor/config.env`, or
-  `/set openai-key`).
 - **`jira`** — runs a JQL query; needs `JIRA_EMAIL` + `JIRA_API_TOKEN` (via
   `~/.egregor/config.env`).
+- **`send_push`** — asks the configured backend to push a notification to a phone; inert
+  unless that backend implements it.
 
 - **Update check** — disabled by default. Set `AYIN_UPDATE_REGISTRY=https://registry.npmjs.org/`
   to enable a best-effort version check; left unset, ayin never contacts any registry.

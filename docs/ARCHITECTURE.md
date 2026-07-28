@@ -282,8 +282,9 @@ an artifact of it. The port probe skips the port derived from `keliBaseUrl()`, s
 model gateway.
 
 **Config** (`prompts.json` → `config`): `qaMaxPasses`, `qaMinAnswerChars`, `pollMinIntervalMs`,
-`pollMaxPerTurn`, `planMinChars`, `planExploreCalls`. **Prompts** (editable, same file): `qaCriteria`,
-`qaReview`, `planTriage`, `planDocument`. **Env:** `AYIN_QA=0`, `AYIN_PLAN=0`, `AYIN_PLAN_DIR`,
+`pollMaxPerTurn`, `planMinChars`, `planExploreCalls`. **Prompts** (editable `.txt` files, see the
+Prompts section): `ayin/qaCriteria`, `ayin/qaReview`, `ayin/planTriage`, `ayin/planDocument`, the six
+`qa/baseline*` criteria, and `plan/*`. **Env:** `AYIN_QA=0`, `AYIN_PLAN=0`, `AYIN_PLAN_DIR`,
 `AYIN_QA_PORT`, `AYIN_QA_PORT_DENY`.
 
 ## Tool-call format & parser (`parser.ts`)
@@ -317,7 +318,7 @@ families.
 Each tool is `{ name, description, parameters, execute }`; the model calls it by its unique
 name. **Core** (no external deps): `read_file`, `grep`, `find_files`, `write_file`,
 `str_replace`, `bash`, `explore`, `status`. **Optional integrations** (inert unless
-configured): `diagram`, `web_search`, `codex`, `jira`, `fixme`. See the README table.
+configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
 
 - **`str_replace`** is the preferred edit tool — a single-unique-match find/replace that
   touches only the targeted block. `write_file` is for new files / deliberate full rewrites
@@ -871,7 +872,7 @@ src/
 │                       slash registry) · status.ts (StatusBar)
 ├── markdown.ts / dialog.ts / log.ts   render + overlay + logging helpers
 ├── image.ts            image downscale for vision turns
-└── fixme.ts / jira.ts / codex.ts / tg-auth*.ts   optional integrations
+└── jira.ts / tg-auth*.ts   optional integrations
 
 tool/
 ├── check-glyphs.mjs    `prebuild` — blessed lies about emoji width; this fails the build on it

@@ -116,13 +116,16 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 | `diagram` | **PlantUML diagram, validated in a loop** until it really parses | needs `plantuml` to verify + render |
 | `status` | Check progress of backgrounded tools | — |
 | `web_search` | Web search | optional — needs a search backend (see SETUP) |
-| `codex` | Hand a hard research task to the OpenAI Codex CLI | optional — needs Codex installed + a key |
 | `jira` | Run a JQL query | optional — needs Jira creds |
-| `fixme` | Rewrite ayin's own persona prompts in a requested style | fun/meta |
+| `send_push` | Push a notification to a phone | optional — needs a backend that forwards it |
 
 The **core eight** (`read_file`, `grep`, `find_files`, `write_file`, `str_replace`, `bash`,
 `explore`, `status`) need nothing but Node + a POSIX shell. The rest are optional
 integrations you can ignore.
+
+Each tool's prompts (where it has any) ship as `.txt` files in its own namespace under
+`prompts/`, so you can retune a tool's behaviour without touching its code — see
+[Prompts](#prompts) below.
 
 Every tool lives **inside this repo** — a static array in `src/tools.ts`, resolved by unique name, with
 no plugin directory and no runtime discovery. Adding one means adding a `Tool` there and shipping a
@@ -301,17 +304,42 @@ only the review file.
 - An **LLM endpoint** (local Ollama via the bundled adapter, any compatible backend, or OpenAI).
   See [`SETUP.md`](SETUP.md).
 
+## Prompts
+
+**Every prompt ayin sends is a file you can edit.** Nothing is baked into the binary.
+
+Each prompt ships as a `.txt` beside the code that uses it and is copied on first run into
+`~/.ayin-cli/prompts/<namespace>/<id>.txt`. That local copy is the only one ayin ever reads,
+and **an upgrade never overwrites it** — a new version only adds prompts you don't have yet.
+Edit a file and the next call uses it: no rebuild, no restart.
+
+```
+~/.ayin-cli/prompts/
+  ayin/      the core loop — system, summarizer, goal, headless guardrails
+  watch/     the repo watcher's reviewers
+  qa/        the QA gate's baseline criteria
+  plan/      plan mode
+  explore/   the explore tool's investigation loop
+  diagram/   the diagram tool
+```
+
+Placeholders are `{{UPPER_SNAKE}}` and are filled in by ayin — leave unfamiliar ones alone.
+Tools carry their own namespace, so a tool from another package brings its prompts with it and
+you tune them the same way. The interactive TUI also serves a small web editor for them at
+`http://localhost:7773` while it runs.
+
 ## Configuration
 
-Runtime config and prompts live in `~/.ayin-cli/prompts.json` (created on first run, edited
-live — changes take effect immediately). Set values from inside the TUI with `/set`:
+Runtime config lives in `~/.ayin-cli/prompts.json` (created on first run, re-read on every
+access — changes take effect immediately). Prompt *text* is not in here; see above. Set values
+from inside the TUI with `/set`:
 
 ```
 /set keli-url http://localhost:9100     # the LLM endpoint ayin talks to
 /set openai-key <your-api-key>          # optional OpenAI fallback
 ```
 
-See [`SETUP.md`](SETUP.md) for the full list and the prompt schema.
+See [`SETUP.md`](SETUP.md) for the full list of tunables.
 
 ## Documentation
 
