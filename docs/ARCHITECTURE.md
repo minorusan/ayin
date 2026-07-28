@@ -353,6 +353,21 @@ tree knows about the internals). Design rules:
   habit, which produced `GPU: chatOnce 306s · 1 waiting` and then a client abort at 10m surfaced as
   `fetch failed`. Auto-lock also pins the model, stopping the gemma↔qwen flapping another consumer's
   ownership change causes mid-session. Headless runs do NOT auto-lock — unattended work yields.
+  **The lock survives the backend losing it.** The authority stack is in-memory, so a daemon restart
+  erases every grant: the next keepalive returns a NEW grant rather than a refresh, which silently
+  broke two things — the token being sent for priority was dead (session quietly back in the LOW
+  band) and the backend re-applied its coder-model policy over the pinned model. `acquireLlm`'s
+  `onRegrant` now rotates the token, the lock re-pins the model it was taken on and says so in the
+  transcript. `release()` recovers from a rotated token too: if the detach frees nothing and `ayin`
+  still holds the resource, it re-acquires to learn the live token and hands THAT back, instead of
+  leaking the grant until its TTL.
+- **Per-model context windows.** Every picker row is labelled with the window that model will
+  ACTUALLY get (`27.8B · Q4_K_M · 16.2G · 24k ctx`), because one global `numCtx` is wrong on a 24 GB
+  card: KV cost per token is architectural, not a function of size. Measured here — `gemma4:26b`
+  (16.8G, 31 layers) fits 64k; `qwen3.6:27b` (16.2G, 64 layers) spills 14 layers to the CPU at 64k
+  and fits at 24k. A MoE is not automatically safe either: its weights are all resident (30b-a3b is
+  17.3G, the same class as dense), only its FLOPs per token are lower. The backend owns the presets
+  (`config.ollama.modelCtx`, `MARADEL_CTX_<MODEL>` override) and reports the resolved value per model.
 - **Model picker + booking** (`/model` → `model-picker.ts`, catalog in `llm-status.ts`): the
   interactive counterpart to headless `AYIN_ACQUIRE_LLM=1`. Bare `/model` opens the **popup** —
   the same overlay the tool-permission prompt uses (`dialog.ts`) — listing every chat model the
