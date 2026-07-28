@@ -136,7 +136,11 @@ repeat, so `status` keeps working — rate-limited, with an explicit "don't poll
 
 ## Plan mode — big requests get a plan first
 
-A prompt of 2000+ characters is triaged in one cheap call: is this actually cross-feature? If it is,
+**Say so and it plans, at any size** — "plan it", "plan the auth rewrite", "deep investigate the
+codebase", "deep dive", "think it through first", or `/plan <text>` for the no-ambiguity door. An
+explicit ask cannot be vetoed by triage; you asked, so it plans.
+
+Otherwise a prompt of 2000+ characters is triaged in one cheap call: is this actually cross-feature? If it is,
 ayin surveys the project, explores the relevant code, and writes **`ayin-plan-<timestamp>.md`** —
 reasoning, existing context, dependencies, **third-party API research**, **gaps** (each with how to
 resolve it, never a guess), a files-to-change table, ordered steps, **log coverage and debugging**, and

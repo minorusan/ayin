@@ -39,7 +39,7 @@ import { pushActivity, setActivityDetail } from '../activity.js';
 import { log } from '../log.js';
 import { getConfig } from '../prompts.js';
 import { recordQa } from '../session-record.js';
-import { addMessage, setAgentStatus } from '../ui.js';
+import { addMessage, formatGateCardForChat, setAgentStatus, HEADLESS } from '../ui.js';
 import { deriveCriteria, dimensionsOf, type Criterion, type Dimension } from './criteria.js';
 import { describeFile, gatherEvidence, gitDirtySet, probeThirdPartyApi, probeWebview, type ChangedFile } from './probes.js';
 import { reviewArtifacts, type QaIssue, type QaVerdict } from './review.js';
@@ -128,26 +128,54 @@ export interface QaOutcome {
   pass: number;
   maxPasses: number;
   verdict: QaVerdict | null;
-  /** What to show the user — already formatted, one compact card. */
-  card: string;
+  /** What to show the user — structured; the chat widget owns how it looks. */
+  card: QaCard;
   /** What to hand the agent when `action === 'fix'`. */
   feedback?: string;
 }
 
+/**
+ * The verdict as a CARD, not a sentence.
+ *
+ * `kind` + `title` + `body` + `footer` is the shape `formatGateCardForChat` renders in the same visual
+ * language as a tool result, and the shape headless mode flattens to plain text. Structured rather
+ * than pre-formatted because the gate should not know what a terminal looks like — the widget does.
+ */
+export interface QaCard {
+  kind: 'pass' | 'fail' | 'stopped' | 'info';
+  title: string;
+  body: string[];
+  footer?: string;
+}
+
 function issueLine(i: QaIssue): string {
   const file = i.file && i.file !== '?' ? ` ${i.file.split('/').slice(-2).join('/')}` : '';
-  return `  • [${i.criterion}]${file} — ${i.problem}${i.fix ? ` → ${i.fix}` : ''}`;
+  return `[${i.criterion}]${file} — ${i.problem}${i.fix ? ` → ${i.fix}` : ''}`;
 }
 
-function passCard(pass: number, max: number, criteria: number, v: QaVerdict): string {
-  return `QA PASS (${pass}/${max}) · ${criteria} criteria checked · ${v.summary || 'the change satisfies what was asked.'}`;
+function passCard(pass: number, max: number, criteria: number, v: QaVerdict): QaCard {
+  return {
+    kind: 'pass',
+    title: `QA PASS ${pass}/${max}`,
+    body: v.summary ? [v.summary] : ['the change satisfies what was asked'],
+    footer: `${criteria} criteria checked`,
+  };
 }
 
-function failCard(pass: number, max: number, v: QaVerdict, willFix: boolean): string {
-  const head = `QA FAIL (${pass}/${max}) · ${v.issues.length} issue(s)${v.summary ? ` · ${v.summary}` : ''}`;
-  const body = v.issues.map(issueLine).join('\n');
-  const tail = willFix ? '\n  fixing…' : `\n  out of QA passes — the issues above are NOT fixed.`;
-  return [head, body, tail].filter(Boolean).join('\n');
+function failCard(pass: number, max: number, v: QaVerdict, willFix: boolean): QaCard {
+  return {
+    kind: willFix ? 'fail' : 'stopped',
+    title: `QA FAIL ${pass}/${max} · ${v.issues.length} issue${v.issues.length === 1 ? '' : 's'}`,
+    body: [...(v.summary ? [v.summary, ''] : []), ...v.issues.map(issueLine)],
+    footer: willFix ? 'fixing…' : 'out of QA passes — the issues above are NOT fixed',
+  };
+}
+
+/** Flatten a card for headless mode / the log, where blessed markup is noise. */
+export function cardToText(c: QaCard): string {
+  return [c.title, ...c.body.map((l) => (l ? `  ${l}` : '')), c.footer ? `  ${c.footer}` : '']
+    .filter((l) => l !== '')
+    .join('\n');
 }
 
 /**
@@ -167,7 +195,12 @@ export async function qaGate(
   const pass = turn.passes;
 
   if (pass > maxPasses) {
-    const card = `QA STOPPED after ${maxPasses} passes · ${turn.lastIssues.length} issue(s) remain unfixed`;
+    const card: QaCard = {
+      kind: 'stopped',
+      title: `QA STOPPED after ${maxPasses} passes`,
+      body: turn.lastIssues.map(issueLine),
+      footer: `${turn.lastIssues.length} issue(s) remain unfixed`,
+    };
     log('WARN', 'qa_exhausted', { passes: String(maxPasses), issues: String(turn.lastIssues.length) });
     recordQa('exhausted', pass, 'max passes reached', turn.lastIssues.length);
     return { action: 'exhausted', pass, maxPasses, verdict: null, card };
@@ -186,7 +219,7 @@ export async function qaGate(
       setActivityDetail('deriving acceptance criteria from your prompts');
       turn.criteria = await deriveCriteria(files, goal, dims);
     }
-    if (isInterrupted()) return { action: 'skipped', pass, maxPasses, verdict: null, card: 'QA skipped (interrupted).' };
+    if (isInterrupted()) return { action: 'skipped', pass, maxPasses, verdict: null, card: { kind: 'info', title: 'QA skipped', body: ['interrupted'] } };
 
     setActivityDetail(`reviewing ${files.length} artifact(s) against ${turn.criteria.length} criteria`);
     const evidence = await gatherEvidence(files);
@@ -198,7 +231,11 @@ export async function qaGate(
       // The judge could not answer. Say so plainly and let the turn finish — never invent a verdict.
       return {
         action: 'skipped', pass, maxPasses, verdict,
-        card: `QA INCONCLUSIVE (${pass}/${maxPasses}) · ${verdict.summary || 'the reviewer did not return a usable verdict'}`,
+        card: {
+          kind: 'info',
+          title: `QA INCONCLUSIVE ${pass}/${maxPasses}`,
+          body: [verdict.summary || 'the reviewer did not return a usable verdict'],
+        },
       };
     }
 
@@ -224,14 +261,22 @@ export async function qaGate(
   } catch (err) {
     // A broken gate must not break the turn it was protecting.
     log('ERROR', 'qa_gate_error', { error: err instanceof Error ? err.message : String(err) });
-    return { action: 'skipped', pass, maxPasses, verdict: null, card: `QA skipped (gate error: ${err instanceof Error ? err.message : String(err)})` };
+    return {
+      action: 'skipped', pass, maxPasses, verdict: null,
+      card: { kind: 'info', title: 'QA skipped', body: [`gate error: ${err instanceof Error ? err.message : String(err)}`] },
+    };
   } finally {
     endPhase();
     setAgentStatus('');
   }
 }
 
-/** Show the verdict card in the transcript. One place, so the format stays consistent. */
-export function qaShowCard(card: string): void {
-  addMessage('system', card);
+/**
+ * Show the verdict in the transcript. One place, so every pass looks the same.
+ *
+ * Headless gets flat text: blessed markup on stderr is unreadable noise, and a headless run's reader
+ * is usually a log or another program.
+ */
+export function qaShowCard(card: QaCard): void {
+  addMessage('system', HEADLESS ? cardToText(card) : formatGateCardForChat(card.kind, card.title, card.body, card.footer));
 }

@@ -192,5 +192,67 @@ act.pushActivity('QA 2/3', 'x');
 act.clearActivity();
 ok(act.activityText() === null, 'a turn ending clears every label, so none outlives its work');
 
+// ── plan mode's explicit door: it must fire on intent, not on length ──
+console.log('\nplan trigger');
+const plan = await import(`file://${join(DIST, 'plan/index.js')}`);
+const fires = (s) => plan.PLAN_TRIGGER.test(s);
+for (const yes of [
+  'plan it', 'plan this properly', 'make a plan for the auth rewrite', 'plan the auth rewrite',
+  'deep investigate the codebase', 'investigate this thoroughly', 'do a deep dive',
+  'study the codebase thoroughly first', 'think it through first',
+  'before you start, investigate the render path', 'I need a plan',
+]) ok(fires(yes), `fires: "${yes}"`);
+// The expensive half: plan mode costs minutes of GPU, so ordinary English must NOT trigger it.
+for (const no of [
+  "what's the plan?", 'the plan was to ship on Friday', 'our plan B is a rewrite',
+  'the planner module is broken', 'fix the plan parser', 'explain the deployment plan',
+  'add a database schema migration', 'this investigation is done', 'plans change',
+]) ok(!fires(no), `stays quiet: "${no}"`);
+
+// ── truncation: nothing silent, and the diff card is finally capped ──
+console.log('\ntool-result truncation');
+const chat = await import(`file://${join(DIST, 'ui/widgets/chat.js')}`);
+const bigDiff = ['File: /tmp/x.ts', '@@ -1 +1 @@', ...Array.from({ length: 3000 }, (_, i) => `+line ${i}`)].join('\n');
+const diffCard = chat.formatToolResultForChat('write_file', bigDiff, 120);
+ok(diffCard.split('\n').length < 60, 'a 3000-line diff no longer paints 3000 lines', `${diffCard.split('\n').length} lines`);
+ok(/more line/.test(diffCard) && /Ctrl\+O/.test(diffCard), 'the omission is stated and points at the full output');
+ok(diffCard.includes('File: /tmp/x.ts'), 'the diff header survives truncation');
+ok(diffCard.includes('line 2999'), 'the diff TAIL survives — a diff\'s end matters too');
+
+const oneHugeLine = `{"blob":"${'x'.repeat(400_000)}"}`;
+const jsonCard = chat.formatToolResultForChat('bash', oneHugeLine, 40);
+ok(jsonCard.length < 12_000, 'a single 400 KB line cannot blow the card budget', `${jsonCard.length} chars`);
+const small = chat.formatToolResultForChat('bash', 'one\ntwo', 10);
+ok(!/more line/.test(small), 'small results are not decorated with a bogus omission note');
+
+// ── the gate card: structured in, one visual language out ────────────
+console.log('\ngate card');
+const qa = await import(`file://${join(DIST, 'qa/index.js')}`);
+const asText = qa.cardToText({ kind: 'fail', title: 'QA FAIL 1/3 · 2 issues', body: ['summary', '', '[x] a — b → c'], footer: 'fixing…' });
+ok(asText.startsWith('QA FAIL 1/3') && asText.includes('fixing…'), 'a card flattens to readable text for headless');
+const styled = chat.formatGateCardForChat('fail', 'QA FAIL 1/3', ['[webview-reachable] server.ts — loopback only'], 'fixing…');
+ok(styled.includes('▣') && styled.includes('╰') && styled.includes('│'), 'and renders with the same gutter/footer as a tool card');
+
+// ── mouse: the wheel, and ONLY the wheel ─────────────────────────────
+// Booting the real (non-headless) TUI in a child and reading the escape codes it writes is the only
+// honest way to check this. `screen.on('mouse', …)` looks passive but makes blessed call
+// `program.enableMouse()`, which turns on 1002 (cell motion) and 1003 (ALL motion) — every mouse
+// movement parsed and dispatched, for a feature that needs a wheel, and the motion grab is what fights
+// text selection hardest. Listening on the *program* instead keeps the modes narrow. If someone
+// "simplifies" that back to the screen, these bytes change and this check fails.
+console.log('\nmouse modes');
+{
+  const { execFileSync } = await import('node:child_process');
+  let out = Buffer.alloc(0);
+  try {
+    out = execFileSync(process.execPath, ['-e', `import(${JSON.stringify(`file://${join(DIST, 'ui/index.js')}`)}).then(() => process.exit(0))`],
+      { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch (e) { out = e?.stdout ?? Buffer.alloc(0); }
+  const modes = [...new Set([...out.toString('latin1').matchAll(/\x1b\[\?(1\d{3})[hl]/g)].map((m) => m[1]))];
+  ok(modes.includes('1000'), 'button tracking (1000) is on — this is where wheel events arrive', modes.join(','));
+  ok(modes.includes('1006'), 'SGR encoding (1006) is on — correct past column 223');
+  ok(!modes.includes('1002') && !modes.includes('1003'), 'motion tracking (1002/1003) stays OFF — no event flood, minimal selection interference');
+}
+
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

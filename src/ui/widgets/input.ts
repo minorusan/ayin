@@ -74,6 +74,36 @@ export class InputBar {
     return this.active;
   }
 
+  /**
+   * Move the cursor one buffer line up/down, keeping its column. Returns false when there is no line
+   * to move to — that is the signal for the caller to fall through to prompt history.
+   *
+   * "Line" here means a real `\n` in the buffer, not a visual wrap: those are the boundaries the user
+   * typed and the ones history navigation must not eat.
+   */
+  private moveCursorLine(dir: 1 | -1): boolean {
+    if (!this.buffer.includes('\n')) return false;
+    const before = this.buffer.slice(0, this.cursor);
+    const lineStart = before.lastIndexOf('\n') + 1;
+    const col = this.cursor - lineStart;
+
+    if (dir === -1) {
+      if (lineStart === 0) return false; // already on the first line → history
+      const prevStart = this.buffer.lastIndexOf('\n', lineStart - 2) + 1;
+      const prevLen = lineStart - 1 - prevStart;
+      this.cursor = prevStart + Math.min(col, prevLen);
+    } else {
+      const nlAfter = this.buffer.indexOf('\n', this.cursor);
+      if (nlAfter === -1) return false; // already on the last line → history
+      const nextStart = nlAfter + 1;
+      const nextEnd = this.buffer.indexOf('\n', nextStart);
+      const nextLen = (nextEnd === -1 ? this.buffer.length : nextEnd) - nextStart;
+      this.cursor = nextStart + Math.min(col, nextLen);
+    }
+    this.redraw();
+    return true;
+  }
+
   clear(): void {
     this.buffer = '';
     this.cursor = 0;
@@ -119,7 +149,13 @@ export class InputBar {
           this.onChange(this.buffer);
         }
         return true;
+      // ↑/↓ walk prompt history — EXCEPT inside a multi-line buffer, where they move the cursor
+      // between lines first. Without that exception, pressing ↑ to fix a typo on the first line of a
+      // pasted three-line prompt silently replaces the whole thing with the previous prompt, and the
+      // text you were writing is gone. History is only reached from the buffer's first (↑) or last
+      // (↓) line, which is exactly how a shell behaves.
       case 'up': {
+        if (this.moveCursorLine(-1)) return true;
         const entry = navigateUp(this.buffer);
         if (entry !== null) {
           this.buffer = entry;
@@ -130,6 +166,7 @@ export class InputBar {
         return true;
       }
       case 'down': {
+        if (this.moveCursorLine(1)) return true;
         const entry = navigateDown();
         if (entry !== null) {
           this.buffer = entry;

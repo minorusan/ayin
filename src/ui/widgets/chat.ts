@@ -218,9 +218,9 @@ export class ChatLog {
     render();
   }
 
-  /** Line-granular scroll (Shift+↑/↓). */
-  scrollLine(dir: 1 | -1): void {
-    this.box.scroll(dir);
+  /** Line-granular scroll: Shift+↑/↓ moves one line, a wheel notch moves `lines`. */
+  scrollLine(dir: 1 | -1, lines = 1): void {
+    this.box.scroll(dir * Math.max(1, lines));
     this.stick = this.atBottom();
     render();
   }
@@ -346,6 +346,55 @@ export function toItalic(text: string): string {
 /** How many output lines each tool's chat card shows before truncating. */
 const PREVIEW_LINES: Record<string, number> = { bash: 6, grep: 6, read_file: 4 };
 const DEFAULT_PREVIEW_LINES = 2;
+/** Lines of a write_file diff worth showing before the card starts drowning the transcript. */
+const DIFF_PREVIEW_LINES = 34;
+/** Lines kept from the END of a truncated diff — a diff's tail is where the interesting part often is. */
+const DIFF_TAIL_LINES = 8;
+/**
+ * Chars any single card may paint, whatever its line count says.
+ *
+ * A line budget alone is not a budget: one minified JSON response or a base64 blob is a *single* line
+ * of 400 KB, passes any `lines.length` check, and turns the transcript into a wall. This is the
+ * display budget only — the model's own view of a tool result has its own, larger clip in `agent.ts`,
+ * because "how much should a human read" and "how much should the model see" are different questions.
+ */
+const PREVIEW_CHAR_BUDGET = 5000;
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Nothing is truncated silently: the marker says how much was withheld, in lines AND bytes, and where
+ * the whole thing still is. The full output is always saved as an artifact (`artifacts.ts`), so this
+ * is a display choice, not data loss — and the marker has to say so, or it reads as one.
+ */
+function omissionNote(hiddenLines: number, hiddenChars: number): string {
+  const what = hiddenLines > 0
+    ? `… ${hiddenLines} more line${hiddenLines === 1 ? '' : 's'} (${formatBytes(hiddenChars)})`
+    : `… ${formatBytes(hiddenChars)} more`;
+  return `{${theme.faint}-fg}│{/} {${theme.dim}-fg}${what} — full output kept, Ctrl+O to browse{/}`;
+}
+
+/**
+ * Take lines until either budget runs out. Returns what to show plus exactly what was left behind, so
+ * the caller can be honest about it.
+ */
+function budgeted(lines: string[], maxLines: number, maxChars = PREVIEW_CHAR_BUDGET): {
+  shown: string[]; hiddenLines: number; hiddenChars: number;
+} {
+  const shown: string[] = [];
+  let spent = 0;
+  for (const line of lines) {
+    if (shown.length >= maxLines || spent >= maxChars) break;
+    shown.push(line);
+    spent += line.length + 1;
+  }
+  const hiddenChars = lines.slice(shown.length).reduce((a, l) => a + l.length + 1, 0);
+  return { shown, hiddenLines: lines.length - shown.length, hiddenChars };
+}
 
 /** Styled tool-call header shown when a tool starts: `▸ bash · cat package.json` */
 export function formatToolCallForChat(tool: string, params: string): string {
@@ -385,41 +434,91 @@ export function formatToolResultForChat(tool: string, content: string, elapsedMs
         : `{${theme.faint}-fg}╰{/} {${theme.ok}-fg}✓{/} {${theme.dim}-fg}${formatToolMs(elapsedMs)} · no output{/}`;
     }
     const max = PREVIEW_LINES[tool] ?? DEFAULT_PREVIEW_LINES;
-    const shown = lines.slice(0, max).map(l => {
-      const cut = l.length > 200 ? l.slice(0, 200) + '…' : l;
+    const { shown, hiddenLines, hiddenChars } = budgeted(lines, max);
+    const rendered = shown.map(l => {
+      const cut = l.length > 200 ? `${l.slice(0, 200)}…` : l;
       return `{${theme.faint}-fg}│{/} {${theme.diffCtx}-fg}${escapeBlessedTags(cut)}{/}`;
     });
-    const more = lines.length > max
-      ? `\n{${theme.faint}-fg}│{/} {${theme.dim}-fg}… ${lines.length - max} more lines — Ctrl+O to browse{/}`
-      : '';
-    return shown.join('\n') + more + toolFooter(content, elapsedMs);
+    const more = hiddenLines > 0 || hiddenChars > 0 ? `\n${omissionNote(hiddenLines, hiddenChars)}` : '';
+    return rendered.join('\n') + more + toolFooter(content, elapsedMs);
   }
 
-  const rendered: string[] = [];
-  for (const line of content.split('\n')) {
-    const escaped = escapeBlessedTags(line);
-    if (line.startsWith('File: ')) {
-      rendered.push(`{bold}{${theme.diffFileFg}-fg}{${theme.diffFileBg}-bg} ${escaped} {/${theme.diffFileBg}-bg}{/}`);
-      continue;
-    }
-    if (line.startsWith('--- ') || line.startsWith('+++ ')) continue;
-    if (line.startsWith('@@')) {
-      rendered.push(`{${theme.diffHunkFg}-fg}{${theme.diffHunkBg}-bg} ${escaped} {/${theme.diffHunkBg}-bg}{/}`);
-      continue;
-    }
-    if (line.startsWith('+') && !line.startsWith('+++')) {
-      rendered.push(`{${theme.diffAddFg}-fg}{${theme.diffAddBg}-bg} ${escaped} {/${theme.diffAddBg}-bg}{/}`);
-      continue;
-    }
-    if (line.startsWith('-') && !line.startsWith('---')) {
-      rendered.push(`{${theme.diffDelFg}-fg}{${theme.diffDelBg}-bg} ${escaped} {/${theme.diffDelBg}-bg}{/}`);
-      continue;
-    }
-    if (line.startsWith(' ')) {
-      rendered.push(`{${theme.diffCtx}-fg}${escaped}{/}`);
-      continue;
-    }
-    rendered.push(escaped);
+  // A write_file diff had NO cap at all: rewriting a 3000-line file painted a 3000-line card and
+  // buried everything before it, including the answer you were reading. Head + tail with an honest
+  // middle marker — a diff's end matters as often as its beginning, so a plain head cut is the wrong
+  // shape here. The `File:` header line is always kept.
+  const diffLines = content.split('\n');
+  const overBudget = diffLines.length > DIFF_PREVIEW_LINES
+    || diffLines.reduce((a, l) => a + l.length + 1, 0) > PREVIEW_CHAR_BUDGET;
+  let headLines = diffLines;
+  let tailLines: string[] = [];
+  let omitted = 0;
+  let omittedChars = 0;
+  if (overBudget) {
+    const head = budgeted(diffLines, DIFF_PREVIEW_LINES - DIFF_TAIL_LINES);
+    headLines = head.shown;
+    const rest = diffLines.slice(headLines.length);
+    tailLines = rest.slice(-DIFF_TAIL_LINES);
+    const middle = rest.slice(0, Math.max(0, rest.length - tailLines.length));
+    omitted = middle.length;
+    omittedChars = middle.reduce((a, l) => a + l.length + 1, 0);
   }
+
+  const rendered = [
+    ...headLines.map(styleDiffLine).filter((l): l is string => l !== null),
+    ...(omitted > 0 || omittedChars > 0 ? [omissionNote(omitted, omittedChars)] : []),
+    ...tailLines.map(styleDiffLine).filter((l): l is string => l !== null),
+  ];
   return rendered.join('\n') + toolFooter(content, elapsedMs);
+}
+
+/**
+ * A gate card — the QA verdict and plan-mode's notices, in the same visual language as a tool result.
+ *
+ * These used to be plain `system` lines, which gave a three-pass review of the user's work exactly the
+ * weight of `[Loop detected]` noise: a verdict on whether the change is actually done was the dimmest
+ * thing on the screen. Same gutter and footer as a tool card, coloured by outcome, so it reads as a
+ * result of work rather than as chatter.
+ *
+ * `kind` picks the colour and mark; `title` is the headline; `body` lines get the gutter.
+ */
+export function formatGateCardForChat(
+  kind: 'pass' | 'fail' | 'stopped' | 'info',
+  title: string,
+  body: string[] = [],
+  footer?: string,
+): string {
+  const look = {
+    pass: { color: theme.ok, glyph: '▣', mark: '✓' },
+    fail: { color: theme.warn, glyph: '▣', mark: '✗' },
+    stopped: { color: theme.err, glyph: '▣', mark: '✗' },
+    info: { color: theme.accent, glyph: '▣', mark: '·' },
+  }[kind];
+
+  const head = `{${look.color}-fg}${look.glyph}{/} {bold}{${look.color}-fg}${escapeBlessedTags(title)}{/${look.color}-fg}{/bold}`;
+  const lines = body.map((l) => `{${theme.faint}-fg}│{/} {${theme.diffCtx}-fg}${escapeBlessedTags(l)}{/}`);
+  const foot = footer
+    ? `{${theme.faint}-fg}╰{/} {${look.color}-fg}${look.mark}{/} {${theme.dim}-fg}${escapeBlessedTags(footer)}{/}`
+    : '';
+  return [head, ...lines, foot].filter(Boolean).join('\n');
+}
+
+/** One diff line, styled. Returns null for the `---`/`+++` headers, which carry nothing readable. */
+function styleDiffLine(line: string): string | null {
+  const escaped = escapeBlessedTags(line);
+  if (line.startsWith('File: ')) {
+    return `{bold}{${theme.diffFileFg}-fg}{${theme.diffFileBg}-bg} ${escaped} {/${theme.diffFileBg}-bg}{/}`;
+  }
+  if (line.startsWith('--- ') || line.startsWith('+++ ')) return null;
+  if (line.startsWith('@@')) {
+    return `{${theme.diffHunkFg}-fg}{${theme.diffHunkBg}-bg} ${escaped} {/${theme.diffHunkBg}-bg}{/}`;
+  }
+  if (line.startsWith('+') && !line.startsWith('+++')) {
+    return `{${theme.diffAddFg}-fg}{${theme.diffAddBg}-bg} ${escaped} {/${theme.diffAddBg}-bg}{/}`;
+  }
+  if (line.startsWith('-') && !line.startsWith('---')) {
+    return `{${theme.diffDelFg}-fg}{${theme.diffDelBg}-bg} ${escaped} {/${theme.diffDelBg}-bg}{/}`;
+  }
+  if (line.startsWith(' ')) return `{${theme.diffCtx}-fg}${escaped}{/}`;
+  return escaped;
 }

@@ -468,8 +468,27 @@ const tools: Tool[] = [
 
 // ── Tool registry ───────────────────────────────────────────────────
 
+/**
+ * Tool names are GLOBALLY UNIQUE, and a collision is a HARD ERROR at boot.
+ *
+ * The model calls a tool by its bare name, so two entries sharing one would silently shadow in the
+ * map — last registration wins — while the system prompt happily advertises both. The symptom is a
+ * tool that "sometimes does the wrong thing", which is about the worst bug shape there is: it looks
+ * like the model misbehaving. Failing at import is loud, immediate, and impossible to ship past.
+ */
 const toolMap = new Map<string, Tool>();
-for (const t of tools) toolMap.set(t.name, t);
+const duplicates: string[] = [];
+for (const t of tools) {
+  if (toolMap.has(t.name)) duplicates.push(t.name);
+  toolMap.set(t.name, t);
+}
+if (duplicates.length > 0) {
+  throw new Error(
+    `Duplicate tool name(s): ${[...new Set(duplicates)].join(', ')}. `
+    + 'Tool names must be unique — the model resolves a tool by its bare name, so a collision silently '
+    + 'shadows one implementation with another. Rename one of them.',
+  );
+}
 
 // ── prompt provisioning ─────────────────────────────────────────────
 // A tool ships its prompt texts next to its own code and declares that directory. Here — at

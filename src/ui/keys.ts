@@ -43,4 +43,53 @@ export function installKeyRouter(opts: {
 
     opts.input.handleKey(ch, key);
   });
+
+  installMouseRouter(opts.chat, opts.input);
+}
+
+/** Lines per wheel notch — the conventional three, so a flick moves a readable amount. */
+const WHEEL_LINES = 3;
+
+/**
+ * Wheel scrolling — the ONLY mouse handling in ayin.
+ *
+ * See the amended copy-paste contract in `screen.ts`: tracking is enabled, but nothing is clickable
+ * or draggable and only `wheelup`/`wheeldown` are consumed, so a click behaves exactly as your
+ * terminal would behave without ayin. **Shift+drag still selects text natively** in every terminal
+ * that implements the standard bypass, which is how copy-paste survives. `AYIN_MOUSE=0` restores the
+ * old keyboard-only behaviour for a terminal where it does not.
+ */
+function installMouseRouter(chat: ChatLog, input: InputBar): void {
+  if (process.env.AYIN_MOUSE === '0') return;
+  try {
+    // NARROW ON PURPOSE. `enableMouse()` turns on 1000 + 1002 (cell motion) + 1003 (ALL motion), so
+    // every pixel of mouse movement becomes an event blessed has to parse and dispatch — for a feature
+    // that only needs the wheel — and the motion grab is what fights text selection hardest. Asking
+    // for `vt200Mouse` (1000: button press/release, which is where wheel buttons 64/65 arrive) plus
+    // `sgrMouse` (1006: the modern encoding, correct past column 223) gets the wheel and nothing else.
+    // Verified by the escape codes on the wire: `[?1000h[?1006h`, no 1002, no 1003.
+    //
+    // And we listen on the PROGRAM, not the screen. `screen.on('mouse', …)` is not a passive
+    // subscription: blessed's Screen intercepts that registration and calls `_listenMouse()` →
+    // `program.enableMouse()`, re-enabling everything we just declined. The program binds its own
+    // mouse parser on its first `mouse` listener (`newListener` → `bindMouse`), so subscribing there
+    // gives the same parsed events with only the modes we asked for.
+    const program = (screen as unknown as {
+      program?: {
+        setMouse?: (opts: Record<string, boolean>, enable: boolean) => void;
+        enableMouse?: () => void;
+        on?: (ev: string, fn: (data: { action?: string }) => void) => void;
+      };
+    }).program;
+    if (!program?.on) return; // no program (headless/noop screen) — nothing to bind
+
+    if (typeof program.setMouse === 'function') program.setMouse({ vt200Mouse: true, sgrMouse: true }, true);
+    else if (typeof program.enableMouse === 'function') program.enableMouse();
+
+    program.on('mouse', (data: { action?: string }) => {
+      if (!input.isActive()) return;
+      if (data?.action === 'wheelup') chat.scrollLine(-1, WHEEL_LINES);
+      else if (data?.action === 'wheeldown') chat.scrollLine(1, WHEEL_LINES);
+    });
+  } catch { /* no mouse reporting here — keyboard scrolling is unaffected */ }
 }

@@ -135,10 +135,26 @@ A 2000-character request is usually several features wearing one paragraph. Hand
 round loop, the model starts on whichever sentence it read last, meets the coupling in round nine, and
 spends the rest of its budget repairing its own first guess.
 
-**Trigger.** `prompt.length ≥ planMinChars` (default 2000) → one cheap `planTriage` call: cross-feature
-or not? Length alone would drag every long bug report into planning; triage alone would cost an LLM
-call on every turn. Together: one extra call, only for genuinely big prompts. `AYIN_PLAN=0` opts out;
-`planMinChars: 0` disables it from `prompts.json`.
+**Two doors, both deterministic.**
+
+| Door | Condition | Triage's verdict |
+|---|---|---|
+| **Size** | `prompt.length ≥ planMinChars` (2000) | decides — "not cross-feature" means no plan |
+| **Explicit** | `PLAN_TRIGGER` matches, or `/plan <text>` | **cannot veto** — you asked |
+
+Length alone would drag every long bug report into planning; triage alone would cost an LLM call on
+every turn. Together: one extra cheap call, only for genuinely big prompts. The explicit door exists
+because "plan the auth rewrite" is nine words — size is a *proxy* for "this needs thought", and a proxy
+must never overrule the person who can simply say so. Triage still runs on an explicit ask (it is the
+cheapest way to decompose the work and to name the APIs the research step needs); only its veto is
+ignored. The plan's header records which door was used, so a plan read back a week later says why it
+exists. `AYIN_PLAN=0` opts out entirely; `planMinChars: 0` closes the size door only.
+
+`PLAN_TRIGGER` is anchored to verb phrases (`plan it`, `make a plan`, `deep investigate`, `deep dive`,
+`study the codebase thoroughly`, `think it through first`), never bare `\bplan\b`. This is the
+tightest of the three triggers on purpose: plan mode is the most expensive gate in the system, and
+`plan` is a far commoner English word than `diagram` or `schema` ever were — "what's the plan?", "the
+plan was to ship Friday". A false fire is minutes of a starved GPU on a plan nobody wanted.
 
 **The plan, in order** — each step feeds the next:
 
@@ -451,9 +467,33 @@ tree knows about the internals). Design rules:
   `layout.ts#relayout()`; a widget that changes height calls `relayout()` and everything
   restacks. Adding a new bottom-docked element = one entry in the stack registration.
 - **One keypress router** (`keys.ts`) and **one theme** (`theme.ts`).
-- **Copy-paste contract** (`screen.ts`): no widget may ever enable blessed mouse tracking
-  (`mouse: true`, `enableMouse`, `clickable`) — it hijacks terminal-native text selection,
-  which is what keeps chat text copy-pastable. Scrolling is PgUp/PgDn by design.
+- **Copy-paste contract, as amended** (`screen.ts`). The old rule was absolute: never enable mouse
+  tracking, because it hijacks terminal-native text selection and copying transcript text matters more
+  than a wheel. It was right about the tradeoff and wrong that the tradeoff is total — every terminal
+  worth using lets **Shift+drag** bypass an application's mouse reporting and select natively. So the
+  wheel is enabled in exactly one place (`keys.ts#installMouseRouter`) under two conditions that keep
+  the rule's spirit: **wheel events only** (nothing is `mouse: true`, clickable, focusable or
+  draggable, so a click still does whatever your terminal does with it) and **switchable**
+  (`AYIN_MOUSE=0` restores keyboard-only exactly, for a terminal without the bypass).
+- **Scrolling, in one place.** Wheel (3 lines/notch) · `PgUp`/`PgDn` (half page) · `Shift+↑`/`Shift+↓`
+  (one line). Plain `↑`/`↓` are **prompt history** — but inside a multi-line buffer they move the
+  cursor between lines first (`input.ts#moveCursorLine`), because pressing ↑ to fix the first line of a
+  three-line prompt used to replace the whole thing with the previous prompt and lose what you wrote.
+  History is reached only from the buffer's first or last line, exactly like a shell.
+- **Nothing is truncated silently** (`widgets/chat.ts`). Every card obeys a line budget **and** a
+  ~5k-char budget, because a line budget alone is not a budget: one minified JSON response is a single
+  line of 400 KB and passes any `lines.length` check. The `write_file` diff card had no cap at all —
+  rewriting a 3000-line file painted a 3000-line card and buried everything above it — and now shows
+  head + tail with an honest middle marker, since a diff's end matters as often as its beginning. Every
+  omission states how many lines and bytes were withheld and that the full output is still an artifact
+  (`Ctrl+O`), so truncation never reads as data loss. The display budget is deliberately a *different*
+  number from the model's own clip in `agent.ts`: "how much should a human read" and "how much should
+  the model see" are different questions.
+- **Gate cards** (`formatGateCardForChat`). A QA verdict and plan mode's notices use the same gutter and
+  footer as a tool result, coloured by outcome. They were plain `system` lines, which gave a three-pass
+  review of the user's work the same visual weight as `[Loop detected]` noise. The gate emits a
+  structured `QaCard` (kind · title · body · footer) and the widget owns how it looks; headless flattens
+  it to text, because blessed markup on stderr is noise.
 - **One animation heartbeat** (`ticker.ts`): widgets subscribe for 80ms beats instead of
   owning intervals — every animation is phase-locked, one re-render per beat regardless of how
   many things move, and the clock stops itself when nothing is subscribed (idle = zero CPU).

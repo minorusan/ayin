@@ -17,6 +17,7 @@ export interface SlashCommand {
 
 const COMMANDS: SlashCommand[] = [
   { name: '/goal',    description: 'Set the session goal (shown in cursive above the chat) · /goal clear' },
+  { name: '/plan',    description: 'Force plan mode: survey → third-party API research → explore → a written ayin-plan-*.md, then execute it' },
   { name: '/model',   description: 'Pick the served model (popup) · /model <name> to switch straight away' },
   { name: '/lock',    description: 'Hold the model for this session — ⚿ in the bar; frees itself if this client dies · /unlock' },
   { name: '/fix',     description: 'Ask headless Claude to change ayin itself — implements, commits, publishes (or rejects)' },

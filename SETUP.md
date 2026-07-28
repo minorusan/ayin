@@ -105,8 +105,16 @@ node dist/index.js
 KELI_URL=http://localhost:9100 node dist/index.js
 ```
 Type a task; ayin works in your **current directory**. Keys: `Ctrl+O` browse tool outputs,
-`Ctrl+S` session summary, `PageUp/Down` scroll, `Ctrl+C` quit. When a tool needs approval
-you get a y/a/n prompt.
+`Ctrl+S` session summary, `Ctrl+C` quit. When a tool needs approval you get a y/a/n prompt.
+
+**Scrolling the transcript:** the **mouse wheel**, `PageUp`/`PageDown`, or `Shift+↑`/`Shift+↓` for one
+line. Plain `↑`/`↓` walk your **prompt history** instead (inside a multi-line prompt they move the
+cursor between lines first, so history never eats what you were writing). Scrolling up stops following
+live output; scroll back to the bottom to resume.
+
+> The wheel needs terminal mouse reporting, which normally takes over text selection — **hold Shift
+> while dragging** to select and copy as usual. If your terminal doesn't support that bypass, set
+> `AYIN_MOUSE=0` for keyboard-only scrolling.
 
 **Headless (one-shot, scriptable):**
 ```bash
@@ -148,6 +156,7 @@ afterwards, so your edits survive every upgrade. Set config values from the TUI:
 | `pollMaxPerTurn` | 6 | tool guard: identical polls allowed per turn before the call is blocked |
 | `planMinChars` | 2000 | plan mode: prompt size that triggers the cross-feature triage (`0` disables) |
 | `planExploreCalls` | 2 | plan mode: `explore` passes spent gathering context (each is real GPU time) |
+| `planApiSearches` | 3 | plan mode: web searches spent on third-party API docs (mandatory when an API is involved) |
 
 ### Editing prompts
 
@@ -164,7 +173,8 @@ upgrading never overwrites a file you edited, and only adds prompts that are gen
 
 Kill switches, when you want the behaviour gone for one run rather than tuned:
 `AYIN_QA=0` (no QA gate) · `AYIN_PLAN=0` (no plan mode) · `AYIN_PLAN_DIR` (where plans are written) ·
-`AYIN_QA_PORT` / `AYIN_QA_PORT_DENY` (force or exclude a port in the webview reachability probe).
+`AYIN_QA_PORT` / `AYIN_QA_PORT_DENY` (force or exclude a port in the webview reachability probe) ·
+`AYIN_MOUSE=0` (no wheel scrolling; keyboard only).
 
 ---
 

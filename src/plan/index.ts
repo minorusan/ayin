@@ -6,13 +6,18 @@
  * round nine, and spends the rest of its budget repairing its own first guess. The cheapest fix is
  * the oldest one: look before you leap, and write down what you saw.
  *
- * THE CONDITION IS DETERMINISTIC, THE JUDGEMENT IS NOT:
+ * TWO DOORS, BOTH DETERMINISTIC:
  *
- *     prompt length ≥ planMinChars   →   ONE triage call: is this cross-feature / multi-feature?
- *                                        yes → plan mode.   no → straight through, nothing lost.
+ *   SIZE     prompt length ≥ planMinChars  →  ONE triage call: cross-feature / multi-feature?
+ *                                             yes → plan.  no → straight through, nothing lost.
+ *   EXPLICIT the prompt asks for it (`PLAN_TRIGGER`: "plan it", "deep investigate the codebase", …)
+ *                                          →  plan, at ANY length, and triage cannot veto it.
  *
  * Length alone would drag every long bug report into planning; triage alone would need an LLM call on
- * every single turn. Together: one extra cheap call, only for genuinely big prompts.
+ * every single turn. Together: one extra cheap call, only for genuinely big prompts. And the explicit
+ * door exists because "plan the auth rewrite" is nine words: size is a proxy for "this needs thought",
+ * and a proxy must never overrule the person who can just say so. `/plan <text>` is the same door with
+ * no regex in the way.
  *
  * THE PLAN, IN ORDER (each step feeds the next):
  *   1. SURVEY   — deterministic: what this project is, what it can serve, how it can be observed.
@@ -57,6 +62,45 @@ export interface PlanResult {
   path: string;
   body: string;
   features: string[];
+}
+
+/**
+ * The explicit "plan this" trigger — same shape as `RESEARCH_TRIGGER` / `DIAGRAM_TRIGGER` in
+ * `agent.ts`, and tight for the same reason, only more so.
+ *
+ * Plan mode is by far the most expensive gate: a triage call, a survey, up to `planApiSearches` web
+ * searches, `planExploreCalls` explore loops (each its own agentic loop) and a long document
+ * generation. A false fire is minutes of a shared, often-starved GPU spent on a plan nobody asked for.
+ * `DIAGRAM_TRIGGER` carries this scar in its own comment — bare `diagram` matched "diagrammatic", bare
+ * `schema` matched "add a database schema migration file" — and **`plan` is a far more common English
+ * word than either**: "what's the plan?", "the plan was to ship Friday", "our plan B". So every
+ * alternative below is anchored to a verb phrase or an unambiguous compound. Never bare `\bplan\b`.
+ */
+export const PLAN_TRIGGER = new RegExp([
+  // asking for a plan
+  '(make|write|draw|draw up|give|need|want|create|prepare)\\s+(me\\s+)?(a|the)\\s+plan',
+  '\\bplan (it|this|that|out|first|ahead)\\b',
+  '\\bplan the \\w+',
+  '\\bplanning mode\\b', '\\bplan mode\\b',
+  // asking for the investigation that a plan is made of
+  '\\bdeep(ly)? investigate\\b', '\\binvestigate (it |this |the \\w+ )?(deeply|thoroughly)\\b',
+  '\\bdeep dive\\b', '\\bdeep-dive\\b',
+  '(study|explore|examine|analyse|analyze|map)\\s+(the\\s+)?(codebase|repo|repository|project|architecture)\\s+(thoroughly|deeply|first|properly|in depth)',
+  '\\b(thorough|deep) investigation\\b',
+  // asking to think before acting
+  '\\bthink it through first\\b', '\\bbefore (you |we )?(start|begin|code|implement),? (investigate|explore|plan|research)\\b',
+].join('|'), 'i');
+
+/**
+ * `/plan <text>` sets this: the same explicit door as `PLAN_TRIGGER`, with no regex in the way.
+ *
+ * One-shot, and consumed even when planning then fails — a flag that survived its turn would silently
+ * plan the NEXT unrelated prompt, which is the sort of surprise that costs a GPU-minute and trust.
+ */
+let forced = false;
+
+export function forcePlanNextTurn(): void {
+  forced = true;
 }
 
 /** `ayin-plan-20260728-143012.md` — sortable, unique enough for a session, readable in a listing. */
@@ -162,22 +206,37 @@ async function exploreContext(userInput: string, features: string[], survey: Sur
  */
 export async function runPlan(userInput: string, goal: string): Promise<PlanResult | null> {
   if (process.env.AYIN_PLAN === '0') return null;
+
+  // Two doors. SIZE is the automatic one; an EXPLICIT ASK is the other, and it ignores the size
+  // threshold entirely — "plan the auth rewrite" is nine words and deserves a plan more than a
+  // 2000-character bug report does.
+  const explicit = forced || PLAN_TRIGGER.test(userInput);
+  forced = false; // one-shot, consumed here whatever happens next
   const minChars = getConfig('planMinChars', 2000);
-  if (minChars <= 0 || userInput.length < minChars) return null;
+  if (!explicit && (minChars <= 0 || userInput.length < minChars)) return null;
 
   // One named phase for the whole planning pass. The wait narrator leads its line with this and the
   // status bar keeps `▣ PLAN` lit, so minutes of triage → research → exploration → writing never look
   // like an ordinary "thinking". See activity.ts.
   const endPhase = pushActivity('PLAN', `triaging a ${userInput.length}-char request`);
   try {
+    // Triage still runs when the ask was explicit — it is the cheapest way to decompose the work and
+    // to NAME THE APIS the mandatory research step needs. What changes is that its `complex` verdict
+    // no longer decides anything: a model must not be able to veto a user who said "plan it".
     const t = await triage(userInput);
-    log('INFO', 'plan_triage', { complex: String(t.complex), features: String(t.features.length), chars: String(userInput.length), reason: t.reason.slice(0, 160) });
-    if (!t.complex) {
+    log('INFO', 'plan_triage', {
+      complex: String(t.complex), explicit: String(explicit), features: String(t.features.length),
+      chars: String(userInput.length), reason: t.reason.slice(0, 160),
+    });
+    if (!explicit && !t.complex) {
       addMessage('system', `Plan mode: not needed — single-feature request (${userInput.length} chars).`);
       return null;
     }
 
-    addMessage('system', `Plan mode: ${t.features.length || 'multiple'} feature(s) detected — planning before executing.${t.reason ? ` ${t.reason}` : ''}`);
+    const why = explicit
+      ? 'you asked for it'
+      : `${t.features.length || 'multiple'} feature(s) detected in ${userInput.length} chars`;
+    addMessage('system', `Plan mode: ${why} — planning before executing.${!explicit && t.reason ? ` ${t.reason}` : ''}`);
 
     setActivityDetail('surveying the project');
     const survey = surveyProject();
@@ -209,6 +268,9 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     const path = join(dir, planFilename());
     const header = [
       '<!-- Written by ayin plan mode before implementation started. -->',
+      // Provenance: a plan read back a week later should say why it exists at all — an explicit ask
+      // and an automatic size trigger are different claims about how much the operator wanted this.
+      `<!-- Triggered by: ${explicit ? 'explicit request in the prompt' : `size (${userInput.length} chars) + triage`} -->`,
       `<!-- Session goal: ${goal || '(none)'} -->`,
       '',
       '# Plan',
@@ -225,7 +287,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     ].filter((l) => l !== undefined).join('\n');
     writeFileSync(path, `${header}${body.trim()}\n`);
 
-    log('INFO', 'plan_written', { path, chars: String(body.length), explorations: String(findings.length) });
+    log('INFO', 'plan_written', { path, chars: String(body.length), explorations: String(findings.length), trigger: explicit ? 'explicit' : 'size' });
     addMessage('system', `Plan written: ${path}`);
     return { path, body: body.trim(), features: t.features };
   } catch (err) {
