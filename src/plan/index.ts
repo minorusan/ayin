@@ -10,14 +10,18 @@
  *
  *   SIZE     prompt length ≥ planMinChars  →  ONE triage call: cross-feature / multi-feature?
  *                                             yes → plan.  no → straight through, nothing lost.
- *   EXPLICIT the prompt asks for it (`PLAN_TRIGGER`: "plan it", "deep investigate the codebase", …)
+ *   EXPLICIT the literal substring `/plan` is in the prompt (see `hasExplicitPlanMarker`, and
+ *            `/plan <text>` — the slash command in `index.ts` — which sets the same door via
+ *            `forcePlanNextTurn()` since it strips the token before the text gets here)
  *                                          →  plan, at ANY length, and triage cannot veto it.
  *
  * Length alone would drag every long bug report into planning; triage alone would need an LLM call on
  * every single turn. Together: one extra cheap call, only for genuinely big prompts. And the explicit
  * door exists because "plan the auth rewrite" is nine words: size is a proxy for "this needs thought",
- * and a proxy must never overrule the person who can just say so. `/plan <text>` is the same door with
- * no regex in the way.
+ * and a proxy must never overrule the person who can just say so. A prior version tried to widen this
+ * door with a natural-language regex ("plan it", "deep investigate the codebase", …); retired — plan
+ * mode is the most expensive gate in the system, and a fuzzy phrase match on it is exactly the kind of
+ * thing that misfires unpredictably from outside one specific conversation. `/plan` is unambiguous.
  *
  * THE PLAN, IN ORDER (each step feeds the next):
  *   1. SURVEY   — deterministic: what this project is, what it can serve, how it can be observed.
@@ -65,37 +69,26 @@ export interface PlanResult {
 }
 
 /**
- * The explicit "plan this" trigger — same shape as `RESEARCH_TRIGGER` / `DIAGRAM_TRIGGER` in
- * `agent.ts`, and tight for the same reason, only more so.
- *
- * Plan mode is by far the most expensive gate: a triage call, a survey, up to `planApiSearches` web
- * searches, `planExploreCalls` explore loops (each its own agentic loop) and a long document
- * generation. A false fire is minutes of a shared, often-starved GPU spent on a plan nobody asked for.
- * `DIAGRAM_TRIGGER` carries this scar in its own comment — bare `diagram` matched "diagrammatic", bare
- * `schema` matched "add a database schema migration file" — and **`plan` is a far more common English
- * word than either**: "what's the plan?", "the plan was to ship Friday", "our plan B". So every
- * alternative below is anchored to a verb phrase or an unambiguous compound. Never bare `\bplan\b`.
+ * The explicit door: the literal substring `/plan` anywhere in the prompt. Deliberately NOT a
+ * natural-language regex — a prior version matched "plan it", "deep investigate the codebase", "deep
+ * dive" and similar verb phrases, tightly anchored to avoid English words like "what's the plan?" or
+ * "the plan was to ship Friday". Retired anyway: a fuzzy phrase match on plan mode — the single most
+ * expensive gate in the system (triage + survey + web searches + explore loops + a long document) — is
+ * exactly the kind of thing that misfires in ways nobody can predict from outside a specific
+ * conversation. `/plan` is unambiguous, greppable, and matches how every other explicit door in this
+ * codebase works: one string, one sentence of documentation, no regression suite needed to keep
+ * matching how people phrase things in English.
  */
-export const PLAN_TRIGGER = new RegExp([
-  // asking for a plan
-  '(make|write|draw|draw up|give|need|want|create|prepare)\\s+(me\\s+)?(a|the)\\s+plan',
-  '\\bplan (it|this|that|out|first|ahead)\\b',
-  '\\bplan the \\w+',
-  '\\bplanning mode\\b', '\\bplan mode\\b',
-  // asking for the investigation that a plan is made of
-  '\\bdeep(ly)? investigate\\b', '\\binvestigate (it |this |the \\w+ )?(deeply|thoroughly)\\b',
-  '\\bdeep dive\\b', '\\bdeep-dive\\b',
-  '(study|explore|examine|analyse|analyze|map)\\s+(the\\s+)?(codebase|repo|repository|project|architecture)\\s+(thoroughly|deeply|first|properly|in depth)',
-  '\\b(thorough|deep) investigation\\b',
-  // asking to think before acting
-  '\\bthink it through first\\b', '\\bbefore (you |we )?(start|begin|code|implement),? (investigate|explore|plan|research)\\b',
-].join('|'), 'i');
+export function hasExplicitPlanMarker(userInput: string): boolean {
+  return userInput.includes('/plan');
+}
 
 /**
- * `/plan <text>` sets this: the same explicit door as `PLAN_TRIGGER`, with no regex in the way.
- *
- * One-shot, and consumed even when planning then fails — a flag that survived its turn would silently
- * plan the NEXT unrelated prompt, which is the sort of surprise that costs a GPU-minute and trust.
+ * `/plan <text>` (the interactive slash command in `index.ts`) sets this. It exists because that
+ * dispatcher STRIPS the `/plan` token before the text ever reaches `runPlan` — so the substring test
+ * above would otherwise never see it for that path. One-shot, and consumed even when planning then
+ * fails — a flag that survived its turn would silently plan the NEXT unrelated prompt, which is the
+ * sort of surprise that costs a GPU-minute and trust.
  */
 let forced = false;
 
@@ -210,7 +203,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
   // Two doors. SIZE is the automatic one; an EXPLICIT ASK is the other, and it ignores the size
   // threshold entirely — "plan the auth rewrite" is nine words and deserves a plan more than a
   // 2000-character bug report does.
-  const explicit = forced || PLAN_TRIGGER.test(userInput);
+  const explicit = forced || hasExplicitPlanMarker(userInput);
   forced = false; // one-shot, consumed here whatever happens next
   const minChars = getConfig('planMinChars', 2000);
   if (!explicit && (minChars <= 0 || userInput.length < minChars)) return null;
@@ -270,7 +263,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       '<!-- Written by ayin plan mode before implementation started. -->',
       // Provenance: a plan read back a week later should say why it exists at all — an explicit ask
       // and an automatic size trigger are different claims about how much the operator wanted this.
-      `<!-- Triggered by: ${explicit ? 'explicit request in the prompt' : `size (${userInput.length} chars) + triage`} -->`,
+      `<!-- Triggered by: ${explicit ? '/plan' : `size (${userInput.length} chars) + triage`} -->`,
       `<!-- Session goal: ${goal || '(none)'} -->`,
       '',
       '# Plan',

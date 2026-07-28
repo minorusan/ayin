@@ -140,7 +140,7 @@ spends the rest of its budget repairing its own first guess.
 | Door | Condition | Triage's verdict |
 |---|---|---|
 | **Size** | `prompt.length ≥ planMinChars` (2000) | decides — "not cross-feature" means no plan |
-| **Explicit** | `PLAN_TRIGGER` matches, or `/plan <text>` | **cannot veto** — you asked |
+| **Explicit** | the literal substring `/plan` is in the prompt (`hasExplicitPlanMarker`), or `/plan <text>` as its own slash command | **cannot veto** — you asked |
 
 Length alone would drag every long bug report into planning; triage alone would cost an LLM call on
 every turn. Together: one extra cheap call, only for genuinely big prompts. The explicit door exists
@@ -150,11 +150,13 @@ cheapest way to decompose the work and to name the APIs the research step needs)
 ignored. The plan's header records which door was used, so a plan read back a week later says why it
 exists. `AYIN_PLAN=0` opts out entirely; `planMinChars: 0` closes the size door only.
 
-`PLAN_TRIGGER` is anchored to verb phrases (`plan it`, `make a plan`, `deep investigate`, `deep dive`,
-`study the codebase thoroughly`, `think it through first`), never bare `\bplan\b`. This is the
-tightest of the three triggers on purpose: plan mode is the most expensive gate in the system, and
-`plan` is a far commoner English word than `diagram` or `schema` ever were — "what's the plan?", "the
-plan was to ship Friday". A false fire is minutes of a starved GPU on a plan nobody wanted.
+**The explicit door used to be a natural-language regex** (`plan it`, `make a plan`, `deep investigate`,
+`deep dive`, …), anchored to verb phrases so it wouldn't fire on ordinary uses of a common word ("what's
+the plan?", "the plan was to ship Friday"). Retired by operator decision: plan mode is the single most
+expensive gate in the system, and a fuzzy phrase match on it is exactly the kind of thing that misfires
+in ways nobody can predict from outside one specific conversation. `/plan` is unambiguous, greppable,
+and matches how every other explicit door in this codebase works — one string, one line of docs, no
+regression suite needed to keep tracking how people phrase things in English.
 
 **The plan, in order** — each step feeds the next:
 

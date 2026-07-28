@@ -192,22 +192,20 @@ act.pushActivity('QA 2/3', 'x');
 act.clearActivity();
 ok(act.activityText() === null, 'a turn ending clears every label, so none outlives its work');
 
-// ── plan mode's explicit door: it must fire on intent, not on length ──
+// ── plan mode's explicit door: the literal substring `/plan`, nothing fuzzier ──
+// A prior version matched natural-language phrases ("plan it", "deep investigate the codebase", …).
+// Retired: plan mode is the single most expensive gate in the system, and a fuzzy phrase match on it
+// is exactly the kind of thing that misfires unpredictably outside one specific conversation. Now it
+// is one unambiguous string — these cases exist to catch a REGRESSION back to fuzzy matching, not to
+// re-litigate English usage.
 console.log('\nplan trigger');
 const plan = await import(`file://${join(DIST, 'plan/index.js')}`);
-const fires = (s) => plan.PLAN_TRIGGER.test(s);
-for (const yes of [
-  'plan it', 'plan this properly', 'make a plan for the auth rewrite', 'plan the auth rewrite',
-  'deep investigate the codebase', 'investigate this thoroughly', 'do a deep dive',
-  'study the codebase thoroughly first', 'think it through first',
-  'before you start, investigate the render path', 'I need a plan',
-]) ok(fires(yes), `fires: "${yes}"`);
-// The expensive half: plan mode costs minutes of GPU, so ordinary English must NOT trigger it.
-for (const no of [
-  "what's the plan?", 'the plan was to ship on Friday', 'our plan B is a rewrite',
-  'the planner module is broken', 'fix the plan parser', 'explain the deployment plan',
-  'add a database schema migration', 'this investigation is done', 'plans change',
-]) ok(!fires(no), `stays quiet: "${no}"`);
+ok(plan.hasExplicitPlanMarker('/plan build the auth rewrite'), 'fires on a leading /plan');
+ok(plan.hasExplicitPlanMarker('do the migration, /plan it first'), 'fires on /plan anywhere in the prompt');
+ok(!plan.hasExplicitPlanMarker('plan it'), 'plain English "plan it" no longer fires (fuzzy trigger retired)');
+ok(!plan.hasExplicitPlanMarker('deep investigate the codebase'), '"deep investigate" no longer fires either');
+ok(!plan.hasExplicitPlanMarker("what's the plan?"), 'ordinary use of the word "plan" never fired and still does not');
+ok(!plan.hasExplicitPlanMarker('planning ahead'), 'a prefix match on "plan" does not count — the marker is literally "/plan"');
 
 // ── truncation: nothing silent, and the diff card is finally capped ──
 console.log('\ntool-result truncation');

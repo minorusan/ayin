@@ -119,9 +119,11 @@ repeat, so `status` keeps working — rate-limited, with an explicit "don't poll
 
 ## Plan mode — big requests get a plan first
 
-**Say so and it plans, at any size** — "plan it", "plan the auth rewrite", "deep investigate the
-codebase", "deep dive", "think it through first", or `/plan <text>` for the no-ambiguity door. An
-explicit ask cannot be vetoed by triage; you asked, so it plans.
+**Put `/plan` anywhere in the prompt and it plans, at any size** — `/plan add OAuth login`, or
+`/plan <text>` as its own slash command. Literal and unambiguous on purpose: an earlier version matched
+natural-language phrases ("plan it", "deep investigate the codebase") and was retired, because plan mode
+is the most expensive gate in the system and a fuzzy phrase match on it misfires unpredictably outside
+one specific conversation. An explicit `/plan` cannot be vetoed by triage; you asked, so it plans.
 
 Otherwise a prompt of 2000+ characters is triaged in one cheap call: is this actually cross-feature? If it is,
 ayin surveys the project, explores the relevant code, and writes **`ayin-plan-<timestamp>.md`** —
