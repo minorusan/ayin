@@ -13,6 +13,3 @@ AGENTS.md
 docs/TechDebt.md
 docs/HANDOFF.md
 
-# NOT ignored on purpose: fixes/ — `/fix` tracks its own request files there (fixes/README.md is
-# committed). Gating that directory is audit remediation #1 and a behaviour change to make on purpose,
-# not a side effect of this ignore block.

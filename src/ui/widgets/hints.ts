@@ -20,7 +20,6 @@ const COMMANDS: SlashCommand[] = [
   { name: '/plan',    description: 'Force plan mode: survey → third-party API research → explore → a written ayin-plan-*.md, then execute it' },
   { name: '/model',   description: 'Pick the served model (popup) · /model <name> to switch straight away' },
   { name: '/lock',    description: 'Hold the model for this session — ⚿ in the bar; frees itself if this client dies · /unlock' },
-  { name: '/fix',     description: 'Ask headless Claude to change ayin itself — implements, commits, publishes (or rejects)' },
   { name: '/summary', description: 'Show session summary (Esc to close)' },
   { name: '/resume',  description: "This directory's past sessions — /resume <n> restores one · /resume all" },
   { name: '/clear',   description: 'Clear chat' },

@@ -52,10 +52,6 @@ export interface StatusState {
   /** Who owns the llm resource — the AUTHORITY, which decides the model, NOT queue priority.
    *  `mine` = an ayin-family holder (our launcher, the watcher, or a dispatched code agent). */
   authority: { holder: string; expiresInMs: number; mine: boolean } | null;
-  /** `/fix` queue: a headless Claude implementing a change to ayin itself, and any rejection
-   *  files sitting unacknowledged in the repo. Rejections are LOUD — red, uppercase — because a
-   *  refused fix is silent otherwise and would just look like nothing happened. */
-  fix: { running: boolean; queued: number; rejected: number } | null;
 }
 
 /** Each phase owns its animation: frames + how many base ticks (80ms) per frame + color.
@@ -86,7 +82,6 @@ export class StatusBar {
     gpu: null,
     queue: null,
     authority: null,
-    fix: null,
     gate: null,
   };
 
@@ -110,9 +105,9 @@ export class StatusBar {
     if (HEADLESS) return;
     Object.assign(this.state, partial);
 
-    // Animate only while something is moving (an LLM phase, or a fix being worked on); the ticker
-    // stops itself when nothing is — idle costs zero CPU.
-    const wantsTicker = !!this.state.llm || !!this.state.fix?.running;
+    // Animate only while an LLM phase is moving; the ticker stops itself when nothing is —
+    // idle costs zero CPU.
+    const wantsTicker = !!this.state.llm;
     if (wantsTicker && !this.unTick) {
       this.unTick = onTick((t) => { this.tick = t; this.redraw(); });
     } else if (!wantsTicker && this.unTick) {
@@ -238,16 +233,6 @@ export class StatusBar {
       }
     }
 
-    // A fix in flight, then the loud one. Rejections stay up until `/fix clear`.
-    const fix = this.state.fix;
-    if (fix && (fix.running || fix.queued > 0)) {
-      const q = fix.queued > 0 ? ` +${fix.queued}` : '';
-      const frame = fix.running ? ['⚒', '⚒', ' '][Math.floor(this.tick / 4) % 3] : '·';
-      parts.push(`{${theme.tool}-fg}${frame} fix${fix.running ? 'ing' : ' queued'}${q}{/}`);
-    }
-    if (fix && fix.rejected > 0) {
-      parts.push(`{${theme.err}-fg}{bold}FIX REJECTED${fix.rejected > 1 ? ` (${fix.rejected})` : ''}{/bold}{/}`);
-    }
 
     if (this.state.update) parts.push(`{${theme.warn}-fg}↑ ${this.state.update}{/}`);
 

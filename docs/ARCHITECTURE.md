@@ -691,46 +691,11 @@ tree knows about the internals). Design rules:
   two role models via `{op:'status'}`. Under 100 columns the model tag and the GPU temperature
   are dropped so the bar still fits. **Tech debt** — see `docs/TechDebt.md`.
 
-## `/fix` — ayin fixing itself (`fix.ts`)
-
-`/fix <what should change about ayin>` writes a **fix request into ayin's own codebase**
-(`fixes/fix-<id>.md`) and runs **headless Claude Code** (`claude --dangerously-skip-permissions -p`)
-over it in the source checkout. The agent either implements the change — typecheck, build, docs,
-patch-version bump, commit, `npm publish`, push if fast-forward — or writes
-`fixes/rejection-<id>.md` explaining what it would need, and stops. Its brief says plainly that a
-clean refusal is a good outcome and a wrong guess published to every machine is not, and that a
-part-done change must be reverted before rejecting: **never leave the build broken**.
-
-- **Survive the power cut.** The queue is a file (`~/.ayin-cli/fixes/state.json`, written
-  atomically via write-then-rename), and the agent is spawned **detached** inside a bash wrapper
-  that logs to `~/.ayin-cli/fixes/<id>.log`, writes an **exit marker** and clears the lock however
-  it ends. Killing ayin, the terminal or the machine does not kill a fix in flight and does not
-  lose a queued one. At every boot the supervisor reconciles: exit marker → finalize
-  (`done`/`rejected`/`failed`); no marker and the pid is gone → **requeued automatically**. No
-  human in the loop. *Verified by killing a run mid-flight with a stub agent: requeued, then
-  completed on the next pass.*
-- **One at a time.** Every fix mutates the same working tree, so a lockfile serializes them and
-  extras queue in order; a lock older than 2h is treated as crashed so a dead run can't block the
-  queue forever.
-- **Ids** are `YYYYMMDD-HHMMSS` with a `-2`/`-3` suffix on collision — seconds alone are not unique,
-  and two requests sharing an id would overwrite one another's file and inherit each other's
-  rejection.
-- **Command surface.** `/fix <prompt>` request · `/fix` the board (running, queued, rejections with
-  their first reason line, else recent history) · `/fix show <id>` read a rejection · `/fix clear`
-  acknowledge them (moves to `fixes/archive/`).
-- **Status bar.** `⚒ fixing` (amber, blinking) while an agent works, `· fix queued +N` when waiting,
-  and a bold red **`FIX REJECTED`** that stays until acknowledged — a refusal is silent otherwise
-  and would just look like nothing happened. Rejections are counted from the repo, so one committed
-  on another machine and pulled in still shows.
-- Needs a **source checkout** (`AYIN_REPO`, else the module's own repo, else `~/maradel/ayin`,
-  `~/ayin`) and the claude binary (`AYIN_CLAUDE_BIN`, default `~/.local/bin/claude`); an ayin
-  installed from the registry has neither and says so rather than failing obscurely.
-
 ## Update indicator (`updater.ts`)
 
 The status bar carries `↑ vX available — ayin update` whenever the registry's `latest` is newer
-than the running build: checked at boot, every 10 minutes, and immediately after a `/fix` finishes
-(which may have just published one). The registry is `AYIN_UPDATE_REGISTRY`, else npm's own
+than the running build: checked at boot and every 10 minutes. The registry is
+`AYIN_UPDATE_REGISTRY`, else npm's own
 configured registry **only when that is a private one** — a checkout pointed at public npmjs gets
 no passive check, since `ayin` is a plausible public name and that would both phone home uninvited
 and risk advertising a stranger's package as your update. `AYIN_UPDATE_CHECK=0` disables it.
