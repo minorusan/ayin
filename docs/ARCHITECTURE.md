@@ -281,6 +281,14 @@ tree knows about the internals). Design rules:
   indented `▸/│/╰` amber frames = tool cards (a dedicated `tool` message role, not `system`),
   `· dim` = system notices (the quietest thing on screen). The input prompt is the matching
   accent `❯`. User lines are tag-escaped like tool output (braces in prompts are literal).
+- **Vertical rhythm + indent** (`widgets/chat.ts`: `GUTTER`, `TOOL_INDENT`, `startsToolCard`):
+  spacing carries the structure, since everything one line apart read as one wall of text. A user
+  prompt gets **two** blank lines (it starts a new exchange), an assistant turn and a system notice
+  get one on a speaker change, and **each tool card gets one before its `▸` header**. The header —
+  not the message boundary — is the separator because a card is *two* messages (call, then
+  result+footer), so splitting on role would cut cards in half. Tool lines are indented
+  `TOOL_INDENT` (4 cells, a tab step) vs the `GUTTER` (2) used for wrapped speaker text, so machine
+  output reads as subordinate to the conversation instead of competing with it at the same margin.
 - **Tool cards** (`widgets/chat.ts`): a call opens with a styled header
   (`formatToolCallForChat` → `▸ bash · cat package.json`), the result renders via
   `formatToolResultForChat` — `write_file` gets the diff card, every other tool a `│`-gutter

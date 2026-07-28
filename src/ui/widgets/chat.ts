@@ -14,6 +14,21 @@ import { theme } from '../theme.js';
 import { ThinkingIndicator, type AgentState } from './thinking.js';
 import { getGoal, onGoalChange } from '../../goal.js';
 
+/**
+ * Indentation, in one place so the transcript has a consistent left rhythm.
+ * `GUTTER` aligns wrapped speaker text under its glyph; `TOOL_INDENT` is a tab-width step further in
+ * for machine output (tool cards), which reads as subordinate instead of competing with the
+ * conversation at the same margin.
+ */
+const GUTTER = '  ';
+const TOOL_INDENT = '    ';
+
+/** Does this tool message OPEN a card (the `▸ tool · params` header) rather than continue one?
+ *  Matched on the glyph after any leading blessed tags, which is what the header always starts with. */
+function startsToolCard(content: string): boolean {
+  return content.replace(/^(?:\{[^}]*\})+/, '').startsWith('▸');
+}
+
 /** OBJECTIVE card: label + how many wrapped rows of goal text it may grow to. */
 const TITLE = 'OBJECTIVE';
 const MAX_CARD_ROWS = 3;
@@ -228,9 +243,17 @@ export class ChatLog {
     //   ◉ text        — ayin speaking (ayin = "eye"; accent glyph on the first line)
     //   ▸ │ ╰ cards   — tool calls (indented one step under the flow, amber frame)
     //   · dim         — system notices (quietest thing on screen)
+    // VERTICAL RHYTHM. A turn is prompt → tool cards → answer, and with everything one line apart it
+    // read as one wall of text. A SPEAKER CHANGE earns a blank line (two before a user prompt, which
+    // starts a new exchange); consecutive tool messages do NOT, because a call and its result are
+    // separate messages that must stay one visually contiguous card.
+    let prevRole: MessageRole | null = null;
     for (const msg of this.messages) {
+      const speakerChanged = prevRole !== msg.role;
+      prevRole = msg.role;
+
       if (msg.role === 'user') {
-        lines.push('');
+        lines.push('', ''); // a new exchange starts — the widest gap in the transcript
         for (const line of msg.content.split('\n')) {
           lines.push(`{${theme.accent}-fg}▌{/} {bold}${escapeBlessedTags(line)}{/bold}`);
         }
@@ -243,16 +266,24 @@ export class ChatLog {
           if (wm) lines.push(wm);
         }
         const rendered = renderMarkdown(msg.content).split('\n');
-        rendered.forEach((line, i) => {
-          lines.push(i === 0 ? `{${theme.accent}-fg}◉{/} ${line}` : `  ${line}`);
+        rendered.forEach((line, i2) => {
+          lines.push(i2 === 0 ? `{${theme.accent}-fg}◉{/} ${line}` : `${GUTTER}${line}`);
         });
       } else if (msg.role === 'tool') {
+        // Tool cards sit a tab in from the edge, so machine output is visibly subordinate to the
+        // conversation rather than competing with it at the same margin.
+        //
+        // A card is TWO messages (the ▸ call, then the result+footer), so role alone can't tell a new
+        // card from the tail of the current one — separating on every tool message would split cards
+        // down the middle. The ▸ header is the card boundary: blank before it, nothing before a result.
+        if (startsToolCard(msg.content)) lines.push('');
         for (const line of msg.content.split('\n')) {
-          lines.push(`  ${line}`);
+          lines.push(`${TOOL_INDENT}${line}`);
         }
       } else {
+        if (speakerChanged) lines.push(''); // system notices shouldn't crowd the answer above them
         msg.content.split('\n').forEach((line, i) => {
-          lines.push(`  {${theme.dim}-fg}${i === 0 ? '· ' : '  '}${line}{/}`);
+          lines.push(`${GUTTER}{${theme.dim}-fg}${i === 0 ? '· ' : '  '}${line}{/}`);
         });
       }
     }
