@@ -35,6 +35,7 @@
  * it catches.
  */
 
+import { pushActivity, setActivityDetail } from '../activity.js';
 import { log } from '../log.js';
 import { getConfig } from '../prompts.js';
 import { recordQa } from '../session-record.js';
@@ -172,19 +173,22 @@ export async function qaGate(
     return { action: 'exhausted', pass, maxPasses, verdict: null, card };
   }
 
+  // One named phase for the whole pass. The wait narrator reads this instead of overwriting it, and
+  // the status bar keeps `▣ QA 1/3` lit even in the gaps where no LLM call is running — so a review
+  // spending the user's GPU never looks like an ordinary turn. See activity.ts.
+  const endPhase = pushActivity(`QA ${pass}/${maxPasses}`, `probing ${files.length} changed file(s)`);
   try {
-    setAgentStatus(`QA pass ${pass}/${maxPasses} — probing…`);
     const webview = await probeWebview(files);
     const api = probeThirdPartyApi(files);
     const dims: Set<Dimension> = dimensionsOf(files, webview.applies, api.applies);
 
     if (!turn.criteria) {
-      setAgentStatus(`QA pass ${pass}/${maxPasses} — deriving acceptance criteria…`);
+      setActivityDetail('deriving acceptance criteria from your prompts');
       turn.criteria = await deriveCriteria(files, goal, dims);
     }
     if (isInterrupted()) return { action: 'skipped', pass, maxPasses, verdict: null, card: 'QA skipped (interrupted).' };
 
-    setAgentStatus(`QA pass ${pass}/${maxPasses} — reviewing ${files.length} artifact(s)…`);
+    setActivityDetail(`reviewing ${files.length} artifact(s) against ${turn.criteria.length} criteria`);
     const evidence = await gatherEvidence(files);
     const verdict = await reviewArtifacts(turn.criteria, evidence, goal, answer, pass);
     turn.lastIssues = verdict.issues;
@@ -222,6 +226,7 @@ export async function qaGate(
     log('ERROR', 'qa_gate_error', { error: err instanceof Error ? err.message : String(err) });
     return { action: 'skipped', pass, maxPasses, verdict: null, card: `QA skipped (gate error: ${err instanceof Error ? err.message : String(err)})` };
   } finally {
+    endPhase();
     setAgentStatus('');
   }
 }

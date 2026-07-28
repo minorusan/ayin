@@ -160,5 +160,37 @@ writeFileSync(planDoc, '# Plan\n');
 q.qaNoteTouched(planDoc);
 ok(!q.qaShouldRun(`Done. ${'x'.repeat(500)}`).files.some((f) => f.path === planDoc), 'a plan document is not reviewed as its own artifact');
 
+// ── the indication: a gate must be visible while it spends your GPU ──
+console.log('\ngate visibility');
+const ui = await import(`file://${join(DIST, 'ui.js')}`);
+const seen = { chip: [], line: [] };
+ui.status.set = (partial) => { if ('gate' in partial) seen.chip.push(partial.gate); };
+ui.chat.setAgentState = (_state, label) => { seen.line.push(label ?? ''); };
+const act = await import(`file://${join(DIST, 'activity.js')}`);
+
+const endQa = act.pushActivity('QA 1/3', 'probing 4 changed file(s)');
+ok(seen.chip.at(-1)?.label === 'QA 1/3', 'a phase lights the status-bar chip');
+ok(seen.line.at(-1) === 'QA 1/3 · probing 4 changed file(s)', 'and paints the thinking line', seen.line.at(-1));
+act.setActivityDetail('reviewing 4 artifacts');
+ok(seen.chip.at(-1)?.detail === 'reviewing 4 artifacts' && seen.chip.at(-1)?.label === 'QA 1/3', 'the step advances without losing the phase label');
+// The regression that made this whole module necessary: narrateWait used to paint 'thinking' over the
+// gate's label every 2 seconds. It now leads with the activity — this is its exact call-site expression.
+ok((act.activityText() ?? 'thinking') !== 'thinking', 'the wait narrator leads with the phase, not "thinking"', act.activityText());
+
+const endInner = act.pushActivity('PLAN', 'researching an API');
+ok(act.activityText().startsWith('PLAN'), 'phases nest');
+endInner();
+ok(act.activityText().startsWith('QA 1/3'), 'popping an inner phase restores the outer one');
+
+const endA = act.pushActivity('A'); const endB = act.pushActivity('B');
+endA();
+ok(act.activityText() === 'B', 'a stale exit removes its own entry, not whatever is on top');
+endB();
+endQa(); endQa();
+ok(act.activityText() === null && seen.chip.at(-1) === null, 'exit is idempotent and clears both surfaces');
+act.pushActivity('QA 2/3', 'x');
+act.clearActivity();
+ok(act.activityText() === null, 'a turn ending clears every label, so none outlives its work');
+
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

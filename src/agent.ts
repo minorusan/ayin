@@ -34,6 +34,7 @@ import { syncSession, getSessionId } from './tiferet-session.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { extractSignals } from './tools/signals.js';
 import { qaBeginTurn, qaNoteTouched, qaShouldRun, qaGate, qaShowCard } from './qa/index.js';
+import { clearActivity } from './activity.js';
 import { guardBeginTurn, guardCheck, guardDirective, guardNoteDenied } from './tool-guard.js';
 import { planContextBlock, runPlan } from './plan/index.js';
 
@@ -635,6 +636,9 @@ export async function runAgent(userInput: string): Promise<void> {
   // QA gate: snapshot what was already dirty BEFORE this turn touches anything, so pre-existing
   // uncommitted work is never reviewed as if this turn produced it.
   qaBeginTurn();
+  // No gate label may outlive the turn it described — a status bar still claiming `▣ QA 2/3` after
+  // the answer landed is worse than no indicator at all.
+  clearActivity();
 
   // Detect project expertise once
   if (!projectExpertise) {

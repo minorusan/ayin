@@ -41,6 +41,10 @@ export interface StatusState {
   model: { name: string; loaded?: string; booked: boolean; swapping: boolean; locked?: boolean } | null;
   /** Shared-GPU telemetry from the backend host (null = unknown / no card → segment hidden). */
   gpu: { util: number; usedMiB: number; totalMiB: number; tempC: number } | null;
+  /** A named phase of the loop that is not the plain agent turn — plan mode, a QA pass. Driven by
+   *  `activity.ts`. It stays lit for the whole phase, including the gaps between LLM calls where
+   *  nothing narrates, so "ayin is spending your GPU on a review right now" is always visible. */
+  gate: { label: string; detail?: string } | null;
   /** The backend's single-slot LLM scheduler: what holds the GPU and how many calls wait behind
    *  it, plus OUR OWN place in line when a request of ours is queued. Shown so a slow turn reads as
    *  "#4 of 6, behind book_writer", not "ayin is slow". */
@@ -83,6 +87,7 @@ export class StatusBar {
     queue: null,
     authority: null,
     fix: null,
+    gate: null,
   };
 
   constructor() {
@@ -151,6 +156,16 @@ export class StatusBar {
     if (this.state.connection === 'connected') parts.push(`{${theme.ok}-fg}●{/} connected`);
     else if (this.state.connection === 'connecting') parts.push(`{${theme.warn}-fg}◐{/} connecting`);
     else parts.push(`{${theme.err}-fg}●{/} disconnected`);
+
+    // A named phase goes FIRST after the connection dot, because it changes what everything else on
+    // this bar means: the tokens and the GPU load you are looking at belong to a review or a planning
+    // pass, not to the answer you asked for. ▣ = ayin is working on its own initiative.
+    if (this.state.gate) {
+      const g = this.state.gate;
+      const narrow = (screen.width as number) < 100;
+      const detail = !narrow && g.detail ? ` {${theme.muted}-fg}${g.detail}{/}` : '';
+      parts.push(`{${theme.accent}-fg}▣ ${g.label}{/}${detail}`);
+    }
 
     // The model is a permanent fact of the session, not an event: always shown once known.
     // ⬢ = booked by us (we hold the llm authority) · ⬡ = the shared model · ⇆ = mid-swap.

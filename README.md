@@ -176,6 +176,22 @@ claim is reviewed before you have to trust it:
 `AYIN_QA=0` opts out; `qaMaxPasses` / `qaMinAnswerChars` tune it. The reviewer's prompts (`qaCriteria`,
 `qaReview`) live in `prompts.json` like every other prompt, so you can rewrite the bar yourself.
 
+### You can always see when a gate is running
+
+Both gates spend GPU time on work you didn't directly ask for, so neither is allowed to hide behind a
+generic spinner. While one is active the thinking line names it and keeps the queue detail that tells
+you *why* it's slow:
+
+```
+▍ ⠹ PLAN · researching the Stripe API (current docs, not recall) · ⏳ queued #2/3      1m12s
+▍ ⠹ QA 1/3 · reviewing 4 artifacts against 7 criteria · ▸ generating on qwen3.6:27b     41s
+```
+
+and the status bar carries a `▣ PLAN` / `▣ QA 1/3` chip that stays lit through the parts with no model
+call at all — probing ports, snapshotting git, writing the plan file. The transcript records the
+decisions too: which features triage found, where the plan was written, and a verdict card for every QA
+pass. Ctrl+C during a gate stops it like anything else.
+
 ### Diagrams — "I don't understand, explain better"
 
 Say that, or anything like it, and ayin draws the picture *before* it answers:

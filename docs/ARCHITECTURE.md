@@ -105,6 +105,30 @@ Three gates wrap the loop, each on a **deterministic trigger** — no model deci
 | **Tool guard** | every tool call, always | `tool-guard.ts` |
 | **QA gate** | the turn changed files **and** the final message reads like a completion report | `qa/` |
 
+### Making a gate visible (`activity.ts`)
+
+A gate spends the user's GPU on work they did not directly ask for, so it must never look like an
+ordinary turn. That is harder than it sounds: **every** LLM call goes through
+`narrateWait('thinking', …)` (see below), which repaints the thinking line every 2 s with its own text.
+The gates' first implementation set a status label and watched it get overwritten two seconds later —
+so a three-pass review, the slowest thing ayin does, was indistinguishable from a normal reply.
+
+So "what ayin is doing right now" is **state, not a message**. `activity.ts` holds a small stack
+(phases nest: a QA pass contains LLM calls) and drives both surfaces:
+
+- the **thinking line**, because `narrateWait` now *leads* with the activity instead of overwriting it:
+  `▍⠹ QA 1/3 · reviewing 4 artifacts · ▸ generating on qwen3.6:27b   38s`
+- a **status-bar chip** (`▣ QA 1/3`), which stays lit through the gaps where no LLM call is running and
+  nothing narrates at all — the probe phase, the git snapshot, writing the plan file. It sits first
+  after the connection dot because it changes what the rest of the bar means: those tokens and that GPU
+  load belong to a review, not to the answer you asked for.
+
+A stack rather than a single value so pops don't fight (an inner phase ending restores the outer one),
+exits are idempotent and remove their own entry rather than whatever is on top, and `clearActivity()`
+runs at the start of every turn — a bar still claiming `▣ QA 2/3` after the answer landed would be
+worse than no indicator. In the chat transcript the gates also speak for themselves: plan mode reports
+its triage decision and the plan's path, and the QA gate prints a verdict card per pass.
+
 ## Plan mode (`src/plan/`)
 
 A 2000-character request is usually several features wearing one paragraph. Handed straight to the
@@ -736,6 +760,8 @@ src/
 ├── tools/              explore.ts · status.ts · signals.ts · web-search.ts (SearXNG→DDG) ·
 │                       diagram.ts (validated PlantUML) · send-push.ts
 ├── tool-guard.ts       per-turn repeat/deny/poll policy: warn → BLOCK → say so in the system prompt
+├── activity.ts         the current named phase (PLAN / QA n/m) → thinking line + status-bar chip;
+│                       read by wait-narrator so a gate is never repainted as plain "thinking"
 ├── plan/               plan mode for big cross-feature prompts:
 │   ├── survey.ts       deterministic project survey (what it is, can serve, how it's observed)
 │   └── index.ts        size trigger + triage → survey → explore → ayin-plan-<ts>.md → pre-prompt

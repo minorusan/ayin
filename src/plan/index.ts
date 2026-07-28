@@ -41,6 +41,7 @@ import { getConfig, getPrompt } from '../prompts.js';
 import { recentPrompts } from '../session-record.js';
 import { exploreExecute } from '../tools/explore.js';
 import { webSearch } from '../tools/web-search.js';
+import { pushActivity, setActivityDetail } from '../activity.js';
 import { addMessage, setAgentStatus } from '../ui.js';
 import { renderSurvey, surveyProject, type Survey } from './survey.js';
 
@@ -102,7 +103,7 @@ async function researchApis(apis: string[]): Promise<string> {
         + `The plan must say so and make looking this up the first implementation step.`);
       continue;
     }
-    setAgentStatus(`Planning — researching the ${api} API (current docs)…`);
+    setActivityDetail(`researching the ${api} API (current docs, not recall)`);
     try {
       const results = await webSearch(`${api} API official documentation current version authentication endpoints rate limits ${new Date().getFullYear()}`);
       spent++;
@@ -141,7 +142,7 @@ async function exploreContext(userInput: string, features: string[], survey: Sur
 
   const findings: string[] = [];
   for (let i = 0; i < questions.length; i++) {
-    setAgentStatus(`Planning — exploring context (${i + 1}/${questions.length})…`);
+    setActivityDetail(`exploring the code (${i + 1}/${questions.length})`);
     try {
       const r = await exploreExecute({ question: questions[i], context: `Project: ${survey.kind} at ${survey.root}` });
       if (r && r.length > 40) findings.push(r.slice(0, 8000));
@@ -161,8 +162,11 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
   const minChars = getConfig('planMinChars', 2000);
   if (minChars <= 0 || userInput.length < minChars) return null;
 
+  // One named phase for the whole planning pass. The wait narrator leads its line with this and the
+  // status bar keeps `▣ PLAN` lit, so minutes of triage → research → exploration → writing never look
+  // like an ordinary "thinking". See activity.ts.
+  const endPhase = pushActivity('PLAN', `triaging a ${userInput.length}-char request`);
   try {
-    setAgentStatus('Large request — checking whether it needs a plan…');
     const t = await triage(userInput);
     log('INFO', 'plan_triage', { complex: String(t.complex), features: String(t.features.length), chars: String(userInput.length), reason: t.reason.slice(0, 160) });
     if (!t.complex) {
@@ -172,7 +176,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
 
     addMessage('system', `Plan mode: ${t.features.length || 'multiple'} feature(s) detected — planning before executing.${t.reason ? ` ${t.reason}` : ''}`);
 
-    setAgentStatus('Planning — surveying the project…');
+    setActivityDetail('surveying the project');
     const survey = surveyProject();
     // Mandatory, before exploration: if somebody else's API is involved, get its CURRENT shape from
     // the web. Everything downstream (the plan, then the implementation) is written against this
@@ -181,7 +185,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     if (t.apis.length) addMessage('system', `Plan mode: third-party API research — ${t.apis.join(', ')}`);
     const findings = await exploreContext(userInput, t.features, survey);
 
-    setAgentStatus('Planning — writing the plan…');
+    setActivityDetail('writing the plan');
     const prompts = recentPrompts(12);
     const body = await llmChat([{
       role: 'user',
@@ -225,6 +229,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     log('WARN', 'plan_failed', { error: err instanceof Error ? err.message : String(err) });
     return null;
   } finally {
+    endPhase();
     setAgentStatus('');
   }
 }

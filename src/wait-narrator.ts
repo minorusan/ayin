@@ -26,6 +26,7 @@
 import { HEADLESS, setAgentState } from './ui.js';
 import { fetchCatalog, fetchGpu, findOwnPlace, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
 import { currentRequestId } from './connection.js';
+import { activityText } from './activity.js';
 
 const POLL_MS = 2_000;
 /** Only blame the priority band once the wait is clearly not just "the model is thinking". */
@@ -83,7 +84,10 @@ export async function narrateWait<T>(what: string, fn: () => Promise<T>): Promis
     try {
       const [cat, tel] = await Promise.all([fetchCatalog(), fetchGpu()]);
       if (done) return; // the call finished while we were asking — don't paint a stale reason
-      setAgentState('thinking', compose(what, cat, tel.queue, tel.gpu, Date.now() - started));
+      // A named phase (a QA pass, plan-mode research) LEADS the line instead of being overwritten by
+      // it: `QA 1/3 · reviewing 4 artifacts · ▸ generating on qwen3.6:27b`. Without this, the two
+      // slowest things ayin does are indistinguishable from an ordinary turn.
+      setAgentState('thinking', compose(activityText() ?? what, cat, tel.queue, tel.gpu, Date.now() - started));
     } catch { /* the reason is a nicety; never let it break the turn */ }
   };
 
