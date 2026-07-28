@@ -34,7 +34,8 @@ import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { llmChat, refreshActiveModel } from './llm/manager.js';
 import { connect, keliBaseUrl } from './connection.js';
-import { acquireLlm, type LlmHold } from './resource-client.js';
+import { acquireLlm, type LlmHold } from './llm/authority.js';
+import { initLlmProvider } from './llm/select.js';
 import { prompts, packagePath } from './prompts-service.js';
 import { log } from './log.js';
 
@@ -136,7 +137,9 @@ function entryKey(e: { repo?: string; commit?: string; kind?: string; ts?: numbe
 }
 
 // llm authority (one door to the GPU): reviews take the llm resource as the `ayin` authority per
-// backlog batch via acquireLlm() (resource-client.ts) — gemma → qwen on gained, revert on release.
+// backlog batch via acquireLlm() (llm/authority.ts) — gemma → qwen on gained, revert on release.
+// A provider with no authority layer answers 'no-resource-layer' and the batch runs on whatever
+// model is being served; the watcher is unchanged either way.
 // BUSY (podcast render, code_agent) → reviews DEFER to a later poll; a background reviewer waits
 // its turn, it never side-doors the GPU. No resource layer → best-effort on the served model.
 
@@ -978,6 +981,7 @@ export async function runWatch(args: string[]): Promise<void> {
   }
 
   await connect(); // marks the LLM transport ready (HTTP; per-call failures are retried above)
+  await initLlmProvider(); // decide direct vs resource once, before the first backlog pass
 
   const retryState = new Map<string, { attempts: number; nextTryAt: number }>();
   out(`ayin watch daemon up (pid ${process.pid}) — queue: ${QUEUE_FILE}`);

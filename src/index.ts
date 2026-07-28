@@ -14,14 +14,15 @@ import {
 } from './ui.js';
 import { connect, disconnect, onConnectionChange, isConnected, currentRequestId } from './connection.js';
 import { refreshActiveModel } from './llm/manager.js';
+import { initLlmProvider } from './llm/select.js';
 import { getSummaryText, getSummary, resetSummary } from './summary.js';
 import { estimateSessionTokens } from './tokens.js';
 import { loadHistory, pushEntry } from './history.js';
 import { forcePlanNextTurn } from './plan/index.js';
 import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation } from './agent.js';
 import { startPromptServer } from './prompt-server.js';
-import { acquireLlm, type LlmHold } from './resource-client.js';
-import { handleModelCommand, releaseModelHold, isModelBooked, lockSession, unlockSession, isSessionLocked } from './model-picker.js';
+import { acquireLlm, type LlmHold } from './llm/authority.js';
+import { handleModelCommand, releaseModelHold, isModelBooked, lockSession, unlockSession, isSessionLocked, lockSupported } from './model-picker.js';
 import { showDialog } from './dialog.js';
 import { startLlmStatusPoll, findOwnPlace } from './llm-status.js';
 import { startUpdateWatch, checkForUpdate } from './updater.js';
@@ -450,6 +451,12 @@ onInput(async (text: string) => {
       case '/lock': {
         // Hold the model for this session: short TTL + fast keepalive, so it self-releases if this
         // client dies rather than stranding the GPU. See model-picker.ts#lockSession.
+        // An LLM provider without an authority layer has nothing to lock — say it once, plainly,
+        // because the user asked; nothing else in the UI ever mentions locking on such a setup.
+        if (!(await lockSupported())) {
+          addMessage('system', 'No authority layer on this LLM endpoint — /lock has nothing to hold here.');
+          return;
+        }
         if (isSessionLocked()) { addMessage('system', 'Already locked. /unlock releases it.'); return; }
         const err = await lockSession();
         if (err) { addMessage('system', `/lock failed: ${err}`); return; }
@@ -558,7 +565,7 @@ onInput(async (text: string) => {
         }
         const key = parts[1];
         const value = parts.slice(2).join(' ');
-        const keyMap: Record<string, string> = { 'openai-key': 'openAiKey', 'keli-url': 'keliUrl', 'update-registry': 'updateRegistry' };
+        const keyMap: Record<string, string> = { 'openai-key': 'openAiKey', 'keli-url': 'keliUrl', 'update-registry': 'updateRegistry', 'llm-provider': 'llmProvider' };
         const configKey = keyMap[key] ?? key;
         setConfigValue(configKey, value);
         addMessage('system', `Set ${key} ✓`);
@@ -611,7 +618,8 @@ onInput(async (text: string) => {
         addMessage('system', '/resume <n>|<id> — restore one by list number or id prefix; new turns append to its record');
         addMessage('system', '/plan <text> — force plan mode: survey, API research, exploration, then a written plan');
         addMessage('system', '/clear — clear chat');
-        addMessage('system', '/set keli-url <http://host:9100> — point ayin at the Maradel backend (gemma) on the LAN');
+        addMessage('system', '/set keli-url <http://host:9100> — point ayin at the LLM endpoint (an adapter, or a backend)');
+        addMessage('system', '/set llm-provider <direct|resource|auto> — how much of that endpoint to expect (default: auto-detect)');
         addMessage('system', '/set update-registry <http://host:4873> — where `ayin update` looks (public npm is refused: "ayin" there is someone else)');
         addMessage('system', '/set openai-key <sk-...> — configure OpenAI API key');
         addMessage('system', '/reset — restore default prompts');
@@ -675,6 +683,9 @@ async function main(): Promise<void> {
     return;
   }
   loadRules(process.cwd());
+  // Decide WHICH LLM provider serves this machine before anything paints or asks for a capability.
+  // Never throws: an endpoint that exposes no resource surface (or none at all) lands on `direct`.
+  await initLlmProvider();
   if (HEADLESS) {
     await runHeadless();
     return;
@@ -742,11 +753,16 @@ async function runInteractive(): Promise<void> {
   // It also pins the model, which stops the gemma↔qwen flapping mid-session that another consumer's
   // ownership change would otherwise cause. Self-releasing (10-min TTL + 2-min keepalive), released
   // on /quit, and opt-out with AYIN_AUTOLOCK=0 for a session that should yield to background work.
+  // On a provider with no authority layer this is not a failure to report — there is no lock to
+  // take and never was. Check first and stay silent, or every public clone opens with an error
+  // about a resource layer its owner has never heard of.
   if (process.env.AYIN_AUTOLOCK !== '0') {
-    void lockSession().then((err) => {
+    void (async () => {
+      if (!(await lockSupported())) return;
+      const err = await lockSession();
       if (err) addMessage('system', `Could not take the priority lock: ${err} — /lock to retry.`);
       else addMessage('system', 'Locked ⚿ — priority band + model pinned for this session (/unlock to yield).');
-    });
+    })();
   }
 
   // /fix supervisor: recovers anything that was in flight when we last died, drains the queue, and

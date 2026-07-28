@@ -6,22 +6,28 @@
  * one pre-selected. Enter initiates the reload; Esc changes nothing.
  * `/model qwen` · `/model gemma4:26b` skip the popup and switch straight away.
  *
- * ONE DOOR. ayin never touches Ollama and never picks a model by itself: it takes the `ayin`
- * authority on the backend llm resource and calls the guarded `setModel` action with that token,
+ * ONE DOOR. ayin never touches a model runtime and never picks a model by itself: it takes the
+ * `ayin` authority through the provider and calls the guarded `setModel` action with that token,
  * so the swap is serialized against every other GPU consumer. Switching back to the SHARED model
- * is a RELEASE, not a set — the backend reverts to gemma on its own when the stack empties, which
- * is also what happens if ayin is killed (the grant TTL-expires, keepalive is unref'd).
+ * is a RELEASE, not a set — the provider reverts on its own when the stack empties, which is also
+ * what happens if ayin is killed (the grant TTL-expires, keepalive is unref'd).
  *
- * A swap costs 30-60s of VRAM churn, so the wait is explicit and bounded: we poll the resource
- * until the model is resident, narrating each step, and give up with a clear message rather than
- * hanging the TUI. The live phase in the status bar (SSE) shows the same swap independently.
+ * A swap costs 30-60s of VRAM churn, so the wait is explicit and bounded: we poll until the model
+ * is resident, narrating each step, and give up with a clear message rather than hanging the TUI.
+ * The live phase in the status bar shows the same swap independently.
+ *
+ * NOT EVERY PROVIDER HAS ANY OF THIS. `setModel` and `acquire` are OPTIONAL capabilities of the LLM
+ * port; the public `direct` provider has neither. Then `/model` says, in one line, that this
+ * installation serves a fixed model, `/lock` says there is no authority to take, and nothing else
+ * in the UI mentions either — no empty popup, no failed request, no error.
  *
  * TECH DEBT — see docs/TechDebt.md "model picker & GPU status".
  */
 
 import { addMessage, setAgentStatus } from './ui.js';
 import { showDialog, type DialogOption } from './dialog.js';
-import { acquireLlm, resourceOp, type LlmHold } from './resource-client.js';
+import { acquireLlm, type LlmHold } from './llm/authority.js';
+import { llmProvider } from './llm/select.js';
 import { setRequestAuthority } from './connection.js';
 import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
 import { refreshActiveModel, activeModelId } from './llm/manager.js';
@@ -52,8 +58,19 @@ export function isSessionLocked(): boolean {
   return locked && isModelBooked();
 }
 
+/**
+ * Whether locking means anything here. Callers that lock on their own initiative (the interactive
+ * auto-lock) must check this and stay SILENT when it is false — an installation without an authority
+ * layer has nothing to lock, and saying so unprompted is noise about a feature it never had.
+ */
+export async function lockSupported(): Promise<boolean> {
+  return typeof (await llmProvider()).acquire === 'function';
+}
+
 /** Take the lock. Returns '' on success, else a human reason. */
 export async function lockSession(): Promise<string> {
+  const provider = await llmProvider();
+  if (!provider.acquire) return 'this LLM provider has no authority layer — there is nothing to lock';
   const cat = await fetchCatalog({ force: true });
   const wanted = cat?.activeModel; // pin what is serving RIGHT NOW, not the coder default
   if (!isModelBooked()) {
@@ -70,7 +87,7 @@ export async function lockSession(): Promise<string> {
         setRequestAuthority(locked ? token : '');
         if (!locked) return;
         addMessage('system', `Lock re-established after the backend dropped it (${via}) — re-pinning ${lockedModel || 'the model'}.`);
-        if (lockedModel) void resourceOp('llm', 'setModel', { model: lockedModel, authority: token }, 10_000);
+        if (lockedModel) void provider.setModel?.(lockedModel, token);
         log('INFO', 'lock_regranted', { via, model: lockedModel });
       },
     });
@@ -86,9 +103,9 @@ export async function lockSession(): Promise<string> {
   setRequestAuthority((modelHold as { token: string }).token);
 
   // Gaining `ayin` ownership applies the coder policy, which would swap the model. Put it back.
-  if (wanted && cat && wanted !== cat.coderModel) {
+  if (wanted && cat && wanted !== cat.coderModel && provider.setModel) {
     const token = (modelHold as { token: string }).token;
-    await resourceOp('llm', 'setModel', { model: wanted, authority: token }, 10_000);
+    await provider.setModel(wanted, token);
   }
   log('INFO', 'session_locked', { model: wanted ?? '?', ttlMinutes: String(LOCK_TTL_MS / 60000) });
   return '';
@@ -135,8 +152,8 @@ function noteFor(m: ModelCatalog['models'][number], cat: ModelCatalog): string {
   // The window this model actually gets. Showing one global figure for every row was simply wrong:
   // the KV cost per token is architectural, so the backend sets it per model.
   if (m.ctx) bits.push(`${Math.round(m.ctx / 1024)}k ctx`);
-  if (m.name === cat.maradelModel) bits.push('shared');
-  if (m.name === cat.coderModel) bits.push('coder');
+  if (cat.sharedModel && m.name === cat.sharedModel) bits.push('shared');
+  if (cat.coderModel && m.name === cat.coderModel) bits.push('coder');
   if (m.name === cat.activeModel) bits.push('● active');
   return bits.join(' · ');
 }
@@ -163,9 +180,15 @@ async function awaitResident(model: string, budgetMs = 180_000): Promise<boolean
 
 /** Switch the served model, through the authority. Returns true when the model is resident. */
 export async function switchModel(model: string, cat: ModelCatalog): Promise<boolean> {
-  // The shared model is the backend's default: release ownership and let it revert. Setting it
+  const provider = await llmProvider();
+  if (!provider.setModel) {
+    addMessage('system', `This LLM provider serves a fixed model (${cat.activeModel}) — switching it from here isn't part of the setup.`);
+    return false;
+  }
+
+  // The shared model is the provider's default: release ownership and let it revert. Setting it
   // while still holding the authority would keep the GPU booked for a model we don't own.
-  if (model === cat.maradelModel) {
+  if (cat.sharedModel && model === cat.sharedModel) {
     if (!isModelBooked()) {
       addMessage('system', `${model} is the shared model and nothing is booked — already served.`);
       return true;
@@ -198,7 +221,7 @@ export async function switchModel(model: string, cat: ModelCatalog): Promise<boo
   }
 
   const token = (modelHold as { token: string }).token;
-  const res = await resourceOp('llm', 'setModel', { model, authority: token }, 10_000);
+  const res = await provider.setModel(model, token);
   if (!res) {
     addMessage('system', `Backend refused the swap to ${model} (authority lost or unknown model).`);
     log('WARN', 'model_set_failed', { model });
@@ -217,8 +240,24 @@ export async function switchModel(model: string, cat: ModelCatalog): Promise<boo
   return ok;
 }
 
-/** The popup: pick a model from what the backend actually has installed. */
+/**
+ * Is there a model manager here at all? A provider without `setModel` cannot switch models, so the
+ * only honest thing `/model` can do is name what is serving you and stop. One line, no popup — the
+ * feature is absent, not broken.
+ */
+async function reportFixedModel(): Promise<boolean> {
+  const provider = await llmProvider();
+  if (provider.setModel) return false;
+  const served = (await provider.status()).model || activeModelId();
+  addMessage('system', served
+    ? `Serving ${served}. This setup has no model manager, so there is nothing to switch to.`
+    : `No model manager here, and ${statusSource()} isn't naming a model — check the endpoint.`);
+  return true;
+}
+
+/** The popup: pick a model from what the provider actually has installed. */
 export async function openModelPicker(): Promise<void> {
+  if (await reportFixedModel()) return;
   setAgentStatus('Reading the model catalog…');
   const [cat, telemetry] = await Promise.all([fetchCatalog({ force: true }), fetchGpu()]);
   setAgentStatus('');
@@ -257,6 +296,7 @@ export async function openModelPicker(): Promise<void> {
 export async function handleModelCommand(arg: string): Promise<void> {
   const t = arg.trim();
   if (!t) { await openModelPicker(); return; }
+  if (await reportFixedModel()) return;
 
   const cat = await fetchCatalog({ force: true });
   if (!cat) {

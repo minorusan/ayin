@@ -24,7 +24,7 @@
  */
 
 import { HEADLESS, setAgentState } from './ui.js';
-import { fetchCatalog, fetchGpu, findOwnPlace, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
+import { fetchCatalog, fetchGpu, findOwnPlace, telemetrySupported, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
 import { currentRequestId } from './connection.js';
 import { activityText } from './activity.js';
 
@@ -75,6 +75,10 @@ function compose(what: string, cat: ModelCatalog | null, q: QueueInfo | null, gp
  */
 export async function narrateWait<T>(what: string, fn: () => Promise<T>): Promise<T> {
   if (HEADLESS) return fn();
+  // Nothing to narrate without a queue and a GPU to read: there is no swap to report, no line to be
+  // fourth in, and the composed string would be the plain label every single tick. Start the call
+  // and skip the poll entirely rather than spend two requests every 2s producing "thinking".
+  if (!(await telemetrySupported())) return fn();
 
   const started = Date.now();
   let done = false;

@@ -4,31 +4,32 @@
  * framing). Every LLM call ayin makes goes through here:
  *
  *     ayin tool / agent loop
- *          │  llmChat / llmCall            (transport: messages → text)
+ *          │  llmChat / llmCall            (messages → text)
  *          ▼
- *     manager ── resolves the ACTIVE model the backend reports (GET /api/status →
+ *     manager ── resolves the ACTIVE model the provider reports (status() →
  *          │      {model}) → picks the matching dialect
  *          ▼
  *     dialect ── toolCallInstructions (→ system prompt) · parse(raw)
  *                · renderToolCall · renderToolResult
  *
- * ayin neither chooses nor knows WHY the backend's model changes — a backend is
- * free to swap the served model at runtime (e.g. a host loading a coder model for
- * a coding task); ayin simply observes /api/status and re-resolves the dialect.
+ * ayin neither chooses nor knows WHY the served model changes — a backend is free
+ * to swap it at runtime (e.g. loading a coder model for a coding task); ayin simply
+ * observes status() and re-resolves the dialect.
  *
- * The transport itself (retries, image attach, OpenAI fallback) lives in
- * connection.ts and is model-agnostic; the manager re-exports it so every caller
- * imports LLM access from ONE place. Add a model family by implementing
- * ModelDialect (see types.ts) and registering it in DIALECTS below.
- * See docs/ARCHITECTURE.md "LLM manager & dialects".
+ * WHERE THE CALL ACTUALLY GOES is the provider's business (provider.ts + select.ts):
+ * `generate` is one of its two REQUIRED methods, so this file works the same whether
+ * the endpoint is a plain adapter or an arbitrated resource layer. The transport
+ * underneath (retries, image attach, OpenAI fallback) still lives in connection.ts.
+ * Add a model family by implementing ModelDialect (see types.ts) and registering it
+ * in DIALECTS below. See docs/ARCHITECTURE.md "LLM manager & dialects".
  */
 
-import { keliBaseUrl, llmChat as transportChat, llmCall as transportCall } from '../connection.js';
 import { log } from '../log.js';
 import type { LlmMessage, ModelDialect, ParseAllResult, ParsedToolCall } from './types.js';
 import { GemmaDialect } from './dialects/gemma.js';
 import { QwenDialect } from './dialects/qwen.js';
 import { narrateWait } from '../wait-narrator.js';
+import { llmProvider } from './select.js';
 
 // Registered dialects, in match-priority order. The first whose matches() returns
 // true for the active model wins; DEFAULT is used until the model id is known.
@@ -59,10 +60,8 @@ function ensureRefreshed(): void {
 export async function refreshActiveModel(): Promise<void> {
   refreshKicked = true;
   try {
-    const res = await fetch(`${keliBaseUrl()}/api/status`, { signal: AbortSignal.timeout(2000) });
-    if (!res.ok) return;
-    const data = await res.json() as { model?: string };
-    const modelId = String(data.model ?? '');
+    const s = await (await llmProvider()).status();
+    const modelId = s.ok ? String(s.model ?? '') : '';
     if (!modelId || modelId === cachedModelId) return;
     cachedModelId = modelId;
     const next = pickDialect(modelId);
@@ -88,16 +87,16 @@ export function parseToolCalls(raw: string): ParseAllResult { return activeDiale
 export function renderToolCall(call: ParsedToolCall): string { return activeDialect().renderToolCall(call); }
 export function renderToolResult(body: string): string { return activeDialect().renderToolResult(body); }
 
-// ── Transport façade (model-agnostic; implemented in connection.ts) ──
-// Both wrap the call in the WAIT NARRATOR (wait-narrator.ts), so any wait — a model swap, the
-// backend's single-slot queue, or generation itself — is reported on the thinking line instead of
-// an indistinguishable "Thinking··". This is the one place every ayin LLM call passes through, so
-// wiring it here covers the agent loop, goal derivation, judges and summaries at once.
+// ── Generation façade (model-agnostic; served by the active provider) ──
+// Both wrap the call in the WAIT NARRATOR (wait-narrator.ts), so any wait — a model swap, a
+// single-slot queue, or generation itself — is reported on the thinking line instead of an
+// indistinguishable "Thinking··" (the narrator stands down when the provider reports no queue).
+// This is the one place every ayin LLM call passes through, so wiring it here covers the agent
+// loop, goal derivation, judges and summaries at once.
 export async function llmChat(messages: LlmMessage[]): Promise<string> {
   ensureRefreshed();
-  return narrateWait('thinking', () => transportChat(messages));
+  return narrateWait('thinking', async () => (await (await llmProvider()).generate(messages)).content);
 }
 export async function llmCall(prompt: string): Promise<string> {
-  ensureRefreshed();
-  return narrateWait('thinking', () => transportCall(prompt));
+  return llmChat([{ role: 'user', content: prompt }]);
 }

@@ -1,14 +1,15 @@
 /**
- * LLM phase subscriber — follows the backend llm resource's live event stream
- * (GET {keliUrl}/resource/llm/events, SSE) and reduces it to one human phase for
- * the status bar: swapping → preprocessing → responding → postprocessing → (idle).
+ * LLM phase subscriber — reduces the provider's live event stream to ONE human phase for the status
+ * bar: swapping → preprocessing → responding → postprocessing → (idle).
  *
- * Reconnects with backoff forever (the TUI may outlive backend restarts); a broken
- * stream simply blanks the phase — the status bar never shows a stale one.
+ * The stream itself belongs to the provider (`LlmProvider.events`, optional, transport + reconnect
+ * live there). This module owns only the reduction, because a phase is a UI fact, not a wire fact.
+ *
+ * A provider with no event stream is not an error and not a blank spinner — the subscription is a
+ * no-op, the phase stays null, and the status bar has no phase segment at all.
  */
 
-import { keliBaseUrl } from './connection.js';
-import { log } from './log.js';
+import { llmProvider } from './llm/select.js';
 
 export interface LlmPhase {
   phase: 'swapping' | 'preprocessing' | 'responding' | 'postprocessing' | 'done' | 'warning' | null;
@@ -36,53 +37,31 @@ export function reducePhase(type: string, payload: Record<string, unknown>): Llm
       return { phase: 'done', detail: ms > 0 ? `${(ms / 1000).toFixed(1)}s` : undefined, ttlMs: 1500 };
     }
     case 'oom.warning': return { phase: 'warning', detail: 'context overflow risk', ttlMs: 4000 };
+    // The provider says the stream died (or was stopped). Blank the phase rather than leave a stale
+    // one lit over a connection that no longer exists.
+    case 'stream.lost': return { phase: null };
     default: return undefined;
   }
 }
 
-/** Subscribe; returns a stop function. */
+/** Subscribe; returns a stop function. Safe to call on any provider. */
 export function subscribeLlmPhase(onPhase: PhaseListener): () => void {
   let stopped = false;
-  let backoffMs = 2_000;
+  let stopStream: (() => void) | null = null;
 
-  const connectLoop = async (): Promise<void> => {
-    while (!stopped) {
-      try {
-        const res = await fetch(`${keliBaseUrl()}/resource/llm/events`, {
-          headers: { Accept: 'text/event-stream' },
-        });
-        if (!res.ok || !res.body) throw new Error(`SSE ${res.status}`);
-        log('INFO', 'llm_events_subscribed', {});
-        backoffMs = 2_000;
+  void llmProvider().then((p) => {
+    if (stopped) return;
+    if (!p.events) return; // no stream on this provider — the segment simply never appears
+    stopStream = p.events((e) => {
+      const phase = reducePhase(e.type, e.payload);
+      if (phase !== undefined) onPhase(phase);
+    });
+  });
 
-        let buf = '';
-        for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-          if (stopped) return;
-          buf += Buffer.from(chunk).toString('utf-8');
-          let idx;
-          while ((idx = buf.indexOf('\n\n')) !== -1) {
-            const frame = buf.slice(0, idx);
-            buf = buf.slice(idx + 2);
-            const dataLine = frame.split('\n').find(l => l.startsWith('data: '));
-            if (!dataLine) continue; // heartbeat/comment
-            try {
-              const e = JSON.parse(dataLine.slice(6));
-              const p = reducePhase(String(e.type), e.payload ?? {});
-              if (p !== undefined) onPhase(p);
-            } catch { /* torn frame */ }
-          }
-        }
-        throw new Error('stream ended');
-      } catch (err) {
-        if (stopped) return;
-        onPhase({ phase: null }); // never show a stale phase over a dead stream
-        log('WARN', 'llm_events_reconnect', { error: err instanceof Error ? err.message : String(err), backoffMs: String(backoffMs) });
-        await new Promise(r => setTimeout(r, backoffMs));
-        backoffMs = Math.min(backoffMs * 2, 30_000);
-      }
-    }
+  return () => {
+    stopped = true;
+    stopStream?.();
+    stopStream = null;
+    onPhase({ phase: null });
   };
-
-  void connectLoop();
-  return () => { stopped = true; onPhase({ phase: null }); };
 }

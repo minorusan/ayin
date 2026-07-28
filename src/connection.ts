@@ -105,6 +105,7 @@ export async function disconnect(): Promise<void> {
  */
 export async function llmChat(
   messages: Array<{ role: string; content: string }>,
+  opts: { temperature?: number; thinking?: boolean } = {},
 ): Promise<string> {
   const { THINKING_MODE } = await import('./ui.js');
   const keliUrl = await getKeliUrl();
@@ -143,10 +144,10 @@ export async function llmChat(
       const requestId = `${randomUUID().slice(0, 8)}`;
       setInFlightRequestId(requestId);
 
-      const body: Record<string, unknown> = { messages, temperature: 0.7, requestId };
+      const body: Record<string, unknown> = { messages, temperature: opts.temperature ?? 0.7, requestId };
       // Locked session → ask for the front of the queue, and prove we may have it.
       if (lockAuthority) { body.authority = lockAuthority; body.priority = 'high'; }
-      if (THINKING_MODE) body.thinking = true;
+      if (opts.thinking ?? THINKING_MODE) body.thinking = true;
       if (images.length) body.images = images;
 
       const reqStart = Date.now();

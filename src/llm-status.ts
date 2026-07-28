@@ -1,130 +1,46 @@
 /**
  * LLM status feed — what model is serving us, what else we could switch to, and what the shared
- * GPU is doing. Everything here comes from the backend llm resource's READ ops (open, no authority):
+ * GPU is doing. Every fact here comes from the LLM PROVIDER (src/llm/provider.ts), never from a
+ * backend call made here: this module is a consumer of the port, not a client of anybody's backend.
  *
- *     POST {keliUrl}/resource/llm  {op:'models'} → {activeModel, loadedModel, maradelModel, coderModel, models[]}
- *     POST {keliUrl}/resource/llm  {op:'gpu'}    → {gpu:{tempC,usedMiB,totalMiB,util,at}|null}
- *
- * Ollama is loopback-only on the model host, so this resource bridge is the ONLY door to the
- * catalog — ayin never probes :11434 and never runs nvidia-smi itself (it may not even be on the
- * same machine as the card).
+ * WHAT IS OPTIONAL. Only `status()` is guaranteed. A provider may or may not offer a catalog, GPU
+ * telemetry or an authority, and this module's whole job is to make "not offered" indistinguishable
+ * from "quiet": every accessor returns null, the status poll reports nulls, and the status bar hides
+ * the segments it has nothing to say about. No errors, no spinners, no empty popups.
  *
  * The poll is self-healing: every failure just leaves the last good value in place (or clears it),
  * and the next tick tries again — a backend restart or a network blip costs one stale interval,
  * never a dead status bar and never a thrown error into the TUI.
- *
- * TECH DEBT — see docs/TechDebt.md "model picker & GPU status". The role aliases below and the
- * fallback catalog are ayin-side knowledge that belongs to the backend; and this poll exists only
- * because the llm resource has no model/gpu EVENTS to ride on the SSE stream we already hold open.
  */
 
 import { keliBaseUrl } from './connection.js';
-import { resourceOp } from './resource-client.js';
+import { llmProvider } from './llm/select.js';
+import type { AuthorityInfo, GpuInfo, ModelCatalog, ModelEntry, QueueInfo } from './llm/provider.js';
 
-export interface GpuInfo {
-  tempC: number;
-  usedMiB: number;
-  totalMiB: number;
-  util: number;
-  at: number;
-}
+export type { AuthorityInfo, GpuInfo, ModelCatalog, ModelEntry, QueueInfo };
+/** Historical alias — the catalog's rows used to be called ModelEntry here. */
+export type { ModelEntry as CatalogEntry };
 
-export interface ModelEntry {
-  name: string;
-  parameterSize: string;
-  quantization: string;
-  sizeBytes: number;
-  active: boolean;
-  /** The context window THIS model will actually get (per-model preset on the backend), not one
-   *  global number — a 24GB card cannot give every model the same window. */
-  ctx?: number;
-}
-
-export interface ModelCatalog {
-  activeModel: string;
-  /** Resident in VRAM right now — differs from activeModel only mid-swap. */
-  loadedModel: string;
-  /** The shared/default model. Switching TO it means RELEASING our authority, not setting a model. */
-  maradelModel: string;
-  coderModel: string;
-  models: ModelEntry[];
-}
-
-/** Role words that mean "whatever model the backend has in that role", so `/model gemma` and
- *  `/model coder` keep working when the concrete tag changes. TECH DEBT: the backend owns roles. */
+/** Role words that mean "whatever model the provider has in that role", so `/model coder` keeps
+ *  working when the concrete tag changes. Providers without roles simply never match these. */
 const SHARED_WORDS = new Set(['gemma', 'chat', 'shared', 'release', 'default']);
 const CODER_WORDS = new Set(['coder', 'qwen', 'code']);
 
-/** Used only when the backend predates the `models` read op — a `status` read still tells us the
- *  two role models, so the picker degrades to "the models this backend has roles for". */
-async function catalogFromStatus(): Promise<ModelCatalog | null> {
-  const s = await resourceOp('llm', 'status', {}, 4_000) as
-    | { activeModel?: string; loadedModel?: string; maradelModel?: string; coderModel?: string }
-    | null;
-  if (!s || !s.activeModel) return null;
-  const names = [s.maradelModel, s.coderModel, s.activeModel].filter((n): n is string => !!n);
-  const uniq = [...new Set(names)];
-  return {
-    activeModel: s.activeModel,
-    loadedModel: s.loadedModel ?? s.activeModel,
-    maradelModel: s.maradelModel ?? s.activeModel,
-    coderModel: s.coderModel ?? s.activeModel,
-    models: uniq.map((name) => ({ name, parameterSize: '', quantization: '', sizeBytes: 0, active: name === s.activeModel })),
-  };
-}
-
-// A backend without the `models` op would otherwise cost TWO requests on every 5s tick, forever.
-// After a miss we stop asking for 5 minutes — long enough that a deploy is picked up on its own,
-// short enough that nobody has to restart ayin to see the richer catalog.
-const MODELS_OP_RETRY_MS = 5 * 60 * 1000;
-let modelsOpMissingUntil = 0;
-
-/** The model catalog, or null when the backend is unreachable. Never throws.
- *  `force` skips the "op is missing" backoff — the picker always asks for the real thing, so a
- *  backend deployed a minute ago doesn't show a stale, degraded list. */
+/** The model catalog, or null when the provider has none / is unreachable. Never throws. */
 export async function fetchCatalog(opts: { force?: boolean } = {}): Promise<ModelCatalog | null> {
-  if (opts.force || Date.now() >= modelsOpMissingUntil) {
-    const r = await resourceOp('llm', 'models', {}, 5_000) as ModelCatalog | null;
-    if (r && Array.isArray(r.models) && r.models.length > 0) {
-      modelsOpMissingUntil = 0;
-      return r;
-    }
-    modelsOpMissingUntil = Date.now() + MODELS_OP_RETRY_MS;
+  const p = await llmProvider();
+  if (!p.models) return null; // no catalog capability → the picker and the model segment stay quiet
+  try {
+    return await p.models(opts);
+  } catch {
+    return null;
   }
-  return catalogFromStatus(); // older backend (no `models` op) → roles only
 }
 
 /**
- * The backend's single-slot LLM scheduler. EVERY model call on that box — chat, habits,
- * embeddings, model swaps, Chatterbox TTS — goes through one slot, ordered by priority then FIFO,
- * and ayin's own calls are LOW priority (the backend's `/api/generate` is
- * `withOllamaPriority("low")`), so they are overtaken by every habit that arrives while they wait.
- * Knowing this is the difference between "ayin is slow" and "ayin is 4th in line behind
- * book_writer".
- */
-export interface QueueInfo {
-  /** Label of the call holding the slot right now (`chatOnce`, `embed`, `swapChatModel`, `gpu:…`). */
-  running: string | null;
-  runningForMs: number;
-  /** Correlation tag of the running job (`ayin:<id>` for our own calls), '' if untagged. */
-  runningTag?: string;
-  /** How many calls are waiting behind it. */
-  depth: number;
-  /** IN THE ORDER THEY WILL RUN — so an entry's index is its real place in line. */
-  waiting: Array<{ label: string; priority: string; waitingMs: number; tag?: string }>;
-}
-
-/** Who owns the llm resource right now — the authority, not the model. */
-export interface AuthorityInfo {
-  holder: string;
-  expiresAt: number;
-  depth: number;
-}
-
-/**
- * Where OUR in-flight request sits in the backend's queue, matched by the correlation id ayin sent
+ * Where OUR in-flight request sits in the provider's queue, matched by the correlation id ayin sent
  * with it. `position` is 1-based among the waiters; `running` means it has the slot and is generating.
- * null when we have nothing in flight or the backend doesn't carry tags (older build).
+ * null when we have nothing in flight, or the provider has no queue at all.
  */
 export function findOwnPlace(q: QueueInfo | null, requestId: string): { running: boolean; position: number; of: number; aheadOfUs: string[] } | null {
   if (!q || !requestId) return null;
@@ -140,15 +56,33 @@ export function findOwnPlace(q: QueueInfo | null, requestId: string): { running:
   };
 }
 
-/** The current authority holder, or null (free / unreachable). Never throws. */
+/** The current authority holder, or null (free / unreachable / no authority layer). Never throws. */
 export async function fetchAuthority(): Promise<AuthorityInfo | null> {
-  return (await resourceOp('llm', 'authority.current', {}, 4_000)) as AuthorityInfo | null;
+  const p = await llmProvider();
+  if (!p.authority) return null;
+  try {
+    return await p.authority();
+  } catch {
+    return null;
+  }
 }
 
-/** Current GPU telemetry + scheduler state. Never throws. */
+/** GPU telemetry + scheduler state; both null when the provider does not report them. Never throws. */
 export async function fetchGpu(): Promise<{ gpu: GpuInfo | null; queue: QueueInfo | null }> {
-  const r = await resourceOp('llm', 'gpu', {}, 4_000) as { gpu?: GpuInfo | null; queue?: QueueInfo } | null;
-  return { gpu: r?.gpu ?? null, queue: r?.queue ?? null };
+  const p = await llmProvider();
+  if (!p.telemetry) return { gpu: null, queue: null };
+  try {
+    const t = await p.telemetry();
+    return { gpu: t.gpu ?? null, queue: t.queue ?? null };
+  } catch {
+    return { gpu: null, queue: null };
+  }
+}
+
+/** True when the provider reports a GPU/queue at all — consumers use it to skip work that could
+ *  only ever produce nothing (see wait-narrator.ts). */
+export async function telemetrySupported(): Promise<boolean> {
+  return typeof (await llmProvider()).telemetry === 'function';
 }
 
 /** Resolve what the user typed (`qwen`, `gemma`, or a full `qwen3-coder:30b`) to a catalog model.
@@ -160,7 +94,7 @@ export function resolveModelName(input: string, catalog: ModelCatalog): string |
   const exact = names.find((n) => n.toLowerCase() === t);
   if (exact) return exact;
 
-  if (SHARED_WORDS.has(t)) return catalog.maradelModel;
+  if (SHARED_WORDS.has(t) && catalog.sharedModel) return catalog.sharedModel;
   if (CODER_WORDS.has(t) && catalog.coderModel) return catalog.coderModel;
 
   // Otherwise a prefix/substring of an installed tag — longest match wins, so `qwen3` beats `qwen`.
@@ -169,9 +103,10 @@ export function resolveModelName(input: string, catalog: ModelCatalog): string |
 }
 
 /**
- * Start the status poll. Fires `onUpdate` after every tick that produced something (model and/or
- * GPU), and keeps running across backend restarts. The interval is unref'd, so it never holds the
- * process open. Returns a stop function.
+ * Start the status poll. Fires `onUpdate` after every tick, and keeps running across backend
+ * restarts. Capabilities the provider lacks arrive as nulls, tick after tick, and the status bar
+ * hides those segments — which is exactly right: they are not broken, they do not exist here.
+ * The interval is unref'd, so it never holds the process open. Returns a stop function.
  */
 export function startLlmStatusPoll(
   onUpdate: (u: { catalog: ModelCatalog | null; gpu: GpuInfo | null; queue: QueueInfo | null; authority: AuthorityInfo | null }) => void,
@@ -199,7 +134,7 @@ export function startLlmStatusPoll(
   return () => { stopped = true; clearInterval(timer); };
 }
 
-/** Where the poll points — surfaced in the picker so a wrong keli-url is obvious. */
+/** Where the provider points — surfaced in the picker so a wrong endpoint is obvious. */
 export function statusSource(): string {
   return keliBaseUrl();
 }
