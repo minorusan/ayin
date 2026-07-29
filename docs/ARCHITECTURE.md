@@ -643,10 +643,19 @@ tree knows about the internals). Design rules:
   (`config.ollama.modelCtx`, `MARADEL_CTX_<MODEL>` override) and reports the resolved value per model.
 - **Model picker + booking** (`/model` → `model-picker.ts`, catalog in `llm-status.ts`): the
   interactive counterpart to headless `AYIN_ACQUIRE_LLM=1`. Bare `/model` opens the **popup** —
-  the same overlay the tool-permission prompt uses (`dialog.ts`) — listing every chat model the
-  backend has installed, polled live from the llm resource, each row annotated
+  the same overlay the tool-permission prompt uses (`dialog.ts`) — listing chat models the backend
+  has installed, polled live from the llm resource, each row annotated
   (`27.8B · Q4_K_M · 17.3G · shared/coder · ● active`) with the active one pre-selected;
-  **Enter initiates the reload**, Esc changes nothing. `/model <name|qwen|gemma>` skips the popup
+  **Enter initiates the reload**, Esc changes nothing.
+  - **Filtered by size** (`filterModelsForPicker`, `modelPickerMinSizeGiB`, default 15, `0` disables):
+    the popup is for choosing a real coding model, not a domain-router sidecar or a 3B fallback — a
+    picker dominated by utility models nobody would select from a TUI popup isn't a picker, it's
+    noise. **The currently active model is NEVER hidden by this filter**, size or no size: a filter
+    that could hide what is actually serving you would silently mis-highlight the popup (or highlight
+    nothing) while claiming to show your options, and if a threshold this aggressive would leave
+    NOTHING at all, it falls back to the unfiltered list rather than present an empty popup. A system
+    line reports how many were hidden and how to see them (`modelPickerMinSizeGiB: 0`).
+  `/model <name|qwen|gemma>` skips the popup
   (role words resolve to whatever the backend has in that role; anything else is a substring of an
   installed tag, longest match wins).
   Switching to a NON-shared model takes the llm resource as the `ayin` authority and calls the

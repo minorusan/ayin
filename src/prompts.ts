@@ -37,6 +37,9 @@ const DEFAULT_CONFIG: Record<string, number> = {
   planMinChars: 2000,
   planExploreCalls: 2,
   planApiSearches: 3,
+  // Model picker (model-picker.ts) — hides small/utility models from the `/model` popup so it lists
+  // only real choices. 0 disables the filter (shows everything installed).
+  modelPickerMinSizeGiB: 15,
 };
 
 // ── one-time migration: prompt entries out of prompts.json, into the file store ──────────────

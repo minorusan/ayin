@@ -281,5 +281,40 @@ console.log('\nmouse modes');
   ok(!modes.includes('1002') && !modes.includes('1003'), 'motion tracking (1002/1003) stays OFF — no event flood, minimal selection interference');
 }
 
+// ── model picker: hide small models, but NEVER hide what's actually serving you ──
+console.log('\nmodel picker size filter');
+{
+  const mp = await import(`file://${join(DIST, 'model-picker.js')}`);
+  const GiB = 1024 ** 3;
+  const cat = {
+    activeModel: 'qwen2.5-coder:7b', // deliberately the SMALL one, to test it survives the filter
+    loadedModel: 'qwen2.5-coder:7b',
+    sharedModel: 'gemma4:26b',
+    coderModel: 'qwen3-coder:30b',
+    models: [
+      { name: 'gemma3:270m', parameterSize: '270M', quantization: 'Q8_0', sizeBytes: 0.27 * GiB, active: false },
+      { name: 'qwen2.5:3b', parameterSize: '3.1B', quantization: 'Q4_K_M', sizeBytes: 1.9 * GiB, active: false },
+      { name: 'qwen2.5-coder:7b', parameterSize: '7.6B', quantization: 'Q4_K_M', sizeBytes: 4.5 * GiB, active: true },
+      { name: 'qwen3.6:27b', parameterSize: '27.8B', quantization: 'Q4_K_M', sizeBytes: 17.4 * GiB, active: false },
+      { name: 'gemma4:26b', parameterSize: '25.8B', quantization: 'Q4_K_M', sizeBytes: 18.0 * GiB, active: false },
+      { name: 'qwen3-coder:30b', parameterSize: '30.5B', quantization: 'Q4_K_M', sizeBytes: 19.0 * GiB, active: false },
+    ],
+  };
+
+  const { models: kept, hiddenCount } = mp.filterModelsForPicker(cat);
+  const names = kept.map((m) => m.name);
+  ok(!names.includes('gemma3:270m'), 'a 270M utility model is hidden');
+  ok(!names.includes('qwen2.5:3b'), 'a 3B fallback model is hidden');
+  ok(names.includes('qwen3.6:27b') && names.includes('gemma4:26b') && names.includes('qwen3-coder:30b'), 'the 15G+ coder-sized models all survive');
+  ok(names.includes('qwen2.5-coder:7b'), 'the ACTIVE model survives even though it is well under 15G — the filter must never hide what is actually serving you');
+  ok(hiddenCount === 2, 'reports exactly how many were hidden, so the popup can say so', String(hiddenCount));
+
+  // Nothing at all above threshold, and the active model isn't in the catalog either (edge case) —
+  // must fall back to the full list rather than present an empty, useless popup.
+  const allSmall = { ...cat, activeModel: 'unknown-ghost-model', models: cat.models.slice(0, 2) };
+  const fallback = mp.filterModelsForPicker(allSmall);
+  ok(fallback.models.length === 2 && fallback.hiddenCount === 0, 'an all-small catalog with no active match falls back to showing everything, not an empty popup');
+}
+
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

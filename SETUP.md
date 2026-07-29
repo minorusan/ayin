@@ -157,6 +157,7 @@ afterwards, so your edits survive every upgrade. Set config values from the TUI:
 | `planMinChars` | 2000 | plan mode: prompt size that triggers the cross-feature triage (`0` disables) |
 | `planExploreCalls` | 2 | plan mode: `explore` passes spent gathering context (each is real GPU time) |
 | `planApiSearches` | 3 | plan mode: web searches spent on third-party API docs (mandatory when an API is involved) |
+| `modelPickerMinSizeGiB` | 15 | `/model` popup: hides installed models smaller than this (`0` shows everything); never hides the active model |
 
 ### Editing prompts
 

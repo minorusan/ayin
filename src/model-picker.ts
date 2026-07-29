@@ -31,6 +31,7 @@ import { llmProvider } from './llm/select.js';
 import { setRequestAuthority } from './connection.js';
 import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
 import { refreshActiveModel, activeModelId } from './llm/manager.js';
+import { getConfig } from './prompts.js';
 import { log } from './log.js';
 
 /** The session's booking. Held until /quit, /model <shared>, or process exit (grant TTL). */
@@ -159,6 +160,26 @@ function noteFor(m: ModelCatalog['models'][number], cat: ModelCatalog): string {
 }
 
 /**
+ * Which models the popup actually lists. `modelPickerMinSizeGiB` (default 15, 0 disables) hides tiny
+ * utility/sidecar models (a domain router, a 3B fallback) from a picker meant for choosing a real
+ * coding model — without it the list is dominated by entries nobody would ever pick from a TUI popup.
+ *
+ * THE ACTIVE MODEL IS NEVER HIDDEN, size or no size. A size filter that could hide what is actually
+ * SERVING you would be worse than no filter: the popup would silently mis-highlight (or fail to
+ * highlight anything) while claiming to show your options. If a threshold this aggressive left NOTHING
+ * (an unlikely rig with nothing installed above it, or `models` reporting zero sizes), fall back to
+ * the unfiltered list rather than present an empty, useless popup.
+ */
+export function filterModelsForPicker(cat: ModelCatalog): { models: ModelCatalog['models']; hiddenCount: number } {
+  const minGiB = getConfig('modelPickerMinSizeGiB', 15);
+  if (minGiB <= 0) return { models: cat.models, hiddenCount: 0 };
+  const minBytes = minGiB * 1024 ** 3;
+  const kept = cat.models.filter((m) => m.sizeBytes >= minBytes || m.name === cat.activeModel);
+  if (kept.length === 0) return { models: cat.models, hiddenCount: 0 };
+  return { models: kept, hiddenCount: cat.models.length - kept.length };
+}
+
+/**
  * Wait for the backend to finish the swap: `loadedModel` is what is actually resident in VRAM, so
  * that — not `activeModel`, which flips synchronously — is the finish line. Bounded; a swap that
  * outlives the budget leaves the TUI usable and says so.
@@ -267,8 +288,13 @@ export async function openModelPicker(): Promise<void> {
     return;
   }
 
-  const options: DialogOption[] = cat.models.map((m) => ({ label: m.name, note: noteFor(m, cat) }));
-  const activeIdx = Math.max(0, cat.models.findIndex((m) => m.name === cat.activeModel));
+  const { models, hiddenCount } = filterModelsForPicker(cat);
+  if (hiddenCount > 0) {
+    const minGiB = getConfig('modelPickerMinSizeGiB', 15);
+    addMessage('system', `${hiddenCount} smaller model(s) under ${minGiB}G hidden — set modelPickerMinSizeGiB to 0 in prompts.json to show everything.`);
+  }
+  const options: DialogOption[] = models.map((m) => ({ label: m.name, note: noteFor(m, cat) }));
+  const activeIdx = Math.max(0, models.findIndex((m) => m.name === cat.activeModel));
 
   const choice = await showDialog(
     'Model',
@@ -283,7 +309,7 @@ export async function openModelPicker(): Promise<void> {
   );
 
   if (choice < 0) return;
-  const picked = cat.models[choice];
+  const picked = models[choice];
   if (!picked) return;
   if (picked.name === cat.activeModel && cat.loadedModel === cat.activeModel) {
     addMessage('system', `${picked.name} is already the served model.`);
