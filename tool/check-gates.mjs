@@ -26,7 +26,7 @@
 if (!process.argv.includes('-p')) process.argv.push('-p');
 
 import { createServer } from 'node:http';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -314,6 +314,73 @@ console.log('\nmodel picker size filter');
   const allSmall = { ...cat, activeModel: 'unknown-ghost-model', models: cat.models.slice(0, 2) };
   const fallback = mp.filterModelsForPicker(allSmall);
   ok(fallback.models.length === 2 && fallback.hiddenCount === 0, 'an all-small catalog with no active match falls back to showing everything, not an empty popup');
+}
+
+// ── Arduino: the toolchain's filename rule is a fact, not a reviewer's opinion ──
+console.log('\narduino project probe');
+{
+  const p = await import(`file://${join(DIST, 'qa/probes.js')}`);
+
+  // Correct: Blinker/Blinker.ino — the toolchain requires exactly this.
+  const goodDir = join(TMP, 'Blinker');
+  mkdirSync(goodDir, { recursive: true });
+  const goodSketch = join(goodDir, 'Blinker.ino');
+  writeFileSync(goodSketch, 'void setup() {}\nvoid loop() {}\n');
+  const goodProbe = p.probeArduinoProject([p.describeFile(goodSketch)], goodDir);
+  ok(goodProbe.applies, 'an .ino file is detected as an Arduino project');
+  ok(goodProbe.sketches[0]?.matches === true, 'a filename matching its folder is measured as CORRECT');
+  ok(!/VIOLATED/.test(goodProbe.note), 'a correct match is not reported as a violation');
+  ok(/correctly match/.test(goodProbe.note), 'the note says explicitly that a match is required, not unusual — the false positive this probe exists to prevent');
+
+  // Wrong: Blinker/main.ino — will not build.
+  const badDir = join(TMP, 'Blinker2');
+  mkdirSync(badDir, { recursive: true });
+  const badSketch = join(badDir, 'main.ino');
+  writeFileSync(badSketch, 'void setup() {}\nvoid loop() {}\n');
+  const badProbe = p.probeArduinoProject([p.describeFile(badSketch)], badDir);
+  ok(badProbe.sketches[0]?.matches === false, 'a mismatched filename is measured as a real violation');
+  ok(/VIOLATED/.test(badProbe.note) && badProbe.note.includes('Blinker2.ino'), 'the note names the exact required rename', badProbe.note.slice(0, 160));
+
+  // Wiring detection: real pin I/O vs. no pin I/O at all.
+  const wiringSketch = join(goodDir, 'wiring-test.ino');
+  writeFileSync(wiringSketch, 'void setup() { pinMode(13, OUTPUT); }\nvoid loop() { digitalWrite(13, HIGH); }\n');
+  const wiringProbe = p.probeArduinoProject([p.describeFile(wiringSketch)], goodDir);
+  ok(wiringProbe.wiringLikely === true, 'pinMode/digitalWrite is detected as touching physical pins');
+
+  const noWiringSketch = join(goodDir, 'no-wiring-test.ino');
+  writeFileSync(noWiringSketch, 'void setup() { Serial.begin(9600); }\nvoid loop() { Serial.println("hi"); }\n');
+  const noWiringProbe = p.probeArduinoProject([p.describeFile(noWiringSketch)], goodDir);
+  ok(noWiringProbe.wiringLikely === false, 'a sketch with no pin I/O does not trigger the wiring-diagram requirement — not every Arduino edit is wiring');
+
+  // platformio.ini alone, no .ino touched this turn, still identifies the project.
+  const pioDir = join(TMP, 'pio-project');
+  mkdirSync(pioDir, { recursive: true });
+  writeFileSync(join(pioDir, 'platformio.ini'), '[env:uno]\nplatform = atmelavr\nboard = uno\n');
+  const pioProbe = p.probeArduinoProject([], pioDir);
+  ok(pioProbe.applies === true && pioProbe.sketches.length === 0, 'platformio.ini alone identifies the project without any changed .ino');
+
+  // Not Arduino at all.
+  const notArduino = p.probeArduinoProject([p.describeFile(join(REPO, 'src/qa/probes.ts'))], REPO);
+  ok(notArduino.applies === false, 'an ordinary TypeScript project is not misidentified as Arduino');
+
+  // dimensionsOf wires both dimensions in correctly, and independently.
+  const qc = await import(`file://${join(DIST, 'qa/criteria.js')}`);
+  const dims1 = qc.dimensionsOf([], false, false, true, true);
+  ok(dims1.has('arduino') && dims1.has('arduino-wiring'), 'dimensionsOf includes both arduino dimensions when wiring is likely');
+  const dims2 = qc.dimensionsOf([], false, false, true, false);
+  ok(dims2.has('arduino') && !dims2.has('arduino-wiring'), 'the wiring dimension is independent — a non-wiring Arduino change gets the naming bar only, not the diagram requirement');
+}
+
+// ── wiring diagram trigger: the deterministic detector, before any LLM involvement ──
+console.log('\nwiring diagram detection');
+{
+  const dg = await import(`file://${join(DIST, 'tools/diagram.js')}`);
+  ok(dg.isWiringRequest(undefined, 'the wiring between an Arduino and an LED'), 'fires from the subject alone, no kind needed');
+  ok(dg.isWiringRequest('wiring', 'anything'), 'fires from an explicit kind');
+  ok(dg.isWiringRequest(undefined, 'show me the circuit for this sensor'), 'fires on "circuit"');
+  ok(dg.isWiringRequest(undefined, 'draw the pinout for this board'), 'fires on "pinout"');
+  ok(!dg.isWiringRequest(undefined, 'how does the chat request flow from the CLI to the model'), 'an ordinary architecture request does not fire it');
+  ok(!dg.isWiringRequest('sequence', 'the lifecycle of a fix request'), 'an explicit non-wiring kind does not fire it either');
 }
 
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);

@@ -1,0 +1,35 @@
+THIS IS A WIRING / CIRCUIT DIAGRAM. The instruction below OVERRIDES any general advice you read
+later about picking "component" for how parts connect — that advice is for architecture, not wiring.
+Use ONLY a flat SEQUENCE diagram: `participant` lines and `->` arrows, nothing else. This is
+counterintuitive but it is the ONLY PlantUML shape whose ASCII text render (`-ttxt`) draws clean,
+readable boxes connected by labeled lines. A component diagram, a class diagram, nested blocks
+(`component "X" { … }`), a `database`/`node`/`cloud` shape, a `title`, or a `note` all render as
+disconnected boxes with no visible wire in ASCII — exactly the failure this instruction exists to
+prevent. If you catch yourself writing the word `component` or `note`, stop and rewrite as
+`participant` + `->` instead.
+
+Rules, specific to wiring — follow ALL of these, not just the shape:
+- FLAT ONLY. One `participant "Name" as Alias` per physical thing, at the top level — never nested,
+  never a group. One line per component: the microcontroller (or one participant per pin you are
+  discussing, e.g. "Arduino D13"), each passive part (resistor, capacitor, diode), each active part
+  (LED, sensor, motor, display), and the power rails ("5V", "3V3", "GND") each as their own participant.
+- One arrow per physical WIRE, in the order current/signal actually flows: `Alias1 -> Alias2 : label`.
+  The label is the wire's role, not a generic word — name the actual pin, signal, polarity, or value:
+  "D13 (PWM)", "anode", "cathode", "SDA", "10kΩ pull-up", "5V". A wire with no label is a wire whose
+  purpose the reader has to guess. NO other annotation — no `note`, no `title`, no colors, no styling.
+- Keep the chain in the same order a hand would follow it on a real breadboard: signal source → any
+  passive component in series → the active component → back to a rail. Do not draw the same wire twice
+  from both ends, and do not add a wire that is not a real physical connection.
+- Real component names from the actual project (not "Component1"), 8-20 participants, no !include.
+
+The ENTIRE diagram must look like this shape (adapt names/labels to the actual circuit — never copy
+these names verbatim, but copy this STRUCTURE exactly: only `participant` and `->`, nothing else):
+@startuml
+participant "Arduino D13" as MCU
+participant "220Ω resistor" as R1
+participant "LED" as D1
+participant "GND" as GND
+MCU -> R1 : PWM signal
+R1 -> D1 : anode
+D1 -> GND : cathode
+@enduml

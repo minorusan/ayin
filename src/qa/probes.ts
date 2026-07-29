@@ -20,7 +20,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { networkInterfaces } from 'node:os';
-import { basename, extname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { keliBaseUrl } from '../connection.js';
 
 // ── what changed ──────────────────────────────────────────────────────
@@ -37,7 +37,11 @@ export interface ChangedFile {
 }
 
 const UI_EXT = new Set(['.html', '.htm', '.css', '.scss', '.sass', '.less', '.tsx', '.jsx', '.vue', '.svelte', '.dart']);
-const CODE_EXT = new Set(['.ts', '.js', '.mjs', '.cjs', '.cs', '.go', '.rs', '.java', '.kt', '.rb', '.php', '.swift', '.c', '.h', '.cc', '.cpp', '.hpp', '.sh', '.zsh', '.mjs']);
+// `.ino`/`.pde` (Arduino sketches, old and current extension) were missing here, which is not a
+// cosmetic gap: an unclassified file gets `kind: 'other'`, and `qaChangedFiles()` DROPS anything of
+// kind 'other' from the review entirely — an Arduino sketch was invisible to the gate outright, not
+// merely under-reviewed.
+const CODE_EXT = new Set(['.ts', '.js', '.mjs', '.cjs', '.cs', '.go', '.rs', '.java', '.kt', '.rb', '.php', '.swift', '.c', '.h', '.cc', '.cpp', '.hpp', '.sh', '.zsh', '.mjs', '.ino', '.pde']);
 const DOC_EXT = new Set(['.md', '.mdx', '.rst', '.adoc']);
 const CONFIG_EXT = new Set(['.json', '.yml', '.yaml', '.toml', '.ini', '.env', '.conf']);
 
@@ -438,6 +442,74 @@ export function probeThirdPartyApi(files: ChangedFile[]): ApiProbe {
   return { applies, hosts: [...hosts], keys: [...keys], signals: [...signals], note };
 }
 
+// ── Arduino: a hard toolchain rule, not a style opinion ─────────────────
+
+export interface ArduinoSketch {
+  path: string;
+  /** What the toolchain REQUIRES this file to be named — its containing folder's name + .ino/.pde. */
+  expectedName: string;
+  matches: boolean;
+}
+
+export interface ArduinoProbe {
+  applies: boolean;
+  sketches: ArduinoSketch[];
+  /** True when the changed code actually touches physical pins — not every Arduino edit is wiring. */
+  wiringLikely: boolean;
+  note: string;
+}
+
+/** Real hardware I/O calls — the unambiguous signal that a PIN, not just code, is involved. */
+const PIN_IO_RE = /\b(pinMode|digitalWrite|digitalRead|analogWrite|analogRead|attachInterrupt)\s*\(/;
+/** Softer signal: prose that talks about wiring even without a matching I/O call this turn (e.g. a
+ *  comment-only change, or a header that only declares pins another file uses). */
+const WIRING_WORD_RE = /\b(wiring|breadboard|schematic|circuit diagram|pinout)\b/i;
+
+/**
+ * Is this an Arduino project, and — the concrete complaint this probe exists for — does each changed
+ * `.ino`/`.pde` sketch have the name the Arduino toolchain (IDE and arduino-cli both) REQUIRES: exactly
+ * its containing folder's name. `Blinker/Blinker.ino` is correct and `Blinker/main.ino` will not even
+ * compile. A reviewer that does not know this rule reads a renamed-to-match-the-folder file as a naming
+ * oddity and flags it — the false positive reported. This probe turns "the reviewer's opinion" into "a
+ * measured fact," so the criterion built on it can say `matches: true` is correct, not merely unusual.
+ */
+export function probeArduinoProject(files: ChangedFile[], cwd = process.cwd()): ArduinoProbe {
+  const root = projectRoot(cwd);
+  const sketchFiles = files.filter((f) => /\.(ino|pde)$/i.test(f.path));
+  const projectMarker = existsSync(join(root, 'platformio.ini')) || existsSync(join(root, 'sketch.yaml'));
+  const applies = sketchFiles.length > 0 || projectMarker;
+
+  const sketches: ArduinoSketch[] = sketchFiles.map((f) => {
+    const folder = basename(dirname(f.path));
+    const ext = extname(f.path);
+    const expectedName = `${folder}${ext}`;
+    return { path: f.path, expectedName, matches: basename(f.path) === expectedName };
+  });
+
+  let wiringLikely = false;
+  for (const f of files) {
+    if (!f.exists || f.bytes > 512 * 1024) continue;
+    if (!/\.(ino|pde|h|hpp|cpp|c)$/i.test(f.path)) continue;
+    let text = '';
+    try { text = readFileSync(f.path, 'utf-8'); } catch { continue; }
+    if (PIN_IO_RE.test(text) || WIRING_WORD_RE.test(text)) { wiringLikely = true; break; }
+  }
+
+  const mismatches = sketches.filter((s) => !s.matches);
+  const note = !applies
+    ? 'not an Arduino project'
+    : [
+      sketches.length > 0
+        ? mismatches.length > 0
+          ? `SKETCH NAMING VIOLATED: ${mismatches.map((m) => `${basename(m.path)} must be renamed to ${m.expectedName} (its folder's name) — the Arduino toolchain requires this, it will not build otherwise`).join('; ')}`
+          : `sketch filename(s) correctly match their folder (required by the toolchain, NOT a style choice — do not flag this as unusual): ${sketches.map((s) => basename(s.path)).join(', ')}`
+        : 'Arduino project (platformio.ini/sketch.yaml present), no .ino changed this turn',
+      wiringLikely ? 'this change touches physical pins (pinMode/digitalWrite/analogRead/…) or discusses wiring' : '',
+    ].filter(Boolean).join('; ');
+
+  return { applies, sketches, wiringLikely, note };
+}
+
 // ── the evidence block handed to the judge ─────────────────────────────
 
 export interface Evidence {
@@ -447,6 +519,7 @@ export interface Evidence {
   markdown: MdProbe[];
   srp: SrpProbe[];
   api: ApiProbe;
+  arduino: ArduinoProbe;
 }
 
 export async function gatherEvidence(files: ChangedFile[]): Promise<Evidence> {
@@ -457,6 +530,7 @@ export async function gatherEvidence(files: ChangedFile[]): Promise<Evidence> {
     markdown: files.map(probeMarkdown).filter((m): m is MdProbe => !!m),
     srp: files.map(probeSrp).filter((s): s is SrpProbe => !!s),
     api: probeThirdPartyApi(files),
+    arduino: probeArduinoProject(files),
   };
 }
 
@@ -470,6 +544,7 @@ export function renderEvidence(e: Evidence): string {
   out.push(`\nWEBVIEW REACHABILITY: ${e.webview.applies ? e.webview.note : 'not applicable'}`);
   if (e.webview.applies && e.webview.lanIp) out.push(`  (probed loopback and this machine's LAN address)`);
   out.push(`\nTHIRD-PARTY API: ${e.api.note}`);
+  if (e.arduino.applies) out.push(`\nARDUINO PROJECT: ${e.arduino.note}`);
   out.push(`\nREADME: ${e.readme.note}`);
   if (e.srp.length) {
     out.push('\nCODE SHAPE (structural signals — many unrelated concerns in one file is the smell):');

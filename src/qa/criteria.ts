@@ -6,7 +6,9 @@
  *   BASELINE (deterministic) — the operator's standing bar, derived from which KINDS of file the
  *   turn touched. These are not negotiable and not invented by a model: UI is never allowed to look
  *   like an MVP, a webview must actually be reachable from another machine, code keeps one
- *   responsibility per module, a project carries a README, markdown uses the format's range.
+ *   responsibility per module, a project carries a README, markdown uses the format's range, an
+ *   Arduino sketch is named the way the toolchain REQUIRES (not the way a reviewer's instinct guesses),
+ *   and wiring is explained with the rendered diagram, not prose describing pins.
  *
  *   INTENT (one LLM call) — what THIS user asked for across the session, distilled from their own
  *   prompts. The model that writes these has NOT seen the artifacts, on purpose: a judge shown the
@@ -31,7 +33,7 @@ import type { ChangedFile } from './probes.js';
  */
 const qaPrompts = promptsService.register('qa', packagePath('prompts', 'qa')).bundle;
 
-export type Dimension = 'ui' | 'webview' | 'code' | 'docs' | 'api' | 'intent';
+export type Dimension = 'ui' | 'webview' | 'code' | 'docs' | 'api' | 'arduino' | 'arduino-wiring' | 'intent';
 
 export interface Criterion {
   id: string;
@@ -41,7 +43,13 @@ export interface Criterion {
 }
 
 /** Which bars apply, from what the turn actually touched. */
-export function dimensionsOf(files: ChangedFile[], webviewApplies: boolean, apiApplies = false): Set<Dimension> {
+export function dimensionsOf(
+  files: ChangedFile[],
+  webviewApplies: boolean,
+  apiApplies = false,
+  arduinoApplies = false,
+  arduinoWiringLikely = false,
+): Set<Dimension> {
   const dims = new Set<Dimension>();
   for (const f of files) {
     if (f.kind === 'ui') { dims.add('ui'); dims.add('code'); }
@@ -50,6 +58,11 @@ export function dimensionsOf(files: ChangedFile[], webviewApplies: boolean, apiA
   }
   if (webviewApplies) dims.add('webview');
   if (apiApplies) dims.add('api');
+  if (arduinoApplies) dims.add('arduino');
+  // A SEPARATE dimension, not folded into 'arduino': the filename rule applies to every Arduino
+  // change, the diagram requirement only when the change actually touches pins — conflating them
+  // would demand a wiring diagram for a comment typo fix.
+  if (arduinoApplies && arduinoWiringLikely) dims.add('arduino-wiring');
   return dims;
 }
 
@@ -61,6 +74,9 @@ const BASELINE: Array<{ id: string; dimension: Dimension; prompt: string }> = [
   { id: 'code-readme', dimension: 'code', prompt: 'baselineCodeReadme' },
   { id: 'api-researched', dimension: 'api', prompt: 'baselineApiResearched' },
   { id: 'docs-rich', dimension: 'docs', prompt: 'baselineDocsRich' },
+  { id: 'arduino-sketch-naming', dimension: 'arduino', prompt: 'baselineArduinoSketchNaming' },
+  { id: 'arduino-quality', dimension: 'arduino', prompt: 'baselineArduinoQuality' },
+  { id: 'arduino-wiring-diagram', dimension: 'arduino-wiring', prompt: 'baselineArduinoWiringDiagram' },
 ];
 
 function baselineFor(dims: Set<Dimension>): Criterion[] {

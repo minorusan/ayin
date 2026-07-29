@@ -249,13 +249,34 @@ intent → criteria (once per turn) → probes → review → pass? done
   with its unanchored peer. Baseline bars are deterministic per changed file-kind (UI is never an MVP ·
   a webview is reachable from another machine · one responsibility per module · README exists and is
   maintained · markdown uses the format's range · **a third-party integration matches the API the vendor
-  documents today**), plus 3-6 intent criteria. Derived **once** per turn and reused, so the bar cannot
-  move while the agent chases it.
+  documents today** · **an Arduino sketch is named the way the toolchain requires, and wiring is shown
+  with a diagram, not narrated**), plus 3-6 intent criteria. Derived **once** per turn and reused, so the
+  bar cannot move while the agent chases it.
 - The **`api` bar** is the enforcement half of plan mode's research step. `probeThirdPartyApi` detects
   the integration from the code — external hosts, credential-shaped env vars, `Bearer`/OAuth/`/v1/`
   shapes, whether 429s are handled at all — and the criterion fails a change that shows no sign the
   current API was actually looked up. Recalled API knowledge is the failure that passes every review and
   breaks only against the live service.
+- **The `arduino` / `arduino-wiring` bars exist because a generic reviewer reads a correct fact as a
+  mistake.** `probeArduinoProject` (`qa/probes.ts`) detects the project from any changed `.ino`/`.pde`
+  file or a `platformio.ini`/`sketch.yaml` at the root, and measures — as a fact, not an opinion —
+  whether each changed sketch's filename matches its containing folder. That match is a **hard
+  requirement of the Arduino toolchain** (the IDE and `arduino-cli` both refuse to build a sketch named
+  anything else): the reported false positive was a reviewer with no Arduino-specific knowledge reading
+  a correctly-renamed file as an unexplained duplication. The `arduino` bar states the rule explicitly so
+  a match is never flagged and a genuine mismatch always is, by name.
+  - `.ino`/`.pde` were **missing from `CODE_EXT`** before this — not cosmetic: an unclassified file gets
+    `kind: 'other'`, and `qaChangedFiles()` **drops** anything of kind `'other'` from the review
+    entirely. An Arduino sketch was invisible to the gate outright, independent of the naming question.
+  - **`arduino-wiring` is a separate dimension, deliberately not folded into `arduino`** — so a
+    comment-typo fix does not suddenly need a wiring diagram. It only applies when the
+    change actually touches a pin (`pinMode`/`digitalWrite`/`digitalRead`/`analogRead`/`analogWrite`/
+    `attachInterrupt`, or the text otherwise discusses wiring), and requires the reply to contain the
+    `diagram` tool's rendered ASCII, not prose describing which pin connects to what — see the wiring
+    mode of the `diagram` tool above, which this bar exists to make mandatory rather than optional.
+  - A modest **`arduino-quality`** bar carries soft, non-blocking recommendations (named pin constants
+    over magic numbers, `delay()` in `loop()` only when genuinely meant to block, `Serial.begin` baud
+    consistency) — raised only when clearly ignored, never invented work.
 - **Probes** (`qa/probes.ts`, no LLM, read-only) supply the facts a reviewer cannot get by reading: a
   real HTTP GET on loopback **and** on this machine's LAN address (so *up but loopback-only* is its own
   verdict — a dev server bound to localhost looks perfect on the machine that built it and is invisible
@@ -372,6 +393,36 @@ configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
   - Verified end-to-end against the real model: a first-try `SEQUENCE (6 participants)` (re-validated
     independently, SVG free of embedded error text), and the repair path forced with a stub validator
     — two rejections fed back, success on round 3.
+  - **Wiring/circuit diagrams render as ASCII text, not an image** (`isWiringRequest`, matched against
+    `kind`/`subject`: wiring, circuit, breadboard, schematic, pinout, connect(ed/ion)). Investigated
+    first, because no maintained library exists to draw one — `circuit-diagram` on npm is 10+ years
+    stale, AACircuit is a Python **desktop GUI**, and `ascii-art-arduinos`/`ASCII-schematics` are static
+    pre-drawn images, not generators. `plantuml -ttxt` (already in the pipeline) is the real answer:
+    `render` defaults to `'txt'` for a wiring request, `DiagramResult.ascii` is the `.atxt` file read
+    back so it can be pasted straight into a reply, and `formatDiagramResult` puts that block front and
+    center with an explicit "paste this, don't describe the wiring in prose" instruction.
+    - **The shape matters more than the mode.** A component or class diagram — PlantUML's own default
+      pick for "how parts connect" — renders in ASCII as disconnected boxes with **no visible wire at
+      all**; only a flat `participant` + labeled `->` (sequence) shape draws a connected, labeled line
+      per wire. `wiringGuidance.txt` is inserted **before** the general type-picking advice in
+      `draw.txt` (moving it there was itself a fix — placed after, the model kept reaching for
+      component/nested-block/`note`/`title` shapes anyway and the general advice quietly won), states
+      the override explicitly, and forbids nesting, `note`, `title` and non-participant shapes by name.
+      **Verified against the real model, not assumed**: the first attempt (guidance present but
+      positioned after the general advice) still produced a nested `component`+`database`+`note`+
+      `title` diagram that PlantUML itself classified `DESCRIPTION`, not `SEQUENCE`, and rendered as
+      disconnected boxes in ASCII — exactly the failure the feature exists to prevent. Reordering +
+      stronger, more explicit override language fixed it: PlantUML then reports `SEQUENCE`, and the
+      ASCII shows four boxes connected by three labeled lines.
+    - **A materialization trap bit this verification loop itself.** Prompts-in-files never overwrite a
+      LOCAL copy once one exists (rule 3) — mid-iteration, the dev machine's already-materialized local
+      `draw.txt`/`wiringGuidance.txt` were stale relative to the edited SOURCE files, so two consecutive
+      "fixes" silently changed nothing at the model. Any installation with these ids already
+      materialized needs `/reset` (or the specific files deleted) to pick this up — same caveat as
+      every other prompt change, worth restating here because it is easy to mistake for "the model is
+      ignoring the instruction" when it is actually "the instruction never reached the model".
+    - `AYIN_DEBUG_DIAGRAM_PROMPT=1` dumps the exact assembled prompt to stderr each round — the fastest
+      way to tell those two failure modes apart, which is exactly how this bug was found.
 - **`web_search`** (`tools/web-search.ts`) mirrors maradel's pipeline (`backend/src/tasks/webSearch.ts`),
   in-process and dependency-free: **SearXNG** (keyless self-hosted metasearch, JSON API) PRIMARY →
   **DuckDuckGo HTML** fallback → **DDG Instant Answer** last resort; rank + dedup → fetch top 4 pages →

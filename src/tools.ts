@@ -431,11 +431,12 @@ const tools: Tool[] = [
   },
   {
     name: 'diagram',
-    description: 'Explain something with a PICTURE: generate a validated PlantUML diagram, write it as a .puml next to the work, render it and open it. Use this whenever a structure, flow, lifecycle or relationship is easier seen than read — and whenever the user says they do not understand something, asks you to explain better, or asks for a diagram/schema/visual. The diagram is checked by the real PlantUML renderer and repaired in a loop until it actually parses, so what you get back always renders. Pass `context` with real facts (file names, functions, events) you already gathered — without it the picture will be generic.',
+    description: 'Explain something with a PICTURE: generate a validated PlantUML diagram, write it as a .puml next to the work, render it and open it. Use this whenever a structure, flow, lifecycle or relationship is easier seen than read — and whenever the user says they do not understand something, asks you to explain better, or asks for a diagram/schema/visual. The diagram is checked by the real PlantUML renderer and repaired in a loop until it actually parses, so what you get back always renders. Pass `context` with real facts (file names, functions, events) you already gathered — without it the picture will be generic. For WIRING or a CIRCUIT (subject or kind mentions wiring/circuit/breadboard/schematic/pinout), it automatically renders as ASCII text instead of an image and hands back the actual rendered art — paste that block into your reply verbatim; do not describe the wiring in prose instead.',
     parameters: [
-      { name: 'subject', type: 'string', description: 'What the diagram must explain, in a phrase. e.g. "how a chat request flows from the CLI to the model and back", "the lifecycle of a fix request".', required: true },
-      { name: 'kind', type: 'string', description: 'Optional diagram type to force: sequence | class | component | activity | state | mindmap. Omit to let it choose.', required: false },
+      { name: 'subject', type: 'string', description: 'What the diagram must explain, in a phrase. e.g. "how a chat request flows from the CLI to the model and back", "the wiring between the Arduino and the LED".', required: true },
+      { name: 'kind', type: 'string', description: 'Optional diagram type to force: sequence | class | component | activity | state | mindmap | wiring. Omit to let it choose.', required: false },
       { name: 'context', type: 'string', description: 'Optional grounding — real module/function/event names, or findings from explore/read_file, so the diagram names your actual code.', required: false },
+      { name: 'render', type: 'string', description: 'Optional render mode override: svg | png | txt | 0. Wiring/circuit diagrams already default to txt (ASCII, pasted straight into the reply) — you rarely need to set this.', required: false },
     ],
     async execute(params) {
       return diagramExecute(params);

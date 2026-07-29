@@ -41,7 +41,7 @@ import { getConfig } from '../prompts.js';
 import { recordQa } from '../session-record.js';
 import { addMessage, formatGateCardForChat, setAgentStatus, HEADLESS } from '../ui.js';
 import { deriveCriteria, dimensionsOf, type Criterion, type Dimension } from './criteria.js';
-import { describeFile, gatherEvidence, gitDirtySet, probeThirdPartyApi, probeWebview, type ChangedFile } from './probes.js';
+import { describeFile, gatherEvidence, gitDirtySet, probeArduinoProject, probeThirdPartyApi, probeWebview, type ChangedFile } from './probes.js';
 import { reviewArtifacts, type QaIssue, type QaVerdict } from './review.js';
 
 export type { QaIssue, QaVerdict };
@@ -227,7 +227,8 @@ export async function qaGate(
   try {
     const webview = await probeWebview(files);
     const api = probeThirdPartyApi(files);
-    const dims: Set<Dimension> = dimensionsOf(files, webview.applies, api.applies);
+    const arduino = probeArduinoProject(files);
+    const dims: Set<Dimension> = dimensionsOf(files, webview.applies, api.applies, arduino.applies, arduino.wiringLikely);
 
     if (!turn.criteria) {
       setActivityDetail('deriving acceptance criteria from your prompts');

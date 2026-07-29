@@ -155,7 +155,10 @@ doesn't slip past the gate just for being terse — that claim is reviewed befor
 2. **Acceptance criteria** are written *before* the changed files are looked at — a reviewer shown the
    answer first invents criteria the answer passes. Standing bars apply by file kind: UI is never left
    looking like an MVP; a webview is actually reachable from another machine; one responsibility per
-   module; a README exists and still matches; markdown uses the format's range.
+   module; a README exists and still matches; markdown uses the format's range; **an Arduino sketch is
+   named the way the toolchain requires — `Blinker/Blinker.ino`, never flagged as odd for matching its
+   own folder, since that match is what makes it build at all** — and wiring is shown with the diagram
+   below, not narrated in prose.
 3. **Probes** measure what reading can't: a real HTTP GET on loopback *and* on the LAN address, so
    "running but loopback-only" is caught — the failure that looks perfect on the machine that built it
    and is invisible from your phone. Plus README staleness, markdown richness, structural SRP signals.
@@ -206,6 +209,23 @@ for repair — up to 4 rounds. So a returned diagram always parses; a failing on
 Output lands next to your work (`<subject-slug>.puml` + a rendered `.svg`), and is opened in VS Code
 when the `code` CLI is on PATH — otherwise it's simply left in place and referenced by path.
 
+- **Ask about wiring or a circuit and it renders as ASCII text, pasted straight into the reply,
+  instead of an SVG.** There is no maintained library for this — `circuit-diagram` on npm is 10+ years
+  stale, the well-known ASCII-circuit tools are Python desktop GUIs, and the Arduino "ASCII art" repos
+  out there are static pre-drawn pinout images, not generators. `plantuml -ttxt` already does the job:
+  ```
+  ,---------------.  ,-------------.  ,---.  ,---.
+  |Arduino Uno D13|  |220Ω Resistor|  |LED|  |GND|
+  `-------+-------'  `------+------'  `-+-'  `-+-'
+          |    D13 Signal   |            |       |
+          |----------------->            |       |
+          |                 |    Anode   |       |
+          |                 |------------>       |
+          |                 |            | Cathode
+          |                 |            |------->
+  ```
+  and the QA gate enforces it: a change touching pins that only *narrates* the wiring, with no
+  rendered diagram in the reply, is a failure it will send back for a fix.
 - **Nothing leaves your machine.** PlantUML's public server would render in one HTTP call, but a
   diagram of your architecture is exactly what not to POST to a third party. Rendering is local;
   point `AYIN_PUML_SERVER` at your own PlantUML/Kroki instance if you want remote.
