@@ -479,31 +479,41 @@ The moving parts, designed to survive interruption at any point:
   backend → best-effort on the served model.
 - **Review**: commit metadata + capped diff (120 KB, truncated at a hunk boundary) → one
   `llmChat` call scoring the diff against the `SMELL_SIGNALS` catalog (~20 typical smells);
-  each finding carries a **confidence 0.30–1.0**. Output: `CodeReview-<shortHash>.md` in the
-  repo root — metadata table, changed files, findings, verdict.
-- **Unity repos** (`Assets/` + `ProjectSettings/`): each commit also gets `AssetDiff-<shortHash>.md` —
-  the deterministic `unity_asset_diff` (`commit^ → commit`, `--md`) object-level change map — as a
-  second file next to the review; the review links to it and the reviewer receives its content.
-  Tool at `~/tools/unity_asset_diff.py` or `AYIN_UNITY_DIFF`; missing tool → one-line note.
+  each finding carries a **confidence 0.30–1.0**. Output: `reviews/<shortHash>/CodeReview.md`
+  under the repo root (or under `AYIN_REVIEW_DIR` if set) — metadata table, changed files,
+  findings, verdict. One folder per review — everything about that commit's review lives
+  together in it, nothing loose in the repo root.
+- **Unity repos** (`Assets/` + `ProjectSettings/`): each commit also gets
+  `reviews/<shortHash>/AssetDiff.md` — the deterministic `unity_asset_diff` (`commit^ → commit`,
+  `--md`) object-level change map — beside `CodeReview.md` in the same folder; the review links
+  to it and the reviewer receives its content. Tool at `~/tools/unity_asset_diff.py` or
+  `AYIN_UNITY_DIFF`; missing tool → one-line note.
+- **Merges** get the same treatment: `reviews/<shortHash>/MergeReport.md`.
 - **Agent-file pointer**: after a report is written, a fenced `<!-- ayin:reports:begin -->` block
-  in the repo-root **`CLAUDE.md` *and* `GEMINI.md`** lists the pending reports (newest 12), so the
-  next Claude Code / Gemini CLI session reads them. Managed region only — the rest of each file is
-  untouched; a missing file is created.
-- **Repo hygiene** (installed with the hooks, re-asserted by the same 5-min self-heal): a fenced
-  `# >>> ayin:local-cruft >>>` block in the repo's **`.gitignore`** listing local dev cruft that must
-  never be committed (ayin's own reports, `system_specs.*`, `STUDY_PERF-*/`, `.claude/hooks/`, the
-  local-only `Assets/LiveOpsHub` + `Assets/Plugins/AltTester` tooling folders), plus the same list —
-  as an instruction — in an `<!-- ayin:hygiene:begin -->` block in `CLAUDE.md` and `GEMINI.md`, so an
-  agent working the repo doesn't stage them either. Writes only when the bytes change (the self-heal
-  is otherwise a no-op), so it never churns mtimes. `AYIN_WATCH_HYGIENE=0` disables it.
-  *Note:* `.gitignore` only affects **untracked** files — cruft already tracked in a repo still needs
-  a manual `git rm --cached`.
-- **Guards**: commits touching only `CodeReview-*.md`/`AssetDiff-*.md` are skipped (no
-  review-of-review loop); the agent files and `.gitignore` are excluded from the working-tree
-  fingerprint, the review diff, and auto-staging — so ayin writing its own blocks never re-triggers
-  a pass and never commits its own bookkeeping;
+  in the repo-root **`CLAUDE.md` *and* `GEMINI.md`** lists the pending reports — everything under
+  `reviews/` plus any root-level periodic smell report (newest 12), so the next Claude Code /
+  Gemini CLI session reads them. Managed region only — the rest of each file is untouched; a
+  missing file is created.
+- **No repo hygiene.** `ayin watch` writes nothing to `.gitignore` and maintains no cruft-list
+  block in `CLAUDE.md`/`GEMINI.md`. What a repo ignores is its owner's call — the only files
+  ayin ever writes to a watched repo are its own reports (under `reviews/`, or a root-level
+  `AYIN-REPORT-SMELLS-*.md`) and the agent-file pointer block above.
+- **Guards**: commits touching only `reviews/**` (or a root `AYIN-REPORT-*.md`) are skipped (no
+  review-of-review loop); the agent files and everything under `reviews/` are excluded from the
+  working-tree fingerprint, the review diff, and auto-staging — so ayin writing its own reports
+  or pointer block never re-triggers a pass and never commits its own bookkeeping;
   vanished commits (rebase/gc) are ledgered as `gone`; LLM/backend failures retry with
   linear backoff up to 5 attempts, then are ledgered as `failed`.
+- **Autostage pass** (every 10 min, only repos whose working tree changed): a deterministic gate
+  (`NEVER_STAGE_RE` — `ProjectSettings/`, `UserSettings/`, `Packages/`, `.vscode/`, `.idea/`,
+  `.vs/`, `hooks/`, `*.csproj/.sln/.user/.vsconfig/.txt` — plus `SECRET_RE` for `.env*`/keys/
+  `id_rsa`/`id_ed25519`/anything named `*secret*`/`*credential*`, and ayin's own output paths)
+  drops files before the model ever sees them. What's left goes to the LLM, told to
+  `stage:true` real source (`.cs`, `.anim`/`.controller`/`.overrideController`/`.asset`, normal
+  source/tests/docs) and `stage:false` debug scaffolding, stray logs, commented-out experiments,
+  scratch files, editor cruft — defaulting to `false` when unsure. Its plan is re-filtered through
+  the same gate before `git add` runs, plus a 2 MB size cap. Never commits — only stages/unstages
+  and drafts `.git/COMMIT_EDITMSG`.
 
 ## Prompts (`prompts-service.ts`, `prompts.ts`, `prompts/`)
 
@@ -863,11 +873,11 @@ can finish — see the warning in `SETUP.md`.
 ```
 src/
 ├── index.ts            entry; interactive vs headless (-p) vs `watch`; overlays; input handling
-├── watch.ts            repo watcher daemon: post-commit → CodeReview, post-merge → AYIN-REPORT-MERGE
-│                       (what a pull brought in); 10-min working-tree pass → autostage meaningful /
+├── watch.ts            repo watcher daemon: post-commit/post-merge → reviews/<hash>/{CodeReview,
+│                       AssetDiff,MergeReport}.md; 10-min working-tree pass → autostage meaningful /
 │                       unstage junk (NO commit) + .git/COMMIT_EDITMSG + AYIN-REPORT-SMELLS; upserts a
-│                       CLAUDE.md + GEMINI.md report pointer and the .gitignore local-cruft block;
-│                       chains onto foreign hooks; 5-min hook + hygiene self-heal
+│                       CLAUDE.md + GEMINI.md report pointer only — no .gitignore, no cruft list;
+│                       chains onto foreign hooks; 5-min hook self-heal
 ├── resource-client.ts  backend resource door (POST /resource/<name>) + shared llm-authority dance
 ├── agent.ts            the agent loop (build → call → parse → execute → loop)
 ├── llm/

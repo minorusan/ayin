@@ -257,8 +257,10 @@ ayin watch --once                           # process any queued commits, then e
 Every commit is queued (a JSON line in `~/.ayin-cli/watch/queue.jsonl`) and reviewed by the
 LLM against a catalog of ~20 typical code-smell signals (long functions, swallowed errors,
 race conditions, hardcoded secrets, injection risk, unbounded memory, …); each finding is
-reported **with a confidence score**. The review lands as `CodeReview-<shortHash>.md` in the
-repo root — commit metadata first, then the findings, then a verdict.
+reported **with a confidence score**. The review lands as `reviews/<shortHash>/CodeReview.md`
+under the repo root (or under `AYIN_REVIEW_DIR` if set) — commit metadata first, then the
+findings, then a verdict. One folder per review: everything about that commit's review lives
+together there, nothing loose in the repo root.
 
 Reviews are LLM work, so the daemon takes the backend's **llm resource as the `ayin`
 authority** for each review batch (the backend swaps to the coder model, and reverts when the
@@ -269,35 +271,26 @@ best-effort on the served model.
 Built to survive interruption: the hook never blocks a commit and never needs the daemon up —
 the queue accumulates, and on its next start the daemon processes the whole backlog (a
 processed-ledger keeps reviews exactly-once; a crash mid-review just re-runs it). One daemon
-serves any number of watched repos. Commits that only touch `CodeReview-*.md` are skipped, so
+serves any number of watched repos. Commits that only touch `reviews/**` are skipped, so
 committing a review never triggers a review of the review.
 
 To keep it running on macOS: `nohup ayin watch --repo <repo> &`, or wrap it in a launchd
 agent with `KeepAlive` — the daemon is safe to kill and restart at any point.
 
-**Repo hygiene** — alongside the hooks, `ayin watch` maintains two managed blocks in every watched
-repo (and re-asserts them in the 5-min self-heal, so a reset or fresh clone gets them back):
+`ayin watch` writes nothing to `.gitignore` and maintains no cruft list anywhere — what a repo
+ignores is its owner's call, not ayin's. The only things it ever writes to a watched repo are
+its own reports (under `reviews/`, or a root-level periodic `AYIN-REPORT-SMELLS-*.md`) and a
+managed pointer block in `CLAUDE.md` **and** `GEMINI.md` (`<!-- ayin:reports:begin -->`) listing
+pending reports, re-asserted by the same 5-min self-heal. Only that fenced region is touched —
+the rest of each file is yours — and it's written only when its bytes actually change.
 
-- `.gitignore` — a `# >>> ayin:local-cruft >>>` block ignoring the local dev cruft that must never
-  be committed: ayin's own `AYIN-REPORT-*` / `CodeReview-*` / `AssetDiff-*` reports, `system_specs.md`
-  / `.txt` (machine hardware dumps — hostname/serial/UUID), `STUDY_PERF-*/` scratch notes,
-  `.claude/hooks/`, and the local-only `Assets/LiveOpsHub` + `Assets/Plugins/AltTester` folders.
-- `CLAUDE.md` **and** `GEMINI.md` — an `<!-- ayin:hygiene:begin -->` block quoting the same list as
-  an instruction, so Claude Code / Gemini CLI don't stage those paths either. The same two files
-  also carry the `<!-- ayin:reports:begin -->` pointer to pending reports.
-
-Only the fenced regions are touched — the rest of each file is yours, and a file is written only
-when its bytes actually change. `AYIN_WATCH_HYGIENE=0` turns the whole thing off. Note that
-`.gitignore` only affects *untracked* files: cruft already tracked in the repo needs a one-time
-`git rm --cached`.
-
-**Unity repos** (`Assets/` + `ProjectSettings/`) get **two files per commit**:
-`CodeReview-<hash>.md` (the LLM review) and `AssetDiff-<hash>.md` — a **deterministic asset
-diff** from the external `unity_asset_diff` tool: object-level changes with full hierarchy
-paths (`MonoBehaviour at Path/To/Object · field old → new`) for prefabs/scenes/assets. The
-review links to it and the reviewer is fed its content as ground truth. Tool path:
-`~/tools/unity_asset_diff.py` or `AYIN_UNITY_DIFF`. Non-Unity repos never spawn it and get
-only the review file.
+**Unity repos** (`Assets/` + `ProjectSettings/`) get **two files per commit**, in the same
+`reviews/<shortHash>/` folder: `CodeReview.md` (the LLM review) and `AssetDiff.md` — a
+**deterministic asset diff** from the external `unity_asset_diff` tool: object-level changes
+with full hierarchy paths (`MonoBehaviour at Path/To/Object · field old → new`) for
+prefabs/scenes/assets. The review links to it and the reviewer is fed its content as ground
+truth. Tool path: `~/tools/unity_asset_diff.py` or `AYIN_UNITY_DIFF`. Non-Unity repos never
+spawn it and get only the review file.
 
 ## Requirements
 

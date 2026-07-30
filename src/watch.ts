@@ -15,13 +15,15 @@
  *     (the report file is rewritten), so a crash mid-review just re-runs it on boot.
  *   - For each commit: gather metadata + diff (capped), one LLM call reviewing against a
  *     catalog of typical code-smell signals (each finding reported with a confidence),
- *     write CodeReview-<shortHash>.md into the repo root.
- *   - Commits that only touch CodeReview-*.md files are skipped — otherwise committing a
+ *     write `reviews/<shortHash>/CodeReview.md` in the repo root (or under AYIN_REVIEW_DIR).
+ *     A Unity repo's deterministic asset diff lands beside it in the same folder,
+ *     `reviews/<shortHash>/AssetDiff.md` — one folder per review, nothing loose in the root.
+ *   - Commits that only touch files under `reviews/` are skipped — otherwise committing a
  *     review would trigger a review of the review, forever.
- *   - Alongside the hooks (and re-asserted by the same 5-min self-heal) each watched repo gets
- *     two managed blocks: the local-cruft ignore list in .gitignore, and the same list as an
- *     instruction — plus the pending-report pointer — in CLAUDE.md and GEMINI.md. Fenced
- *     regions only, written just when the bytes change. AYIN_WATCH_HYGIENE=0 opts out.
+ *   - Alongside the hooks (and re-asserted by the same 5-min self-heal), CLAUDE.md/GEMINI.md
+ *     get one fenced pointer block listing pending reports, so the next agent session in that
+ *     repo notices unread findings. Nothing else is written to a watched repo — no .gitignore
+ *     edit, no hardcoded ignore list. What a repo ignores is its owner's call, not ayin's.
  */
 
 import { spawn } from 'node:child_process';
@@ -223,8 +225,6 @@ async function installHook(repo: string): Promise<void> {
     out(r === 'wrote' ? `${name} hook set: ${paths.hookPath}` : `${name} hook already present`);
     log('INFO', 'watch_hook_installed', { repo, hook: name, result: r });
   }
-  // Repo hygiene rides along with the hooks: the .gitignore cruft block + the agent-file instruction.
-  if (ensureHygiene(repo)) out(`hygiene: local-cruft block written (.gitignore${AGENT_FILES.map(f => ` + ${f}`).join('')})`);
   // Register the repo (the set the daemon watches + self-heals + reviews the working tree of).
   const repos = existsSync(REPOS_FILE) ? JSON.parse(readFileSync(REPOS_FILE, 'utf-8')) : {};
   repos[repo] = { installedAt: new Date().toISOString() };
@@ -242,7 +242,7 @@ function registeredRepos(): string[] {
 async function selfHealHooks(): Promise<void> {
   const repos = registeredRepos();
   if (repos.length === 0) return;
-  let reinstalled = 0, gone = 0, hygiene = 0;
+  let reinstalled = 0, gone = 0;
   for (const repo of repos) {
     let wrote = false, missing = false;
     for (const { name, kind } of WATCH_HOOKS) {
@@ -252,13 +252,10 @@ async function selfHealHooks(): Promise<void> {
     }
     if (missing) { gone++; continue; }
     if (wrote) reinstalled++;
-    // Same self-heal cadence for the hygiene blocks — a reset/checkout that dropped them restores
-    // them here. Idempotent: writes nothing (and logs nothing) when they're already in place.
-    if (ensureHygiene(repo)) hygiene++;
   }
-  if (reinstalled || gone || hygiene) {
-    out(`hook self-heal: ${reinstalled} repo(s) re-hooked, ${hygiene} re-hygiened, ${gone} missing — of ${repos.length} watched`);
-    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), hygiene: String(hygiene), gone: String(gone) });
+  if (reinstalled || gone) {
+    out(`hook self-heal: ${reinstalled} repo(s) re-hooked, ${gone} missing — of ${repos.length} watched`);
+    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), gone: String(gone) });
   }
 }
 
@@ -273,17 +270,39 @@ const AGENT_FILES = ['CLAUDE.md', 'GEMINI.md'];
 
 const CLAUDE_BEGIN = '<!-- ayin:reports:begin -->';
 const CLAUDE_END = '<!-- ayin:reports:end -->';
-const AYIN_REPORT_RE = /^(CodeReview-[0-9a-f]+|AssetDiff-[0-9a-f]+|AYIN-REPORT-[A-Za-z]+-.+)\.md$/;
 
+/** Basename pattern for the ONE report kind still written loose at the repo root: the periodic
+ *  worktree smell pass (`AYIN-REPORT-SMELLS-<timestamp>.md`) — it is not tied to any one commit, so
+ *  it does not fit the per-commit `reviews/<hash>/` folder the way CodeReview/AssetDiff/MergeReport
+ *  do. Everything else ayin writes lives under `reviews/`. */
+const AYIN_REPORT_RE = /^AYIN-REPORT-[A-Za-z]+-.+\.md$/;
+/** A path (relative or absolute) is one of ayin's own outputs — used to exclude the whole `reviews/`
+ *  folder from review, staging and the untracked-file fingerprint, regardless of what's inside it. */
+function isAyinReviewPath(path: string): boolean {
+  return /(^|\/)reviews\//.test(path);
+}
+
+/** The reports worth pointing an agent at: the per-commit ones nested under `reviews/`, plus any
+ *  smell report still sitting at the repo root, newest first. */
 function listRepoReports(repo: string): string[] {
+  const found: Array<{ f: string; m: number }> = [];
   try {
-    return readdirSync(repo)
-      .filter(f => AYIN_REPORT_RE.test(f))
-      .map(f => ({ f, m: statSync(join(repo, f)).mtimeMs }))
-      .sort((a, b) => b.m - a.m)
-      .slice(0, 12)
-      .map(x => x.f);
-  } catch { return []; }
+    for (const f of readdirSync(repo)) {
+      if (AYIN_REPORT_RE.test(f)) found.push({ f, m: statSync(join(repo, f)).mtimeMs });
+    }
+  } catch { /* repo unreadable — the root scan just contributes nothing */ }
+  try {
+    const reviewsDir = join(repo, 'reviews');
+    for (const hash of readdirSync(reviewsDir)) {
+      const hashDir = join(reviewsDir, hash);
+      if (!statSync(hashDir).isDirectory()) continue;
+      for (const name of readdirSync(hashDir)) {
+        if (!/\.md$/.test(name)) continue;
+        found.push({ f: `reviews/${hash}/${name}`, m: statSync(join(hashDir, name)).mtimeMs });
+      }
+    }
+  } catch { /* no reviews/ yet — nothing to add */ }
+  return found.sort((a, b) => b.m - a.m).slice(0, 12).map(x => x.f);
 }
 
 /** Replace a fenced managed region in `content` (or append it), returning the new content.
@@ -322,83 +341,16 @@ function upsertAgentReports(repo: string): void {
   }
 }
 
-// ── repo hygiene: local-cruft ignores ─────────────────────────────────
-// Installed alongside the hooks (and re-asserted by the same 5-min self-heal): a managed block in
-// the repo's .gitignore listing the local dev cruft that must never be committed — ayin's own
-// reports, machine hardware dumps, per-ticket scratch notes, local hook scripts, local-only tooling
-// folders — plus the same list, as an instruction, in CLAUDE.md and GEMINI.md so an agent working
-// the repo does not stage them either. Both are managed regions: everything outside is untouched.
-// Set AYIN_WATCH_HYGIENE=0 to leave a repo's .gitignore / agent files alone.
-
-const HYGIENE_ENABLED = process.env.AYIN_WATCH_HYGIENE !== '0';
-
-const IGNORE_BEGIN = '# >>> ayin:local-cruft >>>';
-const IGNORE_END = '# <<< ayin:local-cruft <<<';
-
-/** The never-commit list. One source of truth: rendered as .gitignore patterns below, and quoted
- *  verbatim into the agent files so Claude/Gemini see the same list they must not stage. */
-const LOCAL_CRUFT = `# --- Local dev cruft: never commit ---
-# ayin local review output
-AYIN-REPORT-*.md
-CodeReview-*.md
-AssetDiff-*.md
-# machine hardware report (sensitive — hostname / serial / UUID)
-system_specs.md
-system_specs.txt
-# per-ticket research / scratch notes
-STUDY_PERF-*/
-# Claude Code local hook scripts
-.claude/hooks/
-# Local-only tooling folders (not part of the shipped game)
-/Assets/LiveOpsHub/
-/Assets/LiveOpsHub.meta
-/Assets/Plugins/AltTester/
-/Assets/Plugins/AltTester.meta`;
-
-const HYGIENE_BEGIN = '<!-- ayin:hygiene:begin -->';
-const HYGIENE_END = '<!-- ayin:hygiene:end -->';
-
-/** Upsert the managed ignore block in <repo>/.gitignore. Creates the file if absent. */
-function upsertCruftIgnore(repo: string): boolean {
-  const path = join(repo, '.gitignore');
-  let content = '';
-  try { content = existsSync(path) ? readFileSync(path, 'utf-8') : ''; } catch { return false; }
-  const block = `${IGNORE_BEGIN}\n${LOCAL_CRUFT}\n${IGNORE_END}`;
-  return writeIfChanged(path, upsertBlock(content, IGNORE_BEGIN, IGNORE_END, block));
-}
-
-/** Upsert the same never-commit list, as an instruction, in each agent file. */
-function upsertCruftInstruction(repo: string): boolean {
-  const block = `${HYGIENE_BEGIN}
-## 🚫 Never commit these — local dev cruft
-Maintained by \`ayin watch\` (mirrors the \`ayin:local-cruft\` block in \`.gitignore\`). These paths are
-local to this machine: never \`git add\` them, never include them in a commit you make on my behalf.
-
-\`\`\`gitignore
-${LOCAL_CRUFT}
-\`\`\`
-${HYGIENE_END}`;
-  let wrote = false;
-  for (const name of AGENT_FILES) {
-    const path = join(repo, name);
-    let content = '';
-    try { content = existsSync(path) ? readFileSync(path, 'utf-8') : ''; } catch { continue; }
-    if (writeIfChanged(path, upsertBlock(content, HYGIENE_BEGIN, HYGIENE_END, block))) wrote = true;
-  }
-  return wrote;
-}
-
-/** Assert repo hygiene: the .gitignore block + the agent-file instruction. Idempotent and silent
- *  when already in place, so the 5-min self-heal is near-free. Never throws. */
-function ensureHygiene(repo: string): boolean {
-  if (!HYGIENE_ENABLED) return false;
-  const ignoreWrote = upsertCruftIgnore(repo);
-  const agentWrote = upsertCruftInstruction(repo);
-  if (ignoreWrote || agentWrote) {
-    log('INFO', 'watch_hygiene_written', { repo, gitignore: String(ignoreWrote), agentFiles: String(agentWrote) });
-  }
-  return ignoreWrote || agentWrote;
-}
+// ── repo hygiene: REMOVED ──────────────────────────────────────────────
+// ayin used to write a managed .gitignore block, and quote the same list into CLAUDE.md/GEMINI.md,
+// on every watched repo — a hardcoded "local dev cruft" list that included one deployment's own
+// internal tooling folder names. That is not ayin's call to make: which paths a repo ignores is the
+// repo owner's decision, not a side effect of pointing ayin at it, and hardcoding one operator's
+// project layout into a public tool leaks exactly what it should never have known. Removed outright,
+// not made opt-in — an opt-in default is still a default someone has to notice and turn off.
+// AYIN_WATCH_HYGIENE, ensureHygiene(), upsertCruftIgnore(), upsertCruftInstruction() and LOCAL_CRUFT
+// are gone; nothing replaces them. Anything a repo owner wants ignored belongs in that repo's own
+// .gitignore, written by them.
 
 // ── danger push ───────────────────────────────────────────────────────
 // When a review flags something dangerous, ping the user's phone via the Maradel backend's FCM
@@ -487,9 +439,9 @@ async function unityAssetDiff(repo: string, commit: string): Promise<string | nu
 
 function onlyReviewFiles(numstat: string): boolean {
   // Skip commits that only touch ayin's own artifacts (else committing a review triggers a review
-  // of the review, forever): CodeReview-*, AssetDiff-*, AYIN-REPORT-*.md.
+  // of the review, forever): anything under reviews/, or a root-level AYIN-REPORT-*.md.
   const files = numstat.split('\n').filter(Boolean).map(l => l.split('\t')[2] || '');
-  return files.length > 0 && files.every(f => /(^|\/)(CodeReview-[0-9a-f]+|AssetDiff-[0-9a-f]+|AYIN-REPORT-[A-Za-z]+-.+)\.md$/.test(f));
+  return files.length > 0 && files.every(f => isAyinReviewPath(f) || AYIN_REPORT_RE.test(f.split('/').pop() || f));
 }
 
 function buildReviewPrompt(meta: CommitMeta, diff: string, truncated: boolean, unityMd?: string | null): string {
@@ -529,20 +481,22 @@ async function reviewCommit(repo: string, commit: string): Promise<{ status: 're
   }
   if (!diff.trim()) diff = '(empty diff — merge or metadata-only commit)';
 
-  // Review output dir — a folder if AYIN_REVIEW_DIR is set (absolute, or relative to the repo);
-  // else the repo root (back-compat). Reports + asset diffs are written here together, so the
-  // relative AssetDiff link in the review header still resolves.
-  const reviewDir = process.env.AYIN_REVIEW_DIR
+  // Review output dir — ONE FOLDER PER REVIEW: `reviews/<shortHash>/` under the repo root, or under
+  // AYIN_REVIEW_DIR if set (absolute, or relative to the repo). Everything about this commit's review
+  // — the report, the Unity asset diff — lives together in that one folder, so a repo-relative link
+  // between them never needs the hash repeated in the filename, and the repo root stays clean.
+  const reviewsBase = process.env.AYIN_REVIEW_DIR
     ? (process.env.AYIN_REVIEW_DIR.startsWith('/') ? process.env.AYIN_REVIEW_DIR : join(repo, process.env.AYIN_REVIEW_DIR))
-    : repo;
-  if (reviewDir !== repo) mkdirSync(reviewDir, { recursive: true });
+    : join(repo, 'reviews');
+  const reviewDir = join(reviewsBase, meta.shortHash);
+  mkdirSync(reviewDir, { recursive: true });
 
-  // Unity repos only: deterministic object-level asset diff → its OWN file next to the review
-  // (AssetDiff-<shortHash>.md), and fed to the reviewer as ground truth.
+  // Unity repos only: deterministic object-level asset diff → its OWN file beside the review, in the
+  // same per-commit folder, and fed to the reviewer as ground truth.
   const unityMd = await unityAssetDiff(repo, commit);
   let assetDiffPath: string | null = null;
   if (unityMd) {
-    assetDiffPath = join(reviewDir, `AssetDiff-${meta.shortHash}.md`);
+    assetDiffPath = join(reviewDir, `AssetDiff.md`);
     writeFileSync(assetDiffPath, `# Unity Asset Diff — ${meta.subject}
 
 | | |
@@ -565,7 +519,7 @@ ${unityMd}
     { role: 'user', content: buildReviewPrompt(meta, diff, truncated, unityMd) },
   ]);
 
-  const reportPath = join(reviewDir, `CodeReview-${meta.shortHash}.md`);
+  const reportPath = join(reviewDir, `CodeReview.md`);
   const header = `# Code Review — ${meta.subject}
 
 | | |
@@ -583,7 +537,7 @@ ${unityMd}
 ${meta.numstat || '(none)'}
 \`\`\`
 
-${unityMd ? `## Deterministic Unity asset diff\n\n→ **[AssetDiff-${meta.shortHash}.md](AssetDiff-${meta.shortHash}.md)** (object-level change map; the reviewer below saw it)\n\n` : ''}---
+${unityMd ? `## Deterministic Unity asset diff\n\n→ **[AssetDiff.md](AssetDiff.md)** (object-level change map; the reviewer below saw it)\n\n` : ''}---
 
 `;
   writeFileSync(reportPath, header + review.trim() + '\n');
@@ -592,15 +546,16 @@ ${unityMd ? `## Deterministic Unity asset diff\n\n→ **[AssetDiff-${meta.shortH
   upsertAgentReports(repo);
   // Dangerous → ping the phone. "Needs attention" is the reviewer's bad verdict.
   if (/needs attention/i.test(review)) {
-    await sendDangerPush(`⚠ Ayin: review flags ${repoName(repo)}`, `"${meta.subject}" (${meta.shortHash}) — Needs attention. See CodeReview-${meta.shortHash}.md`);
+    await sendDangerPush(`⚠ Ayin: review flags ${repoName(repo)}`, `"${meta.subject}" (${meta.shortHash}) — Needs attention. See reviews/${meta.shortHash}/CodeReview.md`);
   }
   return { status: 'reviewed', note: reportPath };
 }
 
 // ── merge review (post-merge / pull) ─────────────────────────────────
 // Explains what a pull/merge just brought in — the range prev(ORIG_HEAD)..HEAD — into
-// AYIN-REPORT-MERGE-<hash>.md in the repo root (so it shows in the client + gets picked up by
-// the agent-file pointer). Answers "what changed under me and what should I watch out for".
+// reviews/<hash>/MergeReport.md, same one-folder-per-commit convention as the post-commit review
+// (so it shows in the client + gets picked up by the agent-file pointer). Answers "what changed
+// under me and what should I watch out for".
 
 function buildMergePrompt(range: string, oneline: string, stat: string, diff: string, truncated: boolean): string {
   return watchPrompts.get('mergeReport', {
@@ -638,7 +593,12 @@ async function reviewMerge(repo: string, commit: string, prev?: string): Promise
     { role: 'user', content: buildMergePrompt(range, onelineRes.stdout.trim(), statRes.stdout.trim(), diff, truncated) },
   ]);
 
-  const reportPath = join(repo, `AYIN-REPORT-MERGE-${meta.shortHash}.md`);
+  const reviewsBase = process.env.AYIN_REVIEW_DIR
+    ? (process.env.AYIN_REVIEW_DIR.startsWith('/') ? process.env.AYIN_REVIEW_DIR : join(repo, process.env.AYIN_REVIEW_DIR))
+    : join(repo, 'reviews');
+  const reviewDir = join(reviewsBase, meta.shortHash);
+  mkdirSync(reviewDir, { recursive: true });
+  const reportPath = join(reviewDir, `MergeReport.md`);
   const header = `# Merge report — what \`${range}\` pulled in
 
 | | |
@@ -655,7 +615,7 @@ async function reviewMerge(repo: string, commit: string, prev?: string): Promise
   log('INFO', 'watch_merge_written', { repo, commit: meta.shortHash, report: reportPath });
   upsertAgentReports(repo);
   if (/^VERDICT:\s*RISKY/im.test(review)) {
-    await sendDangerPush(`⚠ Ayin: risky pull in ${repoName(repo)}`, `${range} brought in breaking/risky changes — see AYIN-REPORT-MERGE-${meta.shortHash}.md`);
+    await sendDangerPush(`⚠ Ayin: risky pull in ${repoName(repo)}`, `${range} brought in breaking/risky changes — see reviews/${meta.shortHash}/MergeReport.md`);
   }
   return { status: 'reviewed', note: reportPath };
 }
@@ -665,14 +625,14 @@ async function reviewMerge(repo: string, commit: string, prev?: string): Promise
 // unstaged work, stages what's meaningful + unstages debug/junk (NO commit, NO push), drafts a
 // conventional-commit message into .git/COMMIT_EDITMSG, and writes AYIN-REPORT-SMELLS-<ts>.md
 // (dangerous ad-hoc solutions, heavy violations, logging suggestions). So you open Fork to ready
-// chores. Fingerprint (ayin's own artifacts + agent files + .gitignore excluded) means it's near-free when idle.
+// chores. Fingerprint (ayin's own artifacts + agent files excluded) means it's near-free when idle.
 
 const WORKTREE_REVIEW_MS = 10 * 60 * 1000;
 const WORKTREE_STATE_FILE = join(WATCH_DIR, 'worktree-state.json');
 const MAX_WORKTREE_DIFF = 80_000;
 const MAX_STAGE_BYTES = 2 * 1024 * 1024; // never stage a file bigger than this (blobs/binaries)
 
-// Never stage (secrets + ayin's own artifacts + the agent-file pointers + the .gitignore hygiene block).
+// Never stage (secrets + ayin's own artifacts + the agent-file pointers).
 const SECRET_RE = /(^|\/)(\.env(\.[^/]+)?|[^/]*\.(pem|key|p12|pfx|keystore)|id_rsa|id_ed25519|[^/]*(secret|credential)[^/]*)$/i;
 // Infra the developer manages by hand — never auto-staged, and excluded from the review trigger:
 // git hooks, Unity ProjectSettings/ + UserSettings/, and editor/IDE settings (.vscode/.idea/.vs,
@@ -680,11 +640,11 @@ const SECRET_RE = /(^|\/)(\.env(\.[^/]+)?|[^/]*\.(pem|key|p12|pfx|keystore)|id_r
 const NEVER_STAGE_RE = /(^|\/)(ProjectSettings|UserSettings|Packages|\.vscode|\.idea|\.vs|hooks)(\/|$)|\.(csproj|sln|user|vsconfig|txt)$/i;
 function isStageable(path: string): boolean {
   const base = path.split('/').pop() || path;
+  if (isAyinReviewPath(path)) return false;
   if (AYIN_REPORT_RE.test(base)) return false;
-  // ayin's own managed files — the agent-file pointers and the .gitignore hygiene block. The dev
-  // decides when those get committed; auto-staging them would commit ayin's bookkeeping for them.
+  // ayin's own managed file — the agent-file pointer block. The dev decides when that gets
+  // committed; auto-staging it would commit ayin's bookkeeping for them.
   if (AGENT_FILES.includes(base)) return false;
-  if (base === '.gitignore') return false;
   if (SECRET_RE.test(path)) return false;
   if (NEVER_STAGE_RE.test(path)) return false;
   return true;
@@ -699,18 +659,19 @@ function saveWorktreeState(s: WorktreeState): void {
 }
 
 // Paths excluded from the unstaged-change fingerprint AND the review diff: ayin's own outputs (so
-// writing a report / an agent file / the .gitignore block never re-triggers the pass) + the never-stage infra (ProjectSettings/
-// UserSettings/IDE/hooks — the dev owns those). Matches isStageable / NEVER_STAGE_RE in intent.
+// writing a report or the agent-file pointer never re-triggers the pass) + the never-stage infra
+// (ProjectSettings/UserSettings/IDE/hooks — the dev owns those). Matches isStageable / NEVER_STAGE_RE
+// in intent. `reviews/**` covers CodeReview/AssetDiff/MergeReport in one glob, one level deep or not.
 const EXCLUDE_PATHSPEC = [
-  'CLAUDE.md', 'GEMINI.md', '.gitignore', 'AYIN-REPORT-*.md', 'CodeReview-*.md', 'AssetDiff-*.md',
+  'CLAUDE.md', 'GEMINI.md', 'AYIN-REPORT-*.md', 'reviews/**',
   'ProjectSettings/**', 'UserSettings/**', 'Packages/**', '.vscode/**', '.idea/**', '.vs/**',
   '*.csproj', '*.sln', '*.user', '*.vsconfig', '*.txt',
 ].flatMap(g => [`:(exclude,glob)${g}`, `:(exclude,glob)**/${g}`]);
 
 /** Fingerprint of the UNSTAGED work only — `git diff` (working tree vs index, NOT --cached) plus
- *  new untracked files — with ayin's own artifacts + agent files + .gitignore excluded. So the big (LLM) review
+ *  new untracked files — with ayin's own artifacts + agent files excluded. So the big (LLM) review
  *  fires only when the user's unstaged changes actually change: staging/unstaging alone doesn't
- *  trip it, and the dog writing its own report / agent-file / ignore block never re-triggers itself. */
+ *  trip it, and the dog writing its own report or the agent-file pointer never re-triggers itself. */
 async function worktreeFingerprint(repo: string): Promise<string> {
   const diff = await git(repo, ['diff', '--', '.', ...EXCLUDE_PATHSPEC], 400_000);
   const others = await git(repo, ['ls-files', '--others', '--exclude-standard']);
