@@ -280,11 +280,26 @@ To keep it running on macOS: `nohup ayin watch --repo <repo> &`, or wrap it in a
 agent with `KeepAlive` — the daemon is safe to kill and restart at any point.
 
 `ayin watch` writes nothing to `.gitignore` and maintains no cruft list anywhere — what a repo
-ignores is its owner's call, not ayin's. The only things it ever writes to a watched repo are
-its own reports (under `reviews/`, or a root-level periodic `AYIN-REPORT-SMELLS-*.md`) and a
-managed pointer block in `CLAUDE.md` **and** `GEMINI.md` (`<!-- ayin:reports:begin -->`) listing
-pending reports, re-asserted by the same 5-min self-heal. Only that fenced region is touched —
-the rest of each file is yours — and it's written only when its bytes actually change.
+ignores is its owner's call, not ayin's. Beyond its own reports (under `reviews/`, or a root-level
+periodic `AYIN-REPORT-SMELLS-*.md`) and a managed pointer block in `CLAUDE.md` **and** `GEMINI.md`
+(`<!-- ayin:reports:begin -->`) listing pending reports, re-asserted by the same 5-min self-heal,
+the only other thing it writes to a watched repo is the Claude Code hound hook below. Only that
+fenced region of the agent files is touched — the rest of each file is yours — and it's written
+only when its bytes actually change.
+
+**Claude Code hound hook** — installed alongside the git hooks (self-healed the same way):
+`.claude/hooks/ayin-hound.sh`, plus a Stop-hook entry merged into `.claude/settings.json`
+(`AYIN_WATCH_HOUND=0` to skip installing it). At the end of a Claude Code turn, if there's a
+staged diff, it runs **ayin itself** — read-only (`AYIN_READONLY=1`, so it can only grep/read,
+never edit) — against that diff, and blocks the stop if ayin finds something: Claude reacts to
+ayin, not the other way round. The engine is ayin, not `claude -p` — no LAN address to hardcode,
+it just talks to whatever `KELI_URL` this ayin install already uses. In a Unity repo the check is
+narrow: excessive comments, a missing/misused `CancellationToken`, single-responsibility
+violations — gated on at least one staged `.cs` file. Every repo also gets a "this staged diff is
+big and complete — commit it now" nudge, gated on the diff actually being large. The JSON merge
+only ever touches the one Stop-hook group that names `ayin-hound.sh` — every other setting, every
+other hook, is left exactly as it was; an existing `settings.json` that fails to parse is left
+alone rather than risked.
 
 **Unity repos** (`Assets/` + `ProjectSettings/`) get **two files per commit**, in the same
 `reviews/<shortHash>/` folder: `CodeReview.md` (the LLM review) and `AssetDiff.md` — a

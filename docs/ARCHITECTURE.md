@@ -496,8 +496,33 @@ The moving parts, designed to survive interruption at any point:
   missing file is created.
 - **No repo hygiene.** `ayin watch` writes nothing to `.gitignore` and maintains no cruft-list
   block in `CLAUDE.md`/`GEMINI.md`. What a repo ignores is its owner's call — the only files
-  ayin ever writes to a watched repo are its own reports (under `reviews/`, or a root-level
-  `AYIN-REPORT-SMELLS-*.md`) and the agent-file pointer block above.
+  ayin ever writes to a watched repo, beyond its own reports (under `reviews/`, or a root-level
+  `AYIN-REPORT-SMELLS-*.md`) and the agent-file pointer block above, are the Claude Code hound
+  hook described next.
+- **Claude Code hound hook** (installed alongside the git hooks, self-healed the same way):
+  `.claude/hooks/ayin-hound.sh` + a Stop-hook entry upserted into `.claude/settings.json`
+  (`AYIN_WATCH_HOUND=0` to skip installing it — existing installs are left as-is). At the end of
+  a Claude Code turn, if there's a staged diff, it runs **ayin itself** — read-only
+  (`AYIN_READONLY=1`, so it can only grep/read, never edit) — against that diff and, if ayin
+  reports anything, **blocks the stop** with the finding: Claude reacts to ayin, not the other
+  way round. The engine is ayin, not `claude -p` — no LAN address to hardcode, no separate config;
+  it inherits whatever `KELI_URL` this ayin install already talks to. In a Unity repo
+  (`isUnityRepo`), the check is narrow and C#-quality-focused — excessive comments, a
+  CancellationToken missing or not propagated/checked, a single-responsibility violation — gated
+  on at least one staged `.cs` file (no point asking about a `.prefab`-only change). Every repo,
+  Unity or not, also gets a "this staged diff is big and complete — commit it now" nudge, gated on
+  the staged diff being large enough to matter (a cheap line-count pre-filter). Same debounce
+  (atomic `mkdir` lock, hashed per diff) and timeout-bounded pattern as a hand-wired Claude Code
+  Stop-hook skeptic; `AYIN_HOUND_SELFTEST=1` stubs the model call for testing the plumbing without
+  spending one. The JSON merge into `settings.json` only ever touches the
+  one Stop-hook group whose command names `ayin-hound.sh` — every other key, every other Stop
+  entry, every other hook event is left exactly as it was; an unparseable existing file is left
+  alone rather than risking a hand-edited config. Both the hook script and `settings.json` are
+  written via `writeAtomic()` (temp file + rename) — `writeIfChanged()`, the same helper the
+  CLAUDE.md/GEMINI.md pointer block already used, now goes through it too: a power cut mid-write
+  can never leave a truncated `settings.json` for the next Claude Code turn to choke on (an
+  unparseable file would otherwise be presumed hand-edited and left alone forever, exactly the
+  case a self-inflicted truncation must not fall into).
 - **Guards**: commits touching only `reviews/**` (or a root `AYIN-REPORT-*.md`) are skipped (no
   review-of-review loop); the agent files and everything under `reviews/` are excluded from the
   working-tree fingerprint, the review diff, and auto-staging — so ayin writing its own reports

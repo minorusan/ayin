@@ -38,7 +38,7 @@ import { llmChat, refreshActiveModel } from './llm/manager.js';
 import { connect, keliBaseUrl } from './connection.js';
 import { acquireLlm, type LlmHold } from './llm/authority.js';
 import { initLlmProvider } from './llm/select.js';
-import { prompts, packagePath } from './prompts-service.js';
+import { prompts, packagePath, writeAtomic } from './prompts-service.js';
 import { log } from './log.js';
 
 /** The watcher's own prompts (SOURCE: `<pkg>/prompts/watch`), materialized into the local store at
@@ -225,6 +225,10 @@ async function installHook(repo: string): Promise<void> {
     out(r === 'wrote' ? `${name} hook set: ${paths.hookPath}` : `${name} hook already present`);
     log('INFO', 'watch_hook_installed', { repo, hook: name, result: r });
   }
+  if (HOUND_ENABLED && ensureHoundHook(repo)) {
+    out(`ayin-hound Stop hook set: ${join(repo, '.claude', 'hooks', HOUND_SCRIPT_NAME)}`);
+    log('INFO', 'watch_hound_installed', { repo });
+  }
   // Register the repo (the set the daemon watches + self-heals + reviews the working tree of).
   const repos = existsSync(REPOS_FILE) ? JSON.parse(readFileSync(REPOS_FILE, 'utf-8')) : {};
   repos[repo] = { installedAt: new Date().toISOString() };
@@ -242,7 +246,7 @@ function registeredRepos(): string[] {
 async function selfHealHooks(): Promise<void> {
   const repos = registeredRepos();
   if (repos.length === 0) return;
-  let reinstalled = 0, gone = 0;
+  let reinstalled = 0, gone = 0, hound = 0;
   for (const repo of repos) {
     let wrote = false, missing = false;
     for (const { name, kind } of WATCH_HOOKS) {
@@ -252,11 +256,145 @@ async function selfHealHooks(): Promise<void> {
     }
     if (missing) { gone++; continue; }
     if (wrote) reinstalled++;
+    if (HOUND_ENABLED && existsSync(repo) && ensureHoundHook(repo)) hound++;
   }
-  if (reinstalled || gone) {
-    out(`hook self-heal: ${reinstalled} repo(s) re-hooked, ${gone} missing — of ${repos.length} watched`);
-    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), gone: String(gone) });
+  if (reinstalled || gone || hound) {
+    out(`hook self-heal: ${reinstalled} repo(s) re-hooked, ${gone} missing, ${hound} hound-refreshed — of ${repos.length} watched`);
+    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), gone: String(gone), hound: String(hound) });
   }
+}
+
+// ── Claude Code hound hook (auto-installed alongside the git hooks) ──
+// A Stop hook written into the watched repo's own .claude/settings.json: at the end of a Claude
+// Code turn, if anything is staged, ayin itself reviews the staged diff — read-only, via
+// AYIN_READONLY=1, so it can only grep/read, never edit — and if it finds something, BLOCKS the
+// stop with the finding. Claude reacts to ayin, not the other way round. The engine is ayin itself,
+// not `claude -p`: no LAN address to hardcode, no separate config — it inherits whatever KELI_URL
+// this ayin install already talks to. Unity repos (isUnityRepo) get a narrow, C#-quality-focused
+// check (excessive comments, missing/misused CancellationToken, single-responsibility violations,
+// gated on at least one staged .cs file); every repo additionally/instead gets a "this is a big,
+// complete, self-contained chunk — commit it now" nudge, gated on the staged diff actually being
+// big (a cheap deterministic pre-filter — no point asking the model about a 5-line diff).
+// AYIN_WATCH_HOUND=0 disables installing this (existing installs are left as they are, not removed).
+
+const HOUND_SCRIPT_NAME = 'ayin-hound.sh';
+const HOUND_MARKER = 'ayin-hound.sh'; // substring ayin looks for in settings.json to recognize its own entry
+const HOUND_ENABLED = process.env.AYIN_WATCH_HOUND !== '0';
+
+function houndScript(promptText: string, unity: boolean): string {
+  const guard = unity
+    ? `git diff --cached --name-only | grep -qE '\\.cs$' || exit 0`
+    : `LINES=$(git diff --cached | wc -l); [ "$LINES" -lt 80 ] && exit 0`;
+  return `#!/usr/bin/env bash
+# ${HOUND_MARKER} — installed by \`ayin watch\`. Reinstalling overwrites this file.
+# Claude Code Stop hook: reviews STAGED changes with ayin itself (read-only) and blocks the stop
+# with any finding. Recursion-guarded, debounced per diff-hash, timeout-bounded.
+# Set AYIN_HOUND_SELFTEST=1 to test the plumbing with a stub finding (no model call).
+set -u
+[ -n "\${AYIN_HOUND:-}" ] && exit 0
+cd "\${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null || exit 0
+command -v git >/dev/null 2>&1 || exit 0
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+command -v ayin >/dev/null 2>&1 || exit 0
+
+DIFF="$(git diff --cached 2>/dev/null)"
+[ -z "$DIFF" ] && exit 0
+${guard}
+
+hash_diff() {
+  if command -v sha1sum  >/dev/null 2>&1; then sha1sum
+  elif command -v shasum >/dev/null 2>&1; then shasum
+  else openssl sha1; fi
+}
+H="$(printf '%s' "$DIFF" | hash_diff 2>/dev/null | grep -oE '[0-9a-f]{40}' | head -1)"
+[ -z "$H" ] && H="len$(printf '%s' "$DIFF" | wc -c | tr -d ' ')"
+STAMP="\${TMPDIR:-/tmp}/ayin-hound.\${H:0:20}.lock"
+mkdir "$STAMP" 2>/dev/null || exit 0
+find "\${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'ayin-hound.*.lock' -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+
+PROMPT_DIFF="$(printf '%s' "$DIFF" | head -c 24000)"
+[ "\${#DIFF}" -gt 24000 ] && PROMPT_DIFF="$PROMPT_DIFF
+[…diff truncated…]"
+
+INSTRUCTIONS=$(cat <<'AYIN_HOUND_PROMPT_EOF'
+${promptText.trim()}
+AYIN_HOUND_PROMPT_EOF
+)
+PROMPT="$INSTRUCTIONS
+
+DIFF:
+$PROMPT_DIFF"
+
+_timeout() {
+  local s="$1"; shift
+  if   command -v timeout  >/dev/null 2>&1; then timeout  "$s" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$s" "$@"
+  else perl -e 'my $s=shift; alarm $s; exec @ARGV or exit 127' "$s" "$@"; fi
+}
+if [ -n "\${AYIN_HOUND_SELFTEST:-}" ]; then
+  FINDINGS="stub: ayin-hound plumbing test — would call ayin here"
+else
+  FINDINGS="$(AYIN_HOUND=1 AYIN_READONLY=1 AYIN_ACQUIRE_LLM=1 _timeout 240 ayin -p "$PROMPT" 2>/dev/null || true)"
+fi
+[ -z "$FINDINGS" ] && exit 0
+printf '%s' "$FINDINGS" | grep -qiE '^VERDICT:[[:space:]]*CLEAR|^CLEAR[[:space:]]*$' && exit 0
+
+FINDINGS="$FINDINGS" node -e 'process.stdout.write(JSON.stringify({decision:"block",reason:"ayin-hound — reconsider before done:\\n\\n"+process.env.FINDINGS}))'
+exit 0
+`;
+}
+
+interface ClaudeHookEntry { type: string; command: string; timeout?: number; statusMessage?: string }
+interface ClaudeHookGroup { hooks?: ClaudeHookEntry[]; matcher?: string }
+interface ClaudeSettings { hooks?: { [event: string]: ClaudeHookGroup[] }; [key: string]: unknown }
+
+function ourHoundEntry(): ClaudeHookEntry {
+  return {
+    type: 'command',
+    command: `bash "$CLAUDE_PROJECT_DIR/.claude/hooks/${HOUND_SCRIPT_NAME}"`,
+    timeout: 240,
+    statusMessage: 'ayin-hound: reviewing staged changes',
+  };
+}
+
+/** Upsert ayin's Stop-hook entry into a repo's .claude/settings.json — a structural JSON merge,
+ *  not a fenced-text block (JSON has no comment syntax to fence with). Leaves every OTHER top-level
+ *  key, every OTHER Stop-hook group, and every other hook event untouched; only the one group whose
+ *  command names our own script is added or replaced. An existing file that fails to parse is left
+ *  alone rather than risking a hand-edited config. */
+function upsertHoundSettings(repo: string): boolean {
+  const dir = join(repo, '.claude');
+  const path = join(dir, 'settings.json');
+  let settings: ClaudeSettings = {};
+  if (existsSync(path)) {
+    try { settings = JSON.parse(readFileSync(path, 'utf-8')); }
+    catch { log('WARN', 'hound_settings_unparseable', { repo }); return false; }
+  }
+  settings.hooks = settings.hooks || {};
+  const stopGroups: ClaudeHookGroup[] = settings.hooks.Stop || [];
+  const others = stopGroups.filter(g => !g.hooks?.some(h => h.command?.includes(HOUND_MARKER)));
+  settings.hooks.Stop = [...others, { hooks: [ourHoundEntry()] }];
+  mkdirSync(dir, { recursive: true });
+  return writeIfChanged(path, `${JSON.stringify(settings, null, 2)}\n`);
+}
+
+/** Write/refresh the hound script + settings.json entry for one repo. Idempotent: only writes when
+ *  bytes actually change (Unity-ness is re-checked live, so a repo that grows an Assets/ folder
+ *  later gets the Unity-scoped prompt on the next self-heal, no reinstall needed). */
+function ensureHoundHook(repo: string): boolean {
+  const unity = isUnityRepo(repo);
+  const promptText = watchPrompts.get(unity ? 'houndUnity' : 'houndGeneral');
+  const scriptPath = join(repo, '.claude', 'hooks', HOUND_SCRIPT_NAME);
+  const desired = houndScript(promptText, unity);
+  let wrote = false;
+  if (!existsSync(scriptPath) || readFileSync(scriptPath, 'utf-8') !== desired) {
+    mkdirSync(join(repo, '.claude', 'hooks'), { recursive: true });
+    writeAtomic(scriptPath, desired);
+    chmodSync(scriptPath, 0o755);
+    wrote = true;
+  }
+  const settingsWrote = upsertHoundSettings(repo);
+  return wrote || settingsWrote;
 }
 
 // ── agent-file pointer (CLAUDE.md + GEMINI.md) ────────────────────────
@@ -317,12 +455,14 @@ function upsertBlock(content: string, begin: string, end: string, block: string)
   return content.trim() ? `${content.replace(/\s*$/, '')}\n\n${block}\n` : `${block}\n`;
 }
 
-/** Write only if the bytes actually change. The self-heal runs every 5 min over every watched repo —
- *  an unconditional write would churn mtimes (and, for a tracked file, the worktree) forever. */
+/** Write only if the bytes actually change (atomically — temp file + rename, so a power cut
+ *  mid-write can never leave a truncated CLAUDE.md/settings.json for the next reader). The
+ *  self-heal runs every 5 min over every watched repo — an unconditional write would churn mtimes
+ *  (and, for a tracked file, the worktree) forever. */
 function writeIfChanged(path: string, content: string): boolean {
   try {
     if (existsSync(path) && readFileSync(path, 'utf-8') === content) return false;
-    writeFileSync(path, content);
+    writeAtomic(path, content);
     return true;
   } catch { return false; } // read-only tree — skip
 }
