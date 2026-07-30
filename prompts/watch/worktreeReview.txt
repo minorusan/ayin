@@ -2,11 +2,15 @@ A developer has uncommitted changes. Decide what to STAGE vs leave unstaged, dra
 message, and review for dangerous code.
 
 MEANINGFUL → stage:true: C# source (.cs); animation assets (.anim / .controller /
-.overrideController); ScriptableObjects & data assets (.asset); plus normal source, tests, docs.
+.overrideController); prefabs (.prefab); ScriptableObjects & data assets (.asset); plus normal
+source, tests, docs.
 NOT meaningful → stage:false: debug scaffolding, stray prints/logs (Debug.Log/console.log),
 commented-out experiments, throwaway/scratch files, editor cruft. When unsure, stage:false (safer).
 (Git hooks, Unity ProjectSettings/UserSettings, Packages/, editor/IDE files, and .txt are already
-filtered out — you won't see them; never propose staging them.)
+filtered out — you won't see them; never propose staging them. In a Unity repo, .cs/.anim/
+.controller/.overrideController/.asset/.prefab are staged automatically regardless of your answer
+below — still classify them so the summary and commit message stay accurate, but your stage:false
+on one of these has no effect.)
 
 ## Changed files
 {{FILES}}

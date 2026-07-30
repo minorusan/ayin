@@ -66,7 +66,9 @@ ayin update --check       # report only, install nothing
 `/set update-registry <url>` (persisted per machine) → npm's own configured registry, and shells out
 to `npm i -g` so a half-finished download can never replace a working binary. If the global prefix
 isn't writable it tells you to re-run with `sudo`. Running from a source checkout, it says so —
-there, updating is `git pull && npm run build`.
+there, updating is `git pull && npm run build`. If a **`watch` daemon is running**, a successful
+update restarts it for you (SIGTERM, wait for exit, relaunch `ayin watch`), so it doesn't keep
+reviewing commits on the old build until someone notices.
 
 > **`ayin` is a taken name on public npm, and that package is not this one.** `ayin update` therefore
 > **refuses** to fall back to registry.npmjs.org: a machine whose npm defaulted to the public
@@ -291,6 +293,11 @@ with full hierarchy paths (`MonoBehaviour at Path/To/Object · field old → new
 prefabs/scenes/assets. The review links to it and the reviewer is fed its content as ground
 truth. Tool path: `~/tools/unity_asset_diff.py` or `AYIN_UNITY_DIFF`. Non-Unity repos never
 spawn it and get only the review file.
+
+The 10-min autostage pass also treats Unity core assets specially: `.cs`, `.anim`, `.controller`,
+`.overrideController`, `.asset`, and `.prefab` are **always staged**, unconditionally — never left
+to the model's judgement, and staged even if the model's plan fails to parse. A renamed animator
+state or a prefab fix is real work, never debug scratch.
 
 ## Requirements
 

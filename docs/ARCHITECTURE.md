@@ -514,6 +514,17 @@ The moving parts, designed to survive interruption at any point:
   scratch files, editor cruft — defaulting to `false` when unsure. Its plan is re-filtered through
   the same gate before `git add` runs, plus a 2 MB size cap. Never commits — only stages/unstages
   and drafts `.git/COMMIT_EDITMSG`.
+- **Unity core assets are always staged**, unconditionally (in Unity repos only, matched by
+  `UNITY_ALWAYS_STAGE_RE`: `.cs`, `.anim`, `.controller`, `.overrideController`, `.asset`,
+  `.prefab`). This runs *before* the model's plan is applied and even if the plan fails to parse —
+  a renamed animator state or a prefab fix left unstaged is real work, never debug scratch, so
+  there's no judgement call to make. It also means a reviewer that only inspects staged changes
+  (`git diff --cached`) actually sees Unity binding changes instead of missing whatever the model
+  happened to leave unstaged. The status scan behind this (and the model's file list) uses
+  `-uall`/`--untracked-files=all` — without it, git collapses a brand-new, never-before-seen
+  directory to one summary line (`?? Assets/NewFeature/`) instead of the files inside it, so a new
+  Unity feature folder added all at once (script + prefab + anim together — a common workflow)
+  would silently match nothing, always-stage included.
 
 ## Prompts (`prompts-service.ts`, `prompts.ts`, `prompts/`)
 
@@ -776,6 +787,17 @@ than the running build: checked at boot and every 10 minutes. The registry is
 configured registry **only when that is a private one** — a checkout pointed at public npmjs gets
 no passive check, since `ayin` is a plausible public name and that would both phone home uninvited
 and risk advertising a stranger's package as your update. `AYIN_UPDATE_CHECK=0` disables it.
+
+**A successful `ayin update` restarts a running `watch` daemon.** `ayin watch` is a long-lived
+background process nobody sits and watches — left alone after an update it would keep reviewing
+commits on the OLD build until someone happened to notice. So once `npm install -g` succeeds,
+`updater.ts` checks for a live daemon pidfile (`watchDaemonPid()`, exported from `watch.ts`) and,
+if one is running: SIGTERM (the daemon's own handler cleans up its pidfile and releases any held
+LLM authority — graceful; its queue survives the interruption regardless, per the poll-only +
+persistent-queue design), waits up to 10s for it to actually exit, then relaunches bare `ayin
+watch` from PATH — which now resolves to the build just installed, and picks its repo set back up
+from `repos.json` (the same boot/resume path described above). Best-effort: no daemon running is a
+no-op, and a missing `ayin` on PATH prints a fallback note instead of failing the update.
 
 ## Popup overlay (`dialog.ts`)
 

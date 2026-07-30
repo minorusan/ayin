@@ -638,6 +638,12 @@ const SECRET_RE = /(^|\/)(\.env(\.[^/]+)?|[^/]*\.(pem|key|p12|pfx|keystore)|id_r
 // git hooks, Unity ProjectSettings/ + UserSettings/, and editor/IDE settings (.vscode/.idea/.vs,
 // .csproj/.sln/.user/.vsconfig). Deterministic so it holds regardless of the model's judgement.
 const NEVER_STAGE_RE = /(^|\/)(ProjectSettings|UserSettings|Packages|\.vscode|\.idea|\.vs|hooks)(\/|$)|\.(csproj|sln|user|vsconfig|txt)$/i;
+// Unity core asset types (Unity repos only) — ALWAYS staged, never left to the model's judgement.
+// A renamed animator state or a prefab binding fix left unstaged is exactly the kind of change a
+// developer forgets to `git add` by hand; these are unambiguously "real work", never debug scratch,
+// so there is no judgement call to make. Also lets a Stop-hook skeptic that only inspects staged
+// diffs (`git diff --cached`) actually see Unity binding changes instead of missing them.
+const UNITY_ALWAYS_STAGE_RE = /\.(cs|anim|controller|overrideController|asset|prefab)$/i;
 function isStageable(path: string): boolean {
   const base = path.split('/').pop() || path;
   if (isAyinReviewPath(path)) return false;
@@ -717,13 +723,18 @@ function buildWorktreePrompt(files: string[], status: string, diff: string, trun
   });
 }
 
-function buildSmellReport(plan: WorktreePlan | null, raw: string, applied: { staged: number; unstaged: number }): string {
+function buildSmellReport(
+  plan: WorktreePlan | null, raw: string, applied: { staged: number; unstaged: number }, forced: string[] = [],
+): string {
   const when = new Date().toISOString();
+  const forcedSet = new Set(forced);
+  const forcedLines = forced.map(f => `- \`${f}\` — always staged (Unity core asset)`);
   if (!plan) {
-    return `# Ayin working-tree review — ${when}\n\n_(could not parse a staging plan from the model; no staging applied — raw output below)_\n\n${raw.trim()}\n`;
+    const stagedOnly = forcedLines.join('\n') || '- (none)';
+    return `# Ayin working-tree review — ${when}\n\n_(could not parse a staging plan from the model; only Unity core assets were auto-staged — raw output below)_\n\n## Staged (always)\n${stagedOnly}\n\n${raw.trim()}\n`;
   }
-  const staged = plan.files.filter(f => f.stage).map(f => `- \`${f.path}\`${f.reason ? ` — ${f.reason}` : ''}`).join('\n') || '- (none)';
-  const skipped = plan.files.filter(f => !f.stage).map(f => `- \`${f.path}\`${f.reason ? ` — ${f.reason}` : ''}`).join('\n') || '- (none)';
+  const staged = [...forcedLines, ...plan.files.filter(f => f.stage && !forcedSet.has(f.path)).map(f => `- \`${f.path}\`${f.reason ? ` — ${f.reason}` : ''}`)].join('\n') || '- (none)';
+  const skipped = plan.files.filter(f => !f.stage && !forcedSet.has(f.path)).map(f => `- \`${f.path}\`${f.reason ? ` — ${f.reason}` : ''}`).join('\n') || '- (none)';
   const smells = (plan.smells || []).length
     ? plan.smells!.map(s => `### [${s.severity || '?'}] ${s.where || ''}\n- **Issue:** ${s.issue || ''}\n- **Fix:** ${s.fix || ''}`).join('\n\n')
     : 'None flagged.';
@@ -754,7 +765,12 @@ ${logging}
 }
 
 async function reviewWorktree(repo: string): Promise<void> {
-  const statusRes = await git(repo, ['-c', 'core.quotepath=false', 'status', '--porcelain=v1']);
+  // -uall (untracked-files=all): without it, git collapses an entirely-new, never-before-seen
+  // directory to one line (`?? Assets/NewFeature/`) instead of listing the files inside it — so a
+  // brand-new Unity feature folder (script + prefab + anim all added together, a common workflow)
+  // would never individually match anything below, Unity always-stage included. Cheap: this repo's
+  // untracked set is small by the time it reaches a review.
+  const statusRes = await git(repo, ['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-uall']);
   const files = statusRes.stdout.split('\n').filter(Boolean).map(l => l.slice(3)).filter(isStageable);
   if (files.length === 0) return;
 
@@ -769,10 +785,25 @@ async function reviewWorktree(repo: string): Promise<void> {
   ]);
   const plan = parseWorktreePlan(raw);
 
-  let staged = 0, unstaged = 0;
+  // Unity core assets are staged unconditionally — regardless of the model's plan, or even if
+  // parsing the plan failed entirely. A renamed animator state or a prefab fix left unstaged is
+  // real work, never debug scratch, so there is no judgement call here. This also guarantees a
+  // Stop-hook skeptic that only inspects staged diffs (`git diff --cached`) actually sees Unity
+  // binding changes instead of missing whatever the model happened to leave unstaged.
+  const forced: string[] = [];
+  if (isUnityRepo(repo)) {
+    for (const f of files) {
+      if (!UNITY_ALWAYS_STAGE_RE.test(f)) continue;
+      const abs = join(repo, f);
+      try { if (existsSync(abs) && statSync(abs).size <= MAX_STAGE_BYTES && (await git(repo, ['add', '--', f])).ok) forced.push(f); } catch { /* skip */ }
+    }
+  }
+  const forcedSet = new Set(forced);
+
+  let staged = forced.length, unstaged = 0;
   if (plan) {
     for (const f of plan.files) {
-      if (!f.path || !isStageable(f.path)) continue;
+      if (!f.path || !isStageable(f.path) || forcedSet.has(f.path)) continue;
       const abs = join(repo, f.path);
       if (f.stage) {
         try { if (existsSync(abs) && statSync(abs).size <= MAX_STAGE_BYTES && (await git(repo, ['add', '--', f.path])).ok) staged++; } catch { /* skip */ }
@@ -789,7 +820,7 @@ async function reviewWorktree(repo: string): Promise<void> {
 
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const reportPath = join(repo, `AYIN-REPORT-SMELLS-${ts}.md`);
-  writeFileSync(reportPath, buildSmellReport(plan, raw, { staged, unstaged }));
+  writeFileSync(reportPath, buildSmellReport(plan, raw, { staged, unstaged }, forced));
   out(`  → ${reportPath} (staged ${staged}, unstaged ${unstaged}) — NO commit`);
   log('INFO', 'worktree_reviewed', { repo, staged: String(staged), unstaged: String(unstaged), parsed: String(!!plan) });
   upsertAgentReports(repo);
@@ -848,6 +879,15 @@ function acquirePidfile(): boolean {
   }
   writeFileSync(PID_FILE, String(process.pid));
   return true;
+}
+
+/** The watch daemon's pid, if one is currently alive — used by `ayin update` to restart a
+ *  long-running daemon after a global install, so it doesn't keep serving stale code until someone
+ *  notices and restarts it by hand. */
+export function watchDaemonPid(): number | null {
+  if (!existsSync(PID_FILE)) return null;
+  const pid = parseInt(readFileSync(PID_FILE, 'utf-8').trim(), 10);
+  return pid && pidAlive(pid) ? pid : null;
 }
 
 let lastBusyLogAt = 0;

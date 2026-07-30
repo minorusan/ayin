@@ -19,13 +19,14 @@
  * open-source checkout never phones home to a registry nobody asked about.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setStatus } from './ui.js';
 import { getConfigString } from './prompts.js';
 import { log } from './log.js';
+import { watchDaemonPid } from './watch.js';
 
 const REGISTRY = process.env.AYIN_UPDATE_REGISTRY ?? '';
 const PACKAGE_NAME = process.env.AYIN_UPDATE_PACKAGE ?? 'ayin';
@@ -283,4 +284,48 @@ export async function runUpdate(argv: string[]): Promise<void> {
 
   log('INFO', 'ayin_updated', { from: current, to: latest, registry });
   process.stdout.write(`ayin is now ${latest}. Restart any running session to pick it up.\n`);
+  await restartWatchDaemon(latest);
+}
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/**
+ * `ayin watch` is a long-running daemon nobody sits and watches — left alone it would keep
+ * reviewing every commit on the OLD build until someone happened to notice and restart it by
+ * hand. So a successful `ayin update` restarts it itself: SIGTERM (the daemon's own handler
+ * cleans up its pidfile and releases any held LLM authority — graceful, and its queue survives
+ * the interruption regardless per the poll-only + persistent-queue design), wait for it to
+ * actually exit, then relaunch `ayin watch` from PATH — which now resolves to the build just
+ * installed. Best-effort: a daemon that isn't running is a no-op, and a machine with no `ayin`
+ * on PATH (e.g. Windows, where the daemon runs as a Task Scheduler job instead) just gets a
+ * fallback note instead of a crash.
+ */
+async function restartWatchDaemon(newVersion: string): Promise<void> {
+  const pid = watchDaemonPid();
+  if (!pid) return;
+  process.stdout.write(`Restarting the watch daemon (pid ${pid}) so it picks up ${newVersion} immediately…\n`);
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    return; // already gone
+  }
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && pidAlive(pid)) {
+    await new Promise(r => setTimeout(r, 250));
+  }
+  try {
+    const child = spawn('ayin', ['watch'], { detached: true, stdio: 'ignore' });
+    const spawned = await new Promise<boolean>((resolve) => {
+      child.once('spawn', () => resolve(true));
+      child.once('error', () => resolve(false));
+    });
+    child.unref();
+    process.stdout.write(spawned
+      ? 'Watch daemon relaunched in the background.\n'
+      : 'Could not relaunch the watch daemon automatically — run `ayin watch` yourself.\n');
+  } catch {
+    process.stdout.write('Could not relaunch the watch daemon automatically — run `ayin watch` yourself.\n');
+  }
 }
