@@ -85,11 +85,22 @@ export async function lockSession(pinTo?: string): Promise<string> {
   const provider = await llmProvider();
   if (!provider.acquire) return 'this LLM provider has no authority layer — there is nothing to lock';
   const cat = await fetchCatalog({ force: true });
-  const wanted = pinTo || cat?.activeModel; // pin what is serving RIGHT NOW, unless a specific target was requested
+  // `isModelBooked()` here means: THIS process already holds a model booking from an EARLIER action
+  // (e.g. `/model qwen-coder` typed by hand, then `/lock`) — that is the ONLY case where
+  // `cat.activeModel` is a genuine, deliberate choice worth preserving. On a FRESH acquire (the
+  // overwhelmingly common case — this is what auto-lock calls on every ayin launch) `cat.activeModel`
+  // is just whichever OTHER consumer happened to be using the shared GPU a moment ago — arbitrary,
+  // not this session's preference — so there is nothing to "put back" to. Falling through to
+  // `undefined` here (not `cat.activeModel`) is what lets the "put it back" check below skip
+  // entirely and simply accept the backend's own `ownership.gained` coder-model policy, which is
+  // right on EVERY machine with zero config, unlike a locally-configured default (see
+  // `lockSessionWithDefaultModel`'s doc for the bug this fixes: a fresh session on a machine with no
+  // `defaultModel` set was reverting straight back to whatever was idly serving before, e.g. gemma).
+  const wasAlreadyBooked = isModelBooked();
+  const wanted = pinTo || (wasAlreadyBooked ? cat?.activeModel : undefined);
   log('INFO', 'lock_session_debug', {
-    pinTo: pinTo ?? '(none)', wanted: wanted ?? '(none)',
+    pinTo: pinTo ?? '(none)', wanted: wanted ?? '(none)', wasAlreadyBooked: String(wasAlreadyBooked),
     catActiveModel: cat?.activeModel ?? '(cat null)', catCoderModel: cat?.coderModel ?? '(cat null)',
-    isModelBooked: String(isModelBooked()),
   });
   if (!isModelBooked()) {
     setAgentStatus('Locking the model…');
@@ -115,12 +126,18 @@ export async function lockSession(pinTo?: string): Promise<string> {
     modelHold = hold;
   }
   locked = true;
-  lockedModel = wanted ?? '';
+  // No explicit/preserved target (a fresh session, nothing manually chosen) → whatever
+  // `ownership.gained` just applied IS the target — always the backend's coder policy — so record
+  // that, not an empty string, for `onRegrant` to re-pin correctly if the grant is ever replaced.
+  lockedModel = wanted ?? cat?.coderModel ?? '';
   // From here every generation carries the token, so the backend can promote this session to the
   // front of the GPU queue instead of leaving it in the LOW band behind every habit.
   setRequestAuthority((modelHold as { token: string }).token);
 
-  // Gaining `ayin` ownership applies the coder policy, which would swap the model. Put it back.
+  // Gaining `ayin` ownership applies the coder policy. Only PUT BACK a specific model when one was
+  // actually requested (an explicit pin, or a genuinely preserved prior manual choice) — see `wanted`
+  // above for why a fresh session has neither, and therefore fires no swap at all here, simply
+  // accepting the coder policy `ownership.gained` already applied.
   log('INFO', 'lock_session_putback_check', {
     willSwap: String(!!(wanted && cat && wanted !== cat.coderModel && provider.setModel)),
     wanted: wanted ?? '(none)', hasProviderSetModel: String(!!provider.setModel),
@@ -137,17 +154,26 @@ export async function lockSession(pinTo?: string): Promise<string> {
 /**
  * Startup convenience: `lockSession()` PLUS an explicit, WAITED-FOR default model — not just
  * "whatever `ownership.gained` happened to auto-swap to." `/set default-model <name>` (persisted in
- * `~/.ayin-cli/prompts.json`, same convention as `keli-url`/`llm-provider`) names it; with nothing
- * configured this is byte-for-byte `lockSession()`'s existing behavior — zero change for anyone who
- * hasn't set one.
+ * `~/.ayin-cli/prompts.json` — LOCAL to this machine, not synced) names an OVERRIDE of the backend's
+ * own coder-model policy; with nothing configured, `lockSession(undefined)` on a fresh session
+ * already lands on that policy correctly (see its own doc for why), so this just degrades to that.
  *
- * WHY THIS EXISTS: `lockSession()` re-pins whatever was ALREADY active and never awaits the swap —
- * fine for its own purpose (don't let a plain `/lock` change your model), wrong for "I want a KNOWN
- * model, reliably, the moment my session starts, and I want to actually see it land before I trust
- * it." A fire-and-forget swap that might still be mid-flight when the first prompt goes out is
- * exactly the kind of silent non-determinism that erodes trust in the lock altogether.
+ * ROOT CAUSE, FOUND FROM A LIVE SESSION LOG (not guessed) after two earlier fixes to THIS function
+ * (1.0.207, 1.0.208) each failed to hold: neither was wrong on the machine they were tested on — the
+ * real bug was one level down, in `lockSession()` itself, and only visible on a DIFFERENT machine.
+ * `defaultModel` was set once (on the nuk) and never on a second Mac; there,
+ * `getConfigString('defaultModel')` correctly returned nothing, so THIS function correctly degraded
+ * to bare `lockSession(undefined)` — but bare `lockSession()`'s own "put it back" step then
+ * unconditionally treated `cat.activeModel` (whichever OTHER consumer happened to be using the
+ * shared GPU a moment ago — gemma, arbitrarily) as a deliberate choice worth restoring, undoing the
+ * perfectly correct qwen the backend's own `ownership.gained` policy had just applied. Fixed AT THE
+ * SOURCE in `lockSession()`: "put it back" now only fires when a model was actually requested (an
+ * explicit pin, or a genuinely preserved PRIOR MANUAL choice) — a fresh session has neither, so it
+ * simply keeps whatever the coder policy already gave it. That is what makes THIS function correct
+ * with ZERO config, on every machine — `defaultModel` is now only an override for wanting something
+ * other than the backend's own coder default.
  *
- * BUG FIXED HERE (real, reproduced live): this used to call bare `lockSession()` first, THEN swap to
+ * PRIOR (SUPERSEDED) FIX NOTE: this used to call bare `lockSession()` first, THEN swap to
  * `target` itself — two swaps, fired back to back over two separate HTTP round-trips, queued on the
  * backend's serialized swap chain (`swapChatModel`/`doSwap`). Gaining `ayin` ownership independently
  * swaps to the backend's coder default; `lockSession()`'s own "put it back" step then swapped to
@@ -164,19 +190,15 @@ export async function lockSessionWithDefaultModel(): Promise<string> {
   const target = getConfigString('defaultModel');
   const err = await lockSession(target);
   if (err) return err;
-  if (!target) return ''; // nothing configured — today's lockSession() behavior stands, unchanged
+  if (!target) return ''; // no override configured — lockSession() already did the right thing above
 
   const cat = await fetchCatalog({ force: true });
   if (cat?.loadedModel === target) { lockedModel = target; return ''; } // already resident, nothing to wait for
 
-  // VERIFY, don't assume: `lockSession(target)`'s own "put it back" step is SUPPOSED to already have
-  // requested `target` — but this function's entire promise to the operator is "you end up on the
-  // named default", so it must not just sit there watching for a swap that, for whatever reason
-  // (a race this build doesn't yet fully explain — see `lock_session_debug`/`lock_session_putback_*`
-  // log events for the evidence), was never actually requested. If the declared TARGET isn't already
-  // `target`, force it here, ourselves, before waiting — belt and suspenders: whatever upstream
-  // reason left the wrong model in flight, this still converges on the configured default instead of
-  // silently timing out 180s later still on the wrong model.
+  // Verify the override actually landed rather than assuming it — belt and suspenders for the one
+  // case `lockSession()`'s own source-level fix (see its doc) doesn't cover by construction: an
+  // explicit override configured here that differs from the backend's own coder policy. See
+  // `lock_session_debug`/`lock_session_putback_*` log events if this ever needs re-diagnosing.
   if (cat?.activeModel !== target) {
     const provider = await llmProvider();
     const token = (modelHold as { token: string } | null)?.token;
