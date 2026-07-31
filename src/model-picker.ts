@@ -68,12 +68,24 @@ export async function lockSupported(): Promise<boolean> {
   return typeof (await llmProvider()).acquire === 'function';
 }
 
-/** Take the lock. Returns '' on success, else a human reason. */
-export async function lockSession(): Promise<string> {
+/**
+ * Take the lock. Returns '' on success, else a human reason.
+ *
+ * `pinTo`, when given, is the model to land on instead of "whatever was serving right before this
+ * call" — `lockSessionWithDefaultModel()` passes its configured default here so there is exactly ONE
+ * corrective swap (straight to the real target), not two racing ones. See that function's own doc for
+ * why: without this, gaining `ayin` ownership swaps to the backend's coder default, then THIS
+ * function's own "put it back" step immediately swaps AGAIN to whatever was active before — and by
+ * the time the caller's own explicit swap-to-default would fire, the two already-queued swaps have
+ * raced on the backend's serialized swap chain with no guarantee which one lands last. Passing the
+ * real target here means the "put back" step already IS the swap to the default model — one swap,
+ * deterministic, no race.
+ */
+export async function lockSession(pinTo?: string): Promise<string> {
   const provider = await llmProvider();
   if (!provider.acquire) return 'this LLM provider has no authority layer — there is nothing to lock';
   const cat = await fetchCatalog({ force: true });
-  const wanted = cat?.activeModel; // pin what is serving RIGHT NOW, not the coder default
+  const wanted = pinTo || cat?.activeModel; // pin what is serving RIGHT NOW, unless a specific target was requested
   if (!isModelBooked()) {
     setAgentStatus('Locking the model…');
     const hold = await acquireLlm('ayin /lock (held while this session lives)', {
@@ -124,30 +136,31 @@ export async function lockSession(): Promise<string> {
  * model, reliably, the moment my session starts, and I want to actually see it land before I trust
  * it." A fire-and-forget swap that might still be mid-flight when the first prompt goes out is
  * exactly the kind of silent non-determinism that erodes trust in the lock altogether.
+ *
+ * BUG FIXED HERE (real, reproduced live): this used to call bare `lockSession()` first, THEN swap to
+ * `target` itself — two swaps, fired back to back over two separate HTTP round-trips, queued on the
+ * backend's serialized swap chain (`swapChatModel`/`doSwap`). Gaining `ayin` ownership independently
+ * swaps to the backend's coder default; `lockSession()`'s own "put it back" step then swapped to
+ * whatever was active BEFORE this session started (e.g. gemma, from backend idle default) — and by
+ * the time THIS function's own explicit swap to `target` fired, up to three swaps were racing the
+ * queue with no guarantee the LAST one to actually commit was the one asked for last. Observed live:
+ * ownership → ayin (qwen, correct) → immediately reverted to gemma by lockSession's "put it back" —
+ * and the session was left on gemma with no further correction, because by then `fetchCatalog`
+ * already reported `loadedModel` matching a stale intermediate state. Fixed by passing `target`
+ * straight into `lockSession(pinTo)`, so its OWN "put it back" step already IS the swap to the real
+ * default — one deterministic swap (or zero, when the backend's coder default already matches).
  */
 export async function lockSessionWithDefaultModel(): Promise<string> {
-  const err = await lockSession();
-  if (err) return err;
-
   const target = getConfigString('defaultModel');
+  const err = await lockSession(target);
+  if (err) return err;
   if (!target) return ''; // nothing configured — today's lockSession() behavior stands, unchanged
 
   const cat = await fetchCatalog({ force: true });
-  const token = (modelHold as { token: string } | null)?.token;
-  if (!cat || !token) return '';
-  if (cat.loadedModel === target) { lockedModel = target; return ''; } // already exactly what we want
-
-  const provider = await llmProvider();
-  if (!provider.setModel) return ''; // fixed-model provider — nothing to switch to
+  if (cat?.loadedModel === target) { lockedModel = target; return ''; } // already resident, nothing to wait for
 
   addMessage('system', `Loading default model ${target} (this session's pinned choice)…`);
   setAgentStatus(`Loading ${target}…`);
-  const res = await provider.setModel(target, token);
-  if (!res) {
-    setAgentStatus('');
-    addMessage('system', `Backend refused the swap to default model ${target} (unknown model, or authority lost) — staying on ${cat.activeModel}.`);
-    return '';
-  }
   const ok = await awaitResident(target);
   setAgentStatus('');
   await refreshActiveModel().catch(() => {});
