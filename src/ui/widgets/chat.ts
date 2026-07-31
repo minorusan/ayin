@@ -7,7 +7,7 @@
  */
 
 import blessed from 'blessed';
-import { renderMarkdown } from '../../markdown.js';
+import { renderMarkdown, inlineFormat } from '../../markdown.js';
 import { HEADLESS, noopBox } from '../headless.js';
 import { screen, render } from '../screen.js';
 import { theme } from '../theme.js';
@@ -496,7 +496,10 @@ export function formatGateCardForChat(
   }[kind];
 
   const head = `{${look.color}-fg}${look.glyph}{/} {bold}{${look.color}-fg}${escapeBlessedTags(title)}{/${look.color}-fg}{/bold}`;
-  const lines = body.map((l) => `{${theme.faint}-fg}│{/} {${theme.diffCtx}-fg}${escapeBlessedTags(l)}{/}`);
+  // Body lines are QA's own prose (a reviewer's summary, an issue description) and can carry inline
+  // markdown (bold, `code`) — escape raw {}/ FIRST, then style, so the reviewer's own braces/asterisks
+  // never get mistaken for blessed tags or left as literal, unrendered markdown syntax.
+  const lines = body.map((l) => `{${theme.faint}-fg}│{/} {${theme.diffCtx}-fg}${inlineFormat(escapeBlessedTags(l))}{/}`);
   const foot = footer
     ? `{${theme.faint}-fg}╰{/} {${look.color}-fg}${look.mark}{/} {${theme.dim}-fg}${escapeBlessedTags(footer)}{/}`
     : '';

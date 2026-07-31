@@ -10,7 +10,6 @@ const NO_TUI_COMMANDS = new Set([
   'watch',      // watch daemon
   'update',     // self-update from the registry
   'version', '--version', '-v',
-  'jira',       // Jira credential setup/refresh (jira-auth-cmd.ts)
 ]);
 
 export const HEADLESS = process.argv.some(a => a === '-p' || a === '--prompt' || a === '--non-interactive')

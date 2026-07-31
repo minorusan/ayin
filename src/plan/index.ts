@@ -27,6 +27,9 @@
  *   1. SURVEY   — deterministic: what this project is, what it can serve, how it can be observed.
  *   2. API RESEARCH — MANDATORY when a third-party API is involved: its CURRENT shape, off the web,
  *      because that is the one thing a model must never answer from memory (see `researchApis`).
+ *      An Arduino project gets the same "don't recall it" treatment: `isArduinoProject` gates a
+ *      deterministic dump of arduino_db's catalog into the prompt, so component facts are grounded in
+ *      the shipped reference instead of guessed at.
  *   3. EXPLORE  — the context around the problem: what already exists, who calls it, what it assumes.
  *   4. DEPENDENCIES — for a new webview specifically: can this project even serve one? What's missing?
  *   5. GAPS     — what is still unknown or undecided, named rather than guessed at.
@@ -51,6 +54,9 @@ import { prompts as promptsService, packagePath } from '../prompts-service.js';
 import { recentPrompts } from '../session-record.js';
 import { exploreExecute } from '../tools/explore.js';
 import { webSearch } from '../tools/web-search.js';
+import { isArduinoProject } from '../tools/arduino-explain.js';
+import { ARDUINO_COMPONENTS } from '../tools/arduino-components-data.js';
+import { catalogLine } from '../tools/arduino-db.js';
 import { pushActivity, setActivityDetail } from '../activity.js';
 import { addMessage, setAgentStatus } from '../ui.js';
 import { renderSurvey, surveyProject, type Survey } from './survey.js';
@@ -240,6 +246,15 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     if (t.apis.length) addMessage('system', `Plan mode: third-party API research — ${t.apis.join(', ')}`);
     const findings = await exploreContext(userInput, t.features, survey);
 
+    // Arduino projects get the SAME "don't recall it, look it up" treatment as a third-party API —
+    // deterministic (no LLM call, arduino_db is a plain keyword catalog), so the writer has real
+    // component facts instead of guessing at pinouts/identification from training data. Component
+    // WIRING LEGS aren't dumped here (would bloat the prompt); the block instructs the plan to send
+    // implementation to the arduino_db TOOL for those, and to web_search only for what the catalog
+    // doesn't cover (a specific datasheet, a library's own API).
+    const arduino = isArduinoProject(survey.root);
+    if (arduino) addMessage('system', 'Plan mode: Arduino project detected — grounding the plan in arduino_db\'s component catalog');
+
     setActivityDetail('writing the plan');
     const prompts = recentPrompts(12);
     const body = await llmChat([{
@@ -253,6 +268,9 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
         FINDINGS: findings.length ? findings.map((f, i) => `### Exploration ${i + 1}\n${f}`).join('\n\n') : '(exploration produced nothing — say so in the Gaps section)',
         APIS: t.apis.length ? t.apis.join(', ') : '(none identified)',
         API_RESEARCH: apiResearch || '(no third-party API involved — omit the API section)',
+        ARDUINO_BLOCK: arduino
+          ? `ARDUINO PROJECT DETECTED. Ground every component fact below in this shipped catalog (query the arduino_db tool for the full entry — legs, wiring notes — during implementation; this list is names/identify only):\n${ARDUINO_COMPONENTS.map(catalogLine).join('\n')}\n\nUse web_search only for what this catalog doesn't cover (a specific datasheet, a library's own API). Never guess a pinout or wiring fact from memory when arduino_db has an entry for it.`
+          : '(not an Arduino project — omit the Arduino reference section)',
       }),
     }]);
 

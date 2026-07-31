@@ -198,9 +198,10 @@ inert:
 - **`web_search`** — needs a search backend. Not portable as shipped (the original shelled
   out to a host-specific binary); route it through your backend's web-search endpoint, or
   ignore it.
-- **`jira`** — runs a JQL query; needs `JIRA_EMAIL` + `JIRA_API_TOKEN` + `JIRA_SITE` (via
-  `~/.egregor/config.env`). Set up or refresh with `ayin jira <token> [email] [site]` — it validates
-  the token against the real API before writing anything.
+- **`jira`** — structured Jira ops via the Maradel backend's `jira` resource; ayin holds no Jira
+  credential itself. Inert with a clear error until the BACKEND is configured — run
+  `maradel-jiraauth <token> [baseUrl] [email]` on the machine running the backend (it validates
+  before writing, same as every other credential setup here), then restart the backend.
 - **`send_push`** — asks the configured backend to push a notification to a phone; inert
   unless that backend implements it.
 

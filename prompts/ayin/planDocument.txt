@@ -25,6 +25,9 @@ THIRD-PARTY APIS INVOLVED: {{APIS}}
 FRESH WEB RESEARCH ON THOSE APIS (fetched just now — this, not your memory, is the truth about them):
 {{API_RESEARCH}}
 
+ARDUINO COMPONENT REFERENCE:
+{{ARDUINO_BLOCK}}
+
 Produce markdown with EXACTLY these sections, in this order:
 
 ## Reasoning
@@ -48,6 +51,13 @@ handle. **Cite the source URL for each claim.** Where the research did not answe
 "UNVERIFIED — look up X first" and make that an early step; never fill the gap from memory. If the
 research failed outright, the first step of this plan is to read the vendor's current documentation, and
 this section says so instead of listing endpoints you recall.
+
+## Arduino component reference
+MANDATORY whenever ARDUINO COMPONENT REFERENCE above is not the "(not an Arduino project...)" line;
+omit the section entirely only when it is. Name every physical component this plan involves and match
+it against the catalog given — use ITS wording (identify/what it does), never a recalled substitute.
+For any component the catalog has no entry for, say so plainly and make looking it up (web_search, or
+the arduino_db tool once more specifics are known) an early step rather than describing it from memory.
 
 ## Gaps and open questions
 What is genuinely unknown or undecided, and for each: how to resolve it (a command to run, a file to read,

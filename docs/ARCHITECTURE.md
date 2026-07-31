@@ -176,8 +176,9 @@ regression suite needed to keep tracking how people phrase things in English.
    rather than model-chosen because each call is its own agentic loop, i.e. real GPU time.
 4. **Document** (`planDocument`) — written to `ayin-plan-<timestamp>.md` in the cwd (`AYIN_PLAN_DIR`
    overrides) with fixed sections: reasoning · context · **dependencies** · **third-party API research**
-   (cited, omitted only when no API is involved) · **gaps** · files-to-change table · steps · **log
-   coverage and debugging** · risks.
+   (cited, omitted only when no API is involved) · **Arduino component reference** (omitted only when
+   `isArduinoProject` says no) · **gaps** · files-to-change table · steps · **log coverage and
+   debugging** · risks.
 5. The plan is pre-prompted into the turn as a `<plan>` block, the same mechanism as auto-research and
    auto-diagram, with instructions not to re-plan or re-explore what it already establishes.
 
@@ -187,6 +188,16 @@ supplies those gaps, so "add a settings page" in a project with no HTTP server a
 identified as three tasks before anyone writes HTML. **Log coverage and debugging** names the project's
 existing logger, env switch and introspection route by name, because a plan that ends at "implement the
 feature" hands over a black box; if the survey found no facility, adding one becomes step 1.
+
+**Arduino component reference gets the same "don't recall it" treatment as a third-party API — and for
+the identical reason.** `isArduinoProject(survey.root)` (reused from `tools/arduino-explain.ts`) gates a
+DETERMINISTIC dump (no LLM call — `arduino_db` is a plain keyword catalog, see the Tools section) of
+every shipped component's `catalogLine` (id/name/category/identify) into the prompt. The plan is told to
+match every component it names against this list rather than recalling a pinout or identification detail
+from training, and to make looking up an uncovered part an early step instead of describing it from
+memory. Wiring LEGS aren't dumped here (would bloat the prompt for every Arduino plan regardless of
+relevance) — the plan instructs implementation to call the `arduino_db` tool itself for those once the
+specific components are known.
 
 The document is on disk **before** implementation starts, so a machine that dies mid-feature leaves the
 thinking behind rather than only half the work.
@@ -206,7 +217,7 @@ has `explore` for self-orientation; this is a user-directed deep dive.
 exploreExecute (reused verbatim — plan/index.ts's exact call shape, an agentic loop, real GPU time)
   → extractExistingPaths (pure: which of explore's mentioned paths are real files on disk)
   → gatherGitHistory + computeBugSignal (pure: git log --follow, deduped, churn/bugfix counted)
-  → extractTicketCandidates → jiraLookup (self-validating — see below)
+  → extractTicketCandidates → jiraTickets (self-validating — see below)
   → ONE llmChat call writes the five-section report
   → makeDiagram (reused from tools/diagram.ts — the SAME validated PlantUML loop, not a second
     implementation) draws the architecture, grounded in the same explore findings
@@ -229,10 +240,10 @@ Two files, two `openInEditor` calls — the report and the diagram are separate 
   is structurally identical to plenty of ordinary text a commit message might contain — hardware part
   numbers (`KY-040`) are the exact same shape, confirmed directly: `check-gates.mjs`'s fixture repo
   deliberately includes a `KY-040` mention alongside a real-looking `PP-101` key, and both are extracted
-  as candidates by `extractTicketCandidates`. `jira.ts#jiraLookup` batch-validates candidates against
-  the real API (`key in (...)`) and only what Jira actually resolves is treated as a real ticket —
-  the report's `## Intention` section is told explicitly never to attribute a feature to an unresolved
-  candidate.
+  as candidates by `extractTicketCandidates`. `jira.ts#jiraTickets` (a resource-client call, see the
+  Tools section) batch-validates candidates against the real API and only what Jira actually resolves
+  is treated as a real ticket — the report's `## Intention` section is told explicitly never to
+  attribute a feature to an unresolved candidate.
 - **The synthesis prompt (`prompts/explain/synthesize.txt`) asks for five fixed sections**: `Intention`
   (what was asked for — a resolved ticket's reporter/summary, or the earliest commit's own stated
   purpose, or an honest "could not be recovered"), `What actually exists` (grounded in explore's
@@ -466,30 +477,29 @@ configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
 - **`str_replace`** is the preferred edit tool — a single-unique-match find/replace that
   touches only the targeted block. `write_file` is for new files / deliberate full rewrites
   (regenerating a large file from memory risks dropping content).
-- **`jira`** (`jira.ts`) runs a JQL query, formatted as text — inert (returns an error string, never
-  throws) unless `~/.egregor/config.env` has `JIRA_EMAIL`/`JIRA_API_TOKEN`/`JIRA_SITE`. The same file
-  also exports two structured (non-text) functions other code calls directly, both going through the
-  one shared `runJiraSearch` fetch/auth/error-handling helper rather than each carrying a copy:
-  `jiraLookup(keys)` (batch-validate candidate ticket keys, used by `/explain`) and
-  `currentSprintTickets(creds?)` (`sprint in openSprints()` — the JQL function needing no board/project
-  id, since a fresh setup doesn't know one yet).
-  - **`ayin jira <token> [email] [site]`** (`jira-auth-cmd.ts`, a top-level CLI subcommand — `NO_TUI_COMMANDS`
-    in `ui/headless.ts`, alongside `watch`/`update`/`version`) sets up or refreshes credentials.
-    **Validates before writing**: the candidate token is tested via `currentSprintTickets`'s `creds`
-    override — which never touches the config file — and `writeEgregorEnvKeys` (atomic temp+rename,
-    merges into the existing file rather than clobbering unrelated keys) is only called on a CONFIRMED
-    working response. A bad paste (expired token, typo'd site) never overwrites a still-working
-    credential, and the file is never left holding something unverified. The same successful call that
-    confirms auth IS the deliverable — current-sprint tickets, printed as proof, not a separate "ok" you
-    have to trust. `email`/`site` are optional: the command's primary job is refreshing an expiring
-    token, so it reuses whatever's already on file for the other two fields; first-time setup (no
-    config file yet) needs all three.
-  - **Forgot to add `jira` to `NO_TUI_COMMANDS` at first** — a real bug, caught by testing: without it,
-    `ayin jira` (like any non-`-p` invocation) constructs a real blessed screen at module-load time
-    (`ui/screen.ts`'s `HEADLESS ? noopScreen() : blessed.screen(...)`, decided once and memoized before
-    `main()` even runs), and its teardown escape codes leaked into the command's plain stdout. Diagnosed
-    by comparing byte-for-byte against `ayin update`/`ayin version` (both already in the set, both
-    clean) rather than guessing.
+- **`jira`** (`jira.ts`) — a thin CONSUMER of the Maradel backend's `jira` resource
+  (`backend/src/resources/jira.ts`), not a Jira API caller. **This is a deliberate architectural
+  collapse**: ayin used to hold its own `~/.egregor/config.env` credentials and call the Jira REST API
+  directly (a second, independent implementation from the backend's own `connectors/jira.ts`); both
+  now go through the one `jira` resource, the same "one door" shape already used for the `llm` resource
+  — `POST {backend}/resource/jira {op, params}` (`resourceOp`, mirroring `llm/providers/resource.ts`'s
+  exact fetch shape). ayin holds NO Jira credential of any kind. Ops: `currentSprint` / `ticket` /
+  `tickets` (batch, self-validating) / `comments` / `epics` / `search` (free text — the backend runs
+  an agentic JQL-writing loop, never handed to ayin's own model to guess at). `jiraTickets(keys)` is
+  the batch op `/explain` calls for ticket-candidate validation.
+  - **Credential setup moved to the backend**: `maradel-jiraauth <token> [baseUrl] [email]`
+    (`backend/src/status/jiraAuthCli.ts`) validates a candidate token against the live API BEFORE
+    writing it to `~/.maradel/maradel.env` — same discipline the removed `ayin jira` command used,
+    just relocated to where the credential actually lives and is actually used. A restart of the
+    backend is required to pick up a change (`config.jira` is read from the env file once at process
+    start, systemd's `EnvironmentFile`), which the command says plainly rather than pretending live.
+  - **Forgot to add `jira` to `NO_TUI_COMMANDS` while it briefly existed as `ayin jira`** — a real bug
+    caught by testing, not review: without it, a non-`-p` invocation still constructs a real blessed
+    screen at module-load time (`ui/screen.ts`'s `HEADLESS ? noopScreen() : blessed.screen(...)`,
+    decided once and memoized before `main()` even runs), leaking teardown escape codes into plain
+    stdout. Diagnosed by comparing byte-for-byte against `ayin update`/`ayin version` (both already in
+    the set, both clean). The command itself no longer exists in ayin (see above), but the fix stayed
+    relevant enough to note: any future top-level ayin subcommand needs the same registration.
 - **Auto-research grounding** (`agent.ts#runResearch`): near-deterministic — if the prompt contains
   `grounded`/`citing`/`citation`/`research`, ayin runs a `web_search` BEFORE the base LLM call and
   **pre-prompts the result into the turn** (a `<research-grounding>` block in the system context), so
@@ -806,6 +816,24 @@ tree knows about the internals). Design rules:
   `layout.ts#relayout()`; a widget that changes height calls `relayout()` and everything
   restacks. Adding a new bottom-docked element = one entry in the stack registration.
 - **One keypress router** (`keys.ts`) and **one theme** (`theme.ts`).
+- **Markdown renders everywhere prose can appear, not just the chat transcript** (`markdown.ts`).
+  `renderMarkdown` (one logical line in → one styled line out, no rewrapping) served the scrolling chat
+  box fine, but fixed-width contexts — the permission dialog's `body` (the agent's own "why it wants
+  this" reasoning, which routinely carries full markdown), a QA card's body lines — showed that same
+  prose completely raw (literal `**`/`###`/`*`), because wrapping ALREADY-tagged text risks splitting a
+  `{tag}` mid-sequence and corrupting the whole render — so those call sites just never attempted it.
+  `renderMarkdownWrapped(text, width, wrap)` fixes this the safe way: strip line-START markers (heading
+  `#`/`##`/`###`, bullet `-`/`*` — harmless to strip before wrapping, since they only ever affect where
+  a paragraph begins) → wrap the STILL-PLAIN paragraph text (inline markers like `**`/`` ` `` are
+  ordinary characters to the wrapper) → apply `inlineFormat` (now exported) to each ALREADY-WRAPPED
+  line independently, then bold the whole paragraph if it was a heading. `dialog.ts`'s `body` and
+  `chat.ts#formatGateCardForChat`'s body lines both use this now. Known, accepted degradation: a bold/
+  code span itself longer than one wrapped line loses its styling on the split line rather than
+  corrupting the tag stream — correct for a side dialog, wrong for the main transcript, which is why
+  `renderMarkdown` itself is untouched for that path. Also fixed in the same pass: `renderMarkdown`
+  never escaped a literal `{`/`}` the MODEL wrote in ordinary prose (only inside fenced code blocks) —
+  a latent tag-corruption risk now closed the same way `chat.ts`'s own `escapeBlessedTags` already
+  protects tool-output previews.
 - **Copy-paste contract, as amended** (`screen.ts`). The old rule was absolute: never enable mouse
   tracking, because it hijacks terminal-native text selection and copying transcript text matters more
   than a wheel. It was right about the tradeoff and wrong that the tradeoff is total — every terminal

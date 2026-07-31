@@ -10,7 +10,8 @@
  *   exploreExecute (reused verbatim, `plan/index.ts`'s exact call shape — an agentic loop, real GPU time)
  *   → extractExistingPaths (pure: which of explore's mentioned paths are real files)
  *   → gatherGitHistory + computeBugSignal (pure: git log --follow, deduped, churn/bugfix counted)
- *   → extractTicketCandidates → jiraLookup (self-validating: a shape match is never trusted alone)
+ *   → extractTicketCandidates → jiraTickets (self-validating: a shape match is never trusted alone —
+ *     the Maradel backend's `jira` resource is what actually asks the real API, ayin only consumes it)
  *   → ONE llmChat call writes the five-section report
  *   → makeDiagram (reused from tools/diagram.ts — the SAME validated PlantUML loop, not a second
  *     implementation) draws the architecture, grounded in the same explore findings.
@@ -27,7 +28,7 @@ import { join, resolve, relative } from 'node:path';
 import { exploreExecute } from '../tools/explore.js';
 import { extractExistingPaths } from './paths.js';
 import { gatherGitHistory, extractTicketCandidates, computeBugSignal, renderHistoryEvidence } from './git-history.js';
-import { jiraLookup } from '../jira.js';
+import { jiraTickets } from '../jira.js';
 import { llmChat } from '../llm/manager.js';
 import { prompts, packagePath } from '../prompts-service.js';
 import { openInEditor } from '../editor.js';
@@ -52,7 +53,7 @@ function explainFilename(feature: string, now = new Date()): string {
   return `ayin-explain-${slugify(feature) || 'feature'}-${stamp}.md`;
 }
 
-function buildJiraBlock(paths: string[], candidates: string[], lookup: Awaited<ReturnType<typeof jiraLookup>> | null): string {
+function buildJiraBlock(paths: string[], candidates: string[], lookup: Awaited<ReturnType<typeof jiraTickets>> | null): string {
   if (paths.length === 0) return 'JIRA: not checked — no real file could be identified for this feature, so no commit history was gathered to look for ticket references.';
   if (candidates.length === 0) return 'JIRA: no ticket-key-shaped references found in any commit message touching these files.';
   if (!lookup) return 'JIRA: candidates were found but the lookup was skipped.';
@@ -60,7 +61,7 @@ function buildJiraBlock(paths: string[], candidates: string[], lookup: Awaited<R
   if (lookup.tickets.length === 0) {
     return `JIRA: ${candidates.length} candidate ticket-key-shaped string(s) found in commit messages (${candidates.join(', ')}), but NONE resolved to a real Jira issue — likely coincidental text (a version string, a part number), not a real ticket. Do not attribute this feature to any of them.`;
   }
-  const lines = lookup.tickets.map((t) => `  [${t.key}] ${t.summary} — reporter: ${t.reporter ?? 'unknown'}, status: ${t.status}, created: ${t.created ?? 'unknown'}`);
+  const lines = lookup.tickets.map((t) => `  [${t.key}] ${t.title} — reporter: ${t.reporter ?? 'unknown'}, status: ${t.status}, updated: ${t.updated ?? 'unknown'}`);
   return `JIRA TICKETS LINKED FROM COMMIT MESSAGES (validated against the real API, not just the key shape):\n${lines.join('\n')}`;
 }
 
@@ -112,7 +113,7 @@ export async function runExplain(argText: string, cwd: string = process.cwd()): 
     // 3. Jira — self-validating: a key-shaped candidate is proven real by asking Jira, never trusted alone.
     setActivityDetail('checking Jira for linked tickets');
     const candidates = paths.length ? extractTicketCandidates(history.commits) : [];
-    const lookup = candidates.length ? await jiraLookup(candidates) : null;
+    const lookup = candidates.length ? await jiraTickets(candidates) : null;
     const jiraBlock = buildJiraBlock(paths, candidates, lookup);
 
     // 4. synthesis — one call, five fixed sections, grounded in everything gathered above.

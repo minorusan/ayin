@@ -409,11 +409,12 @@ const tools: Tool[] = [
   },
   {
     name: 'jira',
-    description: 'Query Jira using JQL (Jira Query Language). Use for: finding tickets, checking sprint status, listing issues by assignee/project/status, getting issue counts. Returns formatted issue list.',
+    description: 'Read Jira through the Maradel backend\'s jira resource — structured, pre-filtered results, never a hand-written JQL query. Pick an op: currentSprint (your open-sprint issues, optional project=), ticket (one issue + comments, needs key=ISSUE-123), comments (just the comments on one issue, needs key=), epics (a project\'s epics, optional project=), search (free text — the backend runs its own agentic loop to build and validate a JQL query for you, needs query=). Inert with a clear error if the backend has no Jira credentials configured (see maradel jiraauth).',
     parameters: [
-      { name: 'jql', type: 'string', description: 'JQL query string, e.g. "project = PP AND status = \"In Progress\" AND assignee = currentUser()"', required: true },
-      { name: 'maxResults', type: 'number', description: 'Max issues to return (default 20, max 50)', required: false },
-      { name: 'fields', type: 'string', description: 'Comma-separated field names to include (default: summary, status, assignee, priority, issuetype, updated, comment, labels)', required: false },
+      { name: 'op', type: 'string', description: 'One of: currentSprint | ticket | comments | epics | search', required: true },
+      { name: 'query', type: 'string', description: 'Free-text search request — required for op=search only', required: false },
+      { name: 'key', type: 'string', description: 'Issue key, e.g. "PROJ-1234" — required for op=ticket / op=comments', required: false },
+      { name: 'project', type: 'string', description: 'Optional project key to scope currentSprint/epics to', required: false },
     ],
     async execute(params) {
       return jiraExecute(params);

@@ -60,7 +60,6 @@ ayin                      # TUI
 ayin version              # what you're running
 ayin update               # fetch + install the newest build
 ayin update --check       # report only, install nothing
-ayin jira <token>         # set up/refresh Jira credentials — see below
 ```
 
 `ayin update` resolves the registry from `--registry` → `AYIN_UPDATE_REGISTRY` →
@@ -83,23 +82,6 @@ every 10 min). It only ever asks a **private** registry — `AYIN_UPDATE_REGISTR
 configured registry when that isn't public npmjs — so a fresh checkout never phones home uninvited
 and can't be told a stranger's `ayin` package is your update. `AYIN_UPDATE_CHECK=0` turns it off.
 
-### `ayin jira <token> [email] [site]` — set up or refresh Jira credentials
-
-Create a token at [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens),
-then:
-
-```bash
-ayin jira ATATT3xFfGF0...                       # refresh — reuses email/site already on file
-ayin jira ATATT3xFfGF0... you@co.com co.atlassian.net   # first-time setup — all three
-```
-
-**Validates before writing.** The token is tested against the real API first (current-sprint tickets —
-`sprint in openSprints()`) using an in-memory credential set that never touches
-`~/.egregor/config.env`; only on a confirmed-working response is anything saved there. A bad paste
-(expired token, typo'd site) never overwrites a still-working credential, and the file is never left
-holding something unverified. The same successful call that confirms auth also returns your current
-sprint's tickets, printed as proof it actually works — not a separate "ok" you have to trust.
-
 ## Tools
 
 ayin's loop calls these tools (each is a unique name; the model invokes them by name):
@@ -117,12 +99,21 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 | `status` | Check progress of backgrounded tools | — |
 | `arduino_db` | Look up a common Arduino/electronics component (identify, what it does, wiring) | auto-approved, no network — keyword search over a shipped catalog |
 | `web_search` | Web search | optional — needs a search backend (see SETUP) |
-| `jira` | Run a JQL query | optional — needs Jira creds (`ayin jira <token>` sets them up) |
+| `jira` | Structured Jira ops (current sprint, a ticket, epics, free-text search) via the Maradel backend | optional — a consumer, not a caller: needs the backend's `jira` resource configured (`maradel-jiraauth`), ayin holds no Jira credential itself |
 | `send_push` | Push a notification to a phone | optional — needs a backend that forwards it |
 
 The **core nine** (`read_file`, `grep`, `find_files`, `write_file`, `str_replace`, `bash`,
 `explore`, `status`, `arduino_db`) need nothing but Node + a POSIX shell. The rest are optional
 integrations you can ignore.
+
+**`jira` is a consumer, not a caller** — ayin holds no Jira credential and never talks to the Jira REST
+API itself. It calls the Maradel backend's `jira` resource (`POST {backend}/resource/jira {op, params}`,
+the exact shape `/api/generate`'s own resource provider already uses for the `llm` resource) with one of
+five structured ops — `currentSprint` / `ticket` / `comments` / `epics` / `search` — never a hand-written
+JQL string. `search` takes free text and runs an agentic loop **on the backend** to build and validate the
+query; everything else is pre-filtered, structured JSON. Set up or refresh the actual credential with
+`maradel-jiraauth <token> [baseUrl] [email]` on the machine running the backend (validates against the
+live API before writing, same discipline this project applies everywhere credentials are set).
 
 Each tool's prompts (where it has any) ship as `.txt` files in its own namespace under
 `prompts/`, so you can retune a tool's behaviour without touching its code — see

@@ -16,6 +16,7 @@
 import blessed from 'blessed';
 import { screen, focusInput, blurInput } from './ui.js';
 import { theme } from './ui/theme.js';
+import { renderMarkdownWrapped } from './markdown.js';
 
 export interface DialogOption {
   label: string;
@@ -120,7 +121,10 @@ export function showDialog(
     const qLines = wrapPlain(question, inner);
     const subLines = opts.subtitle ? wrapPlain(opts.subtitle, inner) : [];
     const targetLines = opts.target ? wrapPlain(opts.target, inner) : [];
-    let bodyLines = opts.body ? wrapPlain(opts.body, inner) : [];
+    // The body is the agent's own prose ("why it wants this") and routinely carries full markdown —
+    // headings, bold, bullets. renderMarkdownWrapped wraps FIRST (plain text, tag-safe) then styles
+    // each already-wrapped line, so `**not this literally**` renders instead of showing raw asterisks.
+    let bodyLines = opts.body ? renderMarkdownWrapped(opts.body, inner, wrapPlain) : [];
 
     // Height must fit the terminal. The reason (body) is the least critical text, so it is what
     // gets cut — the question, the target and the choices always stay whole and reachable.

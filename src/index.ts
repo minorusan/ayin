@@ -653,12 +653,6 @@ async function main(): Promise<void> {
     process.stdout.write(`${getVersion()}\n`);
     return;
   }
-  if (process.argv[2] === 'jira') {
-    // Jira credential setup/refresh — validates before writing, no TUI. See src/jira-auth-cmd.ts.
-    const { runJiraAuth } = await import('./jira-auth-cmd.js');
-    await runJiraAuth(process.argv.slice(3));
-    return;
-  }
   loadRules(process.cwd());
   // Decide WHICH LLM provider serves this machine before anything paints or asks for a capability.
   // Never throws: an endpoint that exposes no resource surface (or none at all) lands on `direct`.

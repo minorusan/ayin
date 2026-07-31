@@ -587,5 +587,39 @@ console.log('\nexplain: git history + bug signal (real throwaway repo)');
   ok(emptyHistory.commits.length === 0, 'a path with no git history at all degrades to an empty list, not an error');
 }
 
+// ── markdown: fixed-width contexts (dialog body, QA cards) render, not raw ──
+console.log('\nmarkdown rendering (dialog body / QA cards)');
+{
+  const md = await import(`file://${join(DIST, 'markdown.js')}`);
+
+  const rendered = md.renderMarkdown('**bold** and `code` and\n### a heading\n* a bullet');
+  ok(rendered.includes('{bold}bold{/bold}'), 'renderMarkdown converts **bold**');
+  ok(rendered.includes('{/}') && !rendered.includes('`code`'), 'renderMarkdown converts `code` spans, not left literal');
+  ok(!/^###/m.test(rendered) && rendered.includes('a heading'), 'renderMarkdown strips the heading marker');
+  ok(rendered.includes('• a bullet'), 'renderMarkdown converts a bullet marker to •');
+  ok(md.renderMarkdown('literal {braces} in prose').includes('{open}braces{close}'), 'a literal { or } the MODEL wrote is escaped, not mistaken for a blessed tag');
+
+  // The wrap-then-format pipeline a fixed-width dialog body needs — the exact bug reported: raw
+  // **/###/* markdown showing unrendered in the permission-dialog body.
+  const wrapPlain = (text, width) => text.split('\n').flatMap((p) => {
+    if (!p.trim()) return [''];
+    const out = []; let line = '';
+    for (const w of p.split(/\s+/)) {
+      if (!line) line = w;
+      else if (line.length + 1 + w.length <= width) line += ` ${w}`;
+      else { out.push(line); line = w; }
+    }
+    if (line) out.push(line);
+    return out;
+  });
+  const wrapped = md.renderMarkdownWrapped('### The Plan\n* **Hardware Wiring**: a guide\n* **The Code**: a `.ino` sketch', 40, wrapPlain);
+  const joined = wrapped.join('\n');
+  ok(joined.includes('{bold}The Plan{/bold}'), 'a heading paragraph is bolded after wrap-then-format, not left as a literal ### line');
+  ok(joined.includes('{bold}Hardware Wiring{/bold}'), 'inline bold survives the wrap-then-format pipeline');
+  ok(joined.includes('• ') && !/^\s*\*/m.test(joined), 'bullets are converted, no raw leading * survives');
+  ok(!joined.includes('`.ino`'), 'inline code backticks are converted, not left literal');
+  ok(!/\{bold\}[^{]*\{bold\}/.test(joined), 'no doubled/corrupted tags from wrapping already-tagged text');
+}
+
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);
