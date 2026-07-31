@@ -86,6 +86,11 @@ export async function lockSession(pinTo?: string): Promise<string> {
   if (!provider.acquire) return 'this LLM provider has no authority layer — there is nothing to lock';
   const cat = await fetchCatalog({ force: true });
   const wanted = pinTo || cat?.activeModel; // pin what is serving RIGHT NOW, unless a specific target was requested
+  log('INFO', 'lock_session_debug', {
+    pinTo: pinTo ?? '(none)', wanted: wanted ?? '(none)',
+    catActiveModel: cat?.activeModel ?? '(cat null)', catCoderModel: cat?.coderModel ?? '(cat null)',
+    isModelBooked: String(isModelBooked()),
+  });
   if (!isModelBooked()) {
     setAgentStatus('Locking the model…');
     const hold = await acquireLlm('ayin /lock (held while this session lives)', {
@@ -116,9 +121,14 @@ export async function lockSession(pinTo?: string): Promise<string> {
   setRequestAuthority((modelHold as { token: string }).token);
 
   // Gaining `ayin` ownership applies the coder policy, which would swap the model. Put it back.
+  log('INFO', 'lock_session_putback_check', {
+    willSwap: String(!!(wanted && cat && wanted !== cat.coderModel && provider.setModel)),
+    wanted: wanted ?? '(none)', hasProviderSetModel: String(!!provider.setModel),
+  });
   if (wanted && cat && wanted !== cat.coderModel && provider.setModel) {
     const token = (modelHold as { token: string }).token;
     await provider.setModel(wanted, token);
+    log('INFO', 'lock_session_putback_fired', { model: wanted });
   }
   log('INFO', 'session_locked', { model: wanted ?? '?', ttlMinutes: String(LOCK_TTL_MS / 60000) });
   return '';
@@ -158,6 +168,23 @@ export async function lockSessionWithDefaultModel(): Promise<string> {
 
   const cat = await fetchCatalog({ force: true });
   if (cat?.loadedModel === target) { lockedModel = target; return ''; } // already resident, nothing to wait for
+
+  // VERIFY, don't assume: `lockSession(target)`'s own "put it back" step is SUPPOSED to already have
+  // requested `target` — but this function's entire promise to the operator is "you end up on the
+  // named default", so it must not just sit there watching for a swap that, for whatever reason
+  // (a race this build doesn't yet fully explain — see `lock_session_debug`/`lock_session_putback_*`
+  // log events for the evidence), was never actually requested. If the declared TARGET isn't already
+  // `target`, force it here, ourselves, before waiting — belt and suspenders: whatever upstream
+  // reason left the wrong model in flight, this still converges on the configured default instead of
+  // silently timing out 180s later still on the wrong model.
+  if (cat?.activeModel !== target) {
+    const provider = await llmProvider();
+    const token = (modelHold as { token: string } | null)?.token;
+    if (provider.setModel && token) {
+      log('WARN', 'default_model_correction_needed', { activeModel: cat?.activeModel ?? '(unknown)', target });
+      await provider.setModel(target, token);
+    }
+  }
 
   addMessage('system', `Loading default model ${target} (this session's pinned choice)…`);
   setAgentStatus(`Loading ${target}…`);
