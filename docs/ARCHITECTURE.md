@@ -970,6 +970,28 @@ tree knows about the internals). Design rules:
   transcript. `release()` recovers from a rotated token too: if the detach frees nothing and `ayin`
   still holds the resource, it re-acquires to learn the live token and hands THAT back, instead of
   leaking the grant until its TTL.
+  **REAL USAGE now keeps the lock alive too — not just the keepalive timer.** Found live: a session
+  deep in `/plan` (several long sequential agentic sub-loops, real minutes each) had the model swap out
+  from under it mid-session, `gemma` loading over an active `qwen` session with no warning. Root cause:
+  the backend's `/api/generate` route checked `holdsToken()` for queue priority (deliberately a
+  **non-throwing, no-side-effect** read, so a client can't fake entitlement by merely asking) but
+  NOTHING slid the grant's expiry except the client's own 2-minute keepalive — a purely in-memory,
+  near-instant op that should never itself be the failure point, but a session that goes minutes
+  between keepalive ticks (fully possible; the timer's own schedule, not activity, decided when it
+  fired) had zero fallback if that one tick landed even slightly late. `AuthorityHolder#touch(token)`
+  (backend `resources/authority.ts`) is `authorise()`'s expiry-sliding effect with `holdsToken()`'s
+  safety (never throws, no-ops on a mismatch); `/api/generate` now calls it on every locked request, so
+  active use — not a background timer nobody's watching — is what a live session actually depends on.
+  Verified in an isolated `AuthorityHolder` instance (no contact with the live resource): a 10s-TTL
+  grant, touched once at t=8s, was confirmed still held at t=12s — past what would have been its
+  original, un-touched expiry.
+  **`/set default-model <name>`** (`lockSessionWithDefaultModel`, `model-picker.ts`) makes auto-lock
+  explicit instead of implicit: with nothing configured, boot pins whatever the backend's own
+  `ownership.gained` policy happened to swap to (today's plain `lockSession()` behavior, unchanged).
+  With a default set, boot explicitly requests THAT model and `awaitResident()`s it — not just
+  "requested," actually resident in VRAM — before the session is reported locked, and the regrant
+  handler re-pins THIS model (not whatever was active moments before the swap) if the backend ever
+  drops and re-issues the grant.
 - **Per-model context windows.** Every picker row is labelled with the window that model will
   ACTUALLY get (`27.8B · Q4_K_M · 16.2G · 24k ctx`), because one global `numCtx` is wrong on a 24 GB
   card: KV cost per token is architectural, not a function of size. Measured here — `gemma4:26b`

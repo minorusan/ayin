@@ -22,7 +22,7 @@ import { forcePlanNextTurn } from './plan/index.js';
 import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation } from './agent.js';
 import { startPromptServer } from './prompt-server.js';
 import { acquireLlm, type LlmHold } from './llm/authority.js';
-import { handleModelCommand, releaseModelHold, isModelBooked, lockSession, unlockSession, isSessionLocked, lockSupported } from './model-picker.js';
+import { handleModelCommand, releaseModelHold, isModelBooked, lockSession, lockSessionWithDefaultModel, unlockSession, isSessionLocked, lockSupported } from './model-picker.js';
 import { showDialog } from './dialog.js';
 import { startLlmStatusPoll, findOwnPlace } from './llm-status.js';
 import { startUpdateWatch, checkForUpdate } from './updater.js';
@@ -505,7 +505,7 @@ onInput(async (text: string) => {
         }
         const key = parts[1];
         const value = parts.slice(2).join(' ');
-        const keyMap: Record<string, string> = { 'openai-key': 'openAiKey', 'keli-url': 'keliUrl', 'update-registry': 'updateRegistry', 'llm-provider': 'llmProvider' };
+        const keyMap: Record<string, string> = { 'openai-key': 'openAiKey', 'keli-url': 'keliUrl', 'update-registry': 'updateRegistry', 'llm-provider': 'llmProvider', 'default-model': 'defaultModel' };
         const configKey = keyMap[key] ?? key;
         setConfigValue(configKey, value);
         addMessage('system', `Set ${key} ✓`);
@@ -591,6 +591,7 @@ onInput(async (text: string) => {
         addMessage('system', '/clear — clear chat');
         addMessage('system', '/set keli-url <http://host:9100> — point ayin at the LLM endpoint (an adapter, or a backend)');
         addMessage('system', '/set llm-provider <direct|resource|auto> — how much of that endpoint to expect (default: auto-detect)');
+        addMessage('system', '/set default-model <name> — explicitly force-load + wait-for-resident + pin this model at startup (default: whatever the backend auto-swaps to)');
         addMessage('system', '/set update-registry <http://host:4873> — where `ayin update` looks (public npm is refused: "ayin" there is someone else)');
         addMessage('system', '/set openai-key <sk-...> — configure OpenAI API key');
         addMessage('system', '/reset — restore default prompts');
@@ -727,10 +728,15 @@ async function runInteractive(): Promise<void> {
   // On a provider with no authority layer this is not a failure to report — there is no lock to
   // take and never was. Check first and stay silent, or every public clone opens with an error
   // about a resource layer its owner has never heard of.
+  //
+  // `lockSessionWithDefaultModel()` layers one more guarantee on top when `/set default-model <name>`
+  // is configured: don't just take the lock and hope whatever the backend auto-swapped to is fine —
+  // explicitly request THAT model and WAIT until it's actually resident before calling this "locked".
+  // With nothing configured this is identical to plain `lockSession()`.
   if (process.env.AYIN_AUTOLOCK !== '0') {
     void (async () => {
       if (!(await lockSupported())) return;
-      const err = await lockSession();
+      const err = await lockSessionWithDefaultModel();
       if (err) addMessage('system', `Could not take the priority lock: ${err} — /lock to retry.`);
       else addMessage('system', 'Locked ⚿ — priority band + model pinned for this session (/unlock to yield).');
     })();

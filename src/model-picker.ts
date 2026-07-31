@@ -31,7 +31,7 @@ import { llmProvider } from './llm/select.js';
 import { setRequestAuthority } from './connection.js';
 import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
 import { refreshActiveModel, activeModelId } from './llm/manager.js';
-import { getConfig } from './prompts.js';
+import { getConfig, getConfigString } from './prompts.js';
 import { log } from './log.js';
 
 /** The session's booking. Held until /quit, /model <shared>, or process exit (grant TTL). */
@@ -109,6 +109,55 @@ export async function lockSession(): Promise<string> {
     await provider.setModel(wanted, token);
   }
   log('INFO', 'session_locked', { model: wanted ?? '?', ttlMinutes: String(LOCK_TTL_MS / 60000) });
+  return '';
+}
+
+/**
+ * Startup convenience: `lockSession()` PLUS an explicit, WAITED-FOR default model — not just
+ * "whatever `ownership.gained` happened to auto-swap to." `/set default-model <name>` (persisted in
+ * `~/.ayin-cli/prompts.json`, same convention as `keli-url`/`llm-provider`) names it; with nothing
+ * configured this is byte-for-byte `lockSession()`'s existing behavior — zero change for anyone who
+ * hasn't set one.
+ *
+ * WHY THIS EXISTS: `lockSession()` re-pins whatever was ALREADY active and never awaits the swap —
+ * fine for its own purpose (don't let a plain `/lock` change your model), wrong for "I want a KNOWN
+ * model, reliably, the moment my session starts, and I want to actually see it land before I trust
+ * it." A fire-and-forget swap that might still be mid-flight when the first prompt goes out is
+ * exactly the kind of silent non-determinism that erodes trust in the lock altogether.
+ */
+export async function lockSessionWithDefaultModel(): Promise<string> {
+  const err = await lockSession();
+  if (err) return err;
+
+  const target = getConfigString('defaultModel');
+  if (!target) return ''; // nothing configured — today's lockSession() behavior stands, unchanged
+
+  const cat = await fetchCatalog({ force: true });
+  const token = (modelHold as { token: string } | null)?.token;
+  if (!cat || !token) return '';
+  if (cat.loadedModel === target) { lockedModel = target; return ''; } // already exactly what we want
+
+  const provider = await llmProvider();
+  if (!provider.setModel) return ''; // fixed-model provider — nothing to switch to
+
+  addMessage('system', `Loading default model ${target} (this session's pinned choice)…`);
+  setAgentStatus(`Loading ${target}…`);
+  const res = await provider.setModel(target, token);
+  if (!res) {
+    setAgentStatus('');
+    addMessage('system', `Backend refused the swap to default model ${target} (unknown model, or authority lost) — staying on ${cat.activeModel}.`);
+    return '';
+  }
+  const ok = await awaitResident(target);
+  setAgentStatus('');
+  await refreshActiveModel().catch(() => {});
+  // From here the regrant handler (see lockSession's onRegrant) re-pins THIS model, not whatever was
+  // active before the swap — the whole point of a named default surviving a backend restart too.
+  lockedModel = target;
+  addMessage('system', ok
+    ? `${target} resident — locked for this session (/unlock to yield).`
+    : `${target} is taking longer than expected; still loading in the background — the status bar will settle when it lands.`);
+  log('INFO', 'session_locked_default_model', { model: target, resident: String(ok) });
   return '';
 }
 
