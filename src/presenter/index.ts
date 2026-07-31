@@ -24,6 +24,12 @@
  * current, so Presenter calls the same `regenerateTouchedSketches` the QA-pass hook uses — see that
  * function's own doc for why the two share one implementation with a skip-set instead of each having
  * their own copy.
+ *
+ * OFF BY DEFAULT for the session — `/present` (bare, in `index.ts`) toggles it on for the rest of the
+ * session; `/presentthis <message>` forces it for exactly one turn regardless of the toggle. This is
+ * INDEPENDENT of QA's own toggle (`qa/index.ts`) even though both still share the identical "does this
+ * look like a completion report" shape check computed once in `agent.ts` (`qaShouldRun`) — enabling one
+ * without the other is a legitimate combination (e.g. nicer formatting with no QA judge, or vice versa).
  */
 
 import { pushActivity, setActivityDetail } from '../activity.js';
@@ -37,6 +43,33 @@ const presenterPrompts = prompts.register('presenter', packagePath('prompts', 'p
 
 export function presenterEnabled(): boolean {
   return process.env.AYIN_PRESENTER !== '0';
+}
+
+let sessionEnabled = false;
+let forceNextTurn = false;
+
+export function togglePresenterSession(): boolean {
+  sessionEnabled = !sessionEnabled;
+  return sessionEnabled;
+}
+
+export function isPresenterSessionEnabled(): boolean {
+  return sessionEnabled;
+}
+
+export function forcePresenterNextTurn(): void {
+  forceNextTurn = true;
+}
+
+/**
+ * Call exactly once per turn, UNCONDITIONALLY (never short-circuited behind the shared shape check) —
+ * see `qa/index.ts#shouldRunQaThisTurn`'s identical reasoning: the one-shot `/presentthis` force must
+ * be consumed whether or not this particular turn had anything to present.
+ */
+export function shouldRunPresenterThisTurn(): boolean {
+  const forced = forceNextTurn;
+  if (forced) forceNextTurn = false;
+  return sessionEnabled || forced;
 }
 
 export interface PresenterFile {

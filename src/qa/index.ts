@@ -6,7 +6,9 @@
  * is rewarded for sounding complete. "Done — I've implemented the panel and updated the docs" is a
  * claim, not a fact. This gate turns the claim into a checked one before the user has to.
  *
- * THE CONDITION IS DETERMINISTIC — no model decides whether QA runs:
+ * OFF BY DEFAULT for the session — `/qa` toggles it on for the rest of the session, `/qathis` forces
+ * it once regardless of the toggle. Once it applies at all, THE CONDITION IS DETERMINISTIC — no model
+ * decides whether QA runs:
  *
  *     files changed this turn > 0   AND   the final message looks like a completion report
  *                                         (big, or opening with a completion verb)
@@ -117,8 +119,48 @@ export function qaEnabled(): boolean {
 }
 
 /**
+ * QA is OFF by default for the session — `/qa` (bare, in `index.ts`) toggles it for the rest of the
+ * session; `/qathis <message>` forces it for exactly one turn regardless of the toggle, consumed
+ * whatever that turn turns out to contain (a flag that survived a no-op turn would silently fire on
+ * the NEXT unrelated one). This is INDEPENDENT of Presenter's own toggle (`presenter/index.ts`) even
+ * though both still share the same underlying "does this look like a completion report" shape check
+ * below (`qaShouldRun`, unchanged) — `shouldRunQaThisTurn()` is the only thing that changed: an
+ * additional gate the caller ANDs with `qaShouldRun(...).run`, never folded into that function itself,
+ * so Presenter can keep using the identical shape check without inheriting QA's own toggle state.
+ */
+let sessionEnabled = false;
+let forceNextTurn = false;
+
+export function toggleQaSession(): boolean {
+  sessionEnabled = !sessionEnabled;
+  return sessionEnabled;
+}
+
+export function isQaSessionEnabled(): boolean {
+  return sessionEnabled;
+}
+
+export function forceQaNextTurn(): void {
+  forceNextTurn = true;
+}
+
+/**
+ * Call exactly once per turn, UNCONDITIONALLY (never short-circuited behind `qaShouldRun(...).run`) —
+ * it consumes the one-shot `/qathis` force flag, and that consumption must happen whether or not this
+ * particular turn had a completion-report shape to act on. A forced turn that turned out to change no
+ * files should still spend its one-shot request, not leave it dangling for a later, unrelated turn.
+ */
+export function shouldRunQaThisTurn(): boolean {
+  const forced = forceNextTurn;
+  if (forced) forceNextTurn = false;
+  return sessionEnabled || forced;
+}
+
+/**
  * The gate condition. Deterministic and cheap — no LLM, no network, one `git status` at most.
- * Returns the reason it will NOT run when it won't, for the log.
+ * Returns the reason it will NOT run when it won't, for the log. Pure shape detection — whether QA
+ * (or Presenter) actually acts on a `true` result is a SEPARATE decision (see `shouldRunQaThisTurn`
+ * above and `presenter/index.ts`'s own equivalent).
  */
 export function qaShouldRun(finalText: string): { run: boolean; why: string; files: ChangedFile[] } {
   if (!qaEnabled()) return { run: false, why: 'disabled', files: [] };

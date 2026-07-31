@@ -6,14 +6,17 @@
  * round nine, and spends the rest of its budget repairing its own first guess. The cheapest fix is
  * the oldest one: look before you leap, and write down what you saw.
  *
- * TWO DOORS, BOTH DETERMINISTIC:
+ * OFF BY DEFAULT, then two doors, both deterministic. Plan mode does nothing at all for a session
+ * until `/plan` (bare) toggles it on — the most expensive gate in the system (triage + mandatory API
+ * research + explore loops + a long document) earns opt-in, not an implicit size guess nobody asked
+ * to trust. Once toggled on:
  *
  *   SIZE     prompt length ≥ planMinChars  →  ONE triage call: cross-feature / multi-feature?
  *                                             yes → plan.  no → straight through, nothing lost.
- *   EXPLICIT the literal substring `/plan` is in the prompt (see `hasExplicitPlanMarker`, and
- *            `/plan <text>` — the slash command in `index.ts` — which sets the same door via
- *            `forcePlanNextTurn()` since it strips the token before the text gets here)
- *                                          →  plan, at ANY length, and triage cannot veto it.
+ *   EXPLICIT `/planthis <text>` — the slash command in `index.ts` — sets `forcePlanNextTurn()` and
+ *            strips the token before the text gets here, forcing a plan for THIS prompt at ANY
+ *            length, triage cannot veto it, and — unlike the size door — it works EVEN WHEN THE
+ *            SESSION TOGGLE IS OFF, for the one time you want a plan without turning the feature on.
  *
  * Length alone would drag every long bug report into planning; triage alone would need an LLM call on
  * every single turn. Together: one extra cheap call, only for genuinely big prompts. And the explicit
@@ -21,7 +24,7 @@
  * and a proxy must never overrule the person who can just say so. A prior version tried to widen this
  * door with a natural-language regex ("plan it", "deep investigate the codebase", …); retired — plan
  * mode is the most expensive gate in the system, and a fuzzy phrase match on it is exactly the kind of
- * thing that misfires unpredictably from outside one specific conversation. `/plan` is unambiguous.
+ * thing that misfires unpredictably from outside one specific conversation. `/planthis` is unambiguous.
  *
  * THE PLAN, IN ORDER (each step feeds the next):
  *   1. SURVEY   — deterministic: what this project is, what it can serve, how it can be observed.
@@ -41,7 +44,8 @@
  * the agent starts, so a machine that dies mid-implementation leaves the thinking behind rather than
  * only half a feature. Then the user's prompt goes to the model with the plan already in context.
  *
- * Opt out with `AYIN_PLAN=0`; `planMinChars: 0` disables it from `prompts.json`.
+ * `AYIN_PLAN=0` is an absolute operator kill switch — it beats the session toggle AND `/planthis`.
+ * `planMinChars: 0` (from `prompts.json`) disables just the size door once the session toggle is on.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -75,26 +79,31 @@ export interface PlanResult {
 }
 
 /**
- * The explicit door: the literal substring `/plan` anywhere in the prompt. Deliberately NOT a
- * natural-language regex — a prior version matched "plan it", "deep investigate the codebase", "deep
- * dive" and similar verb phrases, tightly anchored to avoid English words like "what's the plan?" or
- * "the plan was to ship Friday". Retired anyway: a fuzzy phrase match on plan mode — the single most
- * expensive gate in the system (triage + survey + web searches + explore loops + a long document) — is
- * exactly the kind of thing that misfires in ways nobody can predict from outside a specific
- * conversation. `/plan` is unambiguous, greppable, and matches how every other explicit door in this
- * codebase works: one string, one sentence of documentation, no regression suite needed to keep
- * matching how people phrase things in English.
+ * Plan mode is OFF by default for the session — it is the single most expensive gate in the system
+ * (triage + mandatory API research + explore loops + a long written document), and a size threshold
+ * alone was still a proxy nobody explicitly asked to trust. `/plan` (bare, in `index.ts`) TOGGLES this
+ * for the rest of the session; with it on, the two doors below (size, or an explicit `/planthis`)
+ * behave exactly as before. With it off — the default — NEITHER door applies; only `/planthis <text>`
+ * still gets through, once, regardless of the toggle.
  */
-export function hasExplicitPlanMarker(userInput: string): boolean {
-  return userInput.includes('/plan');
+let sessionEnabled = false;
+
+export function togglePlanSession(): boolean {
+  sessionEnabled = !sessionEnabled;
+  return sessionEnabled;
+}
+
+export function isPlanSessionEnabled(): boolean {
+  return sessionEnabled;
 }
 
 /**
- * `/plan <text>` (the interactive slash command in `index.ts`) sets this. It exists because that
- * dispatcher STRIPS the `/plan` token before the text ever reaches `runPlan` — so the substring test
- * above would otherwise never see it for that path. One-shot, and consumed even when planning then
+ * `/planthis <text>` (the interactive slash command in `index.ts`) sets this — force plan mode for
+ * THIS one prompt, regardless of the session toggle. One-shot, and consumed even when planning then
  * fails — a flag that survived its turn would silently plan the NEXT unrelated prompt, which is the
- * sort of surprise that costs a GPU-minute and trust.
+ * sort of surprise that costs a GPU-minute and trust. (Named `forcePlanNextTurn` for history: this used
+ * to be what bare `/plan <text>` set, before `/plan` became the session toggle and `/planthis` took
+ * over the one-shot-force job.)
  */
 let forced = false;
 
@@ -206,11 +215,18 @@ async function exploreContext(userInput: string, features: string[], survey: Sur
 export async function runPlan(userInput: string, goal: string): Promise<PlanResult | null> {
   if (process.env.AYIN_PLAN === '0') return null;
 
-  // Two doors. SIZE is the automatic one; an EXPLICIT ASK is the other, and it ignores the size
-  // threshold entirely — "plan the auth rewrite" is nine words and deserves a plan more than a
-  // 2000-character bug report does.
-  const explicit = forced || hasExplicitPlanMarker(userInput);
-  forced = false; // one-shot, consumed here whatever happens next
+  // `/planthis` bypasses the session toggle entirely — consumed here whatever happens next, so a
+  // flag that survives a failed/no-op attempt never silently plans the NEXT unrelated prompt.
+  const explicit = forced;
+  forced = false;
+
+  // Off by default: with no session toggle and no explicit /planthis, plan mode never applies, full
+  // stop — neither door below is even evaluated. `/plan` (bare) flips this for the rest of the session.
+  if (!explicit && !sessionEnabled) return null;
+
+  // Two doors, now that the feature applies at all this turn. SIZE is the automatic one; an EXPLICIT
+  // ask ignores the size threshold entirely — "plan the auth rewrite" is nine words and deserves a
+  // plan more than a 2000-character bug report does.
   const minChars = getConfig('planMinChars', 2000);
   if (!explicit && (minChars <= 0 || userInput.length < minChars)) return null;
 
@@ -281,7 +297,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       '<!-- Written by ayin plan mode before implementation started. -->',
       // Provenance: a plan read back a week later should say why it exists at all — an explicit ask
       // and an automatic size trigger are different claims about how much the operator wanted this.
-      `<!-- Triggered by: ${explicit ? '/plan' : `size (${userInput.length} chars) + triage`} -->`,
+      `<!-- Triggered by: ${explicit ? '/planthis' : `size (${userInput.length} chars) + triage`} -->`,
       `<!-- Session goal: ${goal || '(none)'} -->`,
       '',
       '# Plan',

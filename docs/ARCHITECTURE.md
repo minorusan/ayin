@@ -97,13 +97,45 @@ asked-for deliverable exists), a lightweight **judge** (is there enough evidence
 an internal **critic** (sanity-check substantial `write_file` output against gathered facts),
 and a self-audit on hitting the round cap.
 
-Three gates wrap the loop, each on a **deterministic trigger** — no model decides whether they run:
+Three gates wrap the loop, each on a **deterministic trigger** — no model decides whether they run.
+Plan mode, the Presenter pass, and the QA gate are also each **OFF by default for the session** — a
+bare toggle (`/plan`, `/present`, `/qa`) turns one on for the rest of the session; a one-shot force
+(`/planthis`, `/presentthis`, `/qathis`) runs it for exactly one prompt regardless of the toggle. The
+three toggles are fully independent — see "Off by default: toggle + one-shot force" below.
 
-| Gate | Fires when | Module |
+| Gate | Fires when (once its own toggle/force says "yes" this turn) | Module |
 |---|---|---|
 | **Plan mode** | the incoming prompt is ≥ `planMinChars` **and** one triage call says it is cross-feature | `plan/` |
-| **Tool guard** | every tool call, always | `tool-guard.ts` |
+| **Tool guard** | every tool call, always (not gated — this one has no toggle) | `tool-guard.ts` |
+| **Presenter pass** | the turn changed files **and** the final message reads like a completion report | `presenter/` |
 | **QA gate** | the turn changed files **and** the final message reads like a completion report | `qa/` |
+
+### Off by default: toggle + one-shot force
+
+Plan mode, Presenter, and QA all cost real GPU time the user didn't explicitly ask to spend on every
+single turn, so none of them applies until the session opts in. Each gets the identical pair of knobs:
+
+- **Bare toggle** — `/plan`, `/present`, `/qa` (no argument) flip that gate on/off for the rest of the
+  session. `isPlanSessionEnabled()` / `isPresenterSessionEnabled()` / `isQaSessionEnabled()` report the
+  current state.
+- **One-shot force** — `/planthis <text>`, `/presentthis <text>`, `/qathis <text>` run that gate for
+  exactly this one prompt, regardless of whether the session toggle is on or off, then strip the
+  command word and fall through to the agent with `<text>` as the message.
+
+The force flag is **consumed unconditionally, exactly once, every time it is checked** —
+`shouldRunQaThisTurn()` / `shouldRunPresenterThisTurn()` (and plan mode's inline equivalent in
+`runPlan`) clear the flag the instant they read it, whether or not anything ends up running downstream.
+An unconsumed force flag surviving a no-op turn would otherwise silently fire on a *later, unrelated*
+prompt — the same "action fires when you didn't expect it" class of bug the authority-expiry fix
+elsewhere in this codebase exists to prevent.
+
+The three toggles are **independent of each other** even though Presenter and QA share the identical
+underlying shape check (`qaShouldRun` — see below): enabling Presenter without QA (nicer formatting,
+no reviewer) or QA without Presenter (a reviewer, raw replies) are both legitimate combinations.
+`agent.ts` computes `qaShouldRun(response)` once per turn, then calls `shouldRunQaThisTurn()` and
+`shouldRunPresenterThisTurn()` **unconditionally** (never short-circuited behind the shape check) so
+each one-shot force is always consumed, and only runs the pass whose own `doQa`/`doPresenter` (shape
+**and** toggle-or-force) is true.
 
 ### Making a gate visible (`activity.ts`)
 
@@ -135,28 +167,36 @@ A 2000-character request is usually several features wearing one paragraph. Hand
 round loop, the model starts on whichever sentence it read last, meets the coupling in round nine, and
 spends the rest of its budget repairing its own first guess.
 
-**Two doors, both deterministic.**
+**Off by default for the session** — `/plan` (bare) toggles it on for the rest of the session;
+`isPlanSessionEnabled()` reports the current state. Once the toggle is on, **two doors, both
+deterministic**:
 
 | Door | Condition | Triage's verdict |
 |---|---|---|
 | **Size** | `prompt.length ≥ planMinChars` (2000) | decides — "not cross-feature" means no plan |
-| **Explicit** | the literal substring `/plan` is in the prompt (`hasExplicitPlanMarker`), or `/plan <text>` as its own slash command | **cannot veto** — you asked |
+| **Explicit** | `/planthis <text>` as its own slash command, stripped before the text reaches `runPlan` | **cannot veto** — you asked |
+
+`/planthis` is the one door that works **even with the session toggle off** — a one-shot force for the
+one time you want a plan without switching the feature on for good (see "Off by default: toggle +
+one-shot force" above). It is consumed exactly once, whatever happens next.
 
 Length alone would drag every long bug report into planning; triage alone would cost an LLM call on
 every turn. Together: one extra cheap call, only for genuinely big prompts. The explicit door exists
 because "plan the auth rewrite" is nine words — size is a *proxy* for "this needs thought", and a proxy
 must never overrule the person who can simply say so. Triage still runs on an explicit ask (it is the
 cheapest way to decompose the work and to name the APIs the research step needs); only its veto is
-ignored. The plan's header records which door was used, so a plan read back a week later says why it
-exists. `AYIN_PLAN=0` opts out entirely; `planMinChars: 0` closes the size door only.
+ignored. The plan's header records which door was used (`/planthis`, or size + triage), so a plan read
+back a week later says why it exists. `AYIN_PLAN=0` is an absolute kill switch, beating the session
+toggle *and* `/planthis`; `planMinChars: 0` disables just the size door once the toggle is on.
 
 **The explicit door used to be a natural-language regex** (`plan it`, `make a plan`, `deep investigate`,
 `deep dive`, …), anchored to verb phrases so it wouldn't fire on ordinary uses of a common word ("what's
 the plan?", "the plan was to ship Friday"). Retired by operator decision: plan mode is the single most
 expensive gate in the system, and a fuzzy phrase match on it is exactly the kind of thing that misfires
-in ways nobody can predict from outside one specific conversation. `/plan` is unambiguous, greppable,
-and matches how every other explicit door in this codebase works — one string, one line of docs, no
-regression suite needed to keep tracking how people phrase things in English.
+in ways nobody can predict from outside one specific conversation. It was replaced first by a bare
+`/plan <text>` marker, then split again into the current toggle (`/plan`) + one-shot force
+(`/planthis <text>`) pair once QA and Presenter needed the identical shape — one unambiguous command per
+job, greppable, no regression suite needed to keep tracking how people phrase things in English.
 
 **The plan, in order** — each step feeds the next:
 
@@ -298,13 +338,21 @@ up" actually needs. State is per-turn: a new user turn is a new intention.
 
 ## Presenter pass (`src/presenter/`)
 
-Runs **before** the QA gate, on the identical deterministic trigger QA has always used (`qaShouldRun`:
-files changed this turn + the reply reads like a completion report). Where QA judges whether the work
-is *right*, Presenter decides how the reply gets **shown**: is it itself the thing the user must read
-verbatim (a warning, a rejection, an error, a question back to them), or does it report on completed
-work — in which case Presenter builds a short, consistently-shaped answer instead of whatever prose
-shape the model happened to write this time: a quoted line naming what was asked, one sentence of what
-this reply satisfies, and a bulleted file-changed list.
+**Off by default for the session** — `/present` (bare) toggles it on for the rest of the session;
+`/presentthis <text>` forces it for exactly one turn regardless of the toggle (see "Off by default:
+toggle + one-shot force" above). `isPresenterSessionEnabled()` reports the current toggle state;
+`shouldRunPresenterThisTurn()` is the pure per-turn check `agent.ts` calls — unconditionally, so a
+`/presentthis` force is always consumed even on a turn Presenter ends up not running on.
+
+Runs **before** the QA gate, on the identical deterministic shape check QA has always used
+(`qaShouldRun`: files changed this turn + the reply reads like a completion report) — but that shape
+check only decides *whether the turn has the right shape*; Presenter's own toggle/force decides whether
+it actually runs *this session*. Where QA judges whether the work is *right*, Presenter decides how the
+reply gets **shown**: is it itself the thing the user must read verbatim (a warning, a rejection, an
+error, a question back to them), or does it report on completed work — in which case Presenter builds a
+short, consistently-shaped answer instead of whatever prose shape the model happened to write this
+time: a quoted line naming what was asked, one sentence of what this reply satisfies, and a bulleted
+file-changed list.
 
 **ONE quick LLM call does both the classification and the build** (`prompts/presenter/
 classifyAndBuild.txt`) — no repair loop, no retry. A degraded or unparseable response just means "don't
@@ -319,10 +367,11 @@ strict `JSON.parse` would reject good answers for a cosmetic reason.
 - **Visibility matches the QA gate's own contract**: `pushActivity('Presenting', …)` lights the same
   status-bar chip and wait-narrator line QA's `▣ QA 1/3` phases use (`activity.ts`), so the quick call
   never reads as a stall.
-- **QA then reviews the PRESENTED text**, not the raw reply, whenever Presenter produced one — handed
-  in as `qaGate`'s `answer` argument in place of `response`. A presentation is a denser, more complete
-  "what changed" statement than the model's own closing line, so it is strictly better evidence for the
-  reviewer to check claims against.
+- **QA then reviews the PRESENTED text**, not the raw reply, whenever Presenter ran AND produced one —
+  handed in as `qaGate`'s `answer` argument in place of `response`. A presentation is a denser, more
+  complete "what changed" statement than the model's own closing line, so it is strictly better evidence
+  for the reviewer to check claims against. If Presenter didn't run this turn (its own toggle/force said
+  no) but QA did, QA reviews the raw reply exactly as it did before Presenter existed.
 - **Testing-era behavior (temporary, per the operator):** the raw reply is still printed too, right
   below the presentation, de-emphasized in "cursive" — `toItalic()` (a Unicode Mathematical-Italic
   glyph transform; blessed has no real italic attribute) plus `escapeBlessedTags()`, the same pairing
@@ -334,13 +383,14 @@ strict `JSON.parse` would reject good answers for a cosmetic reason.
   below uses, not a second copy. Presenter runs first and hands the QA-pass hook the set of sketch paths
   it already regenerated (`presenterArduinoRegen`, threaded through `agent.ts`), so a single Arduino
   change never re-spends its one-LLM-call-per-sketch grounding twice in the same turn.
-- **Print ordering.** Interactive mode used to print the raw reply immediately, unconditionally. It
-  still does — UNLESS `qaShouldRun` says the Presenter/QA gate will run this turn, in which case the
-  print is deferred: Presenter's output (if produced) becomes the primary visible message, with the raw
-  reply appended right after in cursive; if Presenter declines, the raw reply prints exactly as before,
-  just slightly later (after one quick classification round-trip).
-- **Config:** `AYIN_PRESENTER=0` disables the whole pass (Presenter is skipped outright, QA falls back
-  to reviewing the raw reply — behavior identical to before Presenter existed).
+- **Print ordering.** Interactive mode prints the raw reply immediately, unconditionally — UNLESS the
+  shape check passes AND at least one of Presenter/QA will actually run this turn (`doQa || doPresenter`
+  in `agent.ts`), in which case the print is deferred: whichever pass runs decides the primary visible
+  text. If Presenter runs and produces a presentation, it becomes that text, with the raw reply appended
+  right after in cursive; if Presenter doesn't run this turn (toggle off, no `/presentthis`, headless) but
+  QA does, the raw reply prints as normal and QA reviews it directly.
+- **Config:** `AYIN_PRESENTER=0` is a hard kill switch, independent of and beating the session toggle —
+  Presenter is skipped outright and QA falls back to reviewing the raw reply.
 
 ## QA gate (`src/qa/`)
 
@@ -349,15 +399,23 @@ did the work, from the same context that made the mistakes, and rewarded for sou
 "Done — I've implemented the panel and updated the docs" is a claim. This gate checks it before the
 user has to.
 
-**Trigger** (`qaShouldRun`, no LLM, one `git status` at most): files changed this turn **and** one of
-three things is true of the final message — it is big (≥ `qaMinAnswerChars`, default 400), it opens
+**Off by default for the session** — `/qa` (bare) toggles it on for the rest of the session;
+`/qathis <text>` forces it for exactly one reply regardless of the toggle (see "Off by default: toggle
++ one-shot force" above). `isQaSessionEnabled()` reports the current toggle state;
+`shouldRunQaThisTurn()` is the pure per-turn check `agent.ts` calls unconditionally, so a `/qathis`
+force is always consumed even on a turn QA ends up not running on. `qaShouldRun()` itself is untouched
+by any of this — it stays a pure shape detector shared with Presenter (see above); the toggle/force
+layer decides *whether the gate is even allowed to fire this session*, on top of the shape it fires on.
+
+**Shape trigger** (`qaShouldRun`, no LLM, one `git status` at most): files changed this turn **and** one
+of three things is true of the final message — it is big (≥ `qaMinAnswerChars`, default 400), it opens
 with a completion verb, or it contains the literal phrase **"Ready for QA"**. "Files changed" always
 matters — without it the gate would fire on ordinary questions and burn GPU for nothing — but a short,
 honest closing message ("Done." / "Fixed the typo.") satisfies neither the length nor the wording
 heuristic and was going unreviewed for no better reason than being terse. `system.txt` instructs the
 model to end a completed turn with that exact phrase for precisely this case; same shape as plan mode's
-explicit `/plan` marker — one unambiguous phrase instead of a heuristic — and matched case-insensitively
-anywhere in the message, not just its head.
+explicit `/planthis` marker — one unambiguous phrase instead of a heuristic — and matched
+case-insensitively anywhere in the message, not just its head.
 
 **The loop** (max `qaMaxPasses`, default 3):
 

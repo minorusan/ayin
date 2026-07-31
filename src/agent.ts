@@ -34,9 +34,9 @@ import { getRules } from './rules.js';
 import { syncSession, getSessionId } from './tiferet-session.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { extractSignals } from './tools/signals.js';
-import { qaBeginTurn, qaNoteTouched, qaShouldRun, qaGate, qaShowCard } from './qa/index.js';
+import { qaBeginTurn, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn } from './qa/index.js';
 import { regenerateTouchedSketches } from './tools/arduino-explain.js';
-import { presenterPass } from './presenter/index.js';
+import { presenterPass, shouldRunPresenterThisTurn } from './presenter/index.js';
 import { clearActivity } from './activity.js';
 import { guardBeginTurn, guardCheck, guardDirective, guardNoteDenied } from './tool-guard.js';
 import { planContextBlock, runPlan } from './plan/index.js';
@@ -694,9 +694,19 @@ export async function runAgent(userInput: string): Promise<void> {
       pushMessage('assistant', response);
 
       // Computed once, before either print path, so the interactive branch below knows WHETHER to
-      // defer its immediate print to the Presenter/QA section — same deterministic condition QA has
-      // always used (files changed this turn + the reply reads like a completion report).
+      // defer its immediate print to the Presenter/QA section — same deterministic shape check QA has
+      // always used (files changed this turn + the reply reads like a completion report). Each
+      // feature's OWN enable check (a session toggle, or a one-shot `/qathis`/`/presentthis` force) is
+      // layered independently on top of that shared shape — see qa/index.ts#shouldRunQaThisTurn and
+      // presenter/index.ts#shouldRunPresenterThisTurn. Both are called UNCONDITIONALLY (never
+      // short-circuited behind `gate.run`) because a one-shot force must be consumed exactly once per
+      // turn regardless of whether this particular turn even has the shape to act on — otherwise an
+      // unspent force flag would silently fire on a LATER, unrelated turn instead.
       const gate = qaShouldRun(response);
+      const qaWantsToRun = shouldRunQaThisTurn();
+      const presenterWantsToRun = shouldRunPresenterThisTurn();
+      const doQa = gate.run && qaWantsToRun;
+      const doPresenter = gate.run && presenterWantsToRun && !HEADLESS;
 
       if (HEADLESS) {
         // CTA gate — if there's a deliverable the model hasn't produced, don't exit
@@ -724,12 +734,13 @@ export async function runAgent(userInput: string): Promise<void> {
         }
         lastPrintedText = '';
         log('INFO', 'agent_done', { round: String(round), reason: 'double_text', ctaDelivered: String(ctaDelivered) });
-      } else if (!gate.run) {
-        // Ordinary turn (no Presenter/QA involved) — print immediately, exactly as always.
+      } else if (!(doQa || doPresenter)) {
+        // Ordinary turn — neither feature is enabled/forced for it — print immediately, as always.
         if (parsed.text) addMessage('assistant', parsed.text);
       }
-      // else (interactive AND gate.run): the print is DEFERRED to the Presenter/QA section below —
-      // Presenter decides the primary visible text for a turn in that shape, not the raw model output.
+      // else (interactive AND at least one of Presenter/QA will run this turn): the print is DEFERRED
+      // to the section below — whichever of the two runs decides the primary visible text, not the
+      // raw model output.
 
       setAgentStatus('');
       triggerSync();
@@ -746,10 +757,10 @@ export async function runAgent(userInput: string): Promise<void> {
       // has no headless equivalent to be worth the behavior change there).
       let textForQa = response;
       if (!interrupted) {
-        log('INFO', 'qa_gate_condition', { run: String(gate.run), why: gate.why, files: String(gate.files.length) });
-        if (gate.run) {
+        log('INFO', 'qa_gate_condition', { run: String(gate.run), why: gate.why, files: String(gate.files.length), qa: String(doQa), presenter: String(doPresenter) });
+        if (doQa || doPresenter) {
           let presenterArduinoRegen = new Set<string>();
-          if (!HEADLESS) {
+          if (doPresenter) {
             const presenterOutcome = await presenterPass(getGoal() || currentGoal, response, gate.files);
             presenterArduinoRegen = presenterOutcome.arduinoRegenerated;
             if (presenterOutcome.presented && presenterOutcome.text) {
@@ -771,34 +782,40 @@ export async function runAgent(userInput: string): Promise<void> {
               // show the raw reply exactly as interactive mode always has.
               addMessage('assistant', parsed.text);
             }
+          } else if (parsed.text) {
+            // Presenter not running this turn (toggle off, no `/presentthis`, or headless) — QA alone
+            // is running, so the raw reply still needs to be shown; QA never replaces the visible text.
+            addMessage('assistant', parsed.text);
           }
 
-          const outcome = await qaGate(getGoal() || currentGoal, textForQa, gate.files, () => interrupted);
-          qaShowCard(outcome.card);
-          if (outcome.action === 'fix' && outcome.feedback && !interrupted) {
-            pushToWindow('user', outcome.feedback);
-            // Give the repair a real runway: without this a gate that fires on the last round has
-            // no rounds left to fix anything. Bounded by qaMaxPasses, not by rounds.
-            round = Math.min(round, Math.max(0, maxRounds - 5));
-            log('INFO', 'qa_fix_pass', { pass: String(outcome.pass), issues: String(outcome.verdict?.issues.length ?? 0), roundReset: String(round) });
-            continue;
-          }
+          if (doQa) {
+            const outcome = await qaGate(getGoal() || currentGoal, textForQa, gate.files, () => interrupted);
+            qaShowCard(outcome.card);
+            if (outcome.action === 'fix' && outcome.feedback && !interrupted) {
+              pushToWindow('user', outcome.feedback);
+              // Give the repair a real runway: without this a gate that fires on the last round has
+              // no rounds left to fix anything. Bounded by qaMaxPasses, not by rounds.
+              round = Math.min(round, Math.max(0, maxRounds - 5));
+              log('INFO', 'qa_fix_pass', { pass: String(outcome.pass), issues: String(outcome.verdict?.issues.length ?? 0), roundReset: String(round) });
+              continue;
+            }
 
-          // Arduino QA passing NECESSITATES the wiring explainer being current — a sketch that just
-          // cleared the `arduino`/`arduino-wiring` bars with new pin usage but an unregenerated
-          // `*.wiring.html` would leave a beginner reading a stale diagram. `presenterArduinoRegen`
-          // skips any sketch Presenter already regenerated moments ago in this same pass — one LLM
-          // call per sketch per turn, not two. Never `open`ed here: popping VS Code open after every
-          // unrelated QA pass on an Arduino repo would be disruptive; only the explicit
-          // `/arduino-explain` command opens an editor.
-          if (outcome.action === 'pass') {
-            try {
-              const regen = await regenerateTouchedSketches(process.cwd(), gate.files, presenterArduinoRegen);
-              if (regen && regen.results.length > 0) {
-                addMessage('system', `Arduino QA passed — wiring explainer regenerated: ${regen.results.map((r) => r.htmlPath).join(', ')}`);
+            // Arduino QA passing NECESSITATES the wiring explainer being current — a sketch that just
+            // cleared the `arduino`/`arduino-wiring` bars with new pin usage but an unregenerated
+            // `*.wiring.html` would leave a beginner reading a stale diagram. `presenterArduinoRegen`
+            // skips any sketch Presenter already regenerated moments ago in this same pass — one LLM
+            // call per sketch per turn, not two. Never `open`ed here: popping VS Code open after every
+            // unrelated QA pass on an Arduino repo would be disruptive; only the explicit
+            // `/arduino-explain` command opens an editor.
+            if (outcome.action === 'pass') {
+              try {
+                const regen = await regenerateTouchedSketches(process.cwd(), gate.files, presenterArduinoRegen);
+                if (regen && regen.results.length > 0) {
+                  addMessage('system', `Arduino QA passed — wiring explainer regenerated: ${regen.results.map((r) => r.htmlPath).join(', ')}`);
+                }
+              } catch (err) {
+                log('WARN', 'arduino_explain_regenerate_failed', { error: err instanceof Error ? err.message : String(err) });
               }
-            } catch (err) {
-              log('WARN', 'arduino_explain_regenerate_failed', { error: err instanceof Error ? err.message : String(err) });
             }
           }
         }

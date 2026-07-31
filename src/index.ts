@@ -18,7 +18,9 @@ import { initLlmProvider } from './llm/select.js';
 import { getSummaryText, getSummary, resetSummary } from './summary.js';
 import { estimateSessionTokens } from './tokens.js';
 import { loadHistory, pushEntry } from './history.js';
-import { forcePlanNextTurn } from './plan/index.js';
+import { forcePlanNextTurn, togglePlanSession } from './plan/index.js';
+import { toggleQaSession, forceQaNextTurn } from './qa/index.js';
+import { togglePresenterSession, forcePresenterNextTurn } from './presenter/index.js';
 import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation } from './agent.js';
 import { startPromptServer } from './prompt-server.js';
 import { acquireLlm, type LlmHold } from './llm/authority.js';
@@ -511,16 +513,74 @@ onInput(async (text: string) => {
         addMessage('system', `Set ${key} ✓`);
         return;
       }
-      // `/plan <text>` — the no-ambiguity door into plan mode, for when you KNOW you want the
-      // survey + research + exploration pass and don't want to phrase your way past a regex. Falls
-      // THROUGH to the agent (no `return`) with the command word stripped.
+      // `/plan` — bare session toggle (default OFF): flips whether every long-enough prompt runs the
+      // survey + research + exploration pass for the REST of the session. Takes no argument — that's
+      // what `/planthis` is for. See plan/index.ts's header doc for the toggle/force split.
       case '/plan': {
         const arg = text.slice('/plan'.length).trim();
+        if (arg) {
+          addMessage('system', 'Usage: /plan — bare toggle, no argument. For a one-off forced plan pass: /planthis <what to plan>');
+          return;
+        }
+        const enabled = togglePlanSession();
+        addMessage('system', `Plan mode ${enabled ? 'ON' : 'OFF'} for the rest of this session (AYIN_PLAN=0 still hard-disables it)`);
+        return;
+      }
+      // `/planthis <text>` — the no-ambiguity door into plan mode for exactly ONE turn, regardless of
+      // the session toggle above — for when you KNOW you want the survey + research + exploration pass
+      // right now and don't want to phrase your way past a regex or flip the toggle for good. Falls
+      // THROUGH to the agent (no `return`) with the command word stripped.
+      case '/planthis': {
+        const arg = text.slice('/planthis'.length).trim();
         if (!arg) {
-          addMessage('system', 'Usage: /plan <what to plan> — forces plan mode at any prompt size (AYIN_PLAN=0 still disables it)');
+          addMessage('system', 'Usage: /planthis <what to plan> — forces plan mode for this one prompt only');
           return;
         }
         forcePlanNextTurn();
+        text = arg;
+        break;
+      }
+      // `/qa` — bare session toggle (default OFF) for the QA gate. `/qathis <text>` forces it for one
+      // turn. Independent of `/present` — see qa/index.ts's header doc.
+      case '/qa': {
+        const arg = text.slice('/qa'.length).trim();
+        if (arg) {
+          addMessage('system', 'Usage: /qa — bare toggle, no argument. For a one-off forced QA pass: /qathis <message>');
+          return;
+        }
+        const enabled = toggleQaSession();
+        addMessage('system', `QA gate ${enabled ? 'ON' : 'OFF'} for the rest of this session`);
+        return;
+      }
+      case '/qathis': {
+        const arg = text.slice('/qathis'.length).trim();
+        if (!arg) {
+          addMessage('system', 'Usage: /qathis <message> — forces the QA gate to run on this one reply only');
+          return;
+        }
+        forceQaNextTurn();
+        text = arg;
+        break;
+      }
+      // `/present` — bare session toggle (default OFF) for the Presenter pass. `/presentthis <text>`
+      // forces it for one turn. Independent of `/qa` — see presenter/index.ts's header doc.
+      case '/present': {
+        const arg = text.slice('/present'.length).trim();
+        if (arg) {
+          addMessage('system', 'Usage: /present — bare toggle, no argument. For a one-off forced presentation: /presentthis <message>');
+          return;
+        }
+        const enabled = togglePresenterSession();
+        addMessage('system', `Presenter pass ${enabled ? 'ON' : 'OFF'} for the rest of this session`);
+        return;
+      }
+      case '/presentthis': {
+        const arg = text.slice('/presentthis'.length).trim();
+        if (!arg) {
+          addMessage('system', 'Usage: /presentthis <message> — forces the Presenter pass to run on this one reply only');
+          return;
+        }
+        forcePresenterNextTurn();
         text = arg;
         break;
       }
@@ -585,7 +645,9 @@ onInput(async (text: string) => {
         addMessage('system', '/summary — show session summary (Esc to close)');
         addMessage('system', '/resume — list this directory\'s sessions (newest first) · /resume all for every directory');
         addMessage('system', '/resume <n>|<id> — restore one by list number or id prefix; new turns append to its record');
-        addMessage('system', '/plan <text> — force plan mode: survey, API research, exploration, then a written plan');
+        addMessage('system', '/plan — toggle plan mode for the session (default OFF) · /planthis <text> — force it for one prompt only');
+        addMessage('system', '/qa — toggle the QA gate for the session (default OFF) · /qathis <message> — force it for one reply only');
+        addMessage('system', '/present — toggle the Presenter pass for the session (default OFF) · /presentthis <message> — force it for one reply only');
         addMessage('system', '/arduino-explain — for an Arduino project in this dir: a wiring HTML per sketch (board + breadcrumbs + arduino-db explanations), opened in VS Code');
         addMessage('system', '/explain <feature> — the story of a feature: explore + real git history + validated Jira tickets, a report + an architecture diagram, both opened in VS Code');
         addMessage('system', '/clear — clear chat');

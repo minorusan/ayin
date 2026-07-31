@@ -205,20 +205,42 @@ act.pushActivity('QA 2/3', 'x');
 act.clearActivity();
 ok(act.activityText() === null, 'a turn ending clears every label, so none outlives its work');
 
-// ── plan mode's explicit door: the literal substring `/plan`, nothing fuzzier ──
-// A prior version matched natural-language phrases ("plan it", "deep investigate the codebase", …).
-// Retired: plan mode is the single most expensive gate in the system, and a fuzzy phrase match on it
-// is exactly the kind of thing that misfires unpredictably outside one specific conversation. Now it
-// is one unambiguous string — these cases exist to catch a REGRESSION back to fuzzy matching, not to
-// re-litigate English usage.
-console.log('\nplan trigger');
+// ── Plan/QA/Presenter: default OFF, session toggle, one-shot force ──
+// All three gates share one shape: a session-wide toggle (`/plan`, `/qa`, `/present`, all bare) that
+// starts OFF, plus a one-shot force (`/planthis`, `/qathis`, `/presentthis`) that fires exactly once
+// regardless of the toggle and is consumed even if nothing downstream ends up running — an unconsumed
+// force flag would silently fire on a LATER, unrelated turn, which is the surprise this guards against.
+console.log('\nplan/qa/presenter: toggle + one-shot force');
 const plan = await import(`file://${join(DIST, 'plan/index.js')}`);
-ok(plan.hasExplicitPlanMarker('/plan build the auth rewrite'), 'fires on a leading /plan');
-ok(plan.hasExplicitPlanMarker('do the migration, /plan it first'), 'fires on /plan anywhere in the prompt');
-ok(!plan.hasExplicitPlanMarker('plan it'), 'plain English "plan it" no longer fires (fuzzy trigger retired)');
-ok(!plan.hasExplicitPlanMarker('deep investigate the codebase'), '"deep investigate" no longer fires either');
-ok(!plan.hasExplicitPlanMarker("what's the plan?"), 'ordinary use of the word "plan" never fired and still does not');
-ok(!plan.hasExplicitPlanMarker('planning ahead'), 'a prefix match on "plan" does not count — the marker is literally "/plan"');
+ok(plan.isPlanSessionEnabled() === false, 'plan mode starts OFF for a session');
+ok(plan.togglePlanSession() === true, 'toggling plan mode flips it on and reports the new state');
+ok(plan.isPlanSessionEnabled() === true, 'and the getter agrees');
+ok(plan.togglePlanSession() === false, 'toggling again flips it back off');
+ok(plan.isPlanSessionEnabled() === false, 'and the getter agrees again');
+
+const qaToggle = await import(`file://${join(DIST, 'qa/index.js')}`);
+ok(qaToggle.isQaSessionEnabled() === false, 'QA gate starts OFF for a session');
+ok(qaToggle.shouldRunQaThisTurn() === false, 'and does not run with neither the toggle nor a force set');
+qaToggle.toggleQaSession();
+ok(qaToggle.isQaSessionEnabled() === true, 'toggling QA on is reflected by the getter');
+ok(qaToggle.shouldRunQaThisTurn() === true, 'and the turn-gate now says yes');
+qaToggle.toggleQaSession();
+ok(qaToggle.isQaSessionEnabled() === false, 'toggling QA back off is reflected by the getter');
+qaToggle.forceQaNextTurn();
+ok(qaToggle.shouldRunQaThisTurn() === true, '/qathis forces exactly one turn even with the session toggle off');
+ok(qaToggle.shouldRunQaThisTurn() === false, 'and the force is consumed — the very next call sees it gone');
+
+const presenter = await import(`file://${join(DIST, 'presenter/index.js')}`);
+ok(presenter.isPresenterSessionEnabled() === false, 'Presenter pass starts OFF for a session');
+ok(presenter.shouldRunPresenterThisTurn() === false, 'and does not run with neither the toggle nor a force set');
+presenter.togglePresenterSession();
+ok(presenter.isPresenterSessionEnabled() === true, 'toggling Presenter on is reflected by the getter');
+ok(presenter.shouldRunPresenterThisTurn() === true, 'and the turn-gate now says yes');
+presenter.togglePresenterSession();
+ok(presenter.isPresenterSessionEnabled() === false, 'toggling Presenter back off is reflected by the getter');
+presenter.forcePresenterNextTurn();
+ok(presenter.shouldRunPresenterThisTurn() === true, '/presentthis forces exactly one turn even with the session toggle off');
+ok(presenter.shouldRunPresenterThisTurn() === false, 'and the force is consumed — the very next call sees it gone');
 
 // ── truncation: nothing silent, and the diff card is finally capped ──
 console.log('\ntool-result truncation');

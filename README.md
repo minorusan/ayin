@@ -131,13 +131,15 @@ repeat, so `status` keeps working — rate-limited, with an explicit "don't poll
 
 ## Plan mode — big requests get a plan first
 
-**Put `/plan` anywhere in the prompt and it plans, at any size** — `/plan add OAuth login`, or
-`/plan <text>` as its own slash command. Literal and unambiguous on purpose: an earlier version matched
-natural-language phrases ("plan it", "deep investigate the codebase") and was retired, because plan mode
-is the most expensive gate in the system and a fuzzy phrase match on it misfires unpredictably outside
-one specific conversation. An explicit `/plan` cannot be vetoed by triage; you asked, so it plans.
+**Off by default.** `/plan` (no argument) toggles it on for the rest of the session; run it again to
+toggle it back off. `/planthis <text>` forces a plan for this one prompt only, at any size, regardless
+of whether the toggle is on — `/planthis add OAuth login`. Literal and unambiguous on purpose: an
+earlier version matched natural-language phrases ("plan it", "deep investigate the codebase") and was
+retired, because plan mode is the most expensive gate in the system and a fuzzy phrase match on it
+misfires unpredictably outside one specific conversation. `/planthis` cannot be vetoed by triage; you
+asked, so it plans.
 
-Otherwise a prompt of 2000+ characters is triaged in one cheap call: is this actually cross-feature? If it is,
+Once the toggle is on, a prompt of 2000+ characters is triaged in one cheap call: is this actually cross-feature? If it is,
 ayin surveys the project, explores the relevant code, and writes **`ayin-plan-<timestamp>.md`** —
 reasoning, existing context, dependencies, **third-party API research**, **gaps** (each with how to
 resolve it, never a guess), a files-to-change table, ordered steps, **log coverage and debugging**, and
@@ -154,11 +156,15 @@ API was checked is failed. Only then does your
 prompt reach the model, with the plan already in context.
 
 The plan is on disk *before* implementation starts, so an interrupted machine leaves the thinking
-behind rather than half a feature. `AYIN_PLAN=0` opts out; `planMinChars` / `planExploreCalls` tune it.
+behind rather than half a feature. `AYIN_PLAN=0` is a hard kill switch beating the toggle *and*
+`/planthis`; `planMinChars` / `planExploreCalls` tune the toggled-on behavior.
 
 ## QA gate — the completion report gets checked
 
-When a turn changed files **and** ayin's closing message reads like "done, I've implemented X" — or
+**Off by default.** `/qa` (no argument) toggles it on for the rest of the session; `/qathis <message>`
+forces it for one reply only, regardless of the toggle.
+
+When it's running, and a turn changed files **and** ayin's closing message reads like "done, I've implemented X" — or
 says the literal phrase **"Ready for QA"**, which ayin is told to include so a short, honest "Fixed."
 doesn't slip past the gate just for being terse — that claim is reviewed before you have to trust it:
 
@@ -178,12 +184,15 @@ doesn't slip past the gate just for being terse — that claim is reviewed befor
    the fix, ayin repairs them and is reviewed again, up to 3 passes, then reports honestly what it could
    not fix.
 
-`AYIN_QA=0` opts out; `qaMaxPasses` / `qaMinAnswerChars` tune it. The reviewer's prompts (`qaCriteria`,
-`qaReview`) live in `prompts.json` like every other prompt, so you can rewrite the bar yourself.
+`AYIN_QA=0` is a hard kill switch beating the toggle *and* `/qathis`; `qaMaxPasses` / `qaMinAnswerChars`
+tune the toggled-on behavior. The reviewer's prompts (`qaCriteria`, `qaReview`) live in `prompts.json`
+like every other prompt, so you can rewrite the bar yourself.
 
 ### Presenter pass — how the reply is shown, decided before QA checks whether it's right
 
-Same trigger as the QA gate above, one step earlier: a single quick call asks whether this reply
+**Off by default**, independently of QA — `/present` (no argument) toggles it on for the rest of the
+session; `/presentthis <message>` forces it for one reply only. Same shape trigger as the QA gate above
+(files changed + a completion-report-shaped reply), one step earlier: a single quick call asks whether this reply
 **is** the thing you need to read verbatim (a warning, a rejection, an error, a question back to you —
 shown exactly as written, never rewritten) or **reports on completed work** — in which case ayin builds
 a short, consistent answer instead of whatever shape the model's prose happened to take this time:
@@ -201,8 +210,8 @@ Changed:
 QA then reviews *that* text — a denser, more complete "what changed" statement than the model's own
 closing line, and strictly better evidence for the reviewer to check claims against. For now (while this
 is new) the raw reply still prints too, right below, in de-emphasized cursive, so you can compare the
-two; that aside goes away once Presenter is trusted. `AYIN_PRESENTER=0` disables it outright — TUI-only,
-headless output is unaffected.
+two; that aside goes away once Presenter is trusted. `AYIN_PRESENTER=0` is a hard kill switch beating the
+toggle *and* `/presentthis` — TUI-only, headless output is unaffected.
 
 ### You can always see when a gate is running
 
