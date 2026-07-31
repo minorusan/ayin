@@ -33,6 +33,7 @@ import { loadRules } from './rules.js';
 import { setConfigValue, resetPromptsToDefaults } from './prompts.js';
 import { getGoal, setGoal, clearGoal, refreshGoal } from './goal.js';
 import { runArduinoExplain, formatExplainOutcome } from './tools/arduino-explain.js';
+import { runExplain, formatExplainOutcome as formatExplainReportOutcome } from './explain/index.js';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -536,6 +537,24 @@ onInput(async (text: string) => {
         }
         return;
       }
+      // `/explain <feature>` — broader than explore: an explore pass + real git history + any Jira
+      // tickets validated from commit messages, synthesized into a narrative report, plus an
+      // architecture diagram (tools/diagram.ts's own validated loop). Both files opened in VS Code.
+      case '/explain': {
+        const arg = text.slice('/explain'.length).trim();
+        if (!arg) {
+          addMessage('system', 'Usage: /explain <feature or path> — e.g. /explain the llm resource');
+          return;
+        }
+        addMessage('system', `Explaining: ${arg}...`);
+        try {
+          const outcome = await runExplain(arg, process.cwd());
+          addMessage('system', formatExplainReportOutcome(outcome));
+        } catch (err) {
+          addMessage('system', `/explain failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
       case '/goal': {
         const arg = text.slice('/goal'.length).trim();
         if (!arg) {
@@ -568,6 +587,7 @@ onInput(async (text: string) => {
         addMessage('system', '/resume <n>|<id> — restore one by list number or id prefix; new turns append to its record');
         addMessage('system', '/plan <text> — force plan mode: survey, API research, exploration, then a written plan');
         addMessage('system', '/arduino-explain — for an Arduino project in this dir: a wiring HTML per sketch (board + breadcrumbs + arduino-db explanations), opened in VS Code');
+        addMessage('system', '/explain <feature> — the story of a feature: explore + real git history + validated Jira tickets, a report + an architecture diagram, both opened in VS Code');
         addMessage('system', '/clear — clear chat');
         addMessage('system', '/set keli-url <http://host:9100> — point ayin at the LLM endpoint (an adapter, or a backend)');
         addMessage('system', '/set llm-provider <direct|resource|auto> — how much of that endpoint to expect (default: auto-detect)');
@@ -631,6 +651,12 @@ async function main(): Promise<void> {
   }
   if (process.argv[2] === 'version' || process.argv[2] === '--version' || process.argv[2] === '-v') {
     process.stdout.write(`${getVersion()}\n`);
+    return;
+  }
+  if (process.argv[2] === 'jira') {
+    // Jira credential setup/refresh — validates before writing, no TUI. See src/jira-auth-cmd.ts.
+    const { runJiraAuth } = await import('./jira-auth-cmd.js');
+    await runJiraAuth(process.argv.slice(3));
     return;
   }
   loadRules(process.cwd());

@@ -1,0 +1,169 @@
+/**
+ * `/explain` — the "tell me the story of this feature" command. Broader than `explore`: `explore`
+ * finds and reads code; `/explain` additionally pulls in the feature's real git history, correlates
+ * any Jira tickets referenced in commit messages, and writes a narrative report PLUS an architecture
+ * diagram, both opened in VS Code.
+ *
+ * PIPELINE — deterministic gathering feeds ONE synthesis call, same "evidence before opinion" shape
+ * `qa/` and `arduino-explain.ts` already use:
+ *
+ *   exploreExecute (reused verbatim, `plan/index.ts`'s exact call shape — an agentic loop, real GPU time)
+ *   → extractExistingPaths (pure: which of explore's mentioned paths are real files)
+ *   → gatherGitHistory + computeBugSignal (pure: git log --follow, deduped, churn/bugfix counted)
+ *   → extractTicketCandidates → jiraLookup (self-validating: a shape match is never trusted alone)
+ *   → ONE llmChat call writes the five-section report
+ *   → makeDiagram (reused from tools/diagram.ts — the SAME validated PlantUML loop, not a second
+ *     implementation) draws the architecture, grounded in the same explore findings.
+ *
+ * Two files, two `openInEditor` calls — the report and the diagram are separate deliverables, each
+ * useful on its own (you might want the picture without re-reading the prose, or vice versa).
+ *
+ * COMMAND-ONLY. Not registered as an agent-callable tool — the agent already has `explore` for
+ * self-orientation mid-task; this is a user-directed deep dive, invoked explicitly via `/explain`.
+ */
+
+import { existsSync, writeFileSync } from 'node:fs';
+import { join, resolve, relative } from 'node:path';
+import { exploreExecute } from '../tools/explore.js';
+import { extractExistingPaths } from './paths.js';
+import { gatherGitHistory, extractTicketCandidates, computeBugSignal, renderHistoryEvidence } from './git-history.js';
+import { jiraLookup } from '../jira.js';
+import { llmChat } from '../llm/manager.js';
+import { prompts, packagePath } from '../prompts-service.js';
+import { openInEditor } from '../editor.js';
+import { makeDiagram, slugify, type DiagramResult } from '../tools/diagram.js';
+import { projectRoot } from '../qa/probes.js';
+import { pushActivity, setActivityDetail } from '../activity.js';
+import { log } from '../log.js';
+
+const explainPrompts = prompts.register('explain', packagePath('prompts', 'explain')).bundle;
+
+export interface ExplainOutcome {
+  ok: boolean;
+  reason?: string;
+  reportPath?: string;
+  reportOpened?: boolean;
+  diagram?: DiagramResult;
+}
+
+function explainFilename(feature: string, now = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
+  return `ayin-explain-${slugify(feature) || 'feature'}-${stamp}.md`;
+}
+
+function buildJiraBlock(paths: string[], candidates: string[], lookup: Awaited<ReturnType<typeof jiraLookup>> | null): string {
+  if (paths.length === 0) return 'JIRA: not checked — no real file could be identified for this feature, so no commit history was gathered to look for ticket references.';
+  if (candidates.length === 0) return 'JIRA: no ticket-key-shaped references found in any commit message touching these files.';
+  if (!lookup) return 'JIRA: candidates were found but the lookup was skipped.';
+  if (!lookup.ok) return `JIRA: unavailable (${lookup.reason}) — do not invent a ticket or reporter to fill this gap.`;
+  if (lookup.tickets.length === 0) {
+    return `JIRA: ${candidates.length} candidate ticket-key-shaped string(s) found in commit messages (${candidates.join(', ')}), but NONE resolved to a real Jira issue — likely coincidental text (a version string, a part number), not a real ticket. Do not attribute this feature to any of them.`;
+  }
+  const lines = lookup.tickets.map((t) => `  [${t.key}] ${t.summary} — reporter: ${t.reporter ?? 'unknown'}, status: ${t.status}, created: ${t.created ?? 'unknown'}`);
+  return `JIRA TICKETS LINKED FROM COMMIT MESSAGES (validated against the real API, not just the key shape):\n${lines.join('\n')}`;
+}
+
+/**
+ * The full pipeline for one feature/path description. Never throws — every stage degrades to an
+ * honest gap in the evidence rather than blocking the report; only a totally empty `feature` argument
+ * or an exploration that produces nothing usable returns `ok: false`.
+ */
+export async function runExplain(argText: string, cwd: string = process.cwd()): Promise<ExplainOutcome> {
+  const feature = argText.trim();
+  if (!feature) return { ok: false, reason: 'Usage: /explain <feature or path to explain> — e.g. /explain the llm resource' };
+
+  const root = projectRoot(cwd);
+  const endPhase = pushActivity('Explain', `investigating ${feature}`);
+  try {
+    // 1. explore — reused verbatim (same call shape plan/index.ts uses), a real agentic loop.
+    let exploreFindings = '';
+    try {
+      exploreFindings = await exploreExecute({
+        question: `Explain how this works and exactly where it lives in the codebase (name real files/functions): ${feature}`,
+        thorough: 'true',
+      });
+    } catch (err) {
+      log('WARN', 'explain_explore_failed', { error: err instanceof Error ? err.message : String(err) });
+    }
+    if (!exploreFindings || exploreFindings.length < 20) {
+      return { ok: false, reason: `Exploration found nothing usable for "${feature}" — try a more specific area or a real path.` };
+    }
+
+    // 2. real file paths — either the argument itself, or extracted from explore's prose. Converted to
+    // paths RELATIVE TO THE REPO ROOT before git-log gathering: `cwd` is wherever ayin was launched
+    // (e.g. a `backend/` subdirectory), but `git log` below runs with `cwd: root` — a path resolved
+    // against `cwd` alone (`src/resources/llm.ts`) would silently mean the wrong file once `root` and
+    // `cwd` differ, and `git log` would just report no history instead of erroring, which is the kind
+    // of wrong-but-quiet bug this codebase's own "evidence, not assumption" discipline exists to catch.
+    setActivityDetail('gathering git history');
+    const literalPath = existsSync(resolve(root, feature)) ? feature : (existsSync(resolve(cwd, feature)) ? feature : null);
+    const rawPaths = literalPath ? [literalPath] : extractExistingPaths(exploreFindings, cwd);
+    const paths = rawPaths
+      .map((p) => relative(root, resolve(cwd, p)))
+      .filter((p) => p && !p.startsWith('..'));
+
+    const history = paths.length ? gatherGitHistory(paths, root) : { commits: [], byPath: {} };
+    const signal = computeBugSignal(history);
+    const historyEvidence = paths.length
+      ? renderHistoryEvidence(history, signal)
+      : 'COMMIT HISTORY: could not identify a real file from the exploration — no git history gathered. Say so; do not invent a timeline.';
+
+    // 3. Jira — self-validating: a key-shaped candidate is proven real by asking Jira, never trusted alone.
+    setActivityDetail('checking Jira for linked tickets');
+    const candidates = paths.length ? extractTicketCandidates(history.commits) : [];
+    const lookup = candidates.length ? await jiraLookup(candidates) : null;
+    const jiraBlock = buildJiraBlock(paths, candidates, lookup);
+
+    // 4. synthesis — one call, five fixed sections, grounded in everything gathered above.
+    setActivityDetail('writing the report');
+    const body = await llmChat([{
+      role: 'user',
+      content: explainPrompts.get('synthesize', {
+        FEATURE: feature,
+        EXPLORE_FINDINGS: exploreFindings.slice(0, 8000),
+        HISTORY_EVIDENCE: historyEvidence,
+        JIRA_BLOCK: jiraBlock,
+      }),
+    }]);
+
+    const reportPath = join(cwd, explainFilename(feature));
+    const header = [
+      '<!-- Written by ayin /explain. -->',
+      `<!-- Asked about: ${feature} -->`,
+      `<!-- Files this drew history from: ${paths.length ? paths.join(', ') : '(none identified)'} -->`,
+      '',
+      `# ${feature}`,
+      '',
+    ].join('\n');
+    writeFileSync(reportPath, `${header}${body.trim()}\n`);
+    const reportOpened = await openInEditor(reportPath);
+    log('INFO', 'explain_report_written', { feature, path: reportPath, paths: String(paths.length), commits: String(history.commits.length), tickets: String(lookup?.ok ? lookup.tickets.length : 0) });
+
+    // 5. architecture diagram — reuses tools/diagram.ts's OWN validated PlantUML loop, not a second
+    // implementation; grounded in the same explore findings + the churn signal, so it names real code.
+    setActivityDetail('drawing the architecture diagram');
+    const diagramContext = [
+      exploreFindings.slice(0, 3000),
+      signal.churnByPath.length ? `Most-touched file(s) in its history: ${signal.churnByPath.slice(0, 3).map((c) => `${c.path} (${c.commits} commits)`).join(', ')}` : '',
+    ].filter(Boolean).join('\n\n');
+    const diagram = await makeDiagram(`the architecture of ${feature}`, { context: diagramContext, dir: cwd });
+
+    return { ok: true, reportPath, reportOpened, diagram };
+  } finally {
+    endPhase();
+  }
+}
+
+export function formatExplainOutcome(o: ExplainOutcome): string {
+  if (!o.ok) return o.reason ?? 'Nothing to report.';
+  const lines = [
+    `Report: ${o.reportPath}${o.reportOpened ? ' (opened in editor)' : ' (no editor found on PATH — open it manually)'}`,
+  ];
+  if (o.diagram?.ok) {
+    lines.push(`Diagram: ${o.diagram.file}${o.diagram.unverified ? ' (plantuml not installed — structural check only)' : ''}${o.diagram.opened ? ' (opened in editor)' : ' (no editor found on PATH — open it manually)'}`);
+  } else if (o.diagram) {
+    lines.push(`Diagram FAILED after ${o.diagram.rounds} round(s): ${o.diagram.error}`);
+  }
+  return lines.join('\n');
+}

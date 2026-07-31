@@ -1,0 +1,50 @@
+Write a report that answers ONE question: what was this feature supposed to do, versus what actually
+exists in the code today — and where the two diverge, what should someone touching it be careful about.
+Every fact must trace back to something in the EVIDENCE below; where the evidence is thin or silent,
+say so plainly rather than filling the gap with a plausible-sounding guess.
+
+FEATURE ASKED ABOUT: {{FEATURE}}
+
+WHAT THE CODE ACTUALLY DOES (from a real investigation of the repo):
+{{EXPLORE_FINDINGS}}
+
+{{HISTORY_EVIDENCE}}
+
+{{JIRA_BLOCK}}
+
+Write exactly these five sections, as markdown `##` headings, in this order:
+
+## Intention
+What this was ASKED to do, from the evidence — a resolved Jira ticket's summary (name the reporter and
+ticket key), or failing that, the earliest commit's own subject/message if it states a purpose. If
+NEITHER gives a real stated intention, say plainly that no original intent could be recovered from the
+evidence — do not invent a reporter, a ticket, or a motivation to fill the gap.
+
+## What actually exists
+How it works TODAY, grounded in the explore findings above — name the real files/functions/modules it
+mentions. This is a description of current reality, not a design proposal and not a restatement of the
+intention above.
+
+## How they map
+The actual comparison: does what exists TODAY (the section above) match the intention, or has it grown
+past it, fallen short of it, or drifted into solving a different problem than originally stated? Be
+concrete — name the specific gap or match, don't just say "mostly matches." If there was no recoverable
+intention to compare against, say so here too, and describe instead how the implementation evolved
+(condensed from the commit evidence — group related commits into a narrative, e.g. "introduced in X,
+then Y reworked the retry logic, then Z fixed a race" — never mention a commit that isn't in the
+evidence above).
+
+## Problem areas — be careful here
+State plainly what the evidence shows: which file(s) were touched most (the churn count), and which
+commits looked like bugfixes (by subject). If the evidence lists NO bugfix-looking commits, say this
+area has no visible bug history in the commits examined — do not manufacture a "this has had bugs"
+narrative to fill the section. If a specific file/area churned unusually, name it and say concretely
+why that's worth being careful around (a collision, a race, a repeated fix pattern — whatever the
+subjects actually show) — this is the section someone about to modify this feature reads first.
+
+## Summary
+2-3 sentences: what this feature is, whether reality matches its original intention, and the single
+thing worth knowing before touching it.
+
+Tone: plain, evidence-first, no filler. A confident-sounding paragraph with nothing behind it is worse
+than an honest "the evidence here is thin."

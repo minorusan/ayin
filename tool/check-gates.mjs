@@ -27,6 +27,7 @@ if (!process.argv.includes('-p')) process.argv.push('-p');
 
 import { createServer } from 'node:http';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -507,6 +508,83 @@ console.log('\npresenter pass (no LLM)');
 
   const emptyFiles = pr.formatPresentation('do a thing', { presentable: true, satisfies: '', files: [] }, null);
   ok(/no file-level changes reported/.test(emptyFiles), 'an empty file list still renders an honest line instead of a bare "Changed:" header');
+}
+
+// ── /explain: path extraction from prose (no LLM) ───────────────────
+console.log('\nexplain: path extraction from explore prose');
+{
+  const p = await import(`file://${join(DIST, 'explain/paths.js')}`);
+
+  const explainDir = join(TMP, 'explain-paths');
+  mkdirSync(explainDir, { recursive: true });
+  const realFile = join(explainDir, 'real-file.ts');
+  writeFileSync(realFile, 'export const x = 1;\n');
+
+  const prose = [
+    `The feature lives in \`real-file.ts\`, which exports a constant.`,
+    `It is NOT the same as made-up-file.ts, which does not exist.`,
+    `Also see real-file.ts again — should only be counted once.`,
+  ].join(' ');
+  const found = p.extractExistingPaths(prose, explainDir);
+  ok(found.includes('real-file.ts'), 'a backtick-quoted real path is extracted', found.join(','));
+  ok(!found.some((f) => f.includes('made-up-file.ts')), 'a mentioned path that does not exist on disk is dropped');
+  ok(found.filter((f) => f === 'real-file.ts').length === 1, 'the same path mentioned twice is deduped');
+
+  const manyPaths = Array.from({ length: 20 }, (_, i) => `\`real-file.ts\` again ${i}`).join(' ');
+  ok(p.extractExistingPaths(manyPaths, explainDir, 3).length <= 3, 'the result respects the caller-supplied cap');
+  ok(p.extractExistingPaths('no paths mentioned here at all', explainDir).length === 0, 'prose with nothing path-shaped returns an empty list, not a crash');
+}
+
+// ── /explain: git history, ticket-key candidates, bug/churn signal ──
+console.log('\nexplain: git history + bug signal (real throwaway repo)');
+{
+  const gh = await import(`file://${join(DIST, 'explain/git-history.js')}`);
+
+  const repoDir = join(TMP, 'explain-repo');
+  mkdirSync(repoDir, { recursive: true });
+  const git = (...args) => execFileSync('git', args, { cwd: repoDir, stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q');
+  git('config', 'user.email', 'test@example.com');
+  git('config', 'user.name', 'Test User');
+
+  const filePath = join(repoDir, 'feature.ts');
+  writeFileSync(filePath, 'export function feature() { return 1; }\n');
+  git('add', 'feature.ts');
+  git('commit', '-q', '-m', 'PP-101: introduce the feature');
+
+  writeFileSync(filePath, 'export function feature() { return 2; }\n');
+  git('add', 'feature.ts');
+  git('commit', '-q', '-m', 'fix a race in the feature (KY-040 sensor unrelated mention)');
+
+  writeFileSync(filePath, 'export function feature() { return 3; }\n');
+  git('add', 'feature.ts');
+  git('commit', '-q', '-m', 'tidy up comments');
+
+  const other = join(repoDir, 'other.ts');
+  writeFileSync(other, 'export const other = 1;\n');
+  git('add', 'other.ts');
+  git('commit', '-q', '-m', 'unrelated other file');
+
+  const history = gh.gatherGitHistory(['feature.ts'], repoDir);
+  ok(history.commits.length === 3, 'gatherGitHistory finds exactly the 3 commits that touched feature.ts, not the 4th', String(history.commits.length));
+  ok(history.commits[0].subject === 'tidy up comments', 'commits come back newest-first', history.commits[0].subject);
+  ok(history.byPath['feature.ts']?.length === 3, 'per-path churn count is tracked independently of the merged/capped list');
+
+  const signal = gh.computeBugSignal(history);
+  ok(signal.bugfixCommits.length === 1 && signal.bugfixCommits[0].subject.includes('fix a race'), 'the bugfix-looking commit is identified by subject', JSON.stringify(signal.bugfixCommits.map((c) => c.subject)));
+  ok(signal.churnByPath[0].path === 'feature.ts' && signal.churnByPath[0].commits === 3, 'churn-by-path is sorted most-touched first');
+
+  const candidates = gh.extractTicketCandidates(history.commits);
+  ok(candidates.includes('PP-101'), 'a real-shaped ticket key in a commit subject is extracted as a candidate', candidates.join(','));
+  ok(candidates.includes('KY-040'), 'a hardware-part-number-shaped string is ALSO extracted as a candidate — self-validation against Jira is what filters it, not the regex', candidates.join(','));
+
+  const evidence = gh.renderHistoryEvidence(history, signal);
+  ok(evidence.includes('feature.ts') && evidence.includes('fix a race'), 'rendered evidence names the churned file and the bugfix commit');
+  ok(/no visible bug history|BUGFIX-LOOKING COMMITS: none matched/.test(gh.renderHistoryEvidence({ commits: [], byPath: {} }, gh.computeBugSignal({ commits: [], byPath: {} }))), 'an empty history renders an honest "nothing found" note, not an empty section the writer could fill with a guess');
+
+  // A path git has never seen must not throw — just contributes nothing.
+  const emptyHistory = gh.gatherGitHistory(['does-not-exist.ts'], repoDir);
+  ok(emptyHistory.commits.length === 0, 'a path with no git history at all degrades to an empty list, not an error');
 }
 
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);

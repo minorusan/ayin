@@ -60,6 +60,7 @@ ayin                      # TUI
 ayin version              # what you're running
 ayin update               # fetch + install the newest build
 ayin update --check       # report only, install nothing
+ayin jira <token>         # set up/refresh Jira credentials — see below
 ```
 
 `ayin update` resolves the registry from `--registry` → `AYIN_UPDATE_REGISTRY` →
@@ -82,6 +83,23 @@ every 10 min). It only ever asks a **private** registry — `AYIN_UPDATE_REGISTR
 configured registry when that isn't public npmjs — so a fresh checkout never phones home uninvited
 and can't be told a stranger's `ayin` package is your update. `AYIN_UPDATE_CHECK=0` turns it off.
 
+### `ayin jira <token> [email] [site]` — set up or refresh Jira credentials
+
+Create a token at [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens),
+then:
+
+```bash
+ayin jira ATATT3xFfGF0...                       # refresh — reuses email/site already on file
+ayin jira ATATT3xFfGF0... you@co.com co.atlassian.net   # first-time setup — all three
+```
+
+**Validates before writing.** The token is tested against the real API first (current-sprint tickets —
+`sprint in openSprints()`) using an in-memory credential set that never touches
+`~/.egregor/config.env`; only on a confirmed-working response is anything saved there. A bad paste
+(expired token, typo'd site) never overwrites a still-working credential, and the file is never left
+holding something unverified. The same successful call that confirms auth also returns your current
+sprint's tickets, printed as proof it actually works — not a separate "ok" you have to trust.
+
 ## Tools
 
 ayin's loop calls these tools (each is a unique name; the model invokes them by name):
@@ -99,7 +117,7 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 | `status` | Check progress of backgrounded tools | — |
 | `arduino_db` | Look up a common Arduino/electronics component (identify, what it does, wiring) | auto-approved, no network — keyword search over a shipped catalog |
 | `web_search` | Web search | optional — needs a search backend (see SETUP) |
-| `jira` | Run a JQL query | optional — needs Jira creds |
+| `jira` | Run a JQL query | optional — needs Jira creds (`ayin jira <token>` sets them up) |
 | `send_push` | Push a notification to a phone | optional — needs a backend that forwards it |
 
 The **core nine** (`read_file`, `grep`, `find_files`, `write_file`, `str_replace`, `bash`,
@@ -304,6 +322,33 @@ card rather than being dropped.
 `.wiring.html` automatically** — a wiring change that just cleared QA but left a stale diagram behind
 would defeat the point of a *teaching* tool. Not opened in an editor for you automatically there; only
 the explicit `/arduino-explain` command does that.
+
+## `/explain <feature>` — intention vs. reality, and where to be careful
+
+Broader than `explore`: `explore` finds and reads code; `/explain` additionally pulls in the feature's
+real git history and any Jira tickets referenced in its commit messages, then answers one specific
+question — **what was this supposed to do, versus what actually exists, and what should I be careful
+about** — not a neutral changelog. Command-only (like `/plan`), not agent-callable.
+
+```
+❯ /explain the llm resource
+Explaining: the llm resource...
+Report: /you/project/ayin-explain-the-llm-resource-20260731-081946.md (opened in editor)
+Diagram: /you/project/the-architecture-of-the-llm-resource.puml (opened in editor)
+```
+
+Pipeline: `explore` investigates (its own agentic loop) → real file paths are extracted from its
+answer and confirmed on disk → `git log --follow` per path, deduped, with a churn count and a
+bugfix-commit flag (evidence, not a guess about fragility) → any `PROJECT-123`-shaped string in a
+commit subject is a CANDIDATE only — a generic ticket-key shape is structurally identical to plenty of
+ordinary text (a hardware part number like `KY-040` is the exact same shape), so candidates are
+batch-validated against the real Jira API and only what actually resolves counts → one LLM call writes
+five fixed sections (`Intention` / `What actually exists` / `How they map` / `Problem areas — be
+careful here` / `Summary`) → an architecture diagram (`diagram`'s own validated PlantUML loop, reused
+as-is). Both files open in VS Code.
+
+A missing README or unconfigured Jira never blocks the report — the gaps are stated honestly
+("no original intent could be recovered") rather than papered over.
 
 ## Repo watcher — automatic post-commit code review
 

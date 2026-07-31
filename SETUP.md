@@ -198,8 +198,9 @@ inert:
 - **`web_search`** — needs a search backend. Not portable as shipped (the original shelled
   out to a host-specific binary); route it through your backend's web-search endpoint, or
   ignore it.
-- **`jira`** — runs a JQL query; needs `JIRA_EMAIL` + `JIRA_API_TOKEN` (via
-  `~/.egregor/config.env`).
+- **`jira`** — runs a JQL query; needs `JIRA_EMAIL` + `JIRA_API_TOKEN` + `JIRA_SITE` (via
+  `~/.egregor/config.env`). Set up or refresh with `ayin jira <token> [email] [site]` — it validates
+  the token against the real API before writing anything.
 - **`send_push`** — asks the configured backend to push a notification to a phone; inert
   unless that backend implements it.
 

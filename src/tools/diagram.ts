@@ -163,7 +163,7 @@ async function validate(src: string): Promise<{ ok: boolean; kind?: string; summ
   return { ok: true, kind: lines[0] || undefined, summary: lines[1] || undefined };
 }
 
-function slugify(s: string): string {
+export function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'diagram';
 }
 

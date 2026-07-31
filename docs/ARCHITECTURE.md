@@ -191,6 +191,75 @@ feature" hands over a black box; if the survey found no facility, adding one bec
 The document is on disk **before** implementation starts, so a machine that dies mid-feature leaves the
 thinking behind rather than only half the work.
 
+## `/explain` (`src/explain/`)
+
+Broader than `explore`: `explore` finds and reads code; `/explain <feature>` additionally pulls in the
+feature's real git history, correlates any Jira tickets referenced in commit messages, and answers one
+specific question — **what was this supposed to do, versus what actually exists, and where should
+someone be careful** — not a neutral changelog. **Command-only**, not agent-callable: the agent already
+has `explore` for self-orientation; this is a user-directed deep dive.
+
+**Pipeline** (deterministic gathering feeds ONE synthesis call, same "evidence before opinion" shape
+`qa/` and `arduino-explain.ts` already use):
+
+```
+exploreExecute (reused verbatim — plan/index.ts's exact call shape, an agentic loop, real GPU time)
+  → extractExistingPaths (pure: which of explore's mentioned paths are real files on disk)
+  → gatherGitHistory + computeBugSignal (pure: git log --follow, deduped, churn/bugfix counted)
+  → extractTicketCandidates → jiraLookup (self-validating — see below)
+  → ONE llmChat call writes the five-section report
+  → makeDiagram (reused from tools/diagram.ts — the SAME validated PlantUML loop, not a second
+    implementation) draws the architecture, grounded in the same explore findings
+```
+
+Two files, two `openInEditor` calls — the report and the diagram are separate deliverables.
+
+- **Path resolution is root-relative, not cwd-relative — a real bug caught by testing against a
+  subdirectory.** `exploreExecute` reads `process.cwd()` internally (same as `plan/index.ts`'s own
+  usage — there is no per-call cwd override), so paths it mentions are naturally cwd-relative. But
+  `git log` below runs with `cwd: projectRoot()` — a path resolved only against `cwd` (e.g.
+  `src/resources/llm.ts` when ayin was launched from a `backend/` subdirectory) would silently mean
+  the WRONG file the moment `cwd` and the repo root differ, and `git log` just reports no history
+  instead of erroring — exactly the kind of wrong-but-quiet bug this codebase's own evidence-not-
+  assumption discipline exists to catch. `runExplain` converts every path to be relative to the repo
+  root (`relative(root, resolve(cwd, p))`) before it ever reaches `gatherGitHistory`. Caught by testing
+  live against `maradel/backend/src/resources/llm.ts` from a launch directory of `maradel/backend`
+  (root is `maradel/`) — not by reading the code.
+- **Ticket-key candidates are self-validated, never trusted by shape.** A generic `PROJECT-123` pattern
+  is structurally identical to plenty of ordinary text a commit message might contain — hardware part
+  numbers (`KY-040`) are the exact same shape, confirmed directly: `check-gates.mjs`'s fixture repo
+  deliberately includes a `KY-040` mention alongside a real-looking `PP-101` key, and both are extracted
+  as candidates by `extractTicketCandidates`. `jira.ts#jiraLookup` batch-validates candidates against
+  the real API (`key in (...)`) and only what Jira actually resolves is treated as a real ticket —
+  the report's `## Intention` section is told explicitly never to attribute a feature to an unresolved
+  candidate.
+- **The synthesis prompt (`prompts/explain/synthesize.txt`) asks for five fixed sections**: `Intention`
+  (what was asked for — a resolved ticket's reporter/summary, or the earliest commit's own stated
+  purpose, or an honest "could not be recovered"), `What actually exists` (grounded in explore's
+  findings), `How they map` (the actual gap analysis — matches, drift, scope creep), `Problem areas —
+  be careful here` (the churn/bugfix evidence, by name — never a manufactured "this had bugs" if the
+  evidence shows none), `Summary`.
+- **`gatherGitHistory`/`computeBugSignal` are deterministic, no LLM** (`src/explain/git-history.ts`) —
+  `git log --follow` per path (survives renames), deduped by hash across paths, newest first; a
+  separate per-path count feeds the churn signal (most-touched file first) independently of the
+  merged/capped chronological list, so a real "how often was this touched" number is never distorted
+  by the cap. Bugfix-looking commits are flagged by subject (`fix|bug|regression|crash|race|broken|
+  revert|hotfix|workaround`) — evidence handed to the writer, not an opinion it has to invent.
+- **README/Jira absence never blocks the report** — same philosophy as `arduino-explain.ts`: a feature
+  with no linkable ticket, or a repo with thin history, still gets a report; the gaps are stated
+  honestly (`## Intention`: "no original intent could be recovered") rather than papered over.
+- **Verified against the real backend, not assumed**: run live against maradel backend's actual
+  `llmResource` (`backend/src/resources/llm.ts`) from a `backend/` launch directory — correctly
+  identified the real file (not a same-named decoy — ayin's own `acquireLlm`/`llm/authority.ts` was
+  the wrong target the first attempt found, exactly the cwd bug above, before the root-relative fix
+  landed), correctly reported no Jira ticket recoverable (Jira wasn't configured), and named real
+  churn/bugfix evidence (a VRAM-reclamation regression, a model-warming latency fix) the reviewer could
+  check against the actual commit history.
+- A stale **materialized local prompt** trap bit verification here too, same as `diagram.ts`'s own
+  documented history: editing `prompts/explain/synthesize.txt` AFTER its first live call does nothing
+  until the already-materialized `~/.ayin-cli/prompts/explain/synthesize.txt` is removed (or `/reset`)
+  — caught because the second live run's report still showed the old section headings.
+
 ## Tool guard (`tool-guard.ts`)
 
 The previous duplicate detector answered every repeat with the same warning and let the model try
@@ -397,6 +466,30 @@ configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
 - **`str_replace`** is the preferred edit tool — a single-unique-match find/replace that
   touches only the targeted block. `write_file` is for new files / deliberate full rewrites
   (regenerating a large file from memory risks dropping content).
+- **`jira`** (`jira.ts`) runs a JQL query, formatted as text — inert (returns an error string, never
+  throws) unless `~/.egregor/config.env` has `JIRA_EMAIL`/`JIRA_API_TOKEN`/`JIRA_SITE`. The same file
+  also exports two structured (non-text) functions other code calls directly, both going through the
+  one shared `runJiraSearch` fetch/auth/error-handling helper rather than each carrying a copy:
+  `jiraLookup(keys)` (batch-validate candidate ticket keys, used by `/explain`) and
+  `currentSprintTickets(creds?)` (`sprint in openSprints()` — the JQL function needing no board/project
+  id, since a fresh setup doesn't know one yet).
+  - **`ayin jira <token> [email] [site]`** (`jira-auth-cmd.ts`, a top-level CLI subcommand — `NO_TUI_COMMANDS`
+    in `ui/headless.ts`, alongside `watch`/`update`/`version`) sets up or refreshes credentials.
+    **Validates before writing**: the candidate token is tested via `currentSprintTickets`'s `creds`
+    override — which never touches the config file — and `writeEgregorEnvKeys` (atomic temp+rename,
+    merges into the existing file rather than clobbering unrelated keys) is only called on a CONFIRMED
+    working response. A bad paste (expired token, typo'd site) never overwrites a still-working
+    credential, and the file is never left holding something unverified. The same successful call that
+    confirms auth IS the deliverable — current-sprint tickets, printed as proof, not a separate "ok" you
+    have to trust. `email`/`site` are optional: the command's primary job is refreshing an expiring
+    token, so it reuses whatever's already on file for the other two fields; first-time setup (no
+    config file yet) needs all three.
+  - **Forgot to add `jira` to `NO_TUI_COMMANDS` at first** — a real bug, caught by testing: without it,
+    `ayin jira` (like any non-`-p` invocation) constructs a real blessed screen at module-load time
+    (`ui/screen.ts`'s `HEADLESS ? noopScreen() : blessed.screen(...)`, decided once and memoized before
+    `main()` even runs), and its teardown escape codes leaked into the command's plain stdout. Diagnosed
+    by comparing byte-for-byte against `ayin update`/`ayin version` (both already in the set, both
+    clean) rather than guessing.
 - **Auto-research grounding** (`agent.ts#runResearch`): near-deterministic — if the prompt contains
   `grounded`/`citing`/`citation`/`research`, ayin runs a `web_search` BEFORE the base LLM call and
   **pre-prompts the result into the turn** (a `<research-grounding>` block in the system context), so
