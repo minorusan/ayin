@@ -383,5 +383,131 @@ console.log('\nwiring diagram detection');
   ok(!dg.isWiringRequest('sequence', 'the lifecycle of a fix request'), 'an explicit non-wiring kind does not fire it either');
 }
 
+// ── arduino-db: keyword search, no embeddings, no network ──────────
+console.log('\narduino-db catalog search');
+{
+  const db = await import(`file://${join(DIST, 'tools/arduino-db.js')}`);
+  const servoHits = db.searchArduinoComponents('servo', 3);
+  ok(servoHits.some((c) => c.id === 'sg90-micro-servo'), 'search("servo") finds the micro servo entry', servoHits.map((c) => c.id).join(','));
+  const rgbHits = db.searchArduinoComponents('rgb led', 3);
+  ok(rgbHits.some((c) => c.id === 'rgb-led-common-cathode'), 'search("rgb led") finds the RGB LED entry', rgbHits.map((c) => c.id).join(','));
+  ok(db.searchArduinoComponents('').length === 0, 'an empty query returns nothing rather than the whole catalog');
+  ok(db.searchArduinoComponents('zzz-not-a-real-part-xyz').length === 0, 'a nonsense query returns no hits without throwing');
+  const byId = db.getArduinoComponent('push-button');
+  ok(byId?.legs.length === 4, 'exact id lookup returns the full entry (push-button has 4 legs)', String(byId?.legs.length));
+  ok(db.getArduinoComponent('not-a-real-id') === undefined, 'an unknown id looks up to undefined, not a throw');
+  const summaries = db.listArduinoComponentSummaries();
+  ok(summaries.length >= 20, 'the shipped catalog is broad (20+ common starter-kit parts)', String(summaries.length));
+  ok(new Set(summaries.map((s) => s.id)).size === summaries.length, 'every catalog id is unique — a duplicate would silently shadow in exact lookup');
+}
+
+// ── arduino-explain: the deterministic half (pin extraction, sketch discovery, HTML render) ──
+console.log('\narduino-explain pipeline (no LLM)');
+{
+  const ae = await import(`file://${join(DIST, 'tools/arduino-explain.js')}`);
+
+  // Sketch discovery mirrors probeArduinoProject's own naming rule, but walks the whole tree rather
+  // than just this turn's changed files — `/arduino-explain` runs on demand, not mid-QA-turn.
+  const projDir = join(TMP, 'explain-project');
+  const sketchDir = join(projDir, 'BlinkAndBeep');
+  mkdirSync(sketchDir, { recursive: true });
+  const sketchPath = join(sketchDir, 'BlinkAndBeep.ino');
+  const sketchSrc = [
+    'const int LED_PIN = 13;',
+    'const int BUZZER_PIN = 8;',
+    '#include <Servo.h>',
+    'Servo doorServo;',
+    'void setup() {',
+    '  pinMode(LED_PIN, OUTPUT);',
+    '  pinMode(BUZZER_PIN, OUTPUT);',
+    '  doorServo.attach(9);',
+    '  pinMode(2, INPUT_PULLUP);',
+    '}',
+    'void loop() {',
+    '  digitalWrite(LED_PIN, HIGH);',
+    '  int level = analogRead(A0);',
+    '  if (digitalRead(2) == LOW) { digitalWrite(BUZZER_PIN, HIGH); }',
+    '}',
+  ].join('\n');
+  writeFileSync(sketchPath, sketchSrc);
+  mkdirSync(join(projDir, 'node_modules', 'should-be-skipped'), { recursive: true });
+  writeFileSync(join(projDir, 'node_modules', 'should-be-skipped', 'Fake.ino'), 'void setup(){}\nvoid loop(){}\n');
+
+  ok(ae.isArduinoProject(projDir), 'a project with one correctly-named sketch is detected');
+  ok(!ae.isArduinoProject(REPO), 'ayin\'s own TypeScript source is not misidentified as an Arduino project');
+  const sketches = ae.findSketches(projDir);
+  ok(sketches.length === 1 && sketches[0].baseName === 'BlinkAndBeep', 'finds exactly the one real sketch, skipping node_modules', JSON.stringify(sketches.map((s) => s.baseName)));
+
+  const pins = ae.extractPinUsage(sketchSrc);
+  const byRaw = Object.fromEntries(pins.map((p) => [p.raw, p]));
+  ok(byRaw['LED_PIN']?.resolved === '13', 'a #const-declared pin resolves to its literal value', byRaw['LED_PIN']?.resolved);
+  ok(byRaw['BUZZER_PIN']?.resolved === '8', 'a second declared constant resolves independently', byRaw['BUZZER_PIN']?.resolved);
+  ok(byRaw['9']?.calls.includes('attach'), 'Servo.h-style .attach(pin) is picked up even with no pinMode/digitalWrite on that pin', JSON.stringify(byRaw['9']));
+  ok(byRaw['2']?.calls.includes('pinMode') && byRaw['2']?.calls.includes('digitalRead'), 'a literal numeric pin used by two different calls records both');
+  ok(byRaw['A0']?.calls.includes('analogRead'), 'an analog pin token (A0) is captured as-is, not treated as a name to resolve');
+  ok(ae.extractPinUsage('void setup(){} void loop(){}').length === 0, 'a sketch touching no pins at all extracts an empty list, not a crash');
+
+  // parseConnections: the model's JSON discipline is what's most likely to drift, not the render.
+  ok(ae.parseConnections('not json') === null, 'garbage input returns null rather than throwing');
+  ok(ae.parseConnections('{"connections": "nope"}') === null, 'a non-array connections field is rejected');
+  const wrapped = ae.parseConnections('here you go:\n```json\n{"connections":[{"pin":"13","componentId":"standard-led","leg":"anode","label":"status LED"}]}\n```');
+  ok(Array.isArray(wrapped) && wrapped.length === 1 && wrapped[0].componentId === 'standard-led', 'connections wrapped in prose/fences still parse (brace-scan, same shape as diagram.ts/criteria.ts)');
+
+  // renderExplainHtml is PURE — no LLM in this half, so grounding is fabricated here on purpose.
+  const fakeConnections = [
+    { pin: 'LED_PIN', componentId: 'standard-led', leg: 'anode', label: 'status LED' },
+    { pin: '9', componentId: 'sg90-micro-servo', leg: 'signal wire', label: 'door servo' },
+    { pin: 'NOPE_UNKNOWN', componentId: 'unknown', leg: '', label: '' }, // pin not in the extracted list — must be ignorable, not fatal
+  ];
+  const html = ae.renderExplainHtml('BlinkAndBeep', pins, fakeConnections.filter((c) => byRaw[c.pin]));
+  ok(html.startsWith('<!doctype html>') && html.trim().endsWith('</html>'), 'produces a complete, well-bounded HTML document');
+  const svgOpens = (html.match(/<svg/g) || []).length;
+  const svgCloses = (html.match(/<\/svg>/g) || []).length;
+  ok(svgOpens === svgCloses && svgOpens > 1, 'svg tags are balanced and there is more than one (canvas + per-card icons)', `${svgOpens} open / ${svgCloses} close`);
+  ok((html.match(/<foreignObject/g) || []).length === pins.length, 'exactly one card per touched pin, including the ones with no matched component', String((html.match(/<foreignObject/g) || []).length));
+  ok(html.includes('Standard LED'), 'a matched component card carries its real catalog name');
+  ok(html.includes('Micro servo motor'), 'a second matched component renders alongside the first');
+  ok(html.includes('no catalog component matched'), 'a pin with an unmatched/unknown component still gets an honest card, not a silently dropped one');
+  ok(html.includes('stroke-dasharray'), 'wires render as a dashed breadcrumb trail, not a plain solid line');
+  ok(!/undefined|NaN/.test(html), 'no undefined/NaN leaked into the rendered geometry or text');
+
+  // Not an Arduino project at all → early return, no files written.
+  const outcome = await ae.runArduinoExplain(REPO, { open: false });
+  ok(outcome.ok === false && /does not look like an Arduino project/.test(outcome.reason ?? ''), 'runArduinoExplain early-returns with a clear reason on a non-Arduino directory');
+}
+
+// ── presenter: the classification/build parser, and the pure formatter ──
+console.log('\npresenter pass (no LLM)');
+{
+  const pr = await import(`file://${join(DIST, 'presenter/index.js')}`);
+
+  ok(pr.parsePresentation('not json') === null, 'garbage input returns null rather than throwing');
+  ok(pr.parsePresentation('{"presentable": "yes"}') === null, 'a non-boolean presentable field is rejected');
+
+  const declined = pr.parsePresentation('{"presentable": false, "reason": "this is a rejection"}');
+  ok(declined?.presentable === false && declined.reason === 'this is a rejection', 'a decline carries its reason through');
+  const declinedNoReason = pr.parsePresentation('{"presentable": false}');
+  ok(declinedNoReason?.presentable === false && typeof declinedNoReason.reason === 'string', 'a decline with no reason field still gets a fallback reason, not undefined');
+
+  const wrapped = pr.parsePresentation('here you go:\n```json\n{"presentable": true, "satisfies": "added the widget", "files": [{"path": "a.ts", "summary": "added an export"}, {"path": "", "summary": "should be dropped — empty path"}]}\n```');
+  ok(wrapped?.presentable === true && wrapped.files.length === 1, 'a presentation wrapped in prose/fences still parses, and an empty-path entry is dropped', JSON.stringify(wrapped));
+  ok(wrapped.files[0].path === 'a.ts', 'the surviving file entry keeps its real path');
+
+  const noFilesField = pr.parsePresentation('{"presentable": true, "satisfies": "did a thing"}');
+  ok(Array.isArray(noFilesField?.files) && noFilesField.files.length === 0, 'a presentable response with no files field defaults to an empty array, not a crash');
+
+  const text = pr.formatPresentation('fix the login bug', wrapped, null);
+  ok(text.startsWith('> fix the login bug'), 'the formatted text quotes the goal first, as the "what this satisfies" offset');
+  ok(text.includes('added the widget'), 'the satisfies sentence is included');
+  ok(text.includes('a.ts — added an export'), 'a file bullet reads "path — summary"');
+  ok(!/wiring explainer/.test(text), 'no Arduino note when none was passed in');
+
+  const withArduino = pr.formatPresentation('blink an LED', wrapped, 'wiring explainer regenerated (arduino-explain): /tmp/x.wiring.html');
+  ok(withArduino.includes('wiring explainer regenerated'), 'an Arduino note, when given, appears as its own bullet');
+
+  const emptyFiles = pr.formatPresentation('do a thing', { presentable: true, satisfies: '', files: [] }, null);
+  ok(/no file-level changes reported/.test(emptyFiles), 'an empty file list still renders an honest line instead of a bare "Changed:" header');
+}
+
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

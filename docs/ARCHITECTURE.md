@@ -216,6 +216,52 @@ the same call with the same parameters, on purpose), and a blocked `bash` call i
 hatch — `sleep 5; <command>` is a *different* call and runs, which is what "wait for the server to come
 up" actually needs. State is per-turn: a new user turn is a new intention.
 
+## Presenter pass (`src/presenter/`)
+
+Runs **before** the QA gate, on the identical deterministic trigger QA has always used (`qaShouldRun`:
+files changed this turn + the reply reads like a completion report). Where QA judges whether the work
+is *right*, Presenter decides how the reply gets **shown**: is it itself the thing the user must read
+verbatim (a warning, a rejection, an error, a question back to them), or does it report on completed
+work — in which case Presenter builds a short, consistently-shaped answer instead of whatever prose
+shape the model happened to write this time: a quoted line naming what was asked, one sentence of what
+this reply satisfies, and a bulleted file-changed list.
+
+**ONE quick LLM call does both the classification and the build** (`prompts/presenter/
+classifyAndBuild.txt`) — no repair loop, no retry. A degraded or unparseable response just means "don't
+present," which is always safe: the raw reply is still shown exactly as it was before Presenter existed.
+`parsePresentation` is the same tolerant brace-scan shape as `qa/criteria.ts`'s intent parser and
+`arduino-explain.ts`'s `parseConnections` — a model wraps JSON in prose/fences often enough that a
+strict `JSON.parse` would reject good answers for a cosmetic reason.
+
+- **Interactive-only.** Headless output is unchanged — scripts and the `ayin watch` daemon parse that
+  output, and a TUI-shaped feature (a status-bar chip, a de-emphasized cursive aside) has no headless
+  equivalent worth the behavior change there.
+- **Visibility matches the QA gate's own contract**: `pushActivity('Presenting', …)` lights the same
+  status-bar chip and wait-narrator line QA's `▣ QA 1/3` phases use (`activity.ts`), so the quick call
+  never reads as a stall.
+- **QA then reviews the PRESENTED text**, not the raw reply, whenever Presenter produced one — handed
+  in as `qaGate`'s `answer` argument in place of `response`. A presentation is a denser, more complete
+  "what changed" statement than the model's own closing line, so it is strictly better evidence for the
+  reviewer to check claims against.
+- **Testing-era behavior (temporary, per the operator):** the raw reply is still printed too, right
+  below the presentation, de-emphasized in "cursive" — `toItalic()` (a Unicode Mathematical-Italic
+  glyph transform; blessed has no real italic attribute) plus `escapeBlessedTags()`, the same pairing
+  `chat.ts`'s own goal-line treatment uses. This lets the two be compared side by side while Presenter
+  is new. Once trusted, this block is meant to come out in `agent.ts` and the presentation stands alone
+  — a code change, not a design change, when that day comes.
+- **Arduino.** A presentation of Arduino work is only accurate if the wiring page it can reference is
+  current, so Presenter calls `regenerateTouchedSketches` — the SAME shared helper the QA-pass hook
+  below uses, not a second copy. Presenter runs first and hands the QA-pass hook the set of sketch paths
+  it already regenerated (`presenterArduinoRegen`, threaded through `agent.ts`), so a single Arduino
+  change never re-spends its one-LLM-call-per-sketch grounding twice in the same turn.
+- **Print ordering.** Interactive mode used to print the raw reply immediately, unconditionally. It
+  still does — UNLESS `qaShouldRun` says the Presenter/QA gate will run this turn, in which case the
+  print is deferred: Presenter's output (if produced) becomes the primary visible message, with the raw
+  reply appended right after in cursive; if Presenter declines, the raw reply prints exactly as before,
+  just slightly later (after one quick classification round-trip).
+- **Config:** `AYIN_PRESENTER=0` disables the whole pass (Presenter is skipped outright, QA falls back
+  to reviewing the raw reply — behavior identical to before Presenter existed).
+
 ## QA gate (`src/qa/`)
 
 The agent's own last message is the least trustworthy thing it produces: written by the same model that
@@ -345,7 +391,7 @@ families.
 
 Each tool is `{ name, description, parameters, execute }`; the model calls it by its unique
 name. **Core** (no external deps): `read_file`, `grep`, `find_files`, `write_file`,
-`str_replace`, `bash`, `explore`, `status`. **Optional integrations** (inert unless
+`str_replace`, `bash`, `explore`, `status`, `arduino_db`. **Optional integrations** (inert unless
 configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
 
 - **`str_replace`** is the preferred edit tool — a single-unique-match find/replace that
@@ -423,6 +469,78 @@ configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
       ignoring the instruction" when it is actually "the instruction never reached the model".
     - `AYIN_DEBUG_DIAGRAM_PROMPT=1` dumps the exact assembled prompt to stderr each round — the fastest
       way to tell those two failure modes apart, which is exactly how this bug was found.
+- **`arduino_db`** (`tools/arduino-db.ts`, `tools/arduino-components-data.ts`) — a shipped reference
+  catalog of ~28 common starter-kit components (LEDs, buttons, servos, sensors, displays, drivers, ICs)
+  with a keyword/alias search over it. **Deliberately NOT a RAG pipeline** — no embeddings, no vector
+  store, no chunking: the whole catalog is small enough to score in memory, and "what is this thing and
+  how do I wire it" is answered exactly as well by a keyword scorer as by a vector search, for none of
+  the moving parts. Each entry carries `identify` (how a beginner spots the loose part in a kit pile),
+  `whatItDoes`, `howUsed` (functions/library, digital/analog/PWM/I2C, common gotchas), a `legs[]` array
+  (one physical pin/leg → what it wires to → why), and `wiringNotes` (the single biggest gotcha).
+  Authored by two independent Sonnet passes (inputs/sensors/passive · outputs/displays/comms, split so
+  neither had to cover the other's ground) and reviewed for schema consistency before shipping.
+  - **Scoring is two-tier, on purpose.** `id`/`name`/`alias`/`category` hits are "strong" matches; prose
+    (`identify`/`whatItDoes`/`howUsed`/`wiringNotes`) hits only refine ranking among components a strong
+    field already matched — they never qualify a component on their own. A first cut scored everything
+    into one total, and `check-gates.mjs` caught it immediately: a nonsense query
+    (`"zzz-not-a-real-part-xyz"`) still returned a hit, because "not" and "real" are ordinary English
+    words that show up in nearly every entry's explanatory prose. Splitting the score fixed it.
+  - The agent calls it directly (`query=`/`id=`/`list=1`) while writing or explaining Arduino code —
+    it's the same "don't recall hardware facts from memory" discipline the `api` QA bar already enforces
+    for third-party APIs, applied to component wiring instead. `arduino-explain.ts` also calls
+    `getArduinoComponent`/`ARDUINO_COMPONENTS` directly to ground its HTML render and its grounding
+    LLM call — same data, two consumers.
+- **`arduino-explain`** (`tools/arduino-explain.ts`) — "teach me my own wiring": the `/arduino-explain`
+  command renders one self-contained HTML page per sketch showing a simplified board outline, a dashed
+  **breadcrumb** wire (with dot markers and a leg-label chip) from each touched pin to a card carrying
+  that component's symbol and its full `arduino_db` explanation, then opens it in VS Code. Split into a
+  deterministic half and a grounded half, the same shape as `diagram.ts`'s validated loop:
+  - **`findSketches`/`isArduinoProject`** walk the tree for `.ino`/`.pde` files or a `platformio.ini`/
+    `sketch.yaml` marker (bounded depth, skips `node_modules`/`.git`/`dist`/`.pio`) — project-wide, unlike
+    `qa/probes.ts`'s `probeArduinoProject`, which only looks at a turn's *changed* files. `/arduino-explain`
+    runs on demand against the whole project, not mid-QA-turn.
+  - **`extractPinUsage`** (pure, no LLM) regexes over `pinMode`/`digitalWrite`/`digitalRead`/
+    `analogWrite`/`analogRead`/`attachInterrupt`, resolving named constants (`#define`/`const int`)
+    declared in the same file back to their literal pin. **`.attach(pin)` (Servo.h) is matched
+    separately** — a servo sketch never calls `pinMode`/`digitalWrite` on its own pin at all (the
+    library owns pin configuration internally), so without this a sketch built entirely around a servo
+    would report zero pins for its one actual actuator. Caught building the project's own test fixture
+    (a button + servo + RGB LED sketch), not by reading the code. This is regex-level extraction, not a
+    C++ parser — a library's OWN pin-configuration idiom beyond `.attach()` (a NeoPixel strip's
+    constructor argument, an LCD's `begin()`) is a known gap, recorded in `docs/TechDebt.md`.
+  - **`groundWiring`** — ONE LLM call per sketch (never parallel across a multi-sketch project — the
+    "one door" discipline applies to a single command exactly as it does to a habit), given the real
+    pins, the sketch source, the README when present, and the full `arduino_db` catalog as the only
+    valid `componentId` values. Validated + repaired the same shape as `diagram.ts`: JSON parse failure
+    or a response naming no pin from the real pin list retries (max 3 rounds, `prompts/arduino/
+    groundWiring.txt` + `groundRepair.txt`); an unrecognized `componentId` is coerced to `"unknown"`
+    rather than retried, and an exhausted/unreachable model degrades to `[]` — **never invents a
+    component the catalog doesn't have**, and never throws, so a down model still yields a page (every
+    touched pin still gets a card, honestly labeled "no catalog component matched").
+  - **README is grounding context when present, never a gate.** A beginner's first sketch usually has no
+    README yet, and blocking a *teaching* tool on documentation that doesn't exist would defeat the tool.
+  - **`renderExplainHtml`** (pure) is the other deterministic half — inline SVG board + `foreignObject`
+    HTML cards (so prose wraps with ordinary CSS instead of being laid out character-by-character in
+    SVG `<text>`), a handful of per-id icons (LED, RGB LED, button, servo, buzzer, potentiometer,
+    resistor) falling back to a per-category shape (output/input/sensor/display/communication/passive)
+    for the rest of the catalog. Self-contained, no external requests, dark-themed.
+  - **`regenerateTouchedSketches`** (exported from this module) is the ONE shared entry point two
+    call sites use — the Presenter pass (above) and the QA-pass hook below — so "Arduino work being
+    presented/QA'd necessitates a current wiring page" has exactly one implementation, not two drifting
+    copies. It takes a `skip` set: Presenter runs first and regenerates whatever it touches, then hands
+    the QA-pass hook the paths it already covered, so a single Arduino change never re-spends its
+    one-LLM-call-per-sketch grounding twice in the same turn.
+  - **QA-pass regeneration (`agent.ts`, right after the QA gate's `pass` card).** Passing Arduino QA
+    (the existing `arduino`/`arduino-wiring` bars, unchanged) on a turn that touched a sketch
+    **necessitates regenerating that sketch's `.wiring.html`** if Presenter hasn't already — deliberately
+    **not** opened in an editor here — only the explicit `/arduino-explain` command does that; popping
+    VS Code open after every unrelated QA pass on an Arduino repo would be disruptive. A regenerate
+    failure is logged, never thrown — this must not break the turn it rides on.
+  - **Verified against the real backend, not assumed**: a fixture project (push button → gate servo,
+    RGB LED for status) run through the full pipeline against the actually-running Maradel backend
+    (the sanctioned gateway, not a raw Ollama call) correctly matched `push-button`, `sg90-micro-servo`,
+    and `rgb-led-common-cathode` from five real pins, one of them only discoverable via the `.attach()`
+    fix above.
 - **`web_search`** (`tools/web-search.ts`) mirrors maradel's pipeline (`backend/src/tasks/webSearch.ts`),
   in-process and dependency-free: **SearXNG** (keyless self-hosted metasearch, JSON API) PRIMARY →
   **DuckDuckGo HTML** fallback → **DDG Instant Answer** last resort; rank + dedup → fetch top 4 pages →

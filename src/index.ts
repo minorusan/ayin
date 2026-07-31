@@ -32,6 +32,7 @@ import { HEADLESS } from './ui.js';
 import { loadRules } from './rules.js';
 import { setConfigValue, resetPromptsToDefaults } from './prompts.js';
 import { getGoal, setGoal, clearGoal, refreshGoal } from './goal.js';
+import { runArduinoExplain, formatExplainOutcome } from './tools/arduino-explain.js';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -522,6 +523,19 @@ onInput(async (text: string) => {
         text = arg;
         break;
       }
+      // `/arduino-explain` — early-returns if cwd is not an Arduino project (probes for .ino/.pde or
+      // platformio.ini/sketch.yaml). Otherwise: one wiring HTML per sketch (board + breadcrumb wiring
+      // + per-component beginner explanations from arduino-db), opened in VS Code if it's on PATH.
+      case '/arduino-explain': {
+        addMessage('system', 'Generating wiring explainer(s)...');
+        try {
+          const outcome = await runArduinoExplain(process.cwd());
+          addMessage('system', formatExplainOutcome(outcome));
+        } catch (err) {
+          addMessage('system', `/arduino-explain failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
       case '/goal': {
         const arg = text.slice('/goal'.length).trim();
         if (!arg) {
@@ -553,6 +567,7 @@ onInput(async (text: string) => {
         addMessage('system', '/resume — list this directory\'s sessions (newest first) · /resume all for every directory');
         addMessage('system', '/resume <n>|<id> — restore one by list number or id prefix; new turns append to its record');
         addMessage('system', '/plan <text> — force plan mode: survey, API research, exploration, then a written plan');
+        addMessage('system', '/arduino-explain — for an Arduino project in this dir: a wiring HTML per sketch (board + breadcrumbs + arduino-db explanations), opened in VS Code');
         addMessage('system', '/clear — clear chat');
         addMessage('system', '/set keli-url <http://host:9100> — point ayin at the LLM endpoint (an adapter, or a backend)');
         addMessage('system', '/set llm-provider <direct|resource|auto> — how much of that endpoint to expect (default: auto-detect)');

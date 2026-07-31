@@ -1,0 +1,34 @@
+You are grounding a wiring explainer: map the REAL pins this sketch actually uses to the REAL physical
+components wired to them, using ONLY the catalog below — never invent a component id that isn't listed.
+
+SKETCH: {{SKETCH_NAME}}
+{{README_BLOCK}}
+SKETCH SOURCE:
+{{SKETCH_SOURCE}}
+
+PINS THE CODE ACTUALLY TOUCHES (pinMode/digitalWrite/digitalRead/analogWrite/analogRead/attachInterrupt):
+{{PIN_LIST}}
+
+CATALOG (id — name [category]: how to identify it — pick componentId ONLY from this list, or "unknown"):
+{{CATALOG}}
+{{REPAIR}}
+Return STRICT JSON, nothing else — no prose, no markdown fences, no trailing commas:
+
+{"connections": [
+  {"pin": "13", "componentId": "standard-led", "leg": "anode, through a 220Ω resistor", "label": "status LED"},
+  {"pin": "A0", "componentId": "potentiometer", "leg": "wiper", "label": "brightness dial"}
+]}
+
+Rules:
+- "pin" is the EXACT token from the pin list above (e.g. "13", "A0", "9") — do not renumber or rename it.
+- "componentId" must be one of the catalog ids verbatim, or the literal string "unknown" when nothing in
+  the catalog plausibly matches (still include the pin — do not drop it).
+- "leg" is a short phrase naming which leg/pin of the COMPONENT this wire is, in this project's own words
+  (e.g. "signal wire", "cathode", "DO"), not a restatement of the Arduino pin.
+- "label" is a short 2-4 word name for THIS SPECIFIC instance in the project (e.g. "status LED", "tilt
+  alarm buzzer") — not the generic catalog name.
+- Skip pins 0 and 1 unless the code or README makes clear they carry a real external module (e.g.
+  Bluetooth, GPS) — they are usually just the USB serial console.
+- One entry per pin actually driving/reading a component. Do not invent pins that are not in the pin list.
+- If the code and README together give no usable evidence for a pin (a pin toggled with no clear purpose),
+  still emit it with componentId "unknown" and a leg/label that says what the code does with it.

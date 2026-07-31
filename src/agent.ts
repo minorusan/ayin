@@ -23,7 +23,8 @@ import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution } from './tools.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
 import { getGoal } from './goal.js';
-import { addMessage, setAgentStatus, setAgentState, setStatus, HEADLESS, formatToolResultForChat, formatToolCallForChat } from './ui.js';
+import { addMessage, setAgentStatus, setAgentState, setStatus, HEADLESS, formatToolResultForChat, formatToolCallForChat, escapeBlessedTags, toItalic } from './ui.js';
+import { theme } from './ui/theme.js';
 import { log } from './log.js';
 import { checkPermission } from './permissions.js';
 import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
@@ -34,6 +35,8 @@ import { syncSession, getSessionId } from './tiferet-session.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { extractSignals } from './tools/signals.js';
 import { qaBeginTurn, qaNoteTouched, qaShouldRun, qaGate, qaShowCard } from './qa/index.js';
+import { regenerateTouchedSketches } from './tools/arduino-explain.js';
+import { presenterPass } from './presenter/index.js';
 import { clearActivity } from './activity.js';
 import { guardBeginTurn, guardCheck, guardDirective, guardNoteDenied } from './tool-guard.js';
 import { planContextBlock, runPlan } from './plan/index.js';
@@ -690,6 +693,11 @@ export async function runAgent(userInput: string): Promise<void> {
       pushToWindow('assistant', response);
       pushMessage('assistant', response);
 
+      // Computed once, before either print path, so the interactive branch below knows WHETHER to
+      // defer its immediate print to the Presenter/QA section — same deterministic condition QA has
+      // always used (files changed this turn + the reply reads like a completion report).
+      const gate = qaShouldRun(response);
+
       if (HEADLESS) {
         // CTA gate — if there's a deliverable the model hasn't produced, don't exit
         if (ctaTarget && !ctaDelivered && round < maxRounds - 2) {
@@ -716,23 +724,56 @@ export async function runAgent(userInput: string): Promise<void> {
         }
         lastPrintedText = '';
         log('INFO', 'agent_done', { round: String(round), reason: 'double_text', ctaDelivered: String(ctaDelivered) });
-      } else {
-        // Interactive mode: always print immediately
+      } else if (!gate.run) {
+        // Ordinary turn (no Presenter/QA involved) — print immediately, exactly as always.
         if (parsed.text) addMessage('assistant', parsed.text);
       }
+      // else (interactive AND gate.run): the print is DEFERRED to the Presenter/QA section below —
+      // Presenter decides the primary visible text for a turn in that shape, not the raw model output.
 
       setAgentStatus('');
       triggerSync();
 
-      // ── QA gate ──────────────────────────────────────────────────────
-      // The model has just claimed it is finished. Deterministic condition: files changed this turn
-      // AND this message reads like a completion report. If it fails review, the issues go back into
-      // the loop as a system turn and the agent fixes them — capped at `qaMaxPasses`.
+      // ── Presenter pass, then the QA gate ──────────────────────────────
+      // Presenter runs FIRST, on the same deterministic condition QA uses (files changed + reply reads
+      // like a completion report): one quick LLM call decides whether this reply IS the thing the user
+      // must read literally (a warning/rejection/error/question — never rewritten) or reports on
+      // completed work, in which case Presenter builds a short, consistent answer (what was asked, one
+      // line of what this satisfies, a bulleted file-changed list) and QA reviews THAT text instead of
+      // the raw reply — a denser, more complete "what changed" statement is strictly better evidence
+      // for the reviewer to check claims against. Interactive-only: headless output stays exactly as it
+      // was (scripts/`ayin watch` parse that output; a TUI-shaped feature — status chip, cursive aside —
+      // has no headless equivalent to be worth the behavior change there).
+      let textForQa = response;
       if (!interrupted) {
-        const gate = qaShouldRun(response);
         log('INFO', 'qa_gate_condition', { run: String(gate.run), why: gate.why, files: String(gate.files.length) });
         if (gate.run) {
-          const outcome = await qaGate(getGoal() || currentGoal, response, gate.files, () => interrupted);
+          let presenterArduinoRegen = new Set<string>();
+          if (!HEADLESS) {
+            const presenterOutcome = await presenterPass(getGoal() || currentGoal, response, gate.files);
+            presenterArduinoRegen = presenterOutcome.arduinoRegenerated;
+            if (presenterOutcome.presented && presenterOutcome.text) {
+              addMessage('assistant', presenterOutcome.text);
+              // TESTING-ERA ONLY, per the operator: still show the raw reply too, de-emphasized in
+              // (fake, Unicode-math-italic — blessed has no real italic attribute) cursive BELOW the
+              // presentation, so the two can be compared while Presenter is new. Once trusted, this
+              // block goes away and the presentation stands alone — that's the only change needed here.
+              if (parsed.text) {
+                const preview = parsed.text.length > 2000 ? `${parsed.text.slice(0, 2000)}\n… (truncated, ${parsed.text.length} chars total)` : parsed.text;
+                addMessage('system', [
+                  `{${theme.faint}-fg}${escapeBlessedTags(toItalic('(original reply, shown for testing while Presenter is new)'))}{/}`,
+                  `{${theme.muted}-fg}${escapeBlessedTags(toItalic(preview))}{/}`,
+                ].join('\n'));
+              }
+              textForQa = presenterOutcome.text;
+            } else if (parsed.text) {
+              // Presenter declined (literal/warning/error/question/not-a-presentation, or disabled) —
+              // show the raw reply exactly as interactive mode always has.
+              addMessage('assistant', parsed.text);
+            }
+          }
+
+          const outcome = await qaGate(getGoal() || currentGoal, textForQa, gate.files, () => interrupted);
           qaShowCard(outcome.card);
           if (outcome.action === 'fix' && outcome.feedback && !interrupted) {
             pushToWindow('user', outcome.feedback);
@@ -741,6 +782,24 @@ export async function runAgent(userInput: string): Promise<void> {
             round = Math.min(round, Math.max(0, maxRounds - 5));
             log('INFO', 'qa_fix_pass', { pass: String(outcome.pass), issues: String(outcome.verdict?.issues.length ?? 0), roundReset: String(round) });
             continue;
+          }
+
+          // Arduino QA passing NECESSITATES the wiring explainer being current — a sketch that just
+          // cleared the `arduino`/`arduino-wiring` bars with new pin usage but an unregenerated
+          // `*.wiring.html` would leave a beginner reading a stale diagram. `presenterArduinoRegen`
+          // skips any sketch Presenter already regenerated moments ago in this same pass — one LLM
+          // call per sketch per turn, not two. Never `open`ed here: popping VS Code open after every
+          // unrelated QA pass on an Arduino repo would be disruptive; only the explicit
+          // `/arduino-explain` command opens an editor.
+          if (outcome.action === 'pass') {
+            try {
+              const regen = await regenerateTouchedSketches(process.cwd(), gate.files, presenterArduinoRegen);
+              if (regen && regen.results.length > 0) {
+                addMessage('system', `Arduino QA passed — wiring explainer regenerated: ${regen.results.map((r) => r.htmlPath).join(', ')}`);
+              }
+            } catch (err) {
+              log('WARN', 'arduino_explain_regenerate_failed', { error: err instanceof Error ? err.message : String(err) });
+            }
           }
         }
       }

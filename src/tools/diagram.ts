@@ -50,6 +50,7 @@ import { isAbsolute, join } from 'node:path';
 import { llmChat } from '../llm/manager.js';
 import { log } from '../log.js';
 import { prompts, packagePath } from '../prompts-service.js';
+import { openInEditor } from '../editor.js';
 
 /**
  * This tool's prompt namespace — `prompts/diagram/*.txt`, materialized into the operator's local
@@ -258,18 +259,6 @@ export async function makeDiagram(
     writeFileSync(file, `' VALIDATION FAILED: ${lastError}\n${source}\n`);
   } catch { /* nowhere to write — the source is still in the result */ }
   return { ok: false, rounds: MAX_ROUNDS, error: lastError, source, file, opened: false };
-}
-
-/** Open in VS Code if its CLI is on PATH; otherwise leave the file and say so. */
-async function openInEditor(target: string): Promise<boolean> {
-  for (const bin of ['code', 'code-insiders', 'codium']) {
-    const { code } = await run(bin, ['--version'], undefined, 8_000);
-    if (code === 0) {
-      const r = await run(bin, [target], undefined, 10_000);
-      return r.code === 0;
-    }
-  }
-  return false;
 }
 
 /** Tool entry point: `diagram(subject=…, kind=…, context=…, render=…)`. */

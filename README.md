@@ -97,12 +97,13 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 | `explore` | A focused sub-investigation with its own mini agent loop | for "find/read X" questions |
 | `diagram` | **PlantUML diagram, validated in a loop** until it really parses | needs `plantuml` to verify + render |
 | `status` | Check progress of backgrounded tools | — |
+| `arduino_db` | Look up a common Arduino/electronics component (identify, what it does, wiring) | auto-approved, no network — keyword search over a shipped catalog |
 | `web_search` | Web search | optional — needs a search backend (see SETUP) |
 | `jira` | Run a JQL query | optional — needs Jira creds |
 | `send_push` | Push a notification to a phone | optional — needs a backend that forwards it |
 
-The **core eight** (`read_file`, `grep`, `find_files`, `write_file`, `str_replace`, `bash`,
-`explore`, `status`) need nothing but Node + a POSIX shell. The rest are optional
+The **core nine** (`read_file`, `grep`, `find_files`, `write_file`, `str_replace`, `bash`,
+`explore`, `status`, `arduino_db`) need nothing but Node + a POSIX shell. The rest are optional
 integrations you can ignore.
 
 Each tool's prompts (where it has any) ship as `.txt` files in its own namespace under
@@ -170,6 +171,29 @@ doesn't slip past the gate just for being terse — that claim is reviewed befor
 
 `AYIN_QA=0` opts out; `qaMaxPasses` / `qaMinAnswerChars` tune it. The reviewer's prompts (`qaCriteria`,
 `qaReview`) live in `prompts.json` like every other prompt, so you can rewrite the bar yourself.
+
+### Presenter pass — how the reply is shown, decided before QA checks whether it's right
+
+Same trigger as the QA gate above, one step earlier: a single quick call asks whether this reply
+**is** the thing you need to read verbatim (a warning, a rejection, an error, a question back to you —
+shown exactly as written, never rewritten) or **reports on completed work** — in which case ayin builds
+a short, consistent answer instead of whatever shape the model's prose happened to take this time:
+
+```
+> add a hello endpoint to the server
+
+Added a GET /hello endpoint and documented it.
+
+Changed:
+- server.ts — added the GET /hello handler
+- README.md — documented the new endpoint
+```
+
+QA then reviews *that* text — a denser, more complete "what changed" statement than the model's own
+closing line, and strictly better evidence for the reviewer to check claims against. For now (while this
+is new) the raw reply still prints too, right below, in de-emphasized cursive, so you can compare the
+two; that aside goes away once Presenter is trusted. `AYIN_PRESENTER=0` disables it outright — TUI-only,
+headless output is unaffected.
 
 ### You can always see when a gate is running
 
@@ -247,6 +271,39 @@ when the `code` CLI is on PATH — otherwise it's simply left in place and refer
 
 Env: `AYIN_PUML_BIN` · `AYIN_PUML_DIR` · `AYIN_PUML_RENDER` (`svg`|`png`|`0`) · `AYIN_PUML_OPEN`
 (`auto`|`0`).
+
+## `/arduino-explain` — teach me my own wiring
+
+For a beginner with a starter kit, "the wiring is shown as ASCII in a chat reply" is not the same as
+*understanding* it. `/arduino-explain` renders one self-contained HTML page per sketch in the current
+project: a simplified board outline, a dashed "breadcrumb" wire (dot markers + a leg-label chip) from
+each pin your code actually touches to a card carrying that component's symbol and a full beginner-level
+explanation — how to spot the part in a pile of loose components, what it does, how it's driven from
+code, and the one wiring gotcha that matters most — then opens it in VS Code if the `code` CLI is on
+PATH.
+
+Early-returns with a clear reason if the current directory isn't an Arduino project (no `.ino`/`.pde`
+sketch, no `platformio.ini`/`sketch.yaml`). A README at the project root is fed in as extra context when
+present, but its absence never blocks generation — a beginner's first sketch usually doesn't have one yet.
+
+The explanations come from **`arduino_db`**, a shipped reference catalog of ~28 common starter-kit parts
+(LEDs, buttons, servos, sensors, displays, drivers, ICs) with a keyword/alias search over it —
+deliberately **not** a RAG pipeline; the catalog is small enough that a keyword scorer answers "what is
+this and how do I wire it" exactly as well as a vector search would, with none of the moving parts. The
+agent can also call `arduino_db` directly while writing or explaining Arduino code, same discipline as
+looking up a third-party API instead of recalling it from memory.
+
+Pin usage is extracted by regex (`pinMode`/`digitalWrite`/`digitalRead`/`analogWrite`/`analogRead`/
+`attachInterrupt`, plus `.attach(pin)` for `Servo.h` — a servo sketch never calls `pinMode`/`digitalWrite`
+on its own pin at all, so without that second pattern a servo-only project would report zero pins for
+its one actual actuator), then ONE grounded LLM call maps the real pins to real `arduino_db` component
+ids — never invents one outside the catalog; an unmatched pin still gets an honest "no catalog match"
+card rather than being dropped.
+
+**Passing Arduino QA on a turn that touched a sketch regenerates (overwrites) that sketch's
+`.wiring.html` automatically** — a wiring change that just cleared QA but left a stale diagram behind
+would defeat the point of a *teaching* tool. Not opened in an editor for you automatically there; only
+the explicit `/arduino-explain` command does that.
 
 ## Repo watcher — automatic post-commit code review
 

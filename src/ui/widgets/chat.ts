@@ -320,7 +320,7 @@ export class ChatLog {
 
 // ── tool-result decoration ────────────────────────────────────────────
 
-function escapeBlessedTags(text: string): string {
+export function escapeBlessedTags(text: string): string {
   // blessed's escape syntax is {open}/{close} — NOT backslashes (those render literally).
   // Single pass so the '}' of an inserted '{open}' is never re-escaped.
   return text.replace(/[{}]/g, m => (m === '{' ? '{open}' : '{close}'));
