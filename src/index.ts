@@ -24,7 +24,7 @@ import { togglePresenterSession, forcePresenterNextTurn } from './presenter/inde
 import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation } from './agent.js';
 import { startPromptServer } from './prompt-server.js';
 import { acquireLlm, type LlmHold } from './llm/authority.js';
-import { handleModelCommand, releaseModelHold, isModelBooked, lockSession, lockSessionWithDefaultModel, unlockSession, isSessionLocked, lockSupported } from './model-picker.js';
+import { handleModelCommand, releaseModelHold, isModelBooked, lockSession, unlockSession, isSessionLocked, lockSupported } from './model-picker.js';
 import { showDialog } from './dialog.js';
 import { startLlmStatusPoll, findOwnPlace } from './llm-status.js';
 import { startUpdateWatch, checkForUpdate } from './updater.js';
@@ -394,8 +394,9 @@ onInput(async (text: string) => {
         await handleModelCommand(text.slice('/model'.length));
         return;
       case '/lock': {
-        // Hold the model for this session: short TTL + fast keepalive, so it self-releases if this
-        // client dies rather than stranding the GPU. See model-picker.ts#lockSession.
+        // Hold the PRIORITY BAND for this session: short TTL + fast keepalive, so it self-releases if
+        // this client dies rather than stranding the GPU. It does not change the model — see
+        // model-picker.ts#lockSession.
         // An LLM provider without an authority layer has nothing to lock — say it once, plainly,
         // because the user asked; nothing else in the UI ever mentions locking on such a setup.
         if (!(await lockSupported())) {
@@ -405,7 +406,7 @@ onInput(async (text: string) => {
         if (isSessionLocked()) { addMessage('system', 'Already locked. /unlock releases it.'); return; }
         const err = await lockSession();
         if (err) { addMessage('system', `/lock failed: ${err}`); return; }
-        addMessage('system', 'Locked ⚿ — this session holds the model until you /quit, /unlock, or stop responding for 10 minutes.');
+        addMessage('system', 'Locked ⚿ — this session holds priority (not the model choice) until you /quit, /unlock, or stop responding for 10 minutes.');
         return;
       }
       case '/unlock':
@@ -507,7 +508,14 @@ onInput(async (text: string) => {
         }
         const key = parts[1];
         const value = parts.slice(2).join(' ');
-        const keyMap: Record<string, string> = { 'openai-key': 'openAiKey', 'keli-url': 'keliUrl', 'update-registry': 'updateRegistry', 'llm-provider': 'llmProvider', 'default-model': 'defaultModel' };
+        // `default-model` was REMOVED in 1.0.210 — nothing applies it any more (ayin does not select a
+        // model implicitly; see model-picker.ts). Rejected rather than silently stored, so nobody
+        // configures a preference that will never take effect.
+        if (key === 'default-model') {
+          addMessage('system', 'default-model is no longer a setting — ayin runs on whatever the endpoint serves. Use /model <name> to switch.');
+          return;
+        }
+        const keyMap: Record<string, string> = { 'openai-key': 'openAiKey', 'keli-url': 'keliUrl', 'update-registry': 'updateRegistry', 'llm-provider': 'llmProvider' };
         const configKey = keyMap[key] ?? key;
         setConfigValue(configKey, value);
         addMessage('system', `Set ${key} ✓`);
@@ -784,23 +792,20 @@ async function runInteractive(): Promise<void> {
   // AUTO-LOCK. An interactive session is a human waiting at a keyboard, so it takes the priority
   // band by default instead of sitting in LOW behind every habit — the failure mode that produced
   // "GPU: chatOnce 306s · 1 waiting" and then a 10-minute client abort reported as `fetch failed`.
-  // It also pins the model, which stops the gemma↔qwen flapping mid-session that another consumer's
-  // ownership change would otherwise cause. Self-releasing (10-min TTL + 2-min keepalive), released
-  // on /quit, and opt-out with AYIN_AUTOLOCK=0 for a session that should yield to background work.
-  // On a provider with no authority layer this is not a failure to report — there is no lock to
-  // take and never was. Check first and stay silent, or every public clone opens with an error
-  // about a resource layer its owner has never heard of.
+  // Self-releasing (10-min TTL + 2-min keepalive), released on /quit, and opt-out with
+  // AYIN_AUTOLOCK=0 for a session that should yield to background work. On a provider with no
+  // authority layer this is not a failure to report — there is no lock to take and never was. Check
+  // first and stay silent, or every public clone opens with an error about a resource layer its
+  // owner has never heard of.
   //
-  // `lockSessionWithDefaultModel()` layers one more guarantee on top when `/set default-model <name>`
-  // is configured: don't just take the lock and hope whatever the backend auto-swapped to is fine —
-  // explicitly request THAT model and WAIT until it's actually resident before calling this "locked".
-  // With nothing configured this is identical to plain `lockSession()`.
+  // PRIORITY ONLY — it does not choose or load a model (1.0.210). Starting ayin no longer changes
+  // what the shared GPU is serving for everyone else on the machine; use `/model` to ask for one.
   if (process.env.AYIN_AUTOLOCK !== '0') {
     void (async () => {
       if (!(await lockSupported())) return;
-      const err = await lockSessionWithDefaultModel();
+      const err = await lockSession();
       if (err) addMessage('system', `Could not take the priority lock: ${err} — /lock to retry.`);
-      else addMessage('system', 'Locked ⚿ — priority band + model pinned for this session (/unlock to yield).');
+      else addMessage('system', 'Locked ⚿ — priority band for this session (/unlock to yield). Model unchanged: /model to switch.');
     })();
   }
 

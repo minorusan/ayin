@@ -997,18 +997,21 @@ tree knows about the internals). Design rules:
   `.git/HEAD` (handles a `.git` *file* for submodules/worktrees; detached HEAD → short sha) and
   cached 2s so the per-tick status redraw doesn't hammer the fs.
 
-- **`/lock` / `/unlock`** (`model-picker.ts#lockSession`) — hold this session's model until the
-  client exits or stops responding. The enforcement IS the grant TTL, which is why it needs no
+- **`/lock` / `/unlock`** (`model-picker.ts#lockSession`) — hold this session's **priority band** until
+  the client exits or stops responding. The enforcement IS the grant TTL, which is why it needs no
   server-side session tracking: the hold is taken with a **10-minute** ttl and refreshed every
   **2 minutes** while ayin is alive. Quit cleanly (or `/unlock`) → released at once; die, hang or lose
   the network → the grant lapses within 10 minutes and the backend reverts on its own. Nothing can be
   left locked by a process that no longer exists. Shown as **🔒** beside the model in the status bar.
-  Because gaining the `ayin` authority applies the coder-model policy, the lock immediately re-pins
-  whatever was ALREADY serving — locking must not change your model. That re-pin lands in the same
-  second and `swapChatModel` coalesces onto the already-resident target, so no real load occurs (the
-  bar can flash `🔒⇆ a→b` for one poll tick; verified against the daemon log that no `model.load.*`
-  follows). Verified: 9 assertions — holder recorded, ~10m TTL not 30, model preserved, keepalive
-  slides the expiry, unlock frees it.
+
+  **A LOCK IS NOT A MODEL CHOICE (since 1.0.210).** It fires no swap, in any path. It used to have to:
+  an endpoint with a per-owner model policy swapped the model when ayin gained the authority, so the
+  lock compensated — pin the model, remember it, re-apply it on every regrant. That compensation was
+  the source of three consecutive releases of bugs (1.0.207-1.0.209), and it meant **starting ayin
+  changed what the shared GPU served for every other consumer on the machine**. Removed at the root:
+  ayin never selects a model implicitly. It runs on whatever the endpoint is serving and switches only
+  when a human types `/model` — one deliberate request, one door. `/set default-model` is gone with it
+  (a stored preference nothing applies is worse than none), as is `lockSessionWithDefaultModel()`.
   **A lock also buys QUEUE PRIORITY.** ayin's `/api/generate` calls are LOW priority by design, so a
   locked session would still sit behind every habit. While locked, ayin sends its authority token
   plus `priority:"high"`; the backend grants HIGH only when that token matches the current holder, so
@@ -1018,14 +1021,15 @@ tree knows about the internals). Design rules:
   **Interactive sessions AUTO-LOCK on boot** (`AYIN_AUTOLOCK=0` opts out). A human at a keyboard
   should not have to know a command to avoid starving: without it a session sits in LOW behind every
   habit, which produced `GPU: chatOnce 306s · 1 waiting` and then a client abort at 10m surfaced as
-  `fetch failed`. Auto-lock also pins the model, stopping the gemma↔qwen flapping another consumer's
-  ownership change causes mid-session. Headless runs do NOT auto-lock — unattended work yields.
+  `fetch failed`. Auto-lock takes **priority only** — it does not pin or load a model (1.0.210), so
+  launching ayin is invisible to every other consumer of the shared GPU. Headless runs do NOT
+  auto-lock — unattended work yields.
   **The lock survives the backend losing it.** The authority stack is in-memory, so a daemon restart
   erases every grant: the next keepalive returns a NEW grant rather than a refresh, which silently
-  broke two things — the token being sent for priority was dead (session quietly back in the LOW
-  band) and the backend re-applied its coder-model policy over the pinned model. `acquireLlm`'s
-  `onRegrant` now rotates the token, the lock re-pins the model it was taken on and says so in the
-  transcript. `release()` recovers from a rotated token too: if the detach frees nothing and `ayin`
+  broke the priority the lock exists for: the token being sent was dead, so the session was quietly
+  back in the LOW band. `acquireLlm`'s `onRegrant` rotates the token and says so in the transcript —
+  **the token only**, since 1.0.210 (it used to re-pin a model here too, which is exactly the implicit
+  selection ayin no longer does). `release()` recovers from a rotated token too: if the detach frees nothing and `ayin`
   still holds the resource, it re-acquires to learn the live token and hands THAT back, instead of
   leaking the grant until its TTL.
   **REAL USAGE now keeps the lock alive too — not just the keepalive timer.** Found live: a session
