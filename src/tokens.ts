@@ -1,11 +1,11 @@
 /**
  * Token estimation for the session meter.
  *
- * Tries the Maradel backend's exact tokenizer at `${keliBaseUrl()}/api/estimate` (same host as the
- * LLM, resolved identically — env KELI_URL → /set keli-url → localhost). The current backend does
- * not serve /api/estimate, so this gracefully degrades to a char/4 estimate; if the endpoint is
- * added later this picks it up for free. No egregor/netzach discovery — that was dead in the
- * standalone build (wrong host + wrong port) and only added 3s timeouts on every refresh.
+ * Tries the endpoint's exact tokenizer at `${keliBaseUrl()}/api/estimate` (same host as the LLM,
+ * resolved identically — env KELI_URL → /set keli-url → localhost). An endpoint that does not serve
+ * /api/estimate degrades gracefully to a char/4 estimate; if it is added later this picks it up for
+ * free. Deliberately NO discovery of any other host: probing for a tokenizer somewhere else only
+ * ever added 3s timeouts to every refresh.
  */
 
 import { log } from './log.js';

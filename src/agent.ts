@@ -31,7 +31,7 @@ import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js'
 import { recordPrompt, recordTool, recordAnswer } from './session-record.js';
 import { getConfig, getPrompt } from './prompts.js';
 import { getRules } from './rules.js';
-import { syncSession, getSessionId } from './tiferet-session.js';
+import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { extractSignals } from './tools/signals.js';
 import { qaBeginTurn, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn } from './qa/index.js';
@@ -469,7 +469,7 @@ function summarizableGoal(): string {
   return first.length > 120 ? first.substring(0, 117) + '...' : first;
 }
 
-/** Fire-and-forget Tiferet sync — only runs when a session is active */
+/** Fire-and-forget checkpoint write to the local session store — only when a session is active */
 function triggerSync(): void {
   if (!getSessionId()) return;
   const s = getSummary();

@@ -14,7 +14,7 @@
 import { appendFileSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { getSessionId } from './tiferet-session.js';
+import { getSessionId } from './session-store.js';
 
 const SESSIONS_DIR = join(homedir(), '.ayin-cli', 'sessions');
 const MAX_FIELD = 4000; // cap large tool results / answers so the log stays browsable

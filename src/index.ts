@@ -47,7 +47,7 @@ import {
   type CliSessionMeta,
   setSessionId,
   SESSION_NAMESPACE,
-} from './tiferet-session.js';
+} from './session-store.js';
 
 function getVersion(): string {
   try {
@@ -757,9 +757,10 @@ async function runHeadless(): Promise<void> {
   // Headless runs (ayin -p, the watch daemon) need this exactly like the interactive REPL does.
   await initSession().catch(() => {});
 
-  // Coder authority (AYIN_ACQUIRE_LLM=1): take the llm resource so the backend swaps gemma → the
-  // coder model (qwen) for this run. Sliding grant + unref'd keepalive → auto-released when the
-  // process exits; we also release explicitly on normal completion so gemma reverts promptly.
+  // Coder authority (AYIN_ACQUIRE_LLM=1): take the llm resource for this run. PRIORITY ONLY — it does
+  // not swap the model (no per-owner policy since 1.0.210); the run uses whatever is resident.
+  // Sliding grant + unref'd keepalive → auto-released when the process exits; also released
+  // explicitly on normal completion so nothing waits on a grant this run no longer needs.
   let llmHold: LlmHold = 'no-resource-layer';
   if (process.env.AYIN_ACQUIRE_LLM === '1') {
     llmHold = await acquireLlm('ayin -p (coder authority)');
@@ -834,11 +835,11 @@ async function runInteractive(): Promise<void> {
   try {
     await connect();
     log('INFO', 'connected');
-    // Create session on Tiferet (non-blocking — failure is non-fatal)
+    // Open a local session record (non-blocking — failure is non-fatal)
     initSession().then(id => {
       addMessage('system', `Session: ${id.substring(0, 16)}  (${SESSION_NAMESPACE})`);
     }).catch(err => {
-      log('WARN', 'tiferet_session_init_failed', { error: err instanceof Error ? err.message : String(err) });
+      log('WARN', 'session_init_failed', { error: err instanceof Error ? err.message : String(err) });
     });
   } catch (err) {
     setStatus({ connection: 'disconnected' });

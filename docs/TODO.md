@@ -24,8 +24,10 @@ deferred items to make it a fully clean, shareable standalone project.
   - Move the heavy deps with them: **`telegram`** (gramjs) and **`sharp`** (native) currently sit in
     core `dependencies` though the core agent doesn't need them. (Telegram stays as a real resource,
     but as an *optional* module, not a core dep.)
-  - Neutralize connector config paths (`~/.egregor/config.env`, `~/.egregor/telegram.session`) — make
-    them ayin-native / configurable rather than egregor-scoped.
+  - ~~Neutralize connector config paths~~ **DONE 1.0.211** — the only one left was the Telegram session
+    file, now `~/.ayin-cli/telegram.session` with a one-time migration of the old location
+    (`tg-auth.ts#migrateLegacySession`). Jira holds no credential here at all (it is a resource
+    consumer), so nothing else was borrowing another program's directory.
 - Goal: `npm i ayin` pulls only blessed + undici; connectors are opt-in add-ons.
 
 ### Tests

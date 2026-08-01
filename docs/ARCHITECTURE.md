@@ -2,8 +2,7 @@
 
 A terminal coding agent: a single agentic loop that turns a natural-language task into
 read/search/edit/run tool calls against your filesystem, driven by an LLM you host. This
-doc describes how the pieces fit. (Lineage note: ayin began as egregor's `@egregor/ayin-cli`
-and was decoupled into a standalone agent — see the last section for what was stripped.)
+doc describes how the pieces fit.
 
 ## High-level shape
 
@@ -537,7 +536,7 @@ configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
   (regenerating a large file from memory risks dropping content).
 - **`jira`** (`jira.ts`) — a thin CONSUMER of the Maradel backend's `jira` resource
   (`backend/src/resources/jira.ts`), not a Jira API caller. **This is a deliberate architectural
-  collapse**: ayin used to hold its own `~/.egregor/config.env` credentials and call the Jira REST API
+  collapse**: ayin used to hold its own credentials in a config file and call the Jira REST API
   directly (a second, independent implementation from the backend's own `connectors/jira.ts`); both
   now go through the one `jira` resource, the same "one door" shape already used for the `llm` resource
   — `POST {backend}/resource/jira {op, params}` (`resourceOp`, mirroring `llm/providers/resource.ts`'s
@@ -1177,7 +1176,7 @@ can finish — see the warning in `SETUP.md`.
 - **`artifacts.ts`** — every tool output is saved under `~/.ayin-cli/artifacts/` and browsable
   in the TUI (`Ctrl+O`); chat shows a 2-line preview.
 - **`history.ts`** — persistent prompt history.
-- **Sessions + `/resume`** (`tiferet-session.ts` reads, `session-record.ts` writes). Every run appends
+- **Sessions + `/resume`** (`session-store.ts` reads, `session-record.ts` writes). Every run appends
   one JSON line per prompt / tool call / answer to `~/.ayin-cli/sessions/<id>.jsonl`, each line
   carrying its `cwd`; `syncSession()` (called each turn by the agent) keeps a
   `<id>.checkpoint.json` sidecar with the rolling summary. `/resume` rebuilds context from both:
@@ -1232,9 +1231,9 @@ can finish — see the warning in `SETUP.md`.
   `ui/headless.ts#NO_TUI_COMMANDS` so blessed never grabs the terminal out from under them.
 - **`tokens.ts`** — context-meter estimate: tries `${keliBaseUrl}/api/estimate`, falls back to
   a chars/4 heuristic.
-- **`tiferet-session.ts`** — in the standalone build this is a **local stub**: a per-run
-  session id, no remote checkpoint sync (`/resume` finds nothing). Kept so the call sites don't
-  need conditionals.
+- **`session-store.ts`** — the READ side of the session store plus the checkpoint sidecar, scoped to
+  the working directory. (It was once a stub that answered "no sessions" unconditionally, which is why
+  `/resume` used to find nothing; it is a real store now — see the module header.)
 - **`ui.ts` / `markdown.ts` / `dialog.ts` / `log.ts`** — blessed TUI, markdown→tags, overlays,
   file logger.
 
@@ -1285,7 +1284,7 @@ src/
 ├── artifacts.ts        save/browse tool outputs
 ├── history.ts          prompt history
 ├── tokens.ts           context-meter estimate
-├── tiferet-session.ts  local session stub (no remote sync)
+├── session-store.ts    local session store: list / resume / checkpoint (cwd-scoped)
 ├── ui.ts               compatibility façade → src/ui/ (all './ui.js' imports keep working)
 ├── ui/                 the TUI, decoupled:
 │   ├── headless.ts     HEADLESS/THINKING_MODE detection + noop element factories
@@ -1309,21 +1308,24 @@ tool/
                         whenever you touch qa/, plan/ or tool-guard.ts.
 ```
 
-## Decoupling from egregor (what was stripped)
+## What ayin deliberately does NOT have
 
-The upstream `@egregor/ayin-cli` was wired into egregor's service mesh. The vendored,
-standalone build removed all of it:
+Each of these is an absence on purpose, not a gap waiting to be filled. They are listed because the
+absence is load-bearing: adding any of them back would break a property the agent depends on.
 
-- **`connection.ts`** — no Sofer/Merkavah/Netzach. `connect()` just marks ready; the LLM call
-  goes straight to the resolved HTTP endpoint; the remote-request path is a stub.
-- **`tiferet-session.ts`** — a local per-run session id; no remote checkpoint sync.
-- **`tokens.ts`** — no Netzach discovery; tries `${keliBaseUrl}/api/estimate`, else chars/4.
-- **`updater.ts`** — no hardcoded registry. The *passive* startup check is **opt-in** via
-  `AYIN_UPDATE_REGISTRY`; unset (default) → it never contacts any registry. The explicit
-  **`ayin update`** command may additionally fall through to npm's own configured registry
-  (see "Self-update" below).
-- **`package.json`** — dropped the `@egregor/*` dependencies; package name is `ayin` (neutral
-  standalone; was `@maradel/ayin`). See `docs/TODO.md` for the path to a fully clean standalone.
-
-What's genuinely new vs. the upstream doc: the **LLM manager + dialects** (model-agnostic
-core), **`str_replace`**, and **`explore`**.
+- **No service discovery.** `connection.ts` talks to exactly ONE configured endpoint (`KELI_URL` →
+  `/set keli-url` → loopback). Nothing is looked up, so a misconfigured endpoint fails loudly instead
+  of quietly probing alternatives and adding a timeout to every refresh — which is also why
+  `tokens.ts` only ever asks that same host for `/api/estimate` and otherwise estimates chars/4.
+- **No remote session sync.** Sessions are local files under `~/.ayin-cli/sessions/` and nothing else.
+  `sendRequest()` remains only as a throwing stub, so a caller that reaches for remote sync fails
+  visibly rather than appearing to succeed.
+- **No model of its own, and no implicit model selection.** ayin brings no weights and does not choose
+  what is loaded: it reads the active model from `GET /api/status`, picks a matching dialect, and asks
+  for a different model only when a human does (`/model`). See the `/lock` section.
+- **No hardcoded package registry.** The *passive* startup update check is **opt-in** via
+  `AYIN_UPDATE_REGISTRY`; unset (the default) → it never contacts any registry. The explicit
+  **`ayin update`** command may additionally fall through to npm's own configured registry (see
+  "Self-update" below), and refuses a registry it did not resolve deliberately.
+- **No network sandbox.** `bash` can do whatever your shell can. Headless mode auto-approves writes
+  and commands, so run it on a tree you can diff and revert.

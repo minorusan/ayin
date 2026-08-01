@@ -1,10 +1,9 @@
 /**
- * Connection — standalone (vendored into Maradel).
+ * Connection — the HTTP edge. ONE configured endpoint, no discovery.
  *
- * The egregor build talked to the Keli gateway via Merkavah/Sofer. This vendored
- * copy is decoupled: the LLM call goes straight to a keli-shaped endpoint
- * (the Maradel backend's POST /api/generate, backed by gemma) selected via the
- * KELI_URL env var. No Merkavah, no Sofer, no Netzach discovery.
+ * Every LLM call goes to `POST <endpoint>/api/generate`; the endpoint comes from the `KELI_URL` env
+ * var, else `/set keli-url`, else loopback. There is no service mesh, no registry, nothing to look
+ * up: if the endpoint is wrong the call fails loudly instead of silently probing alternatives.
  */
 
 import { setGlobalDispatcher, Agent } from 'undici';
@@ -84,7 +83,7 @@ export function cancelActiveThinking(): boolean {
   return true;
 }
 
-// ── Init (no Merkavah/Sofer — just mark ready) ──────────────────────
+// ── Init (nothing to negotiate — just mark ready) ──────────────────────
 
 export async function connect(): Promise<void> {
   mkdirSync(LOG_DIR, { recursive: true });
@@ -298,10 +297,13 @@ async function getKeliUrl(): Promise<string | null> {
   return null;
 }
 
-// ── Stubs for the egregor-only surface (no Merkavah in standalone mode) ──────
+// ── Removed surface, kept as a loud stub ─────────────────────────────────────
+// Sessions are local files (see session-store.ts); there is no remote session sync in ayin. This
+// throws rather than returning a plausible empty result, so any caller still reaching for it fails
+// visibly instead of appearing to sync.
 
 export async function sendRequest<TReq = unknown, TRes = unknown>(
   _request: unknown,
 ): Promise<TRes> {
-  throw new Error('sendRequest: remote session sync is disabled in the standalone (Maradel) build');
+  throw new Error('sendRequest: remote session sync is not part of ayin — sessions are local files');
 }
