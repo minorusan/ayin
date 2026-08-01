@@ -259,10 +259,14 @@ onConnectionChange((state) => {
 // One poll of the llm resource's read ops feeds both segments. It survives backend restarts on its
 // own (every failure just clears the segments and the next tick retries), and the interval is
 // unref'd so it never keeps the process alive.
-// Launching ayin through the machine's launcher BOOKS the coder model, which evicts the shared one
-// — so a swap is usually already in flight before the TUI even paints, and the first reply pays for
-// it. Say so once, when it starts and when it lands: being told "qwen" while gemma is still the
-// resident model (or nothing is) is the single most confusing state in the whole UI.
+// A model swap is no longer something gaining/losing the `ayin` authority causes (1.0.210 —
+// model-picker.ts#lockSession takes priority only, never a model). The backend now moves the model
+// on its OWN 08:00/20:00 Europe/Kyiv schedule, an explicit `setModel` from ANY consumer, or the
+// podcast VRAM loan (`resources/llmSchedule.ts`) — none of which this client can see the cause of,
+// only the effect. So this narration DELIBERATELY never attributes a reason: it just says what's
+// happening, once when it starts and once when it lands, because being told "qwen" while gemma is
+// still resident (or nothing is) is the single most confusing state in the whole UI regardless of
+// why the swap is running.
 let announcedSwapTo: string | null = null;
 
 function startModelStatusPoll(): void {
@@ -274,7 +278,7 @@ function startModelStatusPoll(): void {
       if (swapping && announcedSwapTo !== catalog.activeModel) {
         announcedSwapTo = catalog.activeModel;
         addMessage('system', `Backend is loading ${catalog.activeModel} (${catalog.loadedModel} still resident) — ~17GB out, ~16GB in. Your first reply waits for it.`);
-        addMessage('system', 'Launching ayin books the coder model. /model to see the queue and pick another; the shared model needs no load.');
+        addMessage('system', `A model swap is in flight, started elsewhere (the schedule, another consumer, or a manual pick) — not something this ayin session asked for. /model to see the queue or switch yourself.`);
       } else if (!swapping && announcedSwapTo) {
         addMessage('system', `${catalog.loadedModel} is resident now.`);
         announcedSwapTo = null;
