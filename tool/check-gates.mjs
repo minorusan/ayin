@@ -589,6 +589,36 @@ console.log('\nexplain: path extraction from explore prose');
   const manyPaths = Array.from({ length: 20 }, (_, i) => `\`real-file.ts\` again ${i}`).join(' ');
   ok(p.extractExistingPaths(manyPaths, explainDir, 3).length <= 3, 'the result respects the caller-supplied cap');
   ok(p.extractExistingPaths('no paths mentioned here at all', explainDir).length === 0, 'prose with nothing path-shaped returns an empty list, not a crash');
+
+  // Real bug: explore names files conversationally, by BASENAME ("the logic lives in `Deep.cs`"), not by
+  // full repo-relative path. Resolving against cwd alone dropped every such mention, so on any project
+  // with real directory depth /explain gathered NO git history and reported author/origin as
+  // unrecoverable for a feature with hundreds of commits. A git-backed basename lookup resolves them.
+  const nestRepo = join(TMP, 'explain-nested');
+  const nestDeep = join(nestRepo, 'Assets', 'Scripts', 'Feature');
+  mkdirSync(nestDeep, { recursive: true });
+  const nGit = (...args) => execFileSync('git', args, { cwd: nestRepo, stdio: ['ignore', 'pipe', 'pipe'] });
+  nGit('init', '-q');
+  writeFileSync(join(nestDeep, 'Deep.cs'), '// deep\n');
+  // An intentionally ambiguous basename: same name in two directories.
+  mkdirSync(join(nestRepo, 'Assets', 'Scripts', 'Other'), { recursive: true });
+  writeFileSync(join(nestRepo, 'Assets', 'Scripts', 'Other', 'Ambiguous.cs'), '// a\n');
+  writeFileSync(join(nestDeep, 'Ambiguous.cs'), '// b\n');
+  nGit('-c', 'user.name=T', '-c', 'user.email=t@e.com', 'add', '-A');
+  nGit('-c', 'user.name=T', '-c', 'user.email=t@e.com', 'commit', '-q', '-m', 'add nested files');
+
+  const nested = p.extractExistingPaths('The core logic lives in `Deep.cs`, which does the work.', nestRepo);
+  ok(nested.includes('Assets/Scripts/Feature/Deep.cs'), 'a bare basename resolves to its real nested repo path via git ls-files', nested.join(','));
+
+  const ambiguous = p.extractExistingPaths('See `Ambiguous.cs` for details.', nestRepo);
+  ok(ambiguous.length === 2, 'a basename matching a couple of files resolves to all of them — same-named files across one feature are usually all relevant', ambiguous.join(','));
+
+  const untracked = p.extractExistingPaths('Look at `NeverExisted.cs` please.', nestRepo);
+  ok(untracked.length === 0, 'a basename matching nothing tracked still resolves to nothing — the fallback never invents a path');
+
+  // Directly-resolvable paths must still win the limit budget ahead of basename guesses.
+  const mixed = p.extractExistingPaths('`Assets/Scripts/Feature/Deep.cs` and also `Ambiguous.cs`', nestRepo, 1);
+  ok(mixed.length === 1 && mixed[0] === 'Assets/Scripts/Feature/Deep.cs', 'an explicitly-pathed mention takes priority over a basename-only one when the cap is tight', mixed.join(','));
 }
 
 // ── /explain: git history, ticket-key candidates, bug/churn signal ──
