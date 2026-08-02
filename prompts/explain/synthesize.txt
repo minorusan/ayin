@@ -17,9 +17,14 @@ Cover these beats, in this order, as prose paragraphs (not headings) — each on
 
 1. WHAT IT IS AND WHO BUILT IT. Open with what this feature is, in one sentence. Then its origin: who
    developed it mainly (the AUTHORSHIP evidence above — name whoever actually holds the most commits,
-   never a guess), and roughly when it was introduced (the earliest commit in the evidence, or a
-   resolved Jira ticket's date/reporter if one was found). If authorship or origin can't be recovered
-   from the evidence, say so plainly instead of inventing a name or date.
+   never a guess), and roughly when it was introduced. For the origin date, READ THE PER-FILE DATE
+   RANGES IN CHURN BY FILE FIRST — do not just grab the oldest date anywhere in the commit list. If one
+   file's range reaches much further back than the rest, that file is very likely a shared hub (an
+   installer, a central service) the feature was later wired into, not proof the feature itself is that
+   old; its distant past belongs to whatever else touched it over the years, not to this feature. Base
+   the origin date on files whose OWN range is closely scoped to when the bulk of the listed churn
+   happened — or a resolved Jira ticket's date/reporter if one was found. If authorship or a trustworthy
+   origin date can't be recovered this way, say so plainly instead of inventing a name or date.
 
 2. LIFECYCLE AND BUGS. What has happened to it since — has it been stable, or did it go through periods
    of churn and fixes? Name the bugfix-looking commits and what they were about, and name the

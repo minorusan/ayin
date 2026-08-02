@@ -641,6 +641,67 @@ console.log('\nexplain: git history + bug signal (real throwaway repo)');
   // A path git has never seen must not throw — just contributes nothing.
   const emptyHistory = gh.gatherGitHistory(['does-not-exist.ts'], repoDir);
   ok(emptyHistory.commits.length === 0, 'a path with no git history at all degrades to an empty list, not an error');
+
+  // Real bug, caught live against two independent /explain runs on a real codebase: a shared hub file's
+  // OWN unrelated, years-older history got blended into the single "earliest commit in this evidence"
+  // figure, so the writer reported a feature as beginning in 2021 (a shared file's age) when its actual
+  // dedicated code started in 2026. Fixed by giving churnByPath each file's OWN earliest/latest date
+  // range instead of one blended figure — verify the range is per-path, not shared.
+  const dateGit = (date, ...args) => execFileSync('git', args, {
+    cwd: repoDir, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+  });
+  const hubPath = join(repoDir, 'hub.ts');
+  writeFileSync(hubPath, 'export const hub = 1;\n');
+  dateGit('2020-01-01T00:00:00', 'add', 'hub.ts');
+  dateGit('2020-01-01T00:00:00', 'commit', '-q', '-m', 'ancient unrelated hub commit');
+  writeFileSync(hubPath, 'export const hub = 2;\n');
+  dateGit('2026-01-05T00:00:00', 'add', 'hub.ts');
+  dateGit('2026-01-05T00:00:00', 'commit', '-q', '-m', 'hub wired into the new feature');
+
+  const dedicatedPath = join(repoDir, 'dedicated.ts');
+  writeFileSync(dedicatedPath, 'export const dedicated = 1;\n');
+  dateGit('2026-01-01T00:00:00', 'add', 'dedicated.ts');
+  dateGit('2026-01-01T00:00:00', 'commit', '-q', '-m', 'introduce the dedicated feature file');
+
+  const mixedHistory = gh.gatherGitHistory(['hub.ts', 'dedicated.ts'], repoDir);
+  const mixedSignal = gh.computeBugSignal(mixedHistory);
+  const hubEntry = mixedSignal.churnByPath.find((c) => c.path === 'hub.ts');
+  const dedicatedEntry = mixedSignal.churnByPath.find((c) => c.path === 'dedicated.ts');
+  ok(hubEntry?.earliestDate === '2020-01-01', 'a shared hub file reports its OWN earliest date, however old', hubEntry?.earliestDate);
+  ok(dedicatedEntry?.earliestDate === '2026-01-01', 'a feature-dedicated file reports its own, much more recent earliest date — never blended with the hub\'s', dedicatedEntry?.earliestDate);
+  const mixedEvidence = gh.renderHistoryEvidence(mixedHistory, mixedSignal);
+  ok(mixedEvidence.includes('hub.ts (2020-01-01 to 2026-01-05)'), 'the rendered evidence shows each file\'s own date range, not a single blended figure');
+  ok(!/Earliest commit in this evidence/.test(mixedEvidence), 'the old blended "earliest commit in this evidence" line is gone — replaced by per-file ranges the writer must reason about');
+
+  // Real bug, caught by running /explain three times on the SAME unchanged real feature and getting
+  // DIFFERENT primary authors: authorship was counted off `history.commits`, which is capped at
+  // `maxCommits` and newest-first — so the original author's early work falls out of the window and a
+  // later maintainer gets credited with "developing" the feature. Authorship must count the full
+  // per-path history instead. Here: `originalAuthor` makes 5 early commits, `laterMaintainer` makes 3
+  // recent ones, and the merged window is capped at 3 — small enough that the capped list would see
+  // ONLY the later maintainer.
+  const authorRepo = join(TMP, 'explain-authors');
+  mkdirSync(authorRepo, { recursive: true });
+  const arGit = (...args) => execFileSync('git', args, { cwd: authorRepo, stdio: ['ignore', 'pipe', 'pipe'] });
+  arGit('init', '-q');
+  const authored = join(authorRepo, 'thing.ts');
+  for (let i = 0; i < 5; i++) {
+    writeFileSync(authored, `export const thing = ${i};\n`);
+    arGit('-c', 'user.name=originalAuthor', '-c', 'user.email=o@example.com', 'add', 'thing.ts');
+    arGit('-c', 'user.name=originalAuthor', '-c', 'user.email=o@example.com', 'commit', '-q', '-m', `original work ${i}`);
+  }
+  for (let i = 0; i < 3; i++) {
+    writeFileSync(authored, `export const thing = ${i + 100};\n`);
+    arGit('-c', 'user.name=laterMaintainer', '-c', 'user.email=l@example.com', 'add', 'thing.ts');
+    arGit('-c', 'user.name=laterMaintainer', '-c', 'user.email=l@example.com', 'commit', '-q', '-m', `later tweak ${i}`);
+  }
+  const cappedHistory = gh.gatherGitHistory(['thing.ts'], authorRepo, { maxCommits: 3 });
+  ok(cappedHistory.commits.length === 3, 'the merged window is genuinely capped for this test', String(cappedHistory.commits.length));
+  const cappedSignal = gh.computeBugSignal(cappedHistory);
+  const top = cappedSignal.authorsByCommitCount[0];
+  ok(top?.author === 'originalAuthor' && top.commits === 5, 'authorship counts the FULL per-path history, so the original author still leads despite a capped recent window', JSON.stringify(cappedSignal.authorsByCommitCount));
+  ok(cappedSignal.authorsByCommitCount.some((a) => a.author === 'laterMaintainer' && a.commits === 3), 'the later maintainer is still counted accurately, just not credited as the primary author');
 }
 
 // ── markdown: fixed-width contexts (dialog body, QA cards) render, not raw ──
