@@ -11,9 +11,11 @@ captureConsole();
 import {
   screen, addMessage, setStatus, setAgentStatus, clearChat,
   onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
+  showAlert, setStickyAlert, clearStickyAlert,
 } from './ui.js';
+import { isTranscribing, startTranscript, stopTranscript, transcriptPath, transcriptSize, flush as flushTranscript } from './transcript.js';
 import { connect, disconnect, onConnectionChange, isConnected, currentRequestId } from './connection.js';
-import { refreshActiveModel } from './llm/manager.js';
+import { refreshActiveModel, activeModelId } from './llm/manager.js';
 import { initLlmProvider } from './llm/select.js';
 import { getSummaryText, getSummary, resetSummary } from './summary.js';
 import { estimateSessionTokens } from './tokens.js';
@@ -397,6 +399,32 @@ onInput(async (text: string) => {
       case '/model':
         await handleModelCommand(text.slice('/model'.length));
         return;
+      /**
+       * `/transcribe` — start the FULL, unclipped record of this session (see transcript.ts).
+       * `/transcribe off` stops it. It is loud on purpose: the bottom row stays red for as long as it
+       * runs, because this writes every byte the model saw — including whatever a tool printed — to a
+       * file that will get large, and you should never discover that by accident.
+       */
+      case '/transcribe': {
+        const arg = text.slice('/transcribe'.length).trim().toLowerCase();
+        if (arg === 'off' || arg === 'stop') {
+          if (!isTranscribing()) { addMessage('system', 'Not transcribing.'); return; }
+          const p = stopTranscript();
+          clearStickyAlert();
+          addMessage('system', `Transcript closed — ${p}`);
+          return;
+        }
+        if (isTranscribing()) {
+          const { events, bytes } = transcriptSize();
+          addMessage('system', `Already transcribing → ${transcriptPath()} (${events} events, ${(bytes / 1024).toFixed(0)} KB). /transcribe off to stop.`);
+          return;
+        }
+        const p = startTranscript({ cwd: process.cwd(), ayin: getVersion(), model: activeModelId() });
+        if (!p) { addMessage('system', 'Could not start a transcript — no session id yet. Try again in a moment.'); return; }
+        setStickyAlert('warn', `FULL TRANSCRIPT RECORDING — every prompt, response and tool result is being written unclipped to ${p}`);
+        addMessage('system', `Full transcript started → ${p}\nPrompts, raw model responses and complete tool results, nothing clipped. /transcribe off to stop.`);
+        return;
+      }
       case '/lock': {
         // Hold the PRIORITY BAND for this session: short TTL + fast keepalive, so it self-releases if
         // this client dies rather than stranding the GPU. It does not change the model — see
@@ -757,6 +785,15 @@ async function runHeadless(): Promise<void> {
   // Headless runs (ayin -p, the watch daemon) need this exactly like the interactive REPL does.
   await initSession().catch(() => {});
 
+  // FULL TRANSCRIPT for an unattended run — `AYIN_TRANSCRIBE=1` or `--transcribe`. This is the mode
+  // that matters most for it: an enqueued task has nobody watching, so the only way to answer "why did
+  // it do that" afterwards is a complete record written while it ran. Announced on stderr because
+  // stdout is the run's result and must stay parseable.
+  if (process.env.AYIN_TRANSCRIBE === '1' || process.argv.includes('--transcribe')) {
+    const p = startTranscript({ cwd: process.cwd(), ayin: getVersion(), model: activeModelId() });
+    process.stderr.write(p ? `ayin: full transcript → ${p}\n` : 'ayin: could not start a transcript (no session id)\n');
+  }
+
   // Coder authority (AYIN_ACQUIRE_LLM=1): take the llm resource for this run. PRIORITY ONLY — it does
   // not swap the model (no per-owner policy since 1.0.210); the run uses whatever is resident.
   // Sliding grant + unref'd keepalive → auto-released when the process exits; also released
@@ -778,6 +815,7 @@ async function runHeadless(): Promise<void> {
     if (typeof llmHold === 'object') { try { await llmHold.release(); } catch { /* autoreleased on process exit */ } }
   }
 
+  flushTranscript(); // belt and braces — the exit hook covers the rest
   await disconnect();
   process.exit(0);
 }

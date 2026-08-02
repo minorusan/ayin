@@ -23,12 +23,15 @@ import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution } from './tools.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
 import { getGoal } from './goal.js';
-import { addMessage, setAgentStatus, setAgentState, setStatus, HEADLESS, formatToolResultForChat, formatToolCallForChat, escapeBlessedTags, toItalic } from './ui.js';
+import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLESS, formatToolResultForChat, formatToolCallForChat, escapeBlessedTags, toItalic } from './ui.js';
 import { theme } from './ui/theme.js';
 import { log } from './log.js';
 import { checkPermission } from './permissions.js';
 import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
 import { recordPrompt, recordTool, recordAnswer } from './session-record.js';
+// The FULL record (opt-in, unclipped) runs alongside the clipped operating record above — see
+// transcript.ts for why both exist. Every call here is a no-op unless /transcribe is on.
+import { transcribeAnswer, transcribePrompt, transcribeResponse, transcribeTool } from './transcript.js';
 import { getConfig, getPrompt } from './prompts.js';
 import { getRules } from './rules.js';
 import { syncSession, getSessionId } from './session-store.js';
@@ -598,6 +601,7 @@ async function runDiagram(userInput: string): Promise<void> {
 export async function runAgent(userInput: string): Promise<void> {
   currentGoal = userInput;
   recordPrompt(userInput); // consolidated per-session record (prompts + tools + answers)
+  transcribePrompt(userInput); // full transcript (no-op unless /transcribe)
   pushToWindow('user', userInput);
   pushMessage('user', userInput);
   interrupted = false;
@@ -667,6 +671,9 @@ export async function runAgent(userInput: string): Promise<void> {
       }
       const msg = err instanceof Error ? err.message : String(err);
       addMessage('system', `LLM error: ${msg}`);
+      // Also the bottom row: a failed model call used to scroll away behind the next thing printed,
+      // which is when you most need it still on screen.
+      showAlert('error', `LLM call failed — ${msg}`);
       log('ERROR', 'llm_error', { error: msg });
       return;
     }
@@ -677,6 +684,9 @@ export async function runAgent(userInput: string): Promise<void> {
     const parsed = parseToolCalls(response);
     setStatus({ llm: null });
     const hasToolCalls = parsed.toolCalls.length > 0;
+    // The RAW model text, before any parsing strips the tool-call markup — this is the thing you need
+    // when the question is "why did it call that", and it is the first thing every other record drops.
+    transcribeResponse(round, activeModelId(), response, parsed.toolCalls.length);
 
     // For tool-call rounds: print pre-tool reasoning immediately (both modes)
     if (hasToolCalls && parsed.text) {
@@ -690,6 +700,7 @@ export async function runAgent(userInput: string): Promise<void> {
 
     if (!hasToolCalls) {
       recordAnswer(response);
+      transcribeAnswer(response);
       pushToWindow('assistant', response);
       pushMessage('assistant', response);
 
@@ -1028,6 +1039,7 @@ export async function runAgent(userInput: string): Promise<void> {
           completeTask(taskId, r);
           saveArtifact(name, paramPreview, r);
           recordTool(name, paramPreview, r, true);
+          transcribeTool({ round, tool: name, params, result: r, ms: Date.now() - toolStarted, backgrounded: true });
           addMessage('tool', `${formatToolCallForChat(name, `task ${taskId} completed`)}\n${formatToolResultForChat(name, r, Date.now() - toolStarted)}`);
           pushToWindow('user', renderToolResult(`Background ${name} (task ${taskId}) completed:\n${r.substring(0, 16000)}`));
           pushMessage('assistant', `[tool: ${name}(${paramPreview}) → ${r.substring(0, 150)}]`);
@@ -1046,6 +1058,9 @@ export async function runAgent(userInput: string): Promise<void> {
       result = result!;
       saveArtifact(name, paramPreview, result);
       recordTool(name, paramPreview, result);
+      // FULL params (not the 60-char-per-value preview) and the FULL result — the operating record
+      // clips both at 4000 chars, which is exactly the part that explains the next model turn.
+      transcribeTool({ round, tool: name, params, result, ms: Date.now() - toolStarted });
 
       let ctaJustDelivered = false;
       // One formatter for every tool: write_file gets the diff card, the rest a tag-escaped

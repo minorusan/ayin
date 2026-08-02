@@ -26,10 +26,11 @@ import { ChatLog, formatToolResultForChat, formatToolCallForChat, formatGateCard
 import { InputBar } from './widgets/input.js';
 import { CmdHints, registerCommand, type SlashCommand } from './widgets/hints.js';
 import { StatusBar, type StatusState } from './widgets/status.js';
+import { AlertRow, type Alert, type AlertLevel } from './widgets/alert.js';
 import type { AgentState } from './widgets/thinking.js';
 
 export { HEADLESS, THINKING_MODE, screen, registerCommand, formatToolResultForChat, formatToolCallForChat, formatGateCardForChat, escapeBlessedTags, toItalic };
-export type { SlashCommand, StatusState, AgentState, MessageRole };
+export type { SlashCommand, StatusState, AgentState, MessageRole, Alert, AlertLevel };
 
 // ── construct widgets (order matters only for z-stacking of overlays) ─
 
@@ -37,10 +38,13 @@ export const chat = new ChatLog();
 export const hints = new CmdHints();
 export const input = new InputBar();
 export const status = new StatusBar();
+export const alert = new AlertRow();
 
-// Bottom-up stack: status bar, then input, then hints; chat gets the rest.
+// Bottom-up stack: the ALERT row owns the very bottom line (0 rows when there is nothing wrong),
+// then the status bar, then input, then hints; chat gets the rest.
 registerStack(
   [
+    { getHeight: () => alert.getHeight(), setBottom: (r) => alert.setBottom(r) },
     { getHeight: () => status.getHeight(), setBottom: (r) => status.setBottom(r) },
     { getHeight: () => input.getHeight(), setBottom: (r) => input.setBottom(r) },
     { getHeight: () => hints.getHeight(), setBottom: (r) => hints.setBottom(r) },
@@ -91,6 +95,23 @@ export function setAgentState(state: AgentState, label?: string): void {
 
 export function setStatus(partial: Partial<StatusState>): void {
   status.set(partial);
+}
+
+/**
+ * The bottom alert row. `showAlert` is a transient warning/error (auto-clears); `setStickyAlert` is a
+ * standing condition for the session (transcription on) that reappears when transients expire.
+ * Headless is a no-op — there is no row to paint, and these already go to the log.
+ */
+export function showAlert(level: AlertLevel, text: string, ttlMs?: number): void {
+  alert.show({ level, text, ...(ttlMs !== undefined ? { ttlMs } : {}) });
+}
+
+export function setStickyAlert(level: AlertLevel, text: string): void {
+  alert.setSticky({ level, text });
+}
+
+export function clearStickyAlert(): void {
+  alert.setSticky(null);
 }
 
 export function getTokensDisplay(): string {

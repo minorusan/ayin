@@ -1176,6 +1176,35 @@ can finish — see the warning in `SETUP.md`.
 - **`artifacts.ts`** — every tool output is saved under `~/.ayin-cli/artifacts/` and browsable
   in the TUI (`Ctrl+O`); chat shows a 2-line preview.
 - **`history.ts`** — persistent prompt history.
+- **`/transcribe` — the FULL, unclipped record** (`transcript.ts`, 1.0.213). A *second* record with the
+  opposite trade-off to the session log below: **nothing is ever clipped.** Prompts, every model
+  response **verbatim and pre-parse** (the raw text, before tool-call markup is stripped), every tool
+  call with its **full parameters and full result**, the final answer. Off by default; on for a session
+  with `/transcribe` (`/transcribe off` stops it), or for an unattended run with **`AYIN_TRANSCRIBE=1`**
+  / `--transcribe` — which is the mode it was built for, since an enqueued task has nobody watching and
+  the only way to answer "why did it do that" afterwards is a complete record written while it ran.
+
+  Why it exists: the operating record clips every field to 4000 chars, and the part it throws away is
+  usually the 12 KB of tool output the model actually reasoned from. Measured on the first real run —
+  a `read_file` result stored at **9166 chars** that the operating record would have cut at 4000.
+
+  **Two files, on purpose.** `~/.ayin-cli/transcripts/<id>.transcript.jsonl` is append-only, flushed per
+  event — the durable spine, so a `kill -9` costs at most the event being written.
+  `<id>.transcript.json` is the formatted (2-space) document a human or another agent reads, rebuilt
+  from that spine on a 1.5 s debounce (re-stringifying a multi-megabyte transcript on every tool result
+  would make debugging the thing that needs debugging), and always flushed on an answer and on exit.
+  The exit flush is a `process.once('exit')` hook, not a `finally` — both headless paths call
+  `process.exit()`, which skips `finally`, so the last debounce window would have been lost on exactly
+  the unattended runs this serves. `rebuildFromSpine(id)` reconstructs the JSON if a crash lands between
+  debounces. **These files are expected to be large. That is the point.**
+- **The alert row — the bottom line of the screen** (`ui/widgets/alert.ts`, 1.0.213). Warnings and
+  errors, and nothing else, in red, at the very bottom of the stack (below the status bar). Everything
+  used to land in the chat log as a grey `system` message, so a real error scrolled away behind the next
+  tool result at the moment you needed it; this row does not scroll. Two layers: a **sticky** notice (a
+  standing condition — "this session is being transcribed") and a **transient** alert (an LLM error, a
+  blocked tool) that takes the row for a ttl and then falls back to the sticky one. Height 0 when there
+  is nothing to say, because a permanently lit red bar teaches you to ignore red bars. Same GLYPH RULE
+  as the status bar — `▲`/`■` are BMP, non-emoji-presentation, width 1; `npm run check:glyphs` enforces it.
 - **Sessions + `/resume`** (`session-store.ts` reads, `session-record.ts` writes). Every run appends
   one JSON line per prompt / tool call / answer to `~/.ayin-cli/sessions/<id>.jsonl`, each line
   carrying its `cwd`; `syncSession()` (called each turn by the agent) keeps a
@@ -1285,17 +1314,19 @@ src/
 ├── history.ts          prompt history
 ├── tokens.ts           context-meter estimate
 ├── session-store.ts    local session store: list / resume / checkpoint (cwd-scoped)
+├── transcript.ts       /transcribe — the FULL unclipped record (jsonl spine + formatted json)
 ├── ui.ts               compatibility façade → src/ui/ (all './ui.js' imports keep working)
 ├── ui/                 the TUI, decoupled:
 │   ├── headless.ts     HEADLESS/THINKING_MODE detection + noop element factories
 │   ├── theme.ts        every color + glyph in one place (widgets never hardcode)
 │   ├── screen.ts       the one blessed screen — copy-paste contract: NO mouse tracking, ever
-│   ├── layout.ts       bottom-up widget stack (status→input→hints→chat); the only geometry authority
+│   ├── layout.ts       bottom-up stack (alert→status→input→hints→chat); the only geometry authority
 │   ├── ticker.ts       the one animation heartbeat (80ms; runs only while something animates)
 │   ├── keys.ts         the one keypress router (global keys → input → chat scroll)
 │   └── widgets/        chat.ts (ChatLog + diff cards) · thinking.ts (ThinkingIndicator —
 │                       stateful animation) · input.ts (InputBar) · hints.ts (CmdHints +
-│                       slash registry) · status.ts (StatusBar)
+│                       slash registry) · status.ts (StatusBar) · alert.ts (AlertRow — the
+│                       bottom-most row: warnings + errors, red, 0 rows when silent)
 ├── markdown.ts / dialog.ts / log.ts   render + overlay + logging helpers
 ├── image.ts            image downscale for vision turns
 └── jira.ts / tg-auth*.ts   optional integrations
