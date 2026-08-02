@@ -5,13 +5,18 @@
 # is always up and resumes its queue on boot — same power-cut discipline.
 #
 #   powershell -ExecutionPolicy Bypass -File tool\install-watch-windows.ps1 `
-#       -LlmUrl http://192.168.0.229:9100
+#       -LlmUrl http://<your-llm-host>:9100
+#
+# `-LlmUrl` is REQUIRED and has no default: it used to ship pointing at one machine on the author's
+# own LAN, which silently aimed every fresh install at a host that isn't yours. If the endpoint runs on
+# this same Windows box, pass http://localhost:9100 explicitly.
 #
 # Requires: Node on PATH, and Git for Windows (git runs the .git/hooks/post-commit + post-merge
 # shell hooks through its bundled bash — the hooks are portable `#!/bin/sh`). Uninstall:
 #   Unregister-ScheduledTask -TaskName AyinWatch -Confirm:$false
 param(
-  [string]$LlmUrl = "http://192.168.0.229:9100",
+  [Parameter(Mandatory = $true)]
+  [string]$LlmUrl,
   [string]$TaskName = "AyinWatch"
 )
 $ErrorActionPreference = "Stop"
