@@ -10,6 +10,7 @@ const NO_TUI_COMMANDS = new Set([
   'watch',      // watch daemon
   'update',     // self-update from the registry
   'version', '--version', '-v',
+  'explain',    // headless `ayin explain "<question>"` — prints the narrative, exits
 ]);
 
 export const HEADLESS = process.argv.some(a => a === '-p' || a === '--prompt' || a === '--non-interactive')

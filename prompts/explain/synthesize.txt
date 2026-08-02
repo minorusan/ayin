@@ -1,7 +1,8 @@
-Write a report that answers ONE question: what was this feature supposed to do, versus what actually
-exists in the code today — and where the two diverge, what should someone touching it be careful about.
+Write the STORY of this feature, in plain flowing prose — the way you'd explain it out loud to a
+teammate who just joined and has never seen it, not a structured report. No markdown `##` headings, no
+bullet-pointed sections: a handful of short paragraphs that read like one continuous explanation.
 Every fact must trace back to something in the EVIDENCE below; where the evidence is thin or silent,
-say so plainly rather than filling the gap with a plausible-sounding guess.
+say so plainly, in prose, rather than filling the gap with a plausible-sounding guess.
 
 FEATURE ASKED ABOUT: {{FEATURE}}
 
@@ -12,39 +13,30 @@ WHAT THE CODE ACTUALLY DOES (from a real investigation of the repo):
 
 {{JIRA_BLOCK}}
 
-Write exactly these five sections, as markdown `##` headings, in this order:
+Cover these beats, in this order, as prose paragraphs (not headings) — each one flows into the next:
 
-## Intention
-What this was ASKED to do, from the evidence — a resolved Jira ticket's summary (name the reporter and
-ticket key), or failing that, the earliest commit's own subject/message if it states a purpose. If
-NEITHER gives a real stated intention, say plainly that no original intent could be recovered from the
-evidence — do not invent a reporter, a ticket, or a motivation to fill the gap.
+1. WHAT IT IS AND WHO BUILT IT. Open with what this feature is, in one sentence. Then its origin: who
+   developed it mainly (the AUTHORSHIP evidence above — name whoever actually holds the most commits,
+   never a guess), and roughly when it was introduced (the earliest commit in the evidence, or a
+   resolved Jira ticket's date/reporter if one was found). If authorship or origin can't be recovered
+   from the evidence, say so plainly instead of inventing a name or date.
 
-## What actually exists
-How it works TODAY, grounded in the explore findings above — name the real files/functions/modules it
-mentions. This is a description of current reality, not a design proposal and not a restatement of the
-intention above.
+2. LIFECYCLE AND BUGS. What has happened to it since — has it been stable, or did it go through periods
+   of churn and fixes? Name the bugfix-looking commits and what they were about, and name the
+   file(s)/area(s) that churned the most and why that's worth knowing. If the evidence shows no visible
+   bug history, say that plainly — don't manufacture a "had issues" narrative the commits don't support.
 
-## How they map
-The actual comparison: does what exists TODAY (the section above) match the intention, or has it grown
-past it, fallen short of it, or drifted into solving a different problem than originally stated? Be
-concrete — name the specific gap or match, don't just say "mostly matches." If there was no recoverable
-intention to compare against, say so here too, and describe instead how the implementation evolved
-(condensed from the commit evidence — group related commits into a narrative, e.g. "introduced in X,
-then Y reworked the retry logic, then Z fixed a race" — never mention a commit that isn't in the
-evidence above).
+3. WHAT IT'S MADE OF. Walk through its composition, grounded in the explore findings — roughly how many
+   files/modules it spans and what each significant one is responsible for (this file owns the UI, that
+   one owns the state machine, this one talks to the backend, etc.). Name real files and functions, not
+   generic descriptions.
 
-## Problem areas — be careful here
-State plainly what the evidence shows: which file(s) were touched most (the churn count), and which
-commits looked like bugfixes (by subject). If the evidence lists NO bugfix-looking commits, say this
-area has no visible bug history in the commits examined — do not manufacture a "this has had bugs"
-narrative to fill the section. If a specific file/area churned unusually, name it and say concretely
-why that's worth being careful around (a collision, a race, a repeated fix pattern — whatever the
-subjects actually show) — this is the section someone about to modify this feature reads first.
+4. HOW IT'S WIRED UP. How it gets initialized or registered (a DI installer, a startup hook, a config
+   entry point — whatever the evidence shows), what it depends on (other systems, services, config
+   values), and anything else about its setup someone touching it for the first time should know.
 
-## Summary
-2-3 sentences: what this feature is, whether reality matches its original intention, and the single
-thing worth knowing before touching it.
+Close with one or two sentences on the single thing worth knowing before touching this feature.
 
-Tone: plain, evidence-first, no filler. A confident-sounding paragraph with nothing behind it is worse
-than an honest "the evidence here is thin."
+Tone: plain, evidence-first, conversational — like a colleague telling the story, not a template being
+filled in. A confident-sounding paragraph with nothing behind it is worse than an honest "the evidence
+here is thin."

@@ -89,10 +89,17 @@ interface ComponentGroup {
   component: ArduinoComponent | null;
   /** legName -> connectsTo text, in catalog order (or a single synthetic "pin" leg for an unmatched pin). */
   legs: Array<{ legName: string; connectsTo: string }>;
-  /** The one leg the sketch's own pin actually drives. */
-  groundedLeg: string;
-  boardPinKey: string;
-  boardPinLabel: string;
+  /**
+   * EVERY real board-pin → leg wire the sketch actually makes to this component. Usually one, but a
+   * multi-channel part (an RGB LED with a separate PWM pin per color, a stepper with multiple coil
+   * pins) drives several legs from several DIFFERENT pins — a single "the one leg this drives" field
+   * cannot represent that without losing wires. Caught live against a real project (Janitor.ino): three
+   * pins (9/10/11) each drove one anode of the SAME rgb-led-common-cathode component; the single-leg
+   * model kept only the FIRST pin's label and let the LAST connection's leg match win, rendering as one
+   * mislabeled wire ("BLUE_PIN → red anode") with the other two pins silently missing from the board
+   * rectangle entirely — a real, reproduced data-loss bug, not a hypothetical.
+   */
+  groundedConnections: Array<{ leg: string; boardPinKey: string; boardPinLabel: string }>;
 }
 
 /**
@@ -120,8 +127,9 @@ function matchLeg(connLeg: string, legs: Array<{ legName: string }>): string {
   return best.legName;
 }
 
-/** Group grounded connections by component so a component with two driven pins (rare, but the catalog
- *  allows it) still renders as ONE box, not two overlapping ones. */
+/** Group grounded connections by component so a component driven from several pins (an RGB LED's three
+ *  color anodes, each its own PWM pin) still renders as ONE box with ALL of its real wires — never
+ *  collapsed down to whichever pin happened to be processed first. */
 function groupByComponent(pins: PinUsage[], connections: GroundedConnection[]): ComponentGroup[] {
   const byPin = new Map(connections.map((c) => [c.pin, c]));
   const groups = new Map<string, ComponentGroup>();
@@ -135,14 +143,17 @@ function groupByComponent(pins: PinUsage[], connections: GroundedConnection[]): 
       const key = `unknown_${unknownIdx++}`;
       groups.set(key, {
         key, label: conn?.label || p.calls.join('/') || 'Unmatched pin', component: null,
-        legs: [{ legName: 'pin', connectsTo: '' }], groundedLeg: 'pin',
-        boardPinKey: p.resolved, boardPinLabel: pinLabel,
+        legs: [{ legName: 'pin', connectsTo: '' }],
+        groundedConnections: [{ leg: 'pin', boardPinKey: p.resolved, boardPinLabel: pinLabel }],
       });
       continue;
     }
 
     const existing = groups.get(conn.componentId);
-    if (existing) { existing.groundedLeg = matchLeg(conn.leg, existing.legs) || existing.groundedLeg; continue; } // rare 2nd-pin case — first pin wins the drawn wire, kept simple
+    if (existing) {
+      existing.groundedConnections.push({ leg: matchLeg(conn.leg, existing.legs), boardPinKey: p.resolved, boardPinLabel: pinLabel });
+      continue;
+    }
     const component = getArduinoComponent(conn.componentId) ?? null;
     const legs = component ? component.legs.map((l) => ({ legName: l.legName, connectsTo: l.connectsTo })) : [{ legName: conn.leg || 'pin', connectsTo: '' }];
     groups.set(conn.componentId, {
@@ -150,9 +161,7 @@ function groupByComponent(pins: PinUsage[], connections: GroundedConnection[]): 
       label: component?.name ?? conn.label,
       component,
       legs,
-      groundedLeg: matchLeg(conn.leg, legs),
-      boardPinKey: p.resolved,
-      boardPinLabel: pinLabel,
+      groundedConnections: [{ leg: matchLeg(conn.leg, legs), boardPinKey: p.resolved, boardPinLabel: pinLabel }],
     });
   }
   return [...groups.values()];
@@ -174,8 +183,9 @@ export function renderArduinoWiringPuml(
   const boardLabel = board === 'nano' ? 'Arduino Nano' : 'Arduino Uno';
   const groups = groupByComponent(pins, connections);
 
-  const needsGnd = groups.some((g) => g.legs.some((l) => l.legName !== g.groundedLeg && GND_RE.test(l.connectsTo)));
-  const needsPower = groups.some((g) => g.legs.some((l) => l.legName !== g.groundedLeg && POWER_RE.test(l.connectsTo)));
+  const groundedLegNames = (g: ComponentGroup): Set<string> => new Set(g.groundedConnections.map((c) => c.leg));
+  const needsGnd = groups.some((g) => { const gl = groundedLegNames(g); return g.legs.some((l) => !gl.has(l.legName) && GND_RE.test(l.connectsTo)); });
+  const needsPower = groups.some((g) => { const gl = groundedLegNames(g); return g.legs.some((l) => !gl.has(l.legName) && POWER_RE.test(l.connectsTo)); });
 
   const lines: string[] = [];
   lines.push('@startuml');
@@ -205,10 +215,12 @@ export function renderArduinoWiringPuml(
   lines.push(`rectangle ${quote(boardLabel)} <<board>> as BOARD {`);
   const pinAlias = new Map<string, string>();
   for (const g of groups) {
-    if (pinAlias.has(g.boardPinKey)) continue;
-    const a = alias('PIN', g.boardPinKey);
-    pinAlias.set(g.boardPinKey, a);
-    lines.push(`  rectangle ${quote(g.boardPinLabel)} <<pin>> as ${a}`);
+    for (const conn of g.groundedConnections) {
+      if (pinAlias.has(conn.boardPinKey)) continue;
+      const a = alias('PIN', conn.boardPinKey);
+      pinAlias.set(conn.boardPinKey, a);
+      lines.push(`  rectangle ${quote(conn.boardPinLabel)} <<pin>> as ${a}`);
+    }
   }
   if (needsGnd) lines.push('  rectangle "GND" <<gnd>> as BOARD_GND');
   if (needsPower) lines.push('  rectangle "5V" <<power>> as BOARD_5V');
@@ -239,16 +251,37 @@ export function renderArduinoWiringPuml(
     }
     lines.push('');
 
-    const boardAlias = pinAlias.get(g.boardPinKey);
-    const groundedAlias = legAliases.get(g.groundedLeg);
-    if (boardAlias && groundedAlias) wires.push(`${boardAlias} --> ${groundedAlias} : signal`);
+    // One signal wire per REAL board-pin → leg connection — a multi-channel component (three PWM pins
+    // driving three RGB anodes) gets all three wires, not just the first one seen.
+    for (const conn of g.groundedConnections) {
+      const boardAlias = pinAlias.get(conn.boardPinKey);
+      const legAlias = legAliases.get(conn.leg);
+      if (boardAlias && legAlias) wires.push(`${boardAlias} --> ${legAlias} : signal`);
+    }
 
+    // ONE wire per net, not one per leg. A catalog component often lists a ground/power net as TWO+
+    // separate legs that are internally shorted and only exist as a pair for mechanical stability
+    // (push-button's own catalog text says so explicitly: "wiring only one is enough") — drawing a
+    // wire from EVERY such leg to the synthetic GND/5V pin claims you need two ground wires, which is
+    // wrong and was reported live against a real render (two separate wires from a 4-leg button to
+    // GND). The first matching leg gets the wire; the rest are drawn as bare rectangles (still visible,
+    // still labeled), same as any other unwired leg.
+    const groundedLegs = new Set(g.groundedConnections.map((c) => c.leg));
+    let groundDrawn = false;
+    let powerDrawn = false;
     for (const leg of g.legs) {
-      if (leg.legName === g.groundedLeg) continue;
+      if (groundedLegs.has(leg.legName)) continue;
       const legAlias2 = legAliases.get(leg.legName);
       if (!legAlias2) continue;
-      if (GND_RE.test(leg.connectsTo)) wires.push(`${legAlias2} --> BOARD_GND : ground`);
-      else if (POWER_RE.test(leg.connectsTo)) wires.push(`${legAlias2} --> BOARD_5V : power`);
+      if (GND_RE.test(leg.connectsTo)) {
+        if (groundDrawn) continue;
+        wires.push(`${legAlias2} --> BOARD_GND : ground`);
+        groundDrawn = true;
+      } else if (POWER_RE.test(leg.connectsTo)) {
+        if (powerDrawn) continue;
+        wires.push(`${legAlias2} --> BOARD_5V : power`);
+        powerDrawn = true;
+      }
     }
   }
 

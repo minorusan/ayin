@@ -1,26 +1,27 @@
 /**
  * `/explain` — the "tell me the story of this feature" command. Broader than `explore`: `explore`
- * finds and reads code; `/explain` additionally pulls in the feature's real git history, correlates
- * any Jira tickets referenced in commit messages, and writes a narrative report PLUS an architecture
- * diagram, both opened in VS Code.
+ * finds and reads code; `/explain` additionally pulls in the feature's real git history and authorship,
+ * correlates any Jira tickets referenced in commit messages, and writes the whole thing as a narrative
+ * — history and authorship, lifecycle/bugs, composition, and how it's wired up — in plain prose, opened
+ * in VS Code. Callable two ways: the interactive `/explain <feature>` command, and the headless
+ * `ayin explain "<question>"` CLI subcommand (`index.ts`'s `main()`) — both call `runExplain` directly,
+ * so there is exactly one implementation of the pipeline, not one per invocation path.
+ *
+ * NO DIAGRAM (for now). An earlier version also drew an architecture diagram alongside the report
+ * (`tools/diagram.ts`'s validated PlantUML loop). Deliberately dropped per the operator: the report is
+ * meant to read like a story a colleague tells you, and a diagram is a separate concern to revisit later
+ * — not a bug, not a regression, a scope decision. If diagram support returns, it belongs back here as
+ * an explicit opt-in, not bundled unconditionally into every `/explain` call.
  *
  * PIPELINE — deterministic gathering feeds ONE synthesis call, same "evidence before opinion" shape
  * `qa/` and `arduino-explain.ts` already use:
  *
  *   exploreExecute (reused verbatim, `plan/index.ts`'s exact call shape — an agentic loop, real GPU time)
  *   → extractExistingPaths (pure: which of explore's mentioned paths are real files)
- *   → gatherGitHistory + computeBugSignal (pure: git log --follow, deduped, churn/bugfix counted)
+ *   → gatherGitHistory + computeBugSignal (pure: git log --follow, deduped, churn/bugfix/authorship counted)
  *   → extractTicketCandidates → jiraTickets (self-validating: a shape match is never trusted alone —
  *     the Maradel backend's `jira` resource is what actually asks the real API, ayin only consumes it)
- *   → ONE llmChat call writes the five-section report
- *   → makeDiagram (reused from tools/diagram.ts — the SAME validated PlantUML loop, not a second
- *     implementation) draws the architecture, grounded in the same explore findings.
- *
- * Two files, two `openInEditor` calls — the report and the diagram are separate deliverables, each
- * useful on its own (you might want the picture without re-reading the prose, or vice versa).
- *
- * COMMAND-ONLY. Not registered as an agent-callable tool — the agent already has `explore` for
- * self-orientation mid-task; this is a user-directed deep dive, invoked explicitly via `/explain`.
+ *   → ONE llmChat call writes the narrative, in prose, no headings
  */
 
 import { existsSync, writeFileSync } from 'node:fs';
@@ -32,7 +33,7 @@ import { jiraTickets } from '../jira.js';
 import { llmChat } from '../llm/manager.js';
 import { prompts, packagePath } from '../prompts-service.js';
 import { openInEditor } from '../editor.js';
-import { makeDiagram, slugify, type DiagramResult } from '../tools/diagram.js';
+import { slugify } from '../tools/diagram.js';
 import { projectRoot } from '../qa/probes.js';
 import { pushActivity, setActivityDetail } from '../activity.js';
 import { log } from '../log.js';
@@ -44,7 +45,9 @@ export interface ExplainOutcome {
   reason?: string;
   reportPath?: string;
   reportOpened?: boolean;
-  diagram?: DiagramResult;
+  /** The narrative text itself — a headless caller (`ayin explain "..."`) prints this directly rather
+   *  than re-reading the file it was also written to. */
+  body?: string;
 }
 
 function explainFilename(feature: string, now = new Date()): string {
@@ -81,7 +84,7 @@ export async function runExplain(argText: string, cwd: string = process.cwd()): 
     let exploreFindings = '';
     try {
       exploreFindings = await exploreExecute({
-        question: `Explain how this works and exactly where it lives in the codebase (name real files/functions): ${feature}`,
+        question: `Explain how this works and exactly where it lives in the codebase (name real files/functions) — including how it's initialized or registered (a DI installer, a startup hook, an entry point), what it depends on, and any config it reads: ${feature}`,
         thorough: 'true',
       });
     } catch (err) {
@@ -116,9 +119,9 @@ export async function runExplain(argText: string, cwd: string = process.cwd()): 
     const lookup = candidates.length ? await jiraTickets(candidates) : null;
     const jiraBlock = buildJiraBlock(paths, candidates, lookup);
 
-    // 4. synthesis — one call, five fixed sections, grounded in everything gathered above.
-    setActivityDetail('writing the report');
-    const body = await llmChat([{
+    // 4. synthesis — one call, the whole story in prose, grounded in everything gathered above.
+    setActivityDetail('writing the story');
+    const body = (await llmChat([{
       role: 'user',
       content: explainPrompts.get('synthesize', {
         FEATURE: feature,
@@ -126,7 +129,7 @@ export async function runExplain(argText: string, cwd: string = process.cwd()): 
         HISTORY_EVIDENCE: historyEvidence,
         JIRA_BLOCK: jiraBlock,
       }),
-    }]);
+    }])).trim();
 
     const reportPath = join(cwd, explainFilename(feature));
     const header = [
@@ -137,34 +140,20 @@ export async function runExplain(argText: string, cwd: string = process.cwd()): 
       `# ${feature}`,
       '',
     ].join('\n');
-    writeFileSync(reportPath, `${header}${body.trim()}\n`);
+    writeFileSync(reportPath, `${header}${body}\n`);
     const reportOpened = await openInEditor(reportPath);
     log('INFO', 'explain_report_written', { feature, path: reportPath, paths: String(paths.length), commits: String(history.commits.length), tickets: String(lookup?.ok ? lookup.tickets.length : 0) });
 
-    // 5. architecture diagram — reuses tools/diagram.ts's OWN validated PlantUML loop, not a second
-    // implementation; grounded in the same explore findings + the churn signal, so it names real code.
-    setActivityDetail('drawing the architecture diagram');
-    const diagramContext = [
-      exploreFindings.slice(0, 3000),
-      signal.churnByPath.length ? `Most-touched file(s) in its history: ${signal.churnByPath.slice(0, 3).map((c) => `${c.path} (${c.commits} commits)`).join(', ')}` : '',
-    ].filter(Boolean).join('\n\n');
-    const diagram = await makeDiagram(`the architecture of ${feature}`, { context: diagramContext, dir: cwd });
-
-    return { ok: true, reportPath, reportOpened, diagram };
+    return { ok: true, reportPath, reportOpened, body };
   } finally {
     endPhase();
   }
 }
 
+/** Used by the interactive `/explain` command, which shows this short line in chat — the file (opened
+ *  in VS Code) is where the actual story lives. The headless `ayin explain` CLI prints `o.body` itself
+ *  instead of calling this — see `runExplainCli` in `index.ts`. */
 export function formatExplainOutcome(o: ExplainOutcome): string {
   if (!o.ok) return o.reason ?? 'Nothing to report.';
-  const lines = [
-    `Report: ${o.reportPath}${o.reportOpened ? ' (opened in editor)' : ' (no editor found on PATH — open it manually)'}`,
-  ];
-  if (o.diagram?.ok) {
-    lines.push(`Diagram: ${o.diagram.file}${o.diagram.unverified ? ' (plantuml not installed — structural check only)' : ''}${o.diagram.opened ? ' (opened in editor)' : ' (no editor found on PATH — open it manually)'}`);
-  } else if (o.diagram) {
-    lines.push(`Diagram FAILED after ${o.diagram.rounds} round(s): ${o.diagram.error}`);
-  }
-  return lines.join('\n');
+  return `Report: ${o.reportPath}${o.reportOpened ? ' (opened in editor)' : ' (no editor found on PATH — open it manually)'}`;
 }

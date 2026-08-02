@@ -93,6 +93,10 @@ export interface BugSignal {
   bugfixCommits: GitCommit[];
   /** Which of the paths handed in were touched most often, most-churned first. */
   churnByPath: Array<{ path: string; commits: number }>;
+  /** Who actually committed to these files, most commits first — the deterministic fact behind
+   *  "developed mainly by X" in the narrative report; the writer is handed this instead of guessing
+   *  authorship from skimming a commit list itself. */
+  authorsByCommitCount: Array<{ author: string; commits: number }>;
 }
 
 export function computeBugSignal(history: GitHistoryResult): BugSignal {
@@ -100,7 +104,14 @@ export function computeBugSignal(history: GitHistoryResult): BugSignal {
   const churnByPath = Object.entries(history.byPath)
     .map(([path, commits]) => ({ path, commits: commits.length }))
     .sort((a, b) => b.commits - a.commits);
-  return { bugfixCommits, churnByPath };
+
+  const authorCounts = new Map<string, number>();
+  for (const c of history.commits) authorCounts.set(c.author, (authorCounts.get(c.author) ?? 0) + 1);
+  const authorsByCommitCount = [...authorCounts.entries()]
+    .map(([author, commits]) => ({ author, commits }))
+    .sort((a, b) => b.commits - a.commits);
+
+  return { bugfixCommits, churnByPath, authorsByCommitCount };
 }
 
 /** Render history + bug signal as plain text for the synthesis prompt — facts only, no opinions,
@@ -109,6 +120,11 @@ export function renderHistoryEvidence(history: GitHistoryResult, signal: BugSign
   const lines: string[] = [];
   lines.push(`COMMIT HISTORY (${history.commits.length} commit(s), newest first):`);
   for (const c of history.commits) lines.push(`  ${c.date}  ${c.hash.slice(0, 8)}  ${c.author.padEnd(20)}  ${c.subject}`);
+
+  lines.push('');
+  lines.push('AUTHORSHIP BY COMMIT COUNT (a measured fact — attribute "developed mainly by" to whoever actually leads here, never a guess):');
+  for (const { author, commits } of signal.authorsByCommitCount) lines.push(`  ${commits} commit(s) — ${author}`);
+  lines.push(history.commits.length ? `  Earliest commit in this evidence: ${history.commits[history.commits.length - 1].date} (${history.commits[history.commits.length - 1].author})` : '');
 
   lines.push('');
   lines.push(`CHURN BY FILE (most-touched first — a measured fact, not a guess about fragility):`);

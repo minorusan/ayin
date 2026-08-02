@@ -244,10 +244,14 @@ thinking behind rather than only half the work.
 ## `/explain` (`src/explain/`)
 
 Broader than `explore`: `explore` finds and reads code; `/explain <feature>` additionally pulls in the
-feature's real git history, correlates any Jira tickets referenced in commit messages, and answers one
-specific question — **what was this supposed to do, versus what actually exists, and where should
-someone be careful** — not a neutral changelog. **Command-only**, not agent-callable: the agent already
-has `explore` for self-orientation; this is a user-directed deep dive.
+feature's real git history and authorship, correlates any Jira tickets referenced in commit messages,
+and tells its STORY in plain prose — the way you'd explain it out loud to a teammate who just joined —
+not a neutral changelog and not a structured report. Callable two ways, both running the exact same
+`runExplain` pipeline (one implementation, not one per path): the interactive `/explain <feature>`
+command, and the headless **`ayin explain "<question>"`** CLI subcommand (`index.ts`'s `main()` —
+`'explain'` is in `ui/headless.ts`'s `NO_TUI_COMMANDS` set so blessed never grabs the terminal for it,
+same mechanism `watch`/`update`/`version` already use). Not agent-callable either way: the agent already
+has `explore` for self-orientation mid-task; this is a user-directed deep dive.
 
 **Pipeline** (deterministic gathering feeds ONE synthesis call, same "evidence before opinion" shape
 `qa/` and `arduino-explain.ts` already use):
@@ -255,14 +259,20 @@ has `explore` for self-orientation; this is a user-directed deep dive.
 ```
 exploreExecute (reused verbatim — plan/index.ts's exact call shape, an agentic loop, real GPU time)
   → extractExistingPaths (pure: which of explore's mentioned paths are real files on disk)
-  → gatherGitHistory + computeBugSignal (pure: git log --follow, deduped, churn/bugfix counted)
+  → gatherGitHistory + computeBugSignal (pure: git log --follow, deduped, churn/bugfix/authorship counted)
   → extractTicketCandidates → jiraTickets (self-validating — see below)
-  → ONE llmChat call writes the five-section report
-  → makeDiagram (reused from tools/diagram.ts — the SAME validated PlantUML loop, not a second
-    implementation) draws the architecture, grounded in the same explore findings
+  → ONE llmChat call writes the narrative, in prose, no headings
 ```
 
-Two files, two `openInEditor` calls — the report and the diagram are separate deliverables.
+One file, one `openInEditor` call. `runExplain` returns the narrative text itself (`ExplainOutcome.body`)
+alongside the file path — the interactive command shows a short "Report: path" line in chat (the file,
+opened in VS Code, is where the story actually lives), while the headless CLI prints `body` straight to
+stdout, since there's no chat UI to open an editor into.
+
+**NO DIAGRAM (for now).** An earlier version also drew an architecture diagram alongside the report,
+reusing `tools/diagram.ts`'s validated PlantUML loop. Deliberately dropped per the operator: the report
+now reads like a story, and a diagram is a separate concern to pick back up later — a scope decision,
+not a regression. If it returns, it belongs back as an explicit opt-in, not bundled into every call.
 
 - **Path resolution is root-relative, not cwd-relative — a real bug caught by testing against a
   subdirectory.** `exploreExecute` reads `process.cwd()` internally (same as `plan/index.ts`'s own
@@ -281,23 +291,28 @@ Two files, two `openInEditor` calls — the report and the diagram are separate 
   deliberately includes a `KY-040` mention alongside a real-looking `PP-101` key, and both are extracted
   as candidates by `extractTicketCandidates`. `jira.ts#jiraTickets` (a resource-client call, see the
   Tools section) batch-validates candidates against the real API and only what Jira actually resolves
-  is treated as a real ticket — the report's `## Intention` section is told explicitly never to
-  attribute a feature to an unresolved candidate.
-- **The synthesis prompt (`prompts/explain/synthesize.txt`) asks for five fixed sections**: `Intention`
-  (what was asked for — a resolved ticket's reporter/summary, or the earliest commit's own stated
-  purpose, or an honest "could not be recovered"), `What actually exists` (grounded in explore's
-  findings), `How they map` (the actual gap analysis — matches, drift, scope creep), `Problem areas —
-  be careful here` (the churn/bugfix evidence, by name — never a manufactured "this had bugs" if the
-  evidence shows none), `Summary`.
+  is treated as a real ticket — `buildJiraBlock` tells the writer explicitly never to attribute a
+  feature to an unresolved candidate.
+- **The synthesis prompt (`prompts/explain/synthesize.txt`) asks for flowing prose, NO markdown
+  headings** — four beats covered in order, each flowing into the next: (1) what it is and who built it
+  (the authorship evidence below, plus the earliest commit or a resolved ticket's date, or an honest
+  "could not be recovered"), (2) lifecycle and bugs (churn/bugfix evidence, by name — never a
+  manufactured "this had bugs" if the evidence shows none), (3) what it's made of (composition, grounded
+  in explore's findings — real files/functions, not generic descriptions), (4) how it's wired up
+  (initialization/registration, dependencies, config) — closing with the one thing worth knowing before
+  touching it.
 - **`gatherGitHistory`/`computeBugSignal` are deterministic, no LLM** (`src/explain/git-history.ts`) —
   `git log --follow` per path (survives renames), deduped by hash across paths, newest first; a
   separate per-path count feeds the churn signal (most-touched file first) independently of the
   merged/capped chronological list, so a real "how often was this touched" number is never distorted
   by the cap. Bugfix-looking commits are flagged by subject (`fix|bug|regression|crash|race|broken|
   revert|hotfix|workaround`) — evidence handed to the writer, not an opinion it has to invent.
+  `computeBugSignal` also aggregates **`authorsByCommitCount`** — who actually committed to these files,
+  most commits first — the deterministic fact behind "developed mainly by X" in the narrative; the
+  writer is handed this instead of guessing authorship from skimming a raw commit list itself.
 - **README/Jira absence never blocks the report** — same philosophy as `arduino-explain.ts`: a feature
   with no linkable ticket, or a repo with thin history, still gets a report; the gaps are stated
-  honestly (`## Intention`: "no original intent could be recovered") rather than papered over.
+  honestly ("no original intent could be recovered") rather than papered over.
 - **Verified against the real backend, not assumed**: run live against maradel backend's actual
   `llmResource` (`backend/src/resources/llm.ts`) from a `backend/` launch directory — correctly
   identified the real file (not a same-named decoy — ayin's own `acquireLlm`/`llm/authority.ts` was
@@ -308,7 +323,8 @@ Two files, two `openInEditor` calls — the report and the diagram are separate 
 - A stale **materialized local prompt** trap bit verification here too, same as `diagram.ts`'s own
   documented history: editing `prompts/explain/synthesize.txt` AFTER its first live call does nothing
   until the already-materialized `~/.ayin-cli/prompts/explain/synthesize.txt` is removed (or `/reset`)
-  — caught because the second live run's report still showed the old section headings.
+  — worth restating here since it is easy to mistake for "the prompt change didn't take" when it is
+  actually "the edit never reached the model".
 
 ## Tool guard (`tool-guard.ts`)
 

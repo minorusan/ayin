@@ -311,29 +311,46 @@ rectangle rather than being dropped.
 behind would defeat the point of a *teaching* tool. Not opened in an editor for you automatically there;
 only the explicit `/arduino-explain` command (or an agent-initiated `arduino_diagram` call) does that.
 
-## `/explain <feature>` — intention vs. reality, and where to be careful
+## `/explain <feature>` — the story of a feature, in plain prose
 
 Broader than `explore`: `explore` finds and reads code; `/explain` additionally pulls in the feature's
-real git history and any Jira tickets referenced in its commit messages, then answers one specific
-question — **what was this supposed to do, versus what actually exists, and what should I be careful
-about** — not a neutral changelog. Command-only (like `/plan`), not agent-callable.
+real git history and authorship, and any Jira tickets referenced in its commit messages, then tells its
+STORY — the way you'd explain it out loud to a teammate who just joined — not a neutral changelog and
+not a structured report. Command-only (like `/plan`), not agent-callable, but runnable two ways:
 
 ```
 ❯ /explain the llm resource
 Explaining: the llm resource...
 Report: /you/project/ayin-explain-the-llm-resource-20260731-081946.md (opened in editor)
-Diagram: /you/project/the-architecture-of-the-llm-resource.puml (opened in editor)
 ```
 
-Pipeline: `explore` investigates (its own agentic loop) → real file paths are extracted from its
-answer and confirmed on disk → `git log --follow` per path, deduped, with a churn count and a
-bugfix-commit flag (evidence, not a guess about fragility) → any `PROJECT-123`-shaped string in a
-commit subject is a CANDIDATE only — a generic ticket-key shape is structurally identical to plenty of
-ordinary text (a hardware part number like `KY-040` is the exact same shape), so candidates are
-batch-validated against the real Jira API and only what actually resolves counts → one LLM call writes
-five fixed sections (`Intention` / `What actually exists` / `How they map` / `Problem areas — be
-careful here` / `Summary`) → an architecture diagram (`diagram`'s own validated PlantUML loop, reused
-as-is). Both files open in VS Code.
+or headless, straight from a shell — the narrative prints to stdout, the file's still written:
+
+```bash
+ayin explain "explain me the checkout feature"
+```
+```
+The checkout feature is a payment flow developed mainly by Jane Doe, introduced in June 2026...
+(brief history and authorship, then lifecycle/bugs, then what it's made of, then how it's
+ wired up — config and dependencies — closing with the one thing worth knowing before touching it)
+
+Full report written to /you/project/ayin-explain-explain-me-the-checkout-feature-20260802-101530.md
+```
+
+Pipeline: `explore` investigates (its own agentic loop, also asked to surface how the feature is
+initialized/registered and what it depends on) → real file paths are extracted from its answer and
+confirmed on disk → `git log --follow` per path, deduped, with a churn count, a bugfix-commit flag, and
+an **authorship count** (who actually committed here, most commits first — the fact behind "developed
+mainly by X") → any `PROJECT-123`-shaped string in a commit subject is a CANDIDATE only — a generic
+ticket-key shape is structurally identical to plenty of ordinary text (a hardware part number like
+`KY-040` is the exact same shape), so candidates are batch-validated against the real Jira API and only
+what actually resolves counts → one LLM call writes the whole thing as flowing prose, no markdown
+headings. The file opens in VS Code either way; the headless CLI additionally prints the narrative
+itself, since there's no chat UI to read the opened file in.
+
+**No diagram (for now)** — an earlier version also drew an architecture diagram alongside the report.
+Dropped on purpose: the report reads like a story now, and a diagram is a separate concern to revisit
+later, not bundled into every call.
 
 A missing README or unconfigured Jira never blocks the report — the gaps are stated honestly
 ("no original intent could be recovered") rather than papered over.

@@ -687,9 +687,10 @@ onInput(async (text: string) => {
         }
         return;
       }
-      // `/explain <feature>` — broader than explore: an explore pass + real git history + any Jira
-      // tickets validated from commit messages, synthesized into a narrative report, plus an
-      // architecture diagram (tools/diagram.ts's own validated loop). Both files opened in VS Code.
+      // `/explain <feature>` — broader than explore: an explore pass + real git history/authorship +
+      // any Jira tickets validated from commit messages, synthesized into one plain-prose story (no
+      // diagram — see explain/index.ts's header doc for why). Also runnable headless as
+      // `ayin explain "<question>"` (index.ts's `main()`) — same pipeline, one implementation.
       case '/explain': {
         const arg = text.slice('/explain'.length).trim();
         if (!arg) {
@@ -738,8 +739,8 @@ onInput(async (text: string) => {
         addMessage('system', '/plan — toggle plan mode for the session (default OFF) · /planthis <text> — force it for one prompt only');
         addMessage('system', '/qa — toggle the QA gate for the session (default OFF) · /qathis <message> — force it for one reply only');
         addMessage('system', '/present — toggle the Presenter pass for the session (default OFF) · /presentthis <message> — force it for one reply only');
-        addMessage('system', '/arduino-explain — for an Arduino project in this dir: a wiring HTML per sketch (board + breadcrumbs + arduino-db explanations), opened in VS Code');
-        addMessage('system', '/explain <feature> — the story of a feature: explore + real git history + validated Jira tickets, a report + an architecture diagram, both opened in VS Code');
+        addMessage('system', '/arduino-explain — for an Arduino project in this dir: a validated wiring diagram per sketch (board + component rectangles, PUML+SVG), opened in VS Code');
+        addMessage('system', '/explain <feature> — the story of a feature in plain prose: history/authorship, lifecycle/bugs, composition, how it\'s wired up — grounded in explore + real git history + validated Jira tickets, opened in VS Code. Also runnable headless: ayin explain "<question>"');
         addMessage('system', '/clear — clear chat');
         addMessage('system', '/set keli-url <http://host:9100> — point ayin at the LLM endpoint (an adapter, or a backend)');
         addMessage('system', '/set llm-provider <direct|resource|auto> — how much of that endpoint to expect (default: auto-detect)');
@@ -810,11 +811,53 @@ async function main(): Promise<void> {
   // Decide WHICH LLM provider serves this machine before anything paints or asks for a capability.
   // Never throws: an endpoint that exposes no resource surface (or none at all) lands on `direct`.
   await initLlmProvider();
+  if (process.argv[2] === 'explain') {
+    // `ayin explain "<question>"` — the SAME runExplain pipeline the interactive `/explain` command
+    // uses (see explain/index.ts), invoked headlessly: connect, run it, print the narrative straight to
+    // stdout, exit. `'explain'` is in ui/headless.ts's NO_TUI_COMMANDS so blessed never grabs the tty.
+    await runExplainCli(process.argv.slice(3).join(' ').trim());
+    return;
+  }
   if (HEADLESS) {
     await runHeadless();
     return;
   }
   await runInteractive();
+}
+
+async function runExplainCli(feature: string): Promise<void> {
+  if (!feature) {
+    process.stderr.write('ayin: explain requires a feature or question — e.g. ayin explain "explain me the checkout feature"\n');
+    process.exit(1);
+  }
+
+  try {
+    await connect();
+  } catch (err) {
+    process.stderr.write(`ayin: connection failed — ${err instanceof Error ? err.message : err}\n`);
+    process.exit(1);
+  }
+  // Same as runHeadless: establishes a session id so the per-run record has a key to write under.
+  await initSession().catch(() => {});
+  await refreshActiveModel();
+
+  try {
+    const outcome = await runExplain(feature, process.cwd());
+    if (!outcome.ok || !outcome.body) {
+      process.stderr.write(`ayin: ${outcome.reason ?? 'nothing to report'}\n`);
+      await disconnect();
+      process.exit(1);
+    }
+    process.stdout.write(`${outcome.body}\n`);
+    process.stderr.write(`\nFull report written to ${outcome.reportPath}${outcome.reportOpened ? ' (opened in editor)' : ''}\n`);
+  } catch (err) {
+    process.stderr.write(`ayin: explain error — ${err instanceof Error ? err.message : err}\n`);
+    await disconnect();
+    process.exit(1);
+  }
+
+  await disconnect();
+  process.exit(0);
 }
 
 async function runHeadless(): Promise<void> {

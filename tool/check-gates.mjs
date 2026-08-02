@@ -408,7 +408,13 @@ console.log('\narduino wiring diagram render');
   const puml1 = ad.renderArduinoWiringPuml('Blinker', 'uno', pins, fuzzyConn);
   ok(/PIN_2 --> COMP_push_button_LEG_top_left_leg : signal/.test(puml1), 'free-form leg text fuzzy-matches the catalog leg with the most overlapping words (never an exact-string miss)');
   ok(/COMP_push_button_LEG_top_right_leg --> BOARD_GND : ground/.test(puml1), 'a leg whose catalog connectsTo mentions GND wires to the synthetic ground pin');
-  ok(/COMP_push_button_LEG_bottom_right_leg --> BOARD_GND : ground/.test(puml1), 'both legs on the ungrounded side wire to GND, not just the first');
+  // Real bug, caught live against a render: the button's top-right AND bottom-right legs both mention
+  // GND in the catalog (they're internally shorted, "wiring only one is enough" per the catalog text),
+  // so the first draft drew TWO separate ground wires — reading as "you need two ground wires," which is
+  // wrong. Exactly one wire per net now; the other leg still gets its rectangle, just no duplicate wire.
+  const groundWireCount = (puml1.match(/--> BOARD_GND : ground/g) || []).length;
+  ok(groundWireCount === 1, 'only ONE ground wire is drawn even though two legs are internally shorted to the same GND net — not one wire per leg', String(groundWireCount));
+  ok(!/COMP_push_button_LEG_bottom_right_leg --> BOARD_GND/.test(puml1), 'the second (redundant) leg on the same net is not ALSO wired to GND');
 
   // Leg text that shares no words with any catalog leg still draws a wire — falls back to the first
   // leg rather than silently dropping the connection (the bug this matcher replaced).
@@ -426,6 +432,27 @@ console.log('\narduino wiring diagram render');
   // The renderer always produces a structurally valid, self-contained PUML document.
   ok(puml1.startsWith('@startuml') && puml1.trim().endsWith('@enduml'), 'output is a well-formed PlantUML document');
   ok(!/!include/.test(puml1), 'no !include directives — offline-renderable, same discipline as diagram.ts');
+
+  // Real bug, caught live against a real project (Janitor.ino): an RGB LED driven from THREE separate
+  // PWM pins (one per color channel) collapsed to ONE mislabeled wire — the single-connection-per-
+  // component model kept the first pin's label but let the last connection's leg match win. Verifies
+  // all three pins survive, each wired to its OWN correct leg.
+  const rgbPins = [
+    { raw: 'RED_PIN', resolved: '9', calls: ['pinMode', 'analogWrite'] },
+    { raw: 'GREEN_PIN', resolved: '10', calls: ['pinMode', 'analogWrite'] },
+    { raw: 'BLUE_PIN', resolved: '11', calls: ['pinMode', 'analogWrite'] },
+  ];
+  const rgbConn = [
+    { pin: '9', componentId: 'rgb-led-common-cathode', leg: 'red channel', label: 'RGB LED' },
+    { pin: '10', componentId: 'rgb-led-common-cathode', leg: 'green channel', label: 'RGB LED' },
+    { pin: '11', componentId: 'rgb-led-common-cathode', leg: 'blue channel', label: 'RGB LED' },
+  ];
+  const puml4 = ad.renderArduinoWiringPuml('Janitor', 'uno', rgbPins, rgbConn);
+  ok(/PIN_9 --> COMP_rgb_led_common_cathode_LEG_red_anode : signal/.test(puml4), 'a multi-pin component: pin 9 wires to its OWN leg (red anode), not lost or relabeled');
+  ok(/PIN_10 --> COMP_rgb_led_common_cathode_LEG_green_anode : signal/.test(puml4), 'a multi-pin component: pin 10 wires to its OWN leg (green anode) — a second connection to the same component must not overwrite the first');
+  ok(/PIN_11 --> COMP_rgb_led_common_cathode_LEG_blue_anode : signal/.test(puml4), 'a multi-pin component: pin 11 wires to its OWN leg (blue anode) — a third connection must not be dropped either');
+  ok((puml4.match(/rectangle "(RED_PIN|GREEN_PIN|BLUE_PIN)/g) || []).length === 3, 'all three real board pins get their own rectangle, not just the first one seen');
+  ok(/COMP_rgb_led_common_cathode_LEG_common_cathode_longest_leg --> BOARD_GND : ground/.test(puml4), 'the shared cathode leg still wires to GND exactly once');
 }
 
 // ── arduino-db: keyword search, no embeddings, no network ──────────
