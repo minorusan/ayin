@@ -11,7 +11,7 @@ doc describes how the pieces fit.
                   │
                   │  LLM manager  ── picks the dialect for the active model
                   ▼
-        LLM endpoint  (Ollama via adapter · a keli-shaped backend · OpenAI)
+        LLM endpoint  (Ollama via adapter · any backend serving the contract · OpenAI)
                   │
         agent loop ──► tools ──► your filesystem / shell
         (read_file, grep, find_files, write_file, str_replace, bash, explore, …)
@@ -29,8 +29,20 @@ POST /api/generate   { messages, temperature?, thinking?, images? }  ->  { conte
 GET  /api/status     ->  { ok: true, model }
 ```
 
-The endpoint is resolved by `keliBaseUrl()` in priority order: **`KELI_URL`** env → persisted
-`keliUrl` in `~/.ayin-cli/prompts.json` (`/set keli-url …`) → `http://localhost:9100`. If the
+The endpoint is resolved by `llmBaseUrl()` in priority order: **`AYIN_LLM_URL`** env → persisted
+`llmUrl` in `~/.ayin-cli/prompts.json` (`/set llm-url …`) → `http://localhost:9100`.
+
+> **Renamed in 1.0.220.** These were `KELI_URL` / `keliUrl` / `/set keli-url` — named after a private
+> service on the author's network, which told every reader of a public repo a fact about one machine and
+> told them nothing about the value. **Both old spellings still work**, and will keep working: an env
+> var lives in shells, systemd units, launchd plists and CI files this repo cannot reach, so breaking it
+> would strand a working install behind a confusing "no reachable endpoint". Using an old name logs
+> `deprecated_endpoint_name` once per process, `/set keli-url` still sets the setting (writing the *new*
+> key, so it retires itself), and a config still holding only `keliUrl` is **migrated forward to
+> `llmUrl` the first time it is read** — otherwise every future run would take the deprecated path and
+> the operator would never learn the name had changed.
+
+If the
 endpoint is unreachable and an OpenAI key is configured (`/set openai-key`), ayin falls back to
 the OpenAI chat API and adapts its native tool-calls into ayin's XML form. Transport details:
 retries on transient errors, a long timeout (coder models can think for minutes), and image
@@ -506,7 +518,7 @@ Two exclusions worth knowing: the git snapshot uses `-unormal` (on a tree with s
 directories, `-uall` enumerates thousands of files, twice per turn) and only real files reach the judge,
 because a collapsed untracked *directory* described as a file would be reported as "MISSING (deleted?)"
 — a fact that is simply false. `ayin-plan-*.md` is excluded too: the plan is an input to the change, not
-an artifact of it. The port probe skips the port derived from `keliBaseUrl()`, so it can never poke the
+an artifact of it. The port probe skips the port derived from `llmBaseUrl()`, so it can never poke the
 model gateway.
 
 **Config** (`prompts.json` → `config`): `qaMaxPasses`, `qaMinAnswerChars`, `pollMinIntervalMs`,
@@ -718,7 +730,7 @@ configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
   **DuckDuckGo HTML** fallback → **DDG Instant Answer** last resort; rank + dedup → fetch top 4 pages →
   strip to readable text → merged markdown digest (the loop's model synthesizes). 15-min per-query
   cache. The SearXNG base is `MARADEL_SEARXNG_URL` / `AYIN_SEARXNG_URL` / `/set searxng-url`, else
-  **derived from the KELI backend host on `:8888`** (the shared container next to the backend). If it's
+  **derived from the LLM endpoint host on `:8888`** (the shared container next to the backend). If it's
   unreachable, DDG covers it. (Replaced the old shell-out to `malkhut search`, which isn't installed.)
 - **`explore`** is a sub-investigation with its own short LLM loop and clean context — good
   for "find/read X" questions; it translates depth into width. It is **language-agnostic**
@@ -762,7 +774,7 @@ The moving parts, designed to survive interruption at any point:
   the loop. Reviews are idempotent (report rewritten), so a crash mid-review just re-runs.
   Singleton via pidfile (stale pids are taken over). One daemon serves all watched repos.
 - **One door to the GPU**: before a review batch the daemon enqueues on the backend's llm
-  resource as the `ayin` authority (`POST {keliUrl}/resource/llm`) — the backend swaps to the
+  resource as the `ayin` authority (`POST {llmUrl}/resource/llm`) — the backend swaps to the
   coder model on `ownership.gained` and reverts when the batch drains (detach; also released
   on SIGINT/SIGTERM so a kill mid-batch doesn't strand the grant until TTL). Resource busy →
   the batch is **deferred** to a later poll, never run by side-door. No resource layer on the
@@ -796,7 +808,7 @@ The moving parts, designed to survive interruption at any point:
   (`AYIN_READONLY=1`, so it can only grep/read, never edit) — against that diff and, if ayin
   reports anything, **blocks the stop** with the finding: Claude reacts to ayin, not the other
   way round. The engine is ayin, not `claude -p` — no LAN address to hardcode, no separate config;
-  it inherits whatever `KELI_URL` this ayin install already talks to. In a Unity repo
+  it inherits whatever `AYIN_LLM_URL` this ayin install already talks to. In a Unity repo
   (`isUnityRepo`), the check is narrow and C#-quality-focused — excessive comments, a
   CancellationToken missing or not propagated/checked, a single-responsibility violation — gated
   on at least one staged `.cs` file (no point asking about a `.prefab`-only change). Every repo,
@@ -935,7 +947,7 @@ tree knows about the internals). Design rules:
   many things move, and the clock stops itself when nothing is subscribed (idle = zero CPU).
   Per-animation speed is a tick divisor (`every`) in the widget's spec table.
 - **Live LLM phase in the status bar** (`llm-events.ts` + `widgets/status.ts`): the TUI
-  subscribes to the backend llm resource's SSE stream (`GET {keliUrl}/resource/llm/events`,
+  subscribes to the backend llm resource's SSE stream (`GET {llmUrl}/resource/llm/events`,
   auto-reconnect with backoff) and reduces its events to one **animated** segment, each phase
   with its own motion (a new phase = one `LLM_PHASE_LOOK` entry):
   `⇆/⇄ swapping <model>` (amber, arrows trading places) → `◔◑◕● preprocessing` (indigo,
@@ -1289,7 +1301,7 @@ can finish — see the warning in `SETUP.md`.
   the real update is `git pull && npm run build`. `ayin version` prints the running version.
   Subcommands that print to stdout (`update`, `version`, `watch`) are listed in
   `ui/headless.ts#NO_TUI_COMMANDS` so blessed never grabs the terminal out from under them.
-- **`tokens.ts`** — context-meter estimate: tries `${keliBaseUrl}/api/estimate`, falls back to
+- **`tokens.ts`** — context-meter estimate: tries `${llmBaseUrl}/api/estimate`, falls back to
   a chars/4 heuristic.
 - **`session-store.ts`** — the READ side of the session store plus the checkpoint sidecar, scoped to
   the working directory. (It was once a stub that answered "no sessions" unconditionally, which is why
@@ -1313,7 +1325,7 @@ src/
 │   ├── manager.ts      active-model resolution + dialect selection; all LLM calls route here
 │   ├── types.ts        ModelDialect interface
 │   └── dialects/       xml.ts (shared base) · gemma.ts · qwen.ts
-├── connection.ts       transport: the keli-shaped endpoint + OpenAI fallback; KELI_URL resolver
+├── connection.ts       transport: the configured endpoint + OpenAI fallback; AYIN_LLM_URL resolver
 ├── parser.ts           lenient tool-call parser (multi-format)
 ├── shell.ts            cross-platform shell: /bin/bash (POSIX) · Git Bash/cmd (Windows) + killTree
 ├── tools.ts            tool registry (a static array — every tool ships inside this repo)
@@ -1376,8 +1388,8 @@ tool/
 Each of these is an absence on purpose, not a gap waiting to be filled. They are listed because the
 absence is load-bearing: adding any of them back would break a property the agent depends on.
 
-- **No service discovery.** `connection.ts` talks to exactly ONE configured endpoint (`KELI_URL` →
-  `/set keli-url` → loopback). Nothing is looked up, so a misconfigured endpoint fails loudly instead
+- **No service discovery.** `connection.ts` talks to exactly ONE configured endpoint (`AYIN_LLM_URL` →
+  `/set llm-url` → loopback). Nothing is looked up, so a misconfigured endpoint fails loudly instead
   of quietly probing alternatives and adding a timeout to every refresh — which is also why
   `tokens.ts` only ever asks that same host for `/api/estimate` and otherwise estimates chars/4.
 - **No remote session sync.** Sessions are local files under `~/.ayin-cli/sessions/` and nothing else.

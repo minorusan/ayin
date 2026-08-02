@@ -35,7 +35,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { llmChat, refreshActiveModel } from './llm/manager.js';
-import { connect, keliBaseUrl } from './connection.js';
+import { connect, llmBaseUrl } from './connection.js';
 import { acquireLlm, type LlmHold } from './llm/authority.js';
 import { initLlmProvider } from './llm/select.js';
 import { prompts, packagePath, writeAtomic } from './prompts-service.js';
@@ -269,7 +269,7 @@ async function selfHealHooks(): Promise<void> {
 // Code turn, if anything is staged, ayin itself reviews the staged diff — read-only, via
 // AYIN_READONLY=1, so it can only grep/read, never edit — and if it finds something, BLOCKS the
 // stop with the finding. Claude reacts to ayin, not the other way round. The engine is ayin itself,
-// not `claude -p`: no LAN address to hardcode, no separate config — it inherits whatever KELI_URL
+// not `claude -p`: no LAN address to hardcode, no separate config — it inherits whatever AYIN_LLM_URL
 // this ayin install already talks to. Unity repos (isUnityRepo) get a narrow, C#-quality-focused
 // check (excessive comments, missing/misused CancellationToken, single-responsibility violations,
 // gated on at least one staged .cs file); every repo additionally/instead gets a "this is a big,
@@ -502,7 +502,7 @@ function repoName(repo: string): string { return repo.split('/').filter(Boolean)
 async function sendDangerPush(title: string, body: string): Promise<void> {
   if (!PUSH_ENABLED) return;
   try {
-    const res = await fetch(`${keliBaseUrl()}/api/push`, {
+    const res = await fetch(`${llmBaseUrl()}/api/push`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, body }),

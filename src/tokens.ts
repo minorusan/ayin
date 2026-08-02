@@ -1,15 +1,15 @@
 /**
  * Token estimation for the session meter.
  *
- * Tries the endpoint's exact tokenizer at `${keliBaseUrl()}/api/estimate` (same host as the LLM,
- * resolved identically — env KELI_URL → /set keli-url → localhost). An endpoint that does not serve
+ * Tries the endpoint's exact tokenizer at `${llmBaseUrl()}/api/estimate` (same host as the LLM,
+ * resolved identically — env AYIN_LLM_URL → /set llm-url → localhost). An endpoint that does not serve
  * /api/estimate degrades gracefully to a char/4 estimate; if it is added later this picks it up for
  * free. Deliberately NO discovery of any other host: probing for a tokenizer somewhere else only
  * ever added 3s timeouts to every refresh.
  */
 
 import { log } from './log.js';
-import { keliBaseUrl } from './connection.js';
+import { llmBaseUrl } from './connection.js';
 
 export interface TokenEstimate {
   promptTokens: number;
@@ -31,7 +31,7 @@ export async function estimateTokens(
   messages: Array<{ role: string; content: string }>,
 ): Promise<TokenEstimate> {
   try {
-    const res = await fetch(`${keliBaseUrl()}/api/estimate`, {
+    const res = await fetch(`${llmBaseUrl()}/api/estimate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages }),

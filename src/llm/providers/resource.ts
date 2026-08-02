@@ -24,7 +24,7 @@
  * and is preserved verbatim.
  */
 
-import { keliBaseUrl } from '../../connection.js';
+import { llmBaseUrl } from '../../connection.js';
 import { log } from '../../log.js';
 import type {
   AcquireOptions, AcquireResult, AuthorityInfo, LlmEvent, LlmProvider, LlmTelemetry, ModelCatalog,
@@ -35,7 +35,7 @@ import { httpGenerate, httpStatus } from './direct.js';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function resourceOp(resource: string, op: string, params: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<any | null> {
   try {
-    const res = await fetch(`${keliBaseUrl()}/resource/${resource}`, {
+    const res = await fetch(`${llmBaseUrl()}/resource/${resource}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ op, params }),
@@ -59,7 +59,7 @@ async function resourceOp(resource: string, op: string, params: Record<string, u
  */
 export async function probeResourceSurface(timeoutMs = 3_000): Promise<{ present: boolean; conclusive: boolean }> {
   try {
-    const res = await fetch(`${keliBaseUrl()}/resource/llm`, {
+    const res = await fetch(`${llmBaseUrl()}/resource/llm`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ op: 'status', params: {} }),
@@ -219,7 +219,7 @@ function events(onEvent: (e: LlmEvent) => void): () => void {
   const connectLoop = async (): Promise<void> => {
     while (!stopped) {
       try {
-        const res = await fetch(`${keliBaseUrl()}/resource/llm/events`, {
+        const res = await fetch(`${llmBaseUrl()}/resource/llm/events`, {
           headers: { Accept: 'text/event-stream' },
         });
         if (!res.ok || !res.body) throw new Error(`SSE ${res.status}`);

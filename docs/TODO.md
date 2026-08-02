@@ -1,7 +1,7 @@
 # ayin — TODO / path to a clean standalone
 
 ayin is a public, MIT, model-agnostic terminal coding agent. The core (agent loop + 8 core tools,
-LLM via the 2-endpoint keli contract `POST /api/generate` + `GET /api/status`, satisfiable by
+LLM via the 2-endpoint contract `POST /api/generate` + `GET /api/status`, satisfiable by
 `examples/ollama-adapter.mjs`) is cleanly decoupled and runs against local Ollama. These are the
 deferred items to make it a fully clean, shareable standalone project.
 

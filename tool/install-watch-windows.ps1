@@ -5,13 +5,13 @@
 # is always up and resumes its queue on boot — same power-cut discipline.
 #
 #   powershell -ExecutionPolicy Bypass -File tool\install-watch-windows.ps1 `
-#       -KeliUrl http://192.168.0.229:9100
+#       -LlmUrl http://192.168.0.229:9100
 #
 # Requires: Node on PATH, and Git for Windows (git runs the .git/hooks/post-commit + post-merge
 # shell hooks through its bundled bash — the hooks are portable `#!/bin/sh`). Uninstall:
 #   Unregister-ScheduledTask -TaskName AyinWatch -Confirm:$false
 param(
-  [string]$KeliUrl = "http://192.168.0.229:9100",
+  [string]$LlmUrl = "http://192.168.0.229:9100",
   [string]$TaskName = "AyinWatch"
 )
 $ErrorActionPreference = "Stop"
@@ -22,14 +22,14 @@ $repo = Split-Path -Parent $PSScriptRoot            # <repo> (parent of tool\)
 $entry = Join-Path $repo "dist\index.js"
 if (-not (Test-Path $entry)) { throw "built entrypoint not found: $entry  (run `npm run build` first)" }
 
-# A tiny launcher .cmd that sets KELI_URL then runs the daemon — avoids Task Scheduler arg-quoting
+# A tiny launcher .cmd that sets AYIN_LLM_URL then runs the daemon — avoids Task Scheduler arg-quoting
 # pain and gives one place to see/edit the env.
 $dir = Join-Path $env:USERPROFILE ".ayin-cli"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $cmd = Join-Path $dir "ayin-watch.cmd"
 @"
 @echo off
-set KELI_URL=$KeliUrl
+set AYIN_LLM_URL=$LlmUrl
 "$node" "$entry" watch
 "@ | Set-Content -Encoding ASCII $cmd
 
@@ -46,6 +46,6 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Se
 Start-ScheduledTask -TaskName $TaskName
 
 Write-Host "Installed scheduled task '$TaskName'."
-Write-Host "Launcher: $cmd   (KELI_URL=$KeliUrl)"
+Write-Host "Launcher: $cmd   (AYIN_LLM_URL=$LlmUrl)"
 Write-Host "Register a repo to watch:  ayin watch --repo C:\path\to\repo"
 Write-Host "Stop/remove:  Unregister-ScheduledTask -TaskName $TaskName -Confirm:`$false"

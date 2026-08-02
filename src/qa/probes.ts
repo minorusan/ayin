@@ -21,7 +21,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
-import { keliBaseUrl } from '../connection.js';
+import { llmBaseUrl } from '../connection.js';
 
 // ── what changed ──────────────────────────────────────────────────────
 
@@ -151,7 +151,7 @@ const PORT_PATTERNS: RegExp[] = [
 function deniedPorts(): Set<number> {
   const set = new Set<number>();
   try {
-    const p = Number(new URL(keliBaseUrl()).port);
+    const p = Number(new URL(llmBaseUrl()).port);
     if (p > 0) set.add(p);
   } catch { /* unparseable config — nothing to exclude */ }
   for (const raw of (process.env.AYIN_QA_PORT_DENY || '').split(',')) {

@@ -14,7 +14,7 @@
  * `backend/src/resources/jira.ts` for the authoritative op list and return shapes.
  */
 
-import { keliBaseUrl } from './connection.js';
+import { llmBaseUrl } from './connection.js';
 import { log } from './log.js';
 
 interface ResourceResponse {
@@ -26,7 +26,7 @@ interface ResourceResponse {
 /** The one door: POST {backend}/resource/jira {op, params}. Never throws. */
 async function resourceOp(op: string, params: Record<string, unknown> = {}, timeoutMs = 20_000): Promise<ResourceResponse> {
   try {
-    const res = await fetch(`${keliBaseUrl()}/resource/jira`, {
+    const res = await fetch(`${llmBaseUrl()}/resource/jira`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ op, params }),

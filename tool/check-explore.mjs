@@ -5,7 +5,7 @@
  * `npm run check:explore` (needs a build first). Not a unit test of the anti-repeat helpers in
  * isolation — those would pass even if the wiring into `exploreExecute` were wrong. Instead this spins
  * up a fake backend implementing the real `/api/status` + `/api/generate` contract, points a child
- * process at it via `KELI_URL`, and scripts a model that deliberately re-suggests a command it already
+ * process at it via `AYIN_LLM_URL`, and scripts a model that deliberately re-suggests a command it already
  * ran — the exact failure mode reported: "it keeps looping". A `spawn`-based subprocess, not an
  * in-process import, because `exploreExecute` shells out for real and a fake backend over HTTP is the
  * only way to drive it end-to-end without also faking the shell.
@@ -80,7 +80,7 @@ process.stdout.write(JSON.stringify({ result, ms: Date.now() - start }) + '\\n')
 `);
 
 const child = spawn(process.execPath, [harness], {
-  env: { ...process.env, KELI_URL: `http://127.0.0.1:${port}`, AYIN_QA: '0', AYIN_PLAN: '0' },
+  env: { ...process.env, AYIN_LLM_URL: `http://127.0.0.1:${port}`, AYIN_QA: '0', AYIN_PLAN: '0' },
   cwd: TMP,
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -138,7 +138,7 @@ console.log('\nexplore normal case (must still work — the fix must not break o
   const port2 = server2.address().port;
 
   const child2 = spawn(process.execPath, [harness], {
-    env: { ...process.env, KELI_URL: `http://127.0.0.1:${port2}`, AYIN_QA: '0', AYIN_PLAN: '0' },
+    env: { ...process.env, AYIN_LLM_URL: `http://127.0.0.1:${port2}`, AYIN_QA: '0', AYIN_PLAN: '0' },
     cwd: TMP,
     stdio: ['ignore', 'pipe', 'pipe'],
   });

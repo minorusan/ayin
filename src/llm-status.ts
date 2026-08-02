@@ -13,7 +13,7 @@
  * never a dead status bar and never a thrown error into the TUI.
  */
 
-import { keliBaseUrl } from './connection.js';
+import { llmBaseUrl } from './connection.js';
 import { llmProvider } from './llm/select.js';
 import type { AuthorityInfo, GpuInfo, ModelCatalog, ModelEntry, QueueInfo } from './llm/provider.js';
 
@@ -136,5 +136,5 @@ export function startLlmStatusPoll(
 
 /** Where the provider points — surfaced in the picker so a wrong endpoint is obvious. */
 export function statusSource(): string {
-  return keliBaseUrl();
+  return llmBaseUrl();
 }

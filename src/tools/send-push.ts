@@ -4,13 +4,13 @@
  * Calls the backend's POST /api/push (same daemon that serves /api/generate + /api/docs/search),
  * which funnels through push/fcm.ts#sendPush → FCM. This is the OUT-OF-PROCESS counterpart to
  * Maradel's own in-process `send_push` tool: both reach the phone through the one FCM door.
- * Endpoint chosen via KELI_URL, identical to connection.ts. Graceful: if push isn't configured or
+ * Endpoint resolved by llmBaseUrl(), identical to every other call. Graceful: if push isn't configured or
  * no device is registered, the backend returns { delivered: 0 } and this reports that plainly.
  */
 
 import { log } from '../log.js';
 import { addMessage } from '../ui.js';
-import { keliBaseUrl } from '../connection.js';
+import { llmBaseUrl } from '../connection.js';
 
 export async function sendPushExecute(params: Record<string, string>): Promise<string> {
   const title = (params.title ?? '').trim();
@@ -21,7 +21,7 @@ export async function sendPushExecute(params: Record<string, string>): Promise<s
   addMessage('system', `Sending push: ${title}`);
   log('INFO', 'send_push_start', { title: title.substring(0, 80) });
 
-  const base = keliBaseUrl();
+  const base = llmBaseUrl();
   let res: Response;
   try {
     res = await fetch(`${base}/api/push`, {

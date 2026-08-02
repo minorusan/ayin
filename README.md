@@ -40,10 +40,10 @@ npm run build
 
 # Connect to a local Ollama model via the bundled adapter (see SETUP.md for details):
 OLLAMA_MODEL=qwen3-coder:30b node examples/ollama-adapter.mjs &      # terminal 1
-KELI_URL=http://localhost:9100 node dist/index.js                    # terminal 2 (TUI)
+AYIN_LLM_URL=http://localhost:9100 node dist/index.js                    # terminal 2 (TUI)
 
 # …or one-shot headless:
-KELI_URL=http://localhost:9100 node dist/index.js -p "Explain what src/agent.ts does"
+AYIN_LLM_URL=http://localhost:9100 node dist/index.js -p "Explain what src/agent.ts does"
 ```
 
 **Full instructions — including the three ways to connect an LLM — are in
@@ -400,7 +400,7 @@ only when its bytes actually change.
 staged diff, it runs **ayin itself** — read-only (`AYIN_READONLY=1`, so it can only grep/read,
 never edit) — against that diff, and blocks the stop if ayin finds something: Claude reacts to
 ayin, not the other way round. The engine is ayin, not `claude -p` — no LAN address to hardcode,
-it just talks to whatever `KELI_URL` this ayin install already uses. In a Unity repo the check is
+it just talks to whatever `AYIN_LLM_URL` this ayin install already uses. In a Unity repo the check is
 narrow: excessive comments, a missing/misused `CancellationToken`, single-responsibility
 violations — gated on at least one staged `.cs` file. Every repo also gets a "this staged diff is
 big and complete — commit it now" nudge, gated on the diff actually being large. The JSON merge
@@ -460,7 +460,7 @@ access — changes take effect immediately). Prompt *text* is not in here; see a
 from inside the TUI with `/set`:
 
 ```
-/set keli-url http://localhost:9100     # the LLM endpoint ayin talks to
+/set llm-url http://localhost:9100     # the LLM endpoint ayin talks to
 /set openai-key <your-api-key>          # optional OpenAI fallback
 ```
 

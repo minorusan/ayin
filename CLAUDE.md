@@ -68,15 +68,15 @@ ollama pull qwen3-coder:30b
 OLLAMA_MODEL=qwen3-coder:30b node examples/ollama-adapter.mjs      # listens on :9100
 
 # 4. Terminal 2 — ayin:
-KELI_URL=http://localhost:9100 node dist/index.js
+AYIN_LLM_URL=http://localhost:9100 node dist/index.js
 ```
 
 Adapter env: `OLLAMA_MODEL` (required), `OLLAMA_URL` (default `http://localhost:11434`), `PORT`
 (default 9100), `NUM_CTX` (default 32768).
 
-**An existing endpoint** that already serves the contract: point `KELI_URL` at it, no adapter needed.
+**An existing endpoint** that already serves the contract: point `AYIN_LLM_URL` at it, no adapter needed.
 
-**OpenAI**, if `KELI_URL` is unreachable and a key is set (`/set openai-key <key>` in the TUI).
+**OpenAI**, if `AYIN_LLM_URL` is unreachable and a key is set (`/set openai-key <key>` in the TUI).
 
 #### Which model
 
@@ -108,7 +108,7 @@ check `GET /api/status` reports the model you think it does.
 ### 1.5 Then
 
 - `node dist/index.js` for the TUI. `Ctrl+O` browse tool output, `Ctrl+S` summary, `Ctrl+C` quit.
-- `/set keli-url <url>` persists the endpoint so you stop passing `KELI_URL`.
+- `/set llm-url <url>` persists the endpoint so you stop passing `AYIN_LLM_URL`.
 - Prompts are editable files — see §3. That is the fastest way to change how ayin behaves.
 
 > **Headless auto-approves file writes and shell commands.** Run it on a git working tree you can

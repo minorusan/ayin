@@ -595,10 +595,16 @@ onInput(async (text: string) => {
           addMessage('system', 'default-model is no longer a setting — ayin runs on whatever the endpoint serves. Use /model <name> to switch.');
           return;
         }
-        const keyMap: Record<string, string> = { 'openai-key': 'openAiKey', 'keli-url': 'keliUrl', 'update-registry': 'updateRegistry', 'llm-provider': 'llmProvider' };
+        // `keli-url` is the pre-1.0.220 spelling. Still accepted so a muscle-memory command doesn't
+        // fail, but it writes the NEW key — otherwise honouring the old name would keep re-creating
+        // the deprecated config entry it is meant to retire.
+        const keyMap: Record<string, string> = {
+          'openai-key': 'openAiKey', 'llm-url': 'llmUrl', 'keli-url': 'llmUrl',
+          'update-registry': 'updateRegistry', 'llm-provider': 'llmProvider',
+        };
         const configKey = keyMap[key] ?? key;
         setConfigValue(configKey, value);
-        addMessage('system', `Set ${key} ✓`);
+        addMessage('system', key === 'keli-url' ? 'Set llm-url ✓  (keli-url is the old name — same setting)' : `Set ${key} ✓`);
         return;
       }
       // `/plan` — bare session toggle (default OFF): flips whether every long-enough prompt runs the
@@ -742,9 +748,9 @@ onInput(async (text: string) => {
         addMessage('system', '/arduino-explain — for an Arduino project in this dir: a validated wiring diagram per sketch (board + component rectangles, PUML+SVG), opened in VS Code');
         addMessage('system', '/explain <feature> — the story of a feature in plain prose: history/authorship, lifecycle/bugs, composition, how it\'s wired up — grounded in explore + real git history + validated Jira tickets, opened in VS Code. Also runnable headless: ayin explain "<question>"');
         addMessage('system', '/clear — clear chat');
-        addMessage('system', '/set keli-url <http://host:9100> — point ayin at the LLM endpoint (an adapter, or a backend)');
+        addMessage('system', '/set llm-url <http://host:9100> — point ayin at the LLM endpoint (an adapter, or a backend). Env: AYIN_LLM_URL');
         addMessage('system', '/set llm-provider <direct|resource|auto> — how much of that endpoint to expect (default: auto-detect)');
-        addMessage('system', '/set default-model <name> — explicitly force-load + wait-for-resident + pin this model at startup (default: whatever the backend auto-swaps to)');
+        // (`/set default-model` was removed in 1.0.210 — ayin no longer picks a model implicitly.)
         addMessage('system', '/set update-registry <http://host:4873> — where `ayin update` looks (public npm is refused: "ayin" there is someone else)');
         addMessage('system', '/set openai-key <sk-...> — configure OpenAI API key');
         addMessage('system', '/reset — restore default prompts');

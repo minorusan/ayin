@@ -1,8 +1,8 @@
 /**
  * Connection — the HTTP edge. ONE configured endpoint, no discovery.
  *
- * Every LLM call goes to `POST <endpoint>/api/generate`; the endpoint comes from the `KELI_URL` env
- * var, else `/set keli-url`, else loopback. There is no service mesh, no registry, nothing to look
+ * Every LLM call goes to `POST <endpoint>/api/generate`; the endpoint comes from the `AYIN_LLM_URL`
+ * env var, else `/set llm-url`, else loopback. There is no service mesh, no registry, nothing to look
  * up: if the endpoint is wrong the call fails loudly instead of silently probing alternatives.
  */
 
@@ -40,20 +40,69 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { log as fileLog } from './log.js';
-import { getConfigString } from './prompts.js';
+import { getConfigString, setConfigValue } from './prompts.js';
 
 /**
- * Resolve the Maradel backend (gemma) base URL, in priority order:
- *   1. KELI_URL env (set by code_agent, or by the user's shell)
- *   2. persisted per-machine config `keliUrl` in ~/.ayin-cli/prompts.json (`/set keli-url …`)
- *   3. http://localhost:9100 — ONLY correct when the backend runs on THIS machine.
+ * Resolve the LLM endpoint's base URL — the ONE place, so no two call sites can disagree.
  *
- * The backend usually runs on another machine on your LAN; where it isn't local, set the backend
- * address once (e.g. `/set keli-url http://<backend-host>:9100`) and it sticks across runs.
- * Every backend call goes through this resolver, so they never diverge.
+ * Priority order:
+ *   1. `AYIN_LLM_URL` env (set by a dispatcher, or by your shell)
+ *   2. `KELI_URL` env — **DEPRECATED**, still honoured (see below)
+ *   3. persisted per-machine config `llmUrl` in ~/.ayin-cli/prompts.json (`/set llm-url …`)
+ *   4. persisted `keliUrl` — **DEPRECATED**, still honoured
+ *   5. http://localhost:9100 — ONLY correct when the endpoint runs on THIS machine.
+ *
+ * RENAMED in 1.0.220. The old names were `KELI_URL` / `keliUrl` / `/set keli-url`, after a private
+ * service on the author's network — a fact about one machine baked into a public repo, and meaningless
+ * to anyone else reading it. The new names say what the value is.
+ *
+ * Both old spellings keep working, deliberately and indefinitely-until-noticed: an env var lives in
+ * people's shells, systemd units, launchd plists and CI files that this repo cannot reach, so breaking
+ * it would strand a working install with a confusing "no reachable endpoint" error. Using an old name
+ * logs `deprecated_endpoint_name` once per process so the transition is visible without being noisy.
  */
-export function keliBaseUrl(): string {
-  return process.env.KELI_URL || getConfigString('keliUrl') || 'http://localhost:9100';
+let _deprecationLogged = false;
+
+function noteDeprecated(which: string, replacement: string): void {
+  if (_deprecationLogged) return;
+  _deprecationLogged = true;
+  fileLog('WARN', 'deprecated_endpoint_name', { used: which, use: replacement });
+}
+
+export function llmBaseUrl(): string {
+  if (process.env.AYIN_LLM_URL) return process.env.AYIN_LLM_URL;
+  if (process.env.KELI_URL) {
+    noteDeprecated('KELI_URL', 'AYIN_LLM_URL');
+    return process.env.KELI_URL;
+  }
+  const configured = getConfigString('llmUrl');
+  if (configured) return configured;
+  const legacy = getConfigString('keliUrl');
+  if (legacy) {
+    noteDeprecated('config keliUrl', '/set llm-url');
+    migrateLegacyConfigKey(legacy);
+    return legacy;
+  }
+  return 'http://localhost:9100';
+}
+
+/**
+ * Copy a pre-1.0.220 `keliUrl` forward to `llmUrl`, once per process, the first time we actually read
+ * it. A config file is OURS to keep current — leaving the old key as the only source means every future
+ * run takes the deprecated path forever, and the operator never learns the setting was renamed.
+ * Idempotent (the next run finds `llmUrl` and never reaches here) and best-effort: a failed write just
+ * means we migrate again next time, never that the endpoint stops resolving.
+ */
+let _migrated = false;
+function migrateLegacyConfigKey(value: string): void {
+  if (_migrated) return;
+  _migrated = true;
+  try {
+    setConfigValue('llmUrl', value);
+    fileLog('INFO', 'migrated_config_key', { from: 'keliUrl', to: 'llmUrl' });
+  } catch {
+    /* stays on the legacy key; retried next process */
+  }
 }
 
 // ── Config ──────────────────────────────────────────────────────────
@@ -98,7 +147,7 @@ export async function disconnect(): Promise<void> {
 // ── LLM call ────────────────────────────────────────────────────────
 
 /**
- * Send structured messages to the keli-shaped endpoint (Maradel backend /api/generate → gemma).
+ * Send structured messages to the configured endpoint (`POST /api/generate`).
  * Falls back to OpenAI (via openAiKey in prompts.json) when no endpoint is available.
  * Passes thinking=true when --thinking flag is active. Retries once on transient errors.
  */
@@ -107,17 +156,17 @@ export async function llmChat(
   opts: { temperature?: number; thinking?: boolean } = {},
 ): Promise<string> {
   const { THINKING_MODE } = await import('./ui.js');
-  const keliUrl = await getKeliUrl();
+  const llmUrl = await getLlmUrl();
 
-  if (!keliUrl) {
+  if (!llmUrl) {
     const openAiKey = getConfigString('openAiKey');
     if (openAiKey) {
-      fileLog('INFO', 'keli_unavailable_openai_fallback', {});
+      fileLog('INFO', 'endpoint_unavailable_openai_fallback', {});
       return llmChatOpenAI(messages, openAiKey);
     }
     throw new Error(
-      `No reachable LLM backend at ${keliBaseUrl()}. Point ayin at your backend: ` +
-      `set env KELI_URL=http://<backend-host>:9100 or run \`/set keli-url http://<backend-host>:9100\`.`,
+      `No reachable LLM endpoint at ${llmBaseUrl()}. Point ayin at yours: ` +
+      `set env AYIN_LLM_URL=http://<host>:9100 or run \`/set llm-url http://<host>:9100\`.`,
     );
   }
 
@@ -151,9 +200,9 @@ export async function llmChat(
 
       const reqStart = Date.now();
       const reqBytes = JSON.stringify(body).length;
-      fileLog('INFO', 'llm_fetch_start', { url: `${keliUrl}/api/generate`, attempt: String(attempt), reqBytes: String(reqBytes), images: String(images.length) });
+      fileLog('INFO', 'llm_fetch_start', { url: `${llmUrl}/api/generate`, attempt: String(attempt), reqBytes: String(reqBytes), images: String(images.length) });
 
-      const res = await fetch(`${keliUrl}/api/generate`, {
+      const res = await fetch(`${llmUrl}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -163,7 +212,7 @@ export async function llmChat(
 
       if (!res.ok) {
         const errBody = await res.text();
-        throw new Error(`Keli ${res.status}: ${errBody}`);
+        throw new Error(`endpoint ${res.status}: ${errBody}`);
       }
 
       const bodyText = await res.text();
@@ -175,7 +224,7 @@ export async function llmChat(
       } catch {
         const preview = bodyText.substring(0, 500);
         fileLog('ERROR', 'llm_body_parse_failed', { preview, bodyBytes: String(bodyText.length) });
-        throw new Error(`Keli body parse failed (${bodyText.length}B): ${preview}`);
+        throw new Error(`endpoint body parse failed (${bodyText.length}B): ${preview}`);
       }
       let text = data.content || '';
       text = text.replace(/^[\s\S]*<\/think>\s*/g, '').trim();
@@ -188,9 +237,9 @@ export async function llmChat(
         msg.includes('fetch failed') ||
         msg.includes('ECONNRESET') ||
         msg.includes('ECONNREFUSED') ||
-        msg.includes('Keli 502') ||
-        msg.includes('Keli 503') ||
-        msg.includes('Keli 504');
+        msg.includes('endpoint 502') ||
+        msg.includes('endpoint 503') ||
+        msg.includes('endpoint 504');
 
       const aborted = controller.signal.aborted && !transient;
       if (controller.signal.aborted && transient) {
@@ -278,19 +327,19 @@ export async function llmCall(prompt: string): Promise<string> {
   return llmChat([{ role: 'user', content: prompt }]);
 }
 
-// ── Keli endpoint discovery (KELI_URL override; default Maradel backend) ─────
+// ── Endpoint reachability (resolved by llmBaseUrl(); probed once per process) ─────
 
-let _keliUrl: string | null = null;
+let _llmUrl: string | null = null;
 
-async function getKeliUrl(): Promise<string | null> {
-  if (_keliUrl) return _keliUrl;
+async function getLlmUrl(): Promise<string | null> {
+  if (_llmUrl) return _llmUrl;
 
-  const override = keliBaseUrl();
+  const override = llmBaseUrl();
   try {
     const check = await fetch(`${override}/api/status`, { signal: AbortSignal.timeout(2000) });
     if (check.ok) {
-      _keliUrl = override;
-      fileLog('INFO', 'keli_url_resolved', { url: override });
+      _llmUrl = override;
+      fileLog('INFO', 'llm_url_resolved', { url: override });
       return override;
     }
   } catch { /* no endpoint */ }

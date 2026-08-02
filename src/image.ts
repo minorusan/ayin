@@ -3,7 +3,7 @@
  *
  * Gemma's ViT encodes at 896×896 native; larger inputs get tiled (Pan&Scan)
  * which multiplies token count and VRAM. We downscale to max-edge 896 and
- * re-encode to bound bytes before base64-ing for transport to keli/Ollama.
+ * re-encode to bound bytes before base64-ing for transport to the endpoint.
  */
 
 import sharp from 'sharp';

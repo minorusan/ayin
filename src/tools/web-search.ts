@@ -12,7 +12,7 @@
  * Dependency-free: SearXNG is a JSON call; the DDG HTML + page extraction use regex, not cheerio.
  */
 
-import { keliBaseUrl } from '../connection.js';
+import { llmBaseUrl } from '../connection.js';
 import { getConfigString } from '../prompts.js';
 import { log } from '../log.js';
 
@@ -29,13 +29,13 @@ const cache = new Map<string, { result: string; expires: number }>();
 interface SearchResult { title: string; url: string; snippet: string; engine: string }
 interface RankedResult extends SearchResult { score: number }
 
-/** SearXNG base URL: env override → /set searxng-url → derived from the KELI backend host on :8888
+/** SearXNG base URL: env override → /set searxng-url → derived from the LLM endpoint host on :8888
  *  (the shared metasearch container lives next to the backend, mirroring maradel's default). */
 function searxngUrl(): string {
   const explicit = process.env.MARADEL_SEARXNG_URL || process.env.AYIN_SEARXNG_URL || getConfigString('searxngUrl');
   if (explicit) return explicit.replace(/\/$/, '');
   try {
-    const u = new URL(keliBaseUrl());
+    const u = new URL(llmBaseUrl());
     return `${u.protocol}//${u.hostname}:8888`;
   } catch {
     return 'http://localhost:8888';

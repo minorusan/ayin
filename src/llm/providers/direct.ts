@@ -21,7 +21,7 @@
  * job, and keeping it that way is what makes the one-door discipline hold for private installs too.
  */
 
-import { keliBaseUrl, llmChat as transportChat } from '../../connection.js';
+import { llmBaseUrl, llmChat as transportChat } from '../../connection.js';
 import type {
   GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ProviderStatus,
 } from '../provider.js';
@@ -39,7 +39,7 @@ export async function httpGenerate(messages: LlmMessage[], opts?: GenerateOption
 /** `GET /api/status`, for every provider. Never throws — an unreachable endpoint is `{ok:false}`. */
 export async function httpStatus(): Promise<ProviderStatus> {
   try {
-    const res = await fetch(`${keliBaseUrl()}/api/status`, { signal: AbortSignal.timeout(2_000) });
+    const res = await fetch(`${llmBaseUrl()}/api/status`, { signal: AbortSignal.timeout(2_000) });
     if (!res.ok) return { ok: false, model: null };
     const data = await res.json() as { model?: string };
     const model = String(data.model ?? '');

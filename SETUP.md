@@ -44,8 +44,8 @@ GET  /api/status     ->  { ok: true, model }
 `/api/status` is how ayin learns **which model** it's talking to, so it can pick the right
 **dialect** (tool-call format). ayin finds the endpoint via, in priority order:
 
-1. the **`KELI_URL`** environment variable,
-2. a persisted `keliUrl` in `~/.ayin-cli/prompts.json` (set once with `/set keli-url …`),
+1. the **`AYIN_LLM_URL`** environment variable,
+2. a persisted `llmUrl` in `~/.ayin-cli/prompts.json` (set once with `/set llm-url …`),
 3. `http://localhost:9100` (the default).
 
 Pick **one** of the three options below.
@@ -68,27 +68,27 @@ OLLAMA_MODEL=qwen3-coder:30b node examples/ollama-adapter.mjs
 #    → listening on http://localhost:9100
 
 # 4. Run ayin pointed at the adapter (terminal 2):
-KELI_URL=http://localhost:9100 node dist/index.js
+AYIN_LLM_URL=http://localhost:9100 node dist/index.js
 ```
 
 The adapter (`examples/ollama-adapter.mjs`) honours these env vars: `OLLAMA_MODEL`
 (required), `OLLAMA_URL` (default `http://localhost:11434`), `PORT` (default `9100`),
 `NUM_CTX` (default `32768`).
 
-### Option B — A Maradel / keli-shaped backend
+### Option B — Any backend that serves the contract
 
 If you already run a backend that serves the `/api/generate` + `/api/status` contract
 (e.g. a backend that proxies Ollama and adds extras), just point ayin at it — no adapter
 needed:
 
 ```bash
-KELI_URL=http://<backend-host>:9100 node dist/index.js
-# or persist it once inside the TUI:   /set keli-url http://<backend-host>:9100
+AYIN_LLM_URL=http://<backend-host>:9100 node dist/index.js
+# or persist it once inside the TUI:   /set llm-url http://<backend-host>:9100
 ```
 
 ### Option C — OpenAI (no local model)
 
-If `KELI_URL` is unreachable and an OpenAI key is configured, ayin falls back to OpenAI.
+If `AYIN_LLM_URL` is unreachable and an OpenAI key is configured, ayin falls back to OpenAI.
 
 ```bash
 node dist/index.js
@@ -102,7 +102,7 @@ node dist/index.js
 
 **Interactive (TUI):**
 ```bash
-KELI_URL=http://localhost:9100 node dist/index.js
+AYIN_LLM_URL=http://localhost:9100 node dist/index.js
 ```
 Type a task; ayin works in your **current directory**. Keys: `Ctrl+O` browse tool outputs,
 `Ctrl+S` session summary, `Ctrl+C` quit. When a tool needs approval you get a y/a/n prompt.
@@ -119,7 +119,7 @@ live output; scroll back to the bottom to resume.
 **Headless (one-shot, scriptable):**
 ```bash
 cd /path/to/your/project
-KELI_URL=http://localhost:9100 node /path/to/ayin/dist/index.js -p "Add a /health route and a test for it, then run the tests."
+AYIN_LLM_URL=http://localhost:9100 node /path/to/ayin/dist/index.js -p "Add a /health route and a test for it, then run the tests."
 ```
 In headless mode ayin auto-approves its own `write_file`/`bash` and runs until the task is
 done (or it exhausts its round budget), printing a final summary. **Run it inside the repo
@@ -140,7 +140,7 @@ afterwards, so your edits survive every upgrade. Set config values from the TUI:
 
 | Command | Effect |
 |---------|--------|
-| `/set keli-url http://host:9100` | the LLM endpoint ayin talks to |
+| `/set llm-url http://host:9100` | the LLM endpoint ayin talks to |
 | `/set openai-key <key>` | OpenAI fallback key |
 
 `prompts.json` also holds tunables under `config`:
@@ -212,8 +212,8 @@ inert:
 
 ## 7. Troubleshooting
 
-- **`No reachable LLM backend at …`** — nothing is serving the contract at `KELI_URL`.
-  Start the Ollama adapter (Option A) or fix the URL. Verify: `curl $KELI_URL/api/status`
+- **`No reachable LLM backend at …`** — nothing is serving the contract at `AYIN_LLM_URL`.
+  Start the Ollama adapter (Option A) or fix the URL. Verify: `curl $AYIN_LLM_URL/api/status`
   should return `{"ok":true,"model":"…"}`.
 - **Wrong / garbled tool calls** — ayin picks its dialect from `/api/status`'s `model`
   field. If your model isn't recognised (not gemma/qwen), it defaults to the gemma dialect;
@@ -235,7 +235,7 @@ Bash is auto-detected and used for the file tools; the `ayin watch` git hooks ar
   at logon and restarts on failure:
   ```powershell
   npm run build
-  powershell -ExecutionPolicy Bypass -File tool\install-watch-windows.ps1 -KeliUrl http://<backend-host>:9100
+  powershell -ExecutionPolicy Bypass -File tool\install-watch-windows.ps1 -LlmUrl http://<backend-host>:9100
   ayin watch --repo C:\path\to\repo    # register each repo to review
   ```
   Uninstall: `Unregister-ScheduledTask -TaskName AyinWatch -Confirm:$false`.
