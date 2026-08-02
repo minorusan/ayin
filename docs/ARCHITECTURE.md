@@ -1197,6 +1197,25 @@ can finish — see the warning in `SETUP.md`.
   `process.exit()`, which skips `finally`, so the last debounce window would have been lost on exactly
   the unattended runs this serves. `rebuildFromSpine(id)` reconstructs the JSON if a crash lands between
   debounces. **These files are expected to be large. That is the point.**
+- **`/wipe` — delete saved state, deliberately** (`wipe.ts`, 1.0.214). Nothing under `~/.ayin-cli` has
+  ever pruned itself, so it only grows — measured on one machine: **3418 artifacts / 36 MB**, **824 log
+  files / 32 MB**, 99 sessions. Most of it predates the current build, and stale debugging data is worse
+  than none because you trust it.
+
+  `/wipe` opens a scope menu showing what each currently costs, then a second dialog stating the exact
+  file count and byte total, defaulting to **Cancel**. `/wipe all` · `/wipe artifacts` · `/wipe logs` ·
+  `/wipe transcripts` skip only the menu. Scopes: this directory's sessions (default), every
+  directory's sessions, artifacts, logs, transcripts.
+
+  Four safety rules, enforced in `wipe.ts` rather than trusted to the caller: **plan-then-execute**
+  (`planWipe()` only reads — the operator approves a number, not a verb); **never the live files** (the
+  session being recorded, the transcript being written, and this process's own log are excluded from
+  every scope, because deleting a file mid-append turns "clear old data" into "corrupt today's run");
+  **pattern-matched, never recursive** (no `rm -rf` anywhere in the file — a stray `.dat` someone parked
+  in `artifacts/` is left alone); and **transcripts are never in the default** — they are opt-in to
+  create and the one record with no clipped copy elsewhere, so they go only when named. `executeWipe`
+  measures freed bytes **per file as it deletes**, not from the plan, so a partial failure cannot report
+  space it did not free.
 - **The alert row — the bottom line of the screen** (`ui/widgets/alert.ts`, 1.0.213). Warnings and
   errors, and nothing else, in red, at the very bottom of the stack (below the status bar). Everything
   used to land in the chat log as a grey `system` message, so a real error scrolled away behind the next
@@ -1315,6 +1334,7 @@ src/
 ├── tokens.ts           context-meter estimate
 ├── session-store.ts    local session store: list / resume / checkpoint (cwd-scoped)
 ├── transcript.ts       /transcribe — the FULL unclipped record (jsonl spine + formatted json)
+├── wipe.ts             /wipe — plan-then-execute deletion of saved state; never the live files
 ├── ui.ts               compatibility façade → src/ui/ (all './ui.js' imports keep working)
 ├── ui/                 the TUI, decoupled:
 │   ├── headless.ts     HEADLESS/THINKING_MODE detection + noop element factories

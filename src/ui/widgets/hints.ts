@@ -20,6 +20,7 @@ const COMMANDS: SlashCommand[] = [
   { name: '/plan',    description: 'Force plan mode: survey → third-party API research → explore → a written ayin-plan-*.md, then execute it' },
   { name: '/model',   description: 'Pick the served model (popup) · /model <name> to switch straight away' },
   { name: '/lock',    description: 'Hold the model for this session — ⚿ in the bar; frees itself if this client dies · /unlock' },
+  { name: '/wipe',    description: 'Delete saved state — sessions (this dir) · /wipe all · artifacts · logs · transcripts. Asks first; never touches the live session' },
   { name: '/transcribe', description: 'Record EVERYTHING this session — prompts, raw responses, full tool results — to a JSON file. Big on purpose · /transcribe off' },
   { name: '/summary', description: 'Show session summary (Esc to close)' },
   { name: '/resume',  description: "This directory's past sessions — /resume <n> restores one · /resume all" },

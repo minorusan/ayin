@@ -14,6 +14,7 @@ import {
   showAlert, setStickyAlert, clearStickyAlert,
 } from './ui.js';
 import { isTranscribing, startTranscript, stopTranscript, transcriptPath, transcriptSize, flush as flushTranscript } from './transcript.js';
+import { executeWipe, humanBytes, planWipe, wipeOverview, type WipeScope } from './wipe.js';
 import { connect, disconnect, onConnectionChange, isConnected, currentRequestId } from './connection.js';
 import { refreshActiveModel, activeModelId } from './llm/manager.js';
 import { initLlmProvider } from './llm/select.js';
@@ -405,6 +406,53 @@ onInput(async (text: string) => {
        * runs, because this writes every byte the model saw — including whatever a tool printed — to a
        * file that will get large, and you should never discover that by accident.
        */
+      /**
+       * `/wipe` — delete ayin's own saved state. Two dialogs, never one: the first picks a scope and
+       * shows what each currently costs, the second states the exact file count and byte total and
+       * defaults to Cancel. The live session, the live transcript and this process's log file are
+       * excluded by wipe.ts itself, not by this caller. `/wipe <scope>` skips only the menu.
+       */
+      case '/wipe': {
+        const arg = text.slice('/wipe'.length).trim().toLowerCase().replace(/\s+/g, '-');
+        const named: Record<string, WipeScope> = {
+          '': 'sessions', sessions: 'sessions', all: 'sessions-all', 'sessions-all': 'sessions-all',
+          artifacts: 'artifacts', logs: 'logs', transcripts: 'transcripts',
+        };
+        let scope = named[arg];
+        if (!scope && arg) { addMessage('system', `Unknown scope "${arg}". Use: /wipe · /wipe all · /wipe artifacts · /wipe logs · /wipe transcripts`); return; }
+
+        if (!arg) {
+          const overview = await wipeOverview();
+          const pick = await showDialog(
+            'Wipe which saved state?',
+            overview.map((o) => ({
+              label: o.plan.label,
+              note: humanBytes(o.plan.bytes),
+              danger: true,
+              sub: o.scope === 'transcripts' ? 'your debugging records — nothing else keeps a full copy' : undefined,
+            })),
+            { subtitle: 'Nothing under ~/.ayin-cli prunes itself. The live session, transcript and log are never touched.' },
+          );
+          if (pick < 0) { addMessage('system', 'Wipe cancelled.'); return; }
+          scope = overview[pick].scope;
+        }
+
+        const plan = await planWipe(scope);
+        if (plan.files.length === 0) { addMessage('system', `Nothing to wipe — ${plan.label}.`); return; }
+        const confirm = await showDialog(
+          `Delete ${plan.label}?`,
+          [
+            { label: 'Cancel', key: 'c' },
+            { label: `Delete ${plan.files.length} files · ${humanBytes(plan.bytes)}`, key: 'd', danger: true },
+          ],
+          { subtitle: plan.kept ? `Keeping ${plan.kept} — ${plan.keptReason}. This cannot be undone.` : 'This cannot be undone.' },
+        );
+        if (confirm !== 1) { addMessage('system', 'Wipe cancelled.'); return; }
+        const r = executeWipe(plan);
+        showAlert('warn', `Wiped ${r.deleted} files (${humanBytes(r.bytes)})${r.failed ? ` — ${r.failed} could not be deleted` : ''}`);
+        addMessage('system', `Wiped ${r.deleted} files · ${humanBytes(r.bytes)} freed${r.failed ? ` · ${r.failed} failed` : ''}.`);
+        return;
+      }
       case '/transcribe': {
         const arg = text.slice('/transcribe'.length).trim().toLowerCase();
         if (arg === 'off' || arg === 'stop') {
