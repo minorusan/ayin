@@ -175,8 +175,8 @@ doesn't slip past the gate just for being terse — that claim is reviewed befor
    looking like an MVP; a webview is actually reachable from another machine; one responsibility per
    module; a README exists and still matches; markdown uses the format's range; **an Arduino sketch is
    named the way the toolchain requires — `Blinker/Blinker.ino`, never flagged as odd for matching its
-   own folder, since that match is what makes it build at all** — and wiring is shown with the diagram
-   below, not narrated in prose.
+   own folder, since that match is what makes it build at all** — and wiring is shown with the
+   `arduino_diagram` tool below, not narrated in prose.
 3. **Probes** measure what reading can't: a real HTTP GET on loopback *and* on the LAN address, so
    "running but loopback-only" is caught — the failure that looks perfect on the machine that built it
    and is invisible from your phone. Plus README staleness, markdown richness, structural SRP signals.
@@ -253,23 +253,11 @@ for repair — up to 4 rounds. So a returned diagram always parses; a failing on
 Output lands next to your work (`<subject-slug>.puml` + a rendered `.svg`), and is opened in VS Code
 when the `code` CLI is on PATH — otherwise it's simply left in place and referenced by path.
 
-- **Ask about wiring or a circuit and it renders as ASCII text, pasted straight into the reply,
-  instead of an SVG.** There is no maintained library for this — `circuit-diagram` on npm is 10+ years
-  stale, the well-known ASCII-circuit tools are Python desktop GUIs, and the Arduino "ASCII art" repos
-  out there are static pre-drawn pinout images, not generators. `plantuml -ttxt` already does the job:
-  ```
-  ,---------------.  ,-------------.  ,---.  ,---.
-  |Arduino Uno D13|  |220Ω Resistor|  |LED|  |GND|
-  `-------+-------'  `------+------'  `-+-'  `-+-'
-          |    D13 Signal   |            |       |
-          |----------------->            |       |
-          |                 |    Anode   |       |
-          |                 |------------>       |
-          |                 |            | Cathode
-          |                 |            |------->
-  ```
-  and the QA gate enforces it: a change touching pins that only *narrates* the wiring, with no
-  rendered diagram in the reply, is a failure it will send back for a fix.
+- **Arduino wiring is a separate tool, not this one.** Ask about wiring or a circuit and use
+  `/arduino-explain` (or let the agent call `arduino_diagram`) below — it draws per-pin, per-leg detail
+  grounded in your actual sketch code, which a generic diagram can't. The QA gate enforces it: a change
+  touching pins that only *narrates* the wiring, with no diagram referenced in the reply, is a failure
+  it will send back for a fix.
 - **Nothing leaves your machine.** PlantUML's public server would render in one HTTP call, but a
   diagram of your architecture is exactly what not to POST to a third party. Rendering is local;
   point `AYIN_PUML_SERVER` at your own PlantUML/Kroki instance if you want remote.
@@ -292,13 +280,13 @@ Env: `AYIN_PUML_BIN` · `AYIN_PUML_DIR` · `AYIN_PUML_RENDER` (`svg`|`png`|`0`) 
 
 ## `/arduino-explain` — teach me my own wiring
 
-For a beginner with a starter kit, "the wiring is shown as ASCII in a chat reply" is not the same as
-*understanding* it. `/arduino-explain` renders one self-contained HTML page per sketch in the current
-project: a simplified board outline, a dashed "breadcrumb" wire (dot markers + a leg-label chip) from
-each pin your code actually touches to a card carrying that component's symbol and a full beginner-level
-explanation — how to spot the part in a pile of loose components, what it does, how it's driven from
-code, and the one wiring gotcha that matters most — then opens it in VS Code if the `code` CLI is on
-PATH.
+`/arduino-explain` (and the agent-callable `arduino_diagram` tool, param `board: uno|nano`) draws one
+**validated PlantUML diagram** per sketch in the current project: one rectangle for the board with a
+nested rectangle per pin your code actually touches, one rectangle per real component with a nested
+rectangle per leg, and wires drawn as labeled arrows between exact pins — grounded in your sketch code
+and the `arduino_db` catalog, never a generic or invented circuit. Written as a validated `.puml` +
+rendered `.svg` (an editable vector — drag components apart in Inkscape/draw.io, not a flattened
+picture) and opened in VS Code if the `code` CLI is on PATH.
 
 Early-returns with a clear reason if the current directory isn't an Arduino project (no `.ino`/`.pde`
 sketch, no `platformio.ini`/`sketch.yaml`). A README at the project root is fed in as extra context when
@@ -316,12 +304,12 @@ Pin usage is extracted by regex (`pinMode`/`digitalWrite`/`digitalRead`/`analogW
 on its own pin at all, so without that second pattern a servo-only project would report zero pins for
 its one actual actuator), then ONE grounded LLM call maps the real pins to real `arduino_db` component
 ids — never invents one outside the catalog; an unmatched pin still gets an honest "no catalog match"
-card rather than being dropped.
+rectangle rather than being dropped.
 
 **Passing Arduino QA on a turn that touched a sketch regenerates (overwrites) that sketch's
-`.wiring.html` automatically** — a wiring change that just cleared QA but left a stale diagram behind
-would defeat the point of a *teaching* tool. Not opened in an editor for you automatically there; only
-the explicit `/arduino-explain` command does that.
+`.wiring.puml`/`.svg` automatically** — a wiring change that just cleared QA but left a stale diagram
+behind would defeat the point of a *teaching* tool. Not opened in an editor for you automatically there;
+only the explicit `/arduino-explain` command (or an agent-initiated `arduino_diagram` call) does that.
 
 ## `/explain <feature>` — intention vs. reality, and where to be careful
 

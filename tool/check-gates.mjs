@@ -394,16 +394,38 @@ console.log('\narduino project probe');
   ok(dims2.has('arduino') && !dims2.has('arduino-wiring'), 'the wiring dimension is independent — a non-wiring Arduino change gets the naming bar only, not the diagram requirement');
 }
 
-// ── wiring diagram trigger: the deterministic detector, before any LLM involvement ──
-console.log('\nwiring diagram detection');
+// ── arduino_diagram: the pure PUML renderer, esp. the free-form-leg-name fuzzy matcher ──
+console.log('\narduino wiring diagram render');
 {
-  const dg = await import(`file://${join(DIST, 'tools/diagram.js')}`);
-  ok(dg.isWiringRequest(undefined, 'the wiring between an Arduino and an LED'), 'fires from the subject alone, no kind needed');
-  ok(dg.isWiringRequest('wiring', 'anything'), 'fires from an explicit kind');
-  ok(dg.isWiringRequest(undefined, 'show me the circuit for this sensor'), 'fires on "circuit"');
-  ok(dg.isWiringRequest(undefined, 'draw the pinout for this board'), 'fires on "pinout"');
-  ok(!dg.isWiringRequest(undefined, 'how does the chat request flow from the CLI to the model'), 'an ordinary architecture request does not fire it');
-  ok(!dg.isWiringRequest('sequence', 'the lifecycle of a fix request'), 'an explicit non-wiring kind does not fire it either');
+  const ad = await import(`file://${join(DIST, 'tools/arduino-diagram.js')}`);
+
+  // push-button's real catalog legs: 'top-left leg' / 'bottom-left leg' (-> a digital pin) and
+  // 'top-right leg' / 'bottom-right leg' (-> GND). groundWiring never returns the catalog's exact
+  // legName — it returns free-form project phrasing (see matchLeg's own doc comment) — so this
+  // exercises the fuzzy word-overlap matcher, not an exact-string lookup.
+  const pins = [{ raw: '2', resolved: '2', calls: ['pinMode', 'digitalRead'] }];
+  const fuzzyConn = [{ pin: '2', componentId: 'push-button', leg: 'left side of the switch', label: 'push button' }];
+  const puml1 = ad.renderArduinoWiringPuml('Blinker', 'uno', pins, fuzzyConn);
+  ok(/PIN_2 --> COMP_push_button_LEG_top_left_leg : signal/.test(puml1), 'free-form leg text fuzzy-matches the catalog leg with the most overlapping words (never an exact-string miss)');
+  ok(/COMP_push_button_LEG_top_right_leg --> BOARD_GND : ground/.test(puml1), 'a leg whose catalog connectsTo mentions GND wires to the synthetic ground pin');
+  ok(/COMP_push_button_LEG_bottom_right_leg --> BOARD_GND : ground/.test(puml1), 'both legs on the ungrounded side wire to GND, not just the first');
+
+  // Leg text that shares no words with any catalog leg still draws a wire — falls back to the first
+  // leg rather than silently dropping the connection (the bug this matcher replaced).
+  const noOverlapConn = [{ pin: '2', componentId: 'push-button', leg: 'zzz totally unrelated phrase', label: 'push button' }];
+  const puml2 = ad.renderArduinoWiringPuml('Blinker', 'uno', pins, noOverlapConn);
+  ok(/PIN_2 --> COMP_push_button_LEG_top_left_leg : signal/.test(puml2), 'zero word-overlap still falls back to a real leg instead of dropping the wire');
+
+  // An unmatched pin (componentId: 'unknown') still gets its own rectangle and an honest note,
+  // never silently omitted from the diagram.
+  const unknownConn = [{ pin: '2', componentId: 'unknown', leg: '', label: 'mystery' }];
+  const puml3 = ad.renderArduinoWiringPuml('Blinker', 'uno', pins, unknownConn);
+  ok(/no arduino_db catalog component matched/.test(puml3), 'an unmatched pin is drawn with an honest "no catalog match" note, not dropped');
+  ok(/PIN_2 -->/.test(puml3), 'the unmatched pin still gets a wire from the board rectangle');
+
+  // The renderer always produces a structurally valid, self-contained PUML document.
+  ok(puml1.startsWith('@startuml') && puml1.trim().endsWith('@enduml'), 'output is a well-formed PlantUML document');
+  ok(!/!include/.test(puml1), 'no !include directives — offline-renderable, same discipline as diagram.ts');
 }
 
 // ── arduino-db: keyword search, no embeddings, no network ──────────
@@ -424,7 +446,7 @@ console.log('\narduino-db catalog search');
   ok(new Set(summaries.map((s) => s.id)).size === summaries.length, 'every catalog id is unique — a duplicate would silently shadow in exact lookup');
 }
 
-// ── arduino-explain: the deterministic half (pin extraction, sketch discovery, HTML render) ──
+// ── arduino-explain: shared extraction infra (pin extraction, sketch discovery, connection parsing) ──
 console.log('\narduino-explain pipeline (no LLM)');
 {
   const ae = await import(`file://${join(DIST, 'tools/arduino-explain.js')}`);
@@ -476,27 +498,12 @@ console.log('\narduino-explain pipeline (no LLM)');
   const wrapped = ae.parseConnections('here you go:\n```json\n{"connections":[{"pin":"13","componentId":"standard-led","leg":"anode","label":"status LED"}]}\n```');
   ok(Array.isArray(wrapped) && wrapped.length === 1 && wrapped[0].componentId === 'standard-led', 'connections wrapped in prose/fences still parse (brace-scan, same shape as diagram.ts/criteria.ts)');
 
-  // renderExplainHtml is PURE — no LLM in this half, so grounding is fabricated here on purpose.
-  const fakeConnections = [
-    { pin: 'LED_PIN', componentId: 'standard-led', leg: 'anode', label: 'status LED' },
-    { pin: '9', componentId: 'sg90-micro-servo', leg: 'signal wire', label: 'door servo' },
-    { pin: 'NOPE_UNKNOWN', componentId: 'unknown', leg: '', label: '' }, // pin not in the extracted list — must be ignorable, not fatal
-  ];
-  const html = ae.renderExplainHtml('BlinkAndBeep', pins, fakeConnections.filter((c) => byRaw[c.pin]));
-  ok(html.startsWith('<!doctype html>') && html.trim().endsWith('</html>'), 'produces a complete, well-bounded HTML document');
-  const svgOpens = (html.match(/<svg/g) || []).length;
-  const svgCloses = (html.match(/<\/svg>/g) || []).length;
-  ok(svgOpens === svgCloses && svgOpens > 1, 'svg tags are balanced and there is more than one (canvas + per-card icons)', `${svgOpens} open / ${svgCloses} close`);
-  ok((html.match(/<foreignObject/g) || []).length === pins.length, 'exactly one card per touched pin, including the ones with no matched component', String((html.match(/<foreignObject/g) || []).length));
-  ok(html.includes('Standard LED'), 'a matched component card carries its real catalog name');
-  ok(html.includes('Micro servo motor'), 'a second matched component renders alongside the first');
-  ok(html.includes('no catalog component matched'), 'a pin with an unmatched/unknown component still gets an honest card, not a silently dropped one');
-  ok(html.includes('stroke-dasharray'), 'wires render as a dashed breadcrumb trail, not a plain solid line');
-  ok(!/undefined|NaN/.test(html), 'no undefined/NaN leaked into the rendered geometry or text');
-
-  // Not an Arduino project at all → early return, no files written.
-  const outcome = await ae.runArduinoExplain(REPO, { open: false });
-  ok(outcome.ok === false && /does not look like an Arduino project/.test(outcome.reason ?? ''), 'runArduinoExplain early-returns with a clear reason on a non-Arduino directory');
+  // arduino-explain.ts is now pure extraction/grounding infrastructure — no rendering of its own.
+  // Grounding + PUML render is arduino-diagram.ts's job, exercised in the "arduino wiring diagram
+  // render" block above and the early-return check below.
+  const ad = await import(`file://${join(DIST, 'tools/arduino-diagram.js')}`);
+  const outcome = await ad.runArduinoDiagram(REPO, { open: false });
+  ok(outcome.ok === false && /does not look like an Arduino project/.test(outcome.reason ?? ''), 'runArduinoDiagram early-returns with a clear reason on a non-Arduino directory');
 }
 
 // ── presenter: the classification/build parser, and the pure formatter ──
@@ -523,10 +530,10 @@ console.log('\npresenter pass (no LLM)');
   ok(text.startsWith('> fix the login bug'), 'the formatted text quotes the goal first, as the "what this satisfies" offset');
   ok(text.includes('added the widget'), 'the satisfies sentence is included');
   ok(text.includes('a.ts — added an export'), 'a file bullet reads "path — summary"');
-  ok(!/wiring explainer/.test(text), 'no Arduino note when none was passed in');
+  ok(!/wiring diagram regenerated/.test(text), 'no Arduino note when none was passed in');
 
-  const withArduino = pr.formatPresentation('blink an LED', wrapped, 'wiring explainer regenerated (arduino-explain): /tmp/x.wiring.html');
-  ok(withArduino.includes('wiring explainer regenerated'), 'an Arduino note, when given, appears as its own bullet');
+  const withArduino = pr.formatPresentation('blink an LED', wrapped, 'wiring diagram regenerated (arduino-diagram): /tmp/x.wiring.svg');
+  ok(withArduino.includes('wiring diagram regenerated'), 'an Arduino note, when given, appears as its own bullet');
 
   const emptyFiles = pr.formatPresentation('do a thing', { presentable: true, satisfies: '', files: [] }, null);
   ok(/no file-level changes reported/.test(emptyFiles), 'an empty file list still renders an honest line instead of a bare "Changed:" header');

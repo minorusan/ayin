@@ -377,11 +377,11 @@ strict `JSON.parse` would reject good answers for a cosmetic reason.
   `chat.ts`'s own goal-line treatment uses. This lets the two be compared side by side while Presenter
   is new. Once trusted, this block is meant to come out in `agent.ts` and the presentation stands alone
   — a code change, not a design change, when that day comes.
-- **Arduino.** A presentation of Arduino work is only accurate if the wiring page it can reference is
-  current, so Presenter calls `regenerateTouchedSketches` — the SAME shared helper the QA-pass hook
-  below uses, not a second copy. Presenter runs first and hands the QA-pass hook the set of sketch paths
-  it already regenerated (`presenterArduinoRegen`, threaded through `agent.ts`), so a single Arduino
-  change never re-spends its one-LLM-call-per-sketch grounding twice in the same turn.
+- **Arduino.** A presentation of Arduino work is only accurate if the wiring diagram it can reference is
+  current, so Presenter calls `regenerateTouchedDiagrams` (`tools/arduino-diagram.ts`) — the SAME shared
+  helper the QA-pass hook below uses, not a second copy. Presenter runs first and hands the QA-pass hook
+  the set of sketch paths it already regenerated (`presenterArduinoRegen`, threaded through `agent.ts`),
+  so a single Arduino change never re-spends its one-LLM-call-per-sketch grounding twice in the same turn.
 - **Print ordering.** Interactive mode prints the raw reply immediately, unconditionally — UNLESS the
   shape check passes AND at least one of Presenter/QA will actually run this turn (`doQa || doPresenter`
   in `agent.ts`), in which case the print is deferred: whichever pass runs decides the primary visible
@@ -454,9 +454,10 @@ intent → criteria (once per turn) → probes → review → pass? done
   - **`arduino-wiring` is a separate dimension, deliberately not folded into `arduino`** — so a
     comment-typo fix does not suddenly need a wiring diagram. It only applies when the
     change actually touches a pin (`pinMode`/`digitalWrite`/`digitalRead`/`analogRead`/`analogWrite`/
-    `attachInterrupt`, or the text otherwise discusses wiring), and requires the reply to contain the
-    `diagram` tool's rendered ASCII, not prose describing which pin connects to what — see the wiring
-    mode of the `diagram` tool above, which this bar exists to make mandatory rather than optional.
+    `attachInterrupt`, or the text otherwise discusses wiring), and requires the reply to reference the
+    `arduino_diagram` tool's validated PlantUML/SVG output, not prose describing which pin connects to
+    what — see the `arduino_diagram` tool below, which this bar exists to make mandatory rather than
+    optional.
   - A modest **`arduino-quality`** bar carries soft, non-blocking recommendations (named pin constants
     over magic numbers, `delay()` in `loop()` only when genuinely meant to block, `Serial.begin` baud
     consistency) — raised only when clearly ignored, never invented work.
@@ -599,36 +600,14 @@ configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
   - Verified end-to-end against the real model: a first-try `SEQUENCE (6 participants)` (re-validated
     independently, SVG free of embedded error text), and the repair path forced with a stub validator
     — two rejections fed back, success on round 3.
-  - **Wiring/circuit diagrams render as ASCII text, not an image** (`isWiringRequest`, matched against
-    `kind`/`subject`: wiring, circuit, breadboard, schematic, pinout, connect(ed/ion)). Investigated
-    first, because no maintained library exists to draw one — `circuit-diagram` on npm is 10+ years
-    stale, AACircuit is a Python **desktop GUI**, and `ascii-art-arduinos`/`ASCII-schematics` are static
-    pre-drawn images, not generators. `plantuml -ttxt` (already in the pipeline) is the real answer:
-    `render` defaults to `'txt'` for a wiring request, `DiagramResult.ascii` is the `.atxt` file read
-    back so it can be pasted straight into a reply, and `formatDiagramResult` puts that block front and
-    center with an explicit "paste this, don't describe the wiring in prose" instruction.
-    - **The shape matters more than the mode.** A component or class diagram — PlantUML's own default
-      pick for "how parts connect" — renders in ASCII as disconnected boxes with **no visible wire at
-      all**; only a flat `participant` + labeled `->` (sequence) shape draws a connected, labeled line
-      per wire. `wiringGuidance.txt` is inserted **before** the general type-picking advice in
-      `draw.txt` (moving it there was itself a fix — placed after, the model kept reaching for
-      component/nested-block/`note`/`title` shapes anyway and the general advice quietly won), states
-      the override explicitly, and forbids nesting, `note`, `title` and non-participant shapes by name.
-      **Verified against the real model, not assumed**: the first attempt (guidance present but
-      positioned after the general advice) still produced a nested `component`+`database`+`note`+
-      `title` diagram that PlantUML itself classified `DESCRIPTION`, not `SEQUENCE`, and rendered as
-      disconnected boxes in ASCII — exactly the failure the feature exists to prevent. Reordering +
-      stronger, more explicit override language fixed it: PlantUML then reports `SEQUENCE`, and the
-      ASCII shows four boxes connected by three labeled lines.
-    - **A materialization trap bit this verification loop itself.** Prompts-in-files never overwrite a
-      LOCAL copy once one exists (rule 3) — mid-iteration, the dev machine's already-materialized local
-      `draw.txt`/`wiringGuidance.txt` were stale relative to the edited SOURCE files, so two consecutive
-      "fixes" silently changed nothing at the model. Any installation with these ids already
-      materialized needs `/reset` (or the specific files deleted) to pick this up — same caveat as
-      every other prompt change, worth restating here because it is easy to mistake for "the model is
-      ignoring the instruction" when it is actually "the instruction never reached the model".
-    - `AYIN_DEBUG_DIAGRAM_PROMPT=1` dumps the exact assembled prompt to stderr each round — the fastest
-      way to tell those two failure modes apart, which is exactly how this bug was found.
+  - **Arduino wiring does NOT live here.** An earlier version of this tool rendered wiring as validated
+    ASCII text (`isWiringRequest`, a flat sequence-diagram shape). That mode is gone: ASCII boxes-and-
+    arrows cannot show per-pin/per-leg detail or be dragged apart in an editor, and it duplicated
+    `arduino-explain.ts`'s own ungrounded HTML renderer with a second, inconsistent format. Wiring is now
+    exclusively the **`arduino_diagram`** tool below, grounded in the real sketch code and the
+    `arduino_db` catalog and rendered as an editable PUML/SVG. `diagram` itself is back to pure
+    architecture/concept diagrams (sequence/class/component/activity/state/**mindmap** — `mindmap` is the
+    strongest pick for "explain this concept," the most common reason someone reaches for this tool).
 - **`arduino_db`** (`tools/arduino-db.ts`, `tools/arduino-components-data.ts`) — a shipped reference
   catalog of ~28 common starter-kit components (LEDs, buttons, servos, sensors, displays, drivers, ICs)
   with a keyword/alias search over it. **Deliberately NOT a RAG pipeline** — no embeddings, no vector
@@ -647,18 +626,16 @@ configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
     words that show up in nearly every entry's explanatory prose. Splitting the score fixed it.
   - The agent calls it directly (`query=`/`id=`/`list=1`) while writing or explaining Arduino code —
     it's the same "don't recall hardware facts from memory" discipline the `api` QA bar already enforces
-    for third-party APIs, applied to component wiring instead. `arduino-explain.ts` also calls
-    `getArduinoComponent`/`ARDUINO_COMPONENTS` directly to ground its HTML render and its grounding
-    LLM call — same data, two consumers.
-- **`arduino-explain`** (`tools/arduino-explain.ts`) — "teach me my own wiring": the `/arduino-explain`
-  command renders one self-contained HTML page per sketch showing a simplified board outline, a dashed
-  **breadcrumb** wire (with dot markers and a leg-label chip) from each touched pin to a card carrying
-  that component's symbol and its full `arduino_db` explanation, then opens it in VS Code. Split into a
-  deterministic half and a grounded half, the same shape as `diagram.ts`'s validated loop:
+    for third-party APIs, applied to component wiring instead. `arduino-diagram.ts` also calls
+    `getArduinoComponent`/`ARDUINO_COMPONENTS` directly to ground its per-component rectangles and the
+    grounding LLM call — same data, two consumers.
+- **`arduino-explain`** (`tools/arduino-explain.ts`) is now **pure shared infrastructure** — extraction
+  and grounding only, no rendering. It grew a redundant, format-inconsistent HTML wiring renderer once;
+  that renderer is gone (see `arduino_diagram` below), and this file kept only the deterministic and
+  grounded halves every wiring consumer needs:
   - **`findSketches`/`isArduinoProject`** walk the tree for `.ino`/`.pde` files or a `platformio.ini`/
     `sketch.yaml` marker (bounded depth, skips `node_modules`/`.git`/`dist`/`.pio`) — project-wide, unlike
-    `qa/probes.ts`'s `probeArduinoProject`, which only looks at a turn's *changed* files. `/arduino-explain`
-    runs on demand against the whole project, not mid-QA-turn.
+    `qa/probes.ts`'s `probeArduinoProject`, which only looks at a turn's *changed* files.
   - **`extractPinUsage`** (pure, no LLM) regexes over `pinMode`/`digitalWrite`/`digitalRead`/
     `analogWrite`/`analogRead`/`attachInterrupt`, resolving named constants (`#define`/`const int`)
     declared in the same file back to their literal pin. **`.attach(pin)` (Servo.h) is matched
@@ -675,32 +652,51 @@ configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
     or a response naming no pin from the real pin list retries (max 3 rounds, `prompts/arduino/
     groundWiring.txt` + `groundRepair.txt`); an unrecognized `componentId` is coerced to `"unknown"`
     rather than retried, and an exhausted/unreachable model degrades to `[]` — **never invents a
-    component the catalog doesn't have**, and never throws, so a down model still yields a page (every
-    touched pin still gets a card, honestly labeled "no catalog component matched").
-  - **README is grounding context when present, never a gate.** A beginner's first sketch usually has no
-    README yet, and blocking a *teaching* tool on documentation that doesn't exist would defeat the tool.
-  - **`renderExplainHtml`** (pure) is the other deterministic half — inline SVG board + `foreignObject`
-    HTML cards (so prose wraps with ordinary CSS instead of being laid out character-by-character in
-    SVG `<text>`), a handful of per-id icons (LED, RGB LED, button, servo, buzzer, potentiometer,
-    resistor) falling back to a per-category shape (output/input/sensor/display/communication/passive)
-    for the rest of the catalog. Self-contained, no external requests, dark-themed.
-  - **`regenerateTouchedSketches`** (exported from this module) is the ONE shared entry point two
-    call sites use — the Presenter pass (above) and the QA-pass hook below — so "Arduino work being
-    presented/QA'd necessitates a current wiring page" has exactly one implementation, not two drifting
-    copies. It takes a `skip` set: Presenter runs first and regenerates whatever it touches, then hands
-    the QA-pass hook the paths it already covered, so a single Arduino change never re-spends its
+    component the catalog doesn't have**, and never throws, so a down model still yields a diagram
+    (every touched pin still gets a rectangle, honestly labeled "no catalog component matched").
+  - **`readReadme`** (exported) and **README is grounding context when present, never a gate.** A
+    beginner's first sketch usually has no README yet, and blocking a *teaching* tool on documentation
+    that doesn't exist would defeat the tool.
+- **`arduino_diagram`** (`tools/arduino-diagram.ts`) — "teach me my own wiring," as a **validated PlantUML
+  diagram**, the same rendering discipline `diagram.ts` uses (`plantuml -syntax` then `-tsvg`, never
+  reported successful for a file that won't render). The `/arduino-explain` command (name unchanged,
+  output format is not) and the agent-callable `arduino_diagram` tool both call this. Replaces two prior
+  overlapping, ungrounded systems in one change: `diagram.ts`'s old ASCII wiring mode (no per-pin/per-leg
+  detail, not draggable) and this file's own former HTML/breadcrumb renderer (a second, inconsistent
+  format for the same information).
+  - **Shape**: one `rectangle "<board>" <<board>>` containing one nested pin-rectangle per board pin
+    *actually used* by the sketch (plus a synthetic `GND`/`5V` pin when a component leg needs one); one
+    `rectangle <<comp>>` per real component (grouped from `groundWiring`'s per-connection output via
+    `groupByComponent`) containing one nested leg-rectangle per catalog `legs[]` entry, with a `note`
+    carrying `whatItDoes`/`wiringNotes`; wires drawn as labeled arrows (`signal`/`ground`/`power`) between
+    exact pin/leg rectangles. Nested rectangles are what make this **draggable in Inkscape/draw.io** —
+    each stays a distinct SVG group, unlike a flattened picture.
+  - **`matchLeg`** — `groundWiring`'s `leg` field is deliberately **free-form project phrasing** (the
+    prompt asks for e.g. `"cathode"`, `"signal wire"`, never a restatement of the catalog's exact
+    `legName`), so it cannot be looked up by exact string match against `arduino_db`'s `legs[]`. A first
+    draft assumed exact match and silently dropped every wire whose leg text didn't match verbatim —
+    caught in smoke-testing before shipping, not by a user report. Fixed with a normalize-then-score
+    fallback: exact match first, else the catalog leg with the most overlapping words, else the first leg
+    — a connection is **never silently dropped**.
+  - **`board: 'uno' | 'nano'`** (tool param, default `uno`) only changes the board rectangle's title —
+    pins shown are always just what the code actually touches, never a full physical pinout.
+  - **`regenerateTouchedDiagrams`** (exported from this module) is the ONE shared entry point two call
+    sites use — the Presenter pass (above) and the QA-pass hook below — so "Arduino work being
+    presented/QA'd necessitates a current wiring diagram" has exactly one implementation, not two
+    drifting copies. It takes a `skip` set: Presenter runs first and regenerates whatever it touches, then
+    hands the QA-pass hook the paths it already covered, so a single Arduino change never re-spends its
     one-LLM-call-per-sketch grounding twice in the same turn.
   - **QA-pass regeneration (`agent.ts`, right after the QA gate's `pass` card).** Passing Arduino QA
     (the existing `arduino`/`arduino-wiring` bars, unchanged) on a turn that touched a sketch
-    **necessitates regenerating that sketch's `.wiring.html`** if Presenter hasn't already — deliberately
-    **not** opened in an editor here — only the explicit `/arduino-explain` command does that; popping
-    VS Code open after every unrelated QA pass on an Arduino repo would be disruptive. A regenerate
-    failure is logged, never thrown — this must not break the turn it rides on.
-  - **Verified against the real backend, not assumed**: a fixture project (push button → gate servo,
-    RGB LED for status) run through the full pipeline against the actually-running Maradel backend
-    (the sanctioned gateway, not a raw Ollama call) correctly matched `push-button`, `sg90-micro-servo`,
-    and `rgb-led-common-cathode` from five real pins, one of them only discoverable via the `.attach()`
-    fix above.
+    **necessitates regenerating that sketch's `.wiring.puml`/`.svg`** if Presenter hasn't already —
+    deliberately **not** opened in an editor here — only the explicit `/arduino-explain` command (or the
+    `arduino_diagram` tool call) does that; popping VS Code open after every unrelated QA pass on an
+    Arduino repo would be disruptive. A regenerate failure is logged, never thrown — this must not break
+    the turn it rides on.
+  - **Verified against real renders, not assumed**: a 3-component fixture (push button, resistor, LED)
+    rendered to both SVG and PNG via the real `plantuml` binary and visually confirmed — clean layout, all
+    wires drawn, notes/legend rendering correctly — after fixing the `matchLeg` bug above with more
+    realistic free-form leg text ("signal side", "input side", "anode, through a resistor").
 - **`web_search`** (`tools/web-search.ts`) mirrors maradel's pipeline (`backend/src/tasks/webSearch.ts`),
   in-process and dependency-free: **SearXNG** (keyless self-hosted metasearch, JSON API) PRIMARY →
   **DuckDuckGo HTML** fallback → **DDG Instant Answer** last resort; rank + dedup → fetch top 4 pages →

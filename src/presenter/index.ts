@@ -20,10 +20,10 @@
  * raw reply will stop being shown when Presenter produces a presentation — that switch lives in
  * `agent.ts`, not here, since it's about what gets printed, not about the decision itself.
  *
- * ARDUINO. A presentation of Arduino work is only accurate if the wiring page it can reference is
- * current, so Presenter calls the same `regenerateTouchedSketches` the QA-pass hook uses — see that
- * function's own doc for why the two share one implementation with a skip-set instead of each having
- * their own copy.
+ * ARDUINO. A presentation of Arduino work is only accurate if the wiring diagram it can reference is
+ * current, so Presenter calls the same `regenerateTouchedDiagrams` (arduino-diagram.ts) the QA-pass
+ * hook uses — see that function's own doc for why the two share one implementation with a skip-set
+ * instead of each having their own copy.
  *
  * OFF BY DEFAULT for the session — `/present` (bare, in `index.ts`) toggles it on for the rest of the
  * session; `/presentthis <message>` forces it for exactly one turn regardless of the toggle. This is
@@ -36,7 +36,7 @@ import { pushActivity, setActivityDetail } from '../activity.js';
 import { llmChat } from '../llm/manager.js';
 import { log } from '../log.js';
 import { prompts, packagePath } from '../prompts-service.js';
-import { regenerateTouchedSketches } from '../tools/arduino-explain.js';
+import { regenerateTouchedDiagrams } from '../tools/arduino-diagram.js';
 import type { ChangedFile } from '../qa/probes.js';
 
 const presenterPrompts = prompts.register('presenter', packagePath('prompts', 'presenter')).bundle;
@@ -179,11 +179,11 @@ export async function presenterPass(goal: string, response: string, files: Chang
     let arduinoNote: string | null = null;
     let arduinoRegenerated = new Set<string>();
     try {
-      const regen = await regenerateTouchedSketches(process.cwd(), files);
+      const regen = await regenerateTouchedDiagrams(process.cwd(), files);
       if (regen) {
         arduinoRegenerated = regen.regeneratedPaths;
         arduinoNote = regen.results.length
-          ? `wiring explainer regenerated (arduino-explain): ${regen.results.map((r) => r.htmlPath).join(', ')}`
+          ? `wiring diagram regenerated (arduino-diagram): ${regen.results.map((r) => r.svgPath ?? r.pumlPath).join(', ')}`
           : null;
       }
     } catch (err) {

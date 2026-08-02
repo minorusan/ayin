@@ -38,7 +38,7 @@ import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { extractSignals } from './tools/signals.js';
 import { qaBeginTurn, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn } from './qa/index.js';
-import { regenerateTouchedSketches } from './tools/arduino-explain.js';
+import { regenerateTouchedDiagrams } from './tools/arduino-diagram.js';
 import { presenterPass, shouldRunPresenterThisTurn } from './presenter/index.js';
 import { clearActivity } from './activity.js';
 import { guardBeginTurn, guardCheck, guardDirective, guardNoteDenied } from './tool-guard.js';
@@ -813,16 +813,16 @@ export async function runAgent(userInput: string): Promise<void> {
 
             // Arduino QA passing NECESSITATES the wiring explainer being current — a sketch that just
             // cleared the `arduino`/`arduino-wiring` bars with new pin usage but an unregenerated
-            // `*.wiring.html` would leave a beginner reading a stale diagram. `presenterArduinoRegen`
+            // `*.wiring.puml`/`.svg` would leave a beginner reading a stale diagram. `presenterArduinoRegen`
             // skips any sketch Presenter already regenerated moments ago in this same pass — one LLM
             // call per sketch per turn, not two. Never `open`ed here: popping VS Code open after every
             // unrelated QA pass on an Arduino repo would be disruptive; only the explicit
             // `/arduino-explain` command opens an editor.
             if (outcome.action === 'pass') {
               try {
-                const regen = await regenerateTouchedSketches(process.cwd(), gate.files, presenterArduinoRegen);
+                const regen = await regenerateTouchedDiagrams(process.cwd(), gate.files, presenterArduinoRegen);
                 if (regen && regen.results.length > 0) {
-                  addMessage('system', `Arduino QA passed — wiring explainer regenerated: ${regen.results.map((r) => r.htmlPath).join(', ')}`);
+                  addMessage('system', `Arduino QA passed — wiring diagram regenerated: ${regen.results.map((r) => r.svgPath ?? r.pumlPath).join(', ')}`);
                 }
               } catch (err) {
                 log('WARN', 'arduino_explain_regenerate_failed', { error: err instanceof Error ? err.message : String(err) });

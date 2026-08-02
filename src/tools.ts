@@ -23,6 +23,7 @@ import { webSearch } from './tools/web-search.js';
 import { sendPushExecute } from './tools/send-push.js';
 import { diagramExecute } from './tools/diagram.js';
 import { arduinoDbExecute } from './tools/arduino-db.js';
+import { arduinoDiagramExecute } from './tools/arduino-diagram.js';
 
 // ── Async exec ──────────────────────────────────────────────────────
 
@@ -433,15 +434,25 @@ const tools: Tool[] = [
   },
   {
     name: 'diagram',
-    description: 'Explain something with a PICTURE: generate a validated PlantUML diagram, write it as a .puml next to the work, render it and open it. Use this whenever a structure, flow, lifecycle or relationship is easier seen than read — and whenever the user says they do not understand something, asks you to explain better, or asks for a diagram/schema/visual. The diagram is checked by the real PlantUML renderer and repaired in a loop until it actually parses, so what you get back always renders. Pass `context` with real facts (file names, functions, events) you already gathered — without it the picture will be generic. For WIRING or a CIRCUIT (subject or kind mentions wiring/circuit/breadboard/schematic/pinout), it automatically renders as ASCII text instead of an image and hands back the actual rendered art — paste that block into your reply verbatim; do not describe the wiring in prose instead.',
+    description: 'Explain a CONCEPT or an architecture with a PICTURE: generate a validated PlantUML diagram, write it as a .puml next to the work, render it and open it. Use this whenever a structure, flow, lifecycle or relationship is easier seen than read — and whenever the user says they do not understand something, asks you to explain better, or asks for a diagram/schema/visual/mindmap. The diagram is checked by the real PlantUML renderer and repaired in a loop until it actually parses, so what you get back always renders. Pass `context` with real facts (file names, functions, events) you already gathered — without it the picture will be generic. `kind=mindmap` is the strongest choice for "explain this concept to me" — it radiates from one central idea instead of forcing an arbitrary sequence/class shape onto something that isn\'t really a process. NOT for Arduino wiring/circuits — use arduino_diagram for that; it is grounded in the real project and its own component catalog, which this generic tool has no access to.',
     parameters: [
-      { name: 'subject', type: 'string', description: 'What the diagram must explain, in a phrase. e.g. "how a chat request flows from the CLI to the model and back", "the wiring between the Arduino and the LED".', required: true },
-      { name: 'kind', type: 'string', description: 'Optional diagram type to force: sequence | class | component | activity | state | mindmap | wiring. Omit to let it choose.', required: false },
+      { name: 'subject', type: 'string', description: 'What the diagram must explain, in a phrase. e.g. "how a chat request flows from the CLI to the model and back", "the tiered-memory concept".', required: true },
+      { name: 'kind', type: 'string', description: 'Optional diagram type to force: sequence | class | component | activity | state | mindmap. Omit to let it choose; prefer mindmap for "explain this concept".', required: false },
       { name: 'context', type: 'string', description: 'Optional grounding — real module/function/event names, or findings from explore/read_file, so the diagram names your actual code.', required: false },
-      { name: 'render', type: 'string', description: 'Optional render mode override: svg | png | txt | 0. Wiring/circuit diagrams already default to txt (ASCII, pasted straight into the reply) — you rarely need to set this.', required: false },
+      { name: 'render', type: 'string', description: 'Optional render mode override: svg | png | 0.', required: false },
     ],
     async execute(params) {
       return diagramExecute(params);
+    },
+  },
+  {
+    name: 'arduino_diagram',
+    description: 'Draw the WIRING for the Arduino project in the current directory: one rectangle for the board (Uno or Nano) with a nested rectangle per pin actually used, one rectangle per real component with a nested rectangle per leg, wires drawn as labeled arrows between exact pins — grounded in the real sketch code and the arduino_db catalog, never a generic/invented circuit. Written as a validated .puml + rendered .svg (an editable vector — draggable in Inkscape/draw.io, not a flattened picture) and opened in VS Code. Use this whenever the user asks about wiring, a circuit, or "how does this connect" for an Arduino project — never use the generic diagram tool for wiring, it has no idea what components are actually wired.',
+    parameters: [
+      { name: 'board', type: 'string', description: 'Which board to label the diagram for: uno | nano. Defaults to uno. Only affects the board rectangle\'s title — pins shown are always just the ones the code actually touches, not a full physical pinout.', required: false },
+    ],
+    async execute(params) {
+      return arduinoDiagramExecute(params);
     },
   },
   {

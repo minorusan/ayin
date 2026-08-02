@@ -37,7 +37,7 @@ import { HEADLESS } from './ui.js';
 import { loadRules } from './rules.js';
 import { setConfigValue, resetPromptsToDefaults } from './prompts.js';
 import { getGoal, setGoal, clearGoal, refreshGoal } from './goal.js';
-import { runArduinoExplain, formatExplainOutcome } from './tools/arduino-explain.js';
+import { runArduinoDiagram, formatArduinoDiagramOutcome } from './tools/arduino-diagram.js';
 import { runExplain, formatExplainOutcome as formatExplainReportOutcome } from './explain/index.js';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -673,13 +673,15 @@ onInput(async (text: string) => {
         break;
       }
       // `/arduino-explain` — early-returns if cwd is not an Arduino project (probes for .ino/.pde or
-      // platformio.ini/sketch.yaml). Otherwise: one wiring HTML per sketch (board + breadcrumb wiring
-      // + per-component beginner explanations from arduino-db), opened in VS Code if it's on PATH.
+      // platformio.ini/sketch.yaml). Otherwise: one wiring diagram per sketch (board rectangle + one
+      // rectangle per grounded component, wires as labeled arrows — arduino-diagram.ts, PUML+SVG),
+      // opened in VS Code if it's on PATH. The command name stayed the same; the artifact it produces
+      // changed from a hand-rolled HTML page to a validated, draggable-in-a-vector-editor diagram.
       case '/arduino-explain': {
-        addMessage('system', 'Generating wiring explainer(s)...');
+        addMessage('system', 'Generating wiring diagram(s)...');
         try {
-          const outcome = await runArduinoExplain(process.cwd());
-          addMessage('system', formatExplainOutcome(outcome));
+          const outcome = await runArduinoDiagram(process.cwd());
+          addMessage('system', formatArduinoDiagramOutcome(outcome));
         } catch (err) {
           addMessage('system', `/arduino-explain failed: ${err instanceof Error ? err.message : String(err)}`);
         }

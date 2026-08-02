@@ -26,26 +26,22 @@
  * resolves those at render time — reading local files or fetching URLs into the image — which is a
  * neat exfiltration path for anything that can influence the model's output.
  *
- * ASCII TEXT MODE (`render: 'txt'` per call, or AYIN_PUML_RENDER=txt as the installation default) —
- * `plantuml -ttxt` renders straight to a `.atxt` file of box-drawing characters, no image viewer
- * needed, so the result can be pasted directly into a chat reply. Its content is read back into
- * `DiagramResult.ascii` for exactly that reason. WIRING/CIRCUIT diagrams get this by default (detected
- * from `kind`/`subject`, see `WIRING_KIND_RE`) because a component or class shape — PlantUML's default
- * pick for "how parts connect" — renders as disconnected boxes with no visible wire in ASCII; only a
- * SEQUENCE shape (participants + labeled arrows) draws a connected, labeled line per wire. The `draw`
- * prompt is told this explicitly (`wiringGuidance.txt`, with a worked example) — a model asked for a
- * wiring diagram with no further guidance reaches for component/class same as any other diagram, and
- * the ASCII output is then just boxes with no wires: a "diagram" that shows nothing.
+ * ARDUINO WIRING DOES NOT LIVE HERE. This tool used to have a keyword-triggered "wiring mode"
+ * (`isWiringRequest`, rendering ASCII instead of an image) with NO grounding at all — it never
+ * imported arduino-db, so a "wiring" request just got a generic, ungrounded PlantUML diagram of
+ * whatever the model imagined. That mode is gone; `arduino_diagram` (`tools/arduino-diagram.ts`)
+ * replaces it — grounded in the real sketch's pins and the real component catalog, rendered as a
+ * board+component rectangle diagram, not ASCII.
  *
  * Env: AYIN_PUML_BIN (default `plantuml`) · AYIN_PUML_DIR (default cwd) · AYIN_PUML_RENDER
- * (svg|png|txt|0, default svg) · AYIN_PUML_OPEN (auto|0, default auto) · AYIN_PUML_SERVER (opt-in) ·
+ * (svg|png|0, default svg) · AYIN_PUML_OPEN (auto|0, default auto) · AYIN_PUML_SERVER (opt-in) ·
  * AYIN_DEBUG_DIAGRAM_PROMPT=1 dumps the exact assembled prompt to stderr each round — the fastest way
  * to tell "the model ignored the instruction" from "the instruction never reached the model" (the
  * latter is usually a stale LOCAL prompt file predating an edit to the shipped one — see §3 prompts).
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { llmChat } from '../llm/manager.js';
 import { log } from '../log.js';
@@ -63,19 +59,8 @@ const diagramPrompts = prompts.register('diagram', packagePath('prompts', 'diagr
 
 const MAX_ROUNDS = 4;
 const PUML_BIN = process.env.AYIN_PUML_BIN || 'plantuml';
-const RENDER_DEFAULT = (process.env.AYIN_PUML_RENDER ?? 'svg').toLowerCase(); // svg | png | txt | 0
+const RENDER_DEFAULT = (process.env.AYIN_PUML_RENDER ?? 'svg').toLowerCase(); // svg | png | 0
 const OPEN_MODE = (process.env.AYIN_PUML_OPEN ?? 'auto').toLowerCase(); // auto | 0
-
-/**
- * A wiring/circuit request, detected from the kind the caller passed or the subject's own words —
- * the model rarely says `kind=wiring` explicitly, so the subject is checked too, same shape as the
- * other deterministic keyword triggers in this codebase (DIAGRAM_TRIGGER, RESEARCH_TRIGGER).
- */
-const WIRING_KIND_RE = /\b(wiring|circuit|breadboard|schematic|pinout|pin[- ]?out|connect(ed|ion)?s?)\b/i;
-
-export function isWiringRequest(kind: string | undefined, subject: string): boolean {
-  return WIRING_KIND_RE.test(`${kind ?? ''} ${subject}`);
-}
 
 export interface DiagramResult {
   ok: boolean;
@@ -93,9 +78,6 @@ export interface DiagramResult {
   opened: boolean;
   /** True when no renderer was available and only a structural check ran. */
   unverified?: boolean;
-  /** ASCII text render (`plantuml -ttxt`), read back so it can be pasted straight into a chat reply —
-   *  the whole point of asking for text mode instead of an image. Present only when render was 'txt'. */
-  ascii?: string;
 }
 
 function run(cmd: string, args: string[], stdin?: string, timeoutMs = 25_000): Promise<{ code: number; out: string }> {
@@ -170,17 +152,14 @@ export function slugify(s: string): string {
 /**
  * The loop. `context` is optional grounding (facts the agent already gathered) — passing it makes
  * the difference between a generic picture and one that names your actual modules. `render`
- * overrides the installation's default render mode for THIS call — a wiring diagram wants ASCII text
- * regardless of what the operator normally prefers for architecture diagrams, so it defaults to
- * `'txt'` when the request looks like wiring (see `isWiringRequest`) and to the env default otherwise.
+ * overrides the installation's default render mode for THIS call.
  */
 export async function makeDiagram(
   subject: string,
-  opts: { kind?: string; context?: string; dir?: string; open?: boolean; render?: 'svg' | 'png' | 'txt' | '0' } = {},
+  opts: { kind?: string; context?: string; dir?: string; open?: boolean; render?: 'svg' | 'png' | '0' } = {},
 ): Promise<DiagramResult> {
   const dir = opts.dir || process.env.AYIN_PUML_DIR || process.cwd();
-  const wiring = isWiringRequest(opts.kind, subject);
-  const render = (opts.render ?? (wiring ? 'txt' : RENDER_DEFAULT)).toLowerCase();
+  const render = (opts.render ?? RENDER_DEFAULT).toLowerCase();
   let source = '';
   let lastError = '';
 
@@ -197,11 +176,6 @@ export async function makeDiagram(
       CONTEXT_BLOCK: opts.context
         ? diagramPrompts.get('groundingContext', { CONTEXT: opts.context })
         : '',
-      // A component/class shape — PlantUML's default pick for "how parts connect" — renders as
-      // disconnected boxes with no visible wire in ASCII; only a sequence shape draws a labeled line
-      // per wire. Told explicitly, with a worked example, because a model left to reach for its usual
-      // "how parts connect" instinct draws exactly the shape that fails here.
-      WIRING_BLOCK: wiring ? `${diagramPrompts.get('wiringGuidance')}\n` : '',
       REPAIR: repair,
     });
 
@@ -227,28 +201,19 @@ export async function makeDiagram(
     const file = join(dir, `${slugify(subject)}.puml`);
     writeFileSync(file, `${source}\n`);
 
-    // PlantUML's ASCII backend writes `.atxt`, not `.txt` — its own extension, not one that maps
-    // cleanly from the flag name the way svg/png do.
-    const EXT: Record<string, string> = { svg: '.svg', png: '.png', txt: '.atxt' };
-    const FLAG: Record<string, string> = { svg: '-tsvg', png: '-tpng', txt: '-ttxt' };
+    const EXT: Record<string, string> = { svg: '.svg', png: '.png' };
+    const FLAG: Record<string, string> = { svg: '-tsvg', png: '-tpng' };
 
     let image: string | undefined;
-    let ascii: string | undefined;
     if (render !== '0' && FLAG[render] && (await hasPlantuml())) {
       const { code } = await run(PUML_BIN, [FLAG[render], file], undefined, 60_000);
       const candidate = file.replace(/\.puml$/, EXT[render]);
-      if (code === 0 && existsSync(candidate)) {
-        if (render === 'txt') {
-          try { ascii = readFileSync(candidate, 'utf-8'); } catch { /* rendered but unreadable — leave undefined */ }
-        } else {
-          image = candidate;
-        }
-      }
+      if (code === 0 && existsSync(candidate)) image = candidate;
     }
 
     const opened = opts.open === false || OPEN_MODE === '0' ? false : await openInEditor(image ?? file);
-    log('INFO', 'diagram_made', { file, kind: v.kind ?? '?', rounds: String(round), render, wiring: String(wiring) });
-    return { ok: true, file, image, ascii, kind: v.kind, summary: v.summary, rounds: round, source, opened, unverified: v.unverified };
+    log('INFO', 'diagram_made', { file, kind: v.kind ?? '?', rounds: String(round), render });
+    return { ok: true, file, image, kind: v.kind, summary: v.summary, rounds: round, source, opened, unverified: v.unverified };
   }
 
   // Out of rounds — still write it down. A broken draft beats an invisible one.
@@ -267,7 +232,7 @@ export async function diagramExecute(params: Record<string, string>): Promise<st
   if (!subject) return 'Error: subject required — say what the diagram should explain';
 
   const render = params.render?.toLowerCase();
-  const validRender = render === 'svg' || render === 'png' || render === 'txt' || render === '0' ? render : undefined;
+  const validRender = render === 'svg' || render === 'png' || render === '0' ? render : undefined;
   const r = await makeDiagram(subject, { kind: params.kind, context: params.context, render: validRender });
   return formatDiagramResult(r);
 }
@@ -284,13 +249,8 @@ export function formatDiagramResult(r: DiagramResult): string {
   const bits = [
     `${r.kind ?? 'diagram'}${r.summary ? ` ${r.summary}` : ''} — validated${r.unverified ? ' STRUCTURALLY ONLY (plantuml not installed — install it to verify it renders)' : ' by plantuml'}${r.rounds > 1 ? `, ${r.rounds} rounds` : ''}`,
     `puml:  ${r.file}`,
-    r.ascii
-      // The whole point of ASCII mode is that the render itself is the deliverable — put it front and
-      // center in a fenced block, and say plainly that THIS is what belongs in the reply, not the
-      // PlantUML source underneath it (a diagram description is not the same thing as a diagram).
-      ? `\n\`\`\`\n${r.ascii.trimEnd()}\n\`\`\`\n\nPaste the block above verbatim into your reply — it IS the diagram. Do not describe the wiring in prose instead of showing this.`
-      : (r.image ? `image: ${r.image}` : 'image: not rendered (no local plantuml)'),
-    r.ascii ? '' : (r.opened ? 'opened in your editor' : 'left in place — open it, or preview with the VS Code PlantUML extension'),
+    r.image ? `image: ${r.image}` : 'image: not rendered (no local plantuml)',
+    r.opened ? 'opened in your editor' : 'left in place — open it, or preview with the VS Code PlantUML extension',
     '',
     r.source,
   ];
