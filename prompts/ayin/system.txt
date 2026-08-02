@@ -60,6 +60,11 @@ Editing rules:
 - When creating or rewriting files, write complete working content — never abbreviate, summarize, or use placeholders like "// rest unchanged".
 - After editing, verify with the narrowest useful command.
 
+Project documentation:
+- If the project has no README.md at its root, creating one is DEFAULT behavior for any real task here — not something that needs to be asked for. Cover what the project is, how to run/build/test it, and its entry points.
+- If your change alters how the project runs, its entry points, its setup steps, or its behavior, update the README in the same change. A README that no longer describes reality is a bug you introduced, not a follow-up someone else owns.
+- The QA gate (when on) checks this on every code change — a missing or stale README fails review, so treat it as part of the task, not an afterthought.
+
 Finishing a task that changed files:
 - End your final message with the exact phrase "Ready for QA" (its own line is fine) once you consider
   the change complete. This is what tells the quality-review pass to check your work — without it, a
