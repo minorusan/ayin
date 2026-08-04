@@ -172,6 +172,102 @@ runs at the start of every turn — a bar still claiming `▣ QA 2/3` after the 
 worse than no indicator. In the chat transcript the gates also speak for themselves: plan mode reports
 its triage decision and the plan's path, and the QA gate prints a verdict card per pass.
 
+## Executors (`src/executors/`) — plan / QA / present, per project type
+
+The three gates were written against one implicit project shape: a Node/web repo with a
+`package.json`, an HTTP server and a logger module. On any other kind of project that assumption does
+not merely go quiet — **it actively misleads**. An Arduino sketch surveyed by the generic planner is
+told it has *"NO logging facility found — the plan must add one"* (the answer is `Serial.begin`, not a
+logger module) and *"bind the server to all interfaces or the page will be invisible"* (there is no
+page). The gate was steering the work wrong.
+
+So each gate is now **one base implementation plus a per-project-type implementation that overrides
+only what genuinely differs**.
+
+```
+src/executors/
+  types.ts            the three contracts + ProjectType + Deliverable + ProbeFact
+  detect.ts           which project this is — recomputed on EVERY call
+  registry.ts         reads every config.json, selects by project type
+  deliverables.ts     glob-ish pattern → "is this file actually on disk"
+  plan/base/          index.ts + config.json     ← exactly the old behaviour
+  plan/arduino/       index.ts + config.json
+  qa/base/            index.ts + config.json
+  qa/arduino/         index.ts + config.json
+  present/base/       index.ts + config.json
+  present/arduino/    index.ts + config.json
+```
+
+### Declaration lives in data
+
+Every executor ships a `config.json` **beside its implementation**, because "which projects is this
+handler for" is a property of the handler and a reviewer should find the answer in the same folder as
+the code:
+
+```json
+{ "id": "arduino", "kind": "qa", "projectTypes": ["arduino"], "priority": 100,
+  "description": "Arduino QA — generates the wiring diagram BEFORE judging …" }
+```
+
+**The selection rule, in full:** among configs of the requested kind, keep those whose `projectTypes`
+contains the detected type or `"*"`, take the highest `priority`, break ties by id. The base executors
+declare `["*"]` at priority 0 — they serve everything nobody else claims and lose to any specific
+handler. There is no other dispatch logic and no implicit ordering.
+
+Adding support for a project type is **a new directory**, never an edit to a central switch. The
+registry cross-checks configs against the import map and **throws on any mismatch in either
+direction** — a declared handler nobody imported would silently never run, which looks exactly like
+support. `tool/copy-executor-configs.mjs` (postbuild) copies the configs into `dist`, since `tsc`
+copies nothing but `.ts`.
+
+### Detection is recomputed every time (`detect.ts`)
+
+**No cache, deliberately.** A session is not pinned to one directory — the operator `cd`s from a
+sketch into a Unity project and keeps talking to the same agent. A type decided once at boot would
+apply Arduino deliverables and an Arduino component catalog to C#, with nothing in the output saying
+so. Detection is a few `existsSync` calls plus one bounded walk.
+
+Two sources, in strict order:
+
+1. **The tree** — files on disk. Always wins when it says anything at all.
+2. **The request** — consulted *only* when the tree is silent, i.e. the greenfield case: an empty
+   directory and *"create an Arduino project that…"*.
+
+That second source closes a real, reproduced hole. Every Arduino behaviour used to hang off
+`isArduinoProject(root)`, which needs an `.ino` to already exist. **On the one turn where component
+grounding matters most — the turn that CREATES the sketch — no `.ino` exists**, so the planner was
+handed `(not an Arduino project — omit the Arduino reference section)` and wrote pinouts from memory.
+The request said "arduino" in its first sentence. The request is never allowed to *override* the tree,
+only to speak when the tree has nothing to say.
+
+### What each contract does
+
+| Contract | Methods | What the Arduino implementation adds |
+|---|---|---|
+| `PlanExecutor` | `survey` · `grounding` · `deliverables` · `observability` · `scaffold` | board + FQBN + PWM map + sketch-naming rule instead of the webview/bundler survey; the component catalog as mandatory grounding; Serial Monitor and `arduino-cli compile` instead of logger modules; sketch + README + `.wiring.puml` + `.svg` as required deliverables |
+| `QaExecutor` | `prepare` · `probe` · `criteria` | generates the wiring diagram **before** judging; runs a real `arduino-cli compile`; validates the generated PlantUML with the real renderer; asserts deliverables; catches `analogWrite` on a non-PWM pin |
+| `PresentExecutor` | `artifacts` | regenerates the diagram and names the resulting paths; calls out any required deliverable still missing |
+
+`scaffold()` is the deterministic half of "the project has a README". That has been a standing QA
+criterion for a long time and was being enforced the expensive way — the agent finishes, the judge
+notices the missing file, a whole fix pass is spent creating four lines of markdown. **A file that
+must exist is a `writeFileSync`, not a criterion for a model to remember.** It never overwrites: an
+existing README is the operator's, exactly as a materialized prompt is.
+
+### `prepare()` runs before the judge, and that is the point
+
+The `arduino-wiring-diagram` criterion asks whether the reply references a rendered `.wiring.puml`.
+The diagram used to be generated by a hook that ran **after** a QA pass succeeded — so on pass 1 the
+file did not exist, the judge could not find it, the criterion failed, and a full fix pass (two LLM
+calls plus another agent round) was spent arriving where the next line of code was going to arrive
+anyway. That single ordering mistake is the largest share of *"Arduino QA is slow and always fails"*.
+
+`prepare()` is bounded by **mtime, not a flag**: regenerate only when the sketch is newer than the
+diagram beside it. Pass 1 generates; pass 2 after a real edit regenerates; pass 2 after an unrelated
+edit costs nothing. A flag would forget across a crash; the filesystem does not.
+
+---
+
 ## Plan mode (`src/plan/`)
 
 A 2000-character request is usually several features wearing one paragraph. Handed straight to the
@@ -184,8 +280,18 @@ deterministic**:
 
 | Door | Condition | Triage's verdict |
 |---|---|---|
-| **Size** | `prompt.length ≥ planMinChars` (2000) | decides — "not cross-feature" means no plan |
+| **Size** | `prompt.length ≥ planToggledMinChars` (60) | decides — "not cross-feature" means no plan |
 | **Explicit** | `/planthis <text>` as its own slash command, stripped before the text reaches `runPlan` | **cannot veto** — you asked |
+
+> The size floor used to be `planMinChars` (2000), and that was wrong once `/plan` became an opt-in
+> session toggle. It made sense when plan mode was implicitly available every turn: a length proxy
+> kept a triage call off ordinary conversation. But an operator who has typed `/plan` has already said
+> "plan my work this session", and then watched a 150-character request — *"create an Arduino project
+> that cycles an RGB LED green→yellow→red over 10 s, a button toggles it"* — sail past the gate with
+> no plan and no explanation, purely for being short. **A request being short is not evidence that it
+> is simple; it is evidence that it is well phrased.** With the toggle on, the floor is only high
+> enough to keep "hi" and "yes" from spending a call, and triage makes the real decision.
+> `planMinChars: 0` remains the operator's absolute off switch for the automatic door.
 
 `/planthis` is the one door that works **even with the session toggle off** — a one-shot force for the
 one time you want a plan without switching the feature on for good (see "Off by default: toggle +
@@ -199,6 +305,36 @@ cheapest way to decompose the work and to name the APIs the research step needs)
 ignored. The plan's header records which door was used (`/planthis`, or size + triage), so a plan read
 back a week later says why it exists. `AYIN_PLAN=0` is an absolute kill switch, beating the session
 toggle *and* `/planthis`; `planMinChars: 0` disables just the size door once the toggle is on.
+
+### Two outcomes, not one: a plan, or grounding alone
+
+A triage veto is **not** honoured when the project type has domain reference material, because triage
+answers "is this several features wearing one paragraph" and that is not the only reason to plan. A
+single-feature Arduino request was vetoed with *"single-feature request (255 chars)"*, so the component
+catalog, the PWM rule and the sketch-naming rule never reached the model — and it shipped a sketch that
+could not compile. Grounding withheld exactly where it was needed, the same shape as the greenfield bug.
+
+But overriding the veto with a **full plan** was the wrong instrument. Measured: "blink the built-in LED
+once per second" went from 48s to 193s, ~145s of it generating a 5,185-character nine-section document
+for a sketch with two calls in it. So `runPlan` has two outcomes:
+
+| Trigger | Outcome | Cost |
+|---|---|---|
+| triage says complex, or `/planthis` | `kind: 'plan'` — the full document, written to disk | survey + research + explore + one long generation |
+| triage says simple, project type has reference material | `kind: 'grounding'` — reference material only, no document, nothing written | **zero extra LLM calls** — the grounding block is a deterministic string |
+
+`planContextBlock` switches on `kind`: a grounding result gets `plan/groundingContext.txt`, never the
+`<plan>` wrapper, which would otherwise instruct the model to "follow the plan" and "work the steps in
+order" for a file that does not exist. Scaffolding (the README) happens on both paths — a file that must
+exist is a `writeFileSync` either way.
+
+**`AYIN_PLAN=1` / `AYIN_QA=1` force the session toggles ON** — the mirror of the `=0` kill switches.
+They exist because headless (`-p`) has no TUI, so there is no way to type `/plan` or `/qa`, which made
+both gates **untestable in any automated harness** — including the Arduino benchmark, whose entire
+subject is how well ayin plans and reviews. A feature that can only be exercised by a human pressing
+keys cannot be regression-tested. Presenter has no such switch on purpose: it is a TUI-only feature
+(`doPresenter = … && !HEADLESS`), and the artifact regeneration it performs is already done by the QA
+executor's `prepare()`.
 
 **The explicit door used to be a natural-language regex** (`plan it`, `make a plan`, `deep investigate`,
 `deep dive`, …), anchored to verb phrases so it wouldn't fire on ordinary uses of a common word ("what's
@@ -405,11 +541,16 @@ strict `JSON.parse` would reject good answers for a cosmetic reason.
   `chat.ts`'s own goal-line treatment uses. This lets the two be compared side by side while Presenter
   is new. Once trusted, this block is meant to come out in `agent.ts` and the presentation stands alone
   — a code change, not a design change, when that day comes.
-- **Arduino.** A presentation of Arduino work is only accurate if the wiring diagram it can reference is
-  current, so Presenter calls `regenerateTouchedDiagrams` (`tools/arduino-diagram.ts`) — the SAME shared
-  helper the QA-pass hook below uses, not a second copy. Presenter runs first and hands the QA-pass hook
-  the set of sketch paths it already regenerated (`presenterArduinoRegen`, threaded through `agent.ts`),
-  so a single Arduino change never re-spends its one-LLM-call-per-sketch grounding twice in the same turn.
+- **Project-type artifacts.** What a presentation owes beyond the file list depends on the kind of
+  project, so it is decided by the **present executor** for the detected type (`executors/present/`),
+  not here — Presenter's own job is classify, then format. `formatPresentation` takes a **list** of
+  artifact lines rather than one optional Arduino string, because a project type can owe more than one.
+  The Arduino one regenerates the wiring diagram (a presentation pointing at a *stale* diagram is worse
+  than one pointing at nothing) via the same `regenerateTouchedDiagrams` the QA executor's `prepare()`
+  uses, and it names any required deliverable still missing rather than hiding it. The two gates trade
+  skip sets in both directions — `qaPreparedUnits()` into Presenter, `arduinoRegenerated` back out — so
+  whichever runs first tells the second what it already covered and one turn never spends its
+  one-grounding-call-per-sketch budget twice.
 - **Print ordering.** Interactive mode prints the raw reply immediately, unconditionally — UNLESS the
   shape check passes AND at least one of Presenter/QA will actually run this turn (`doQa || doPresenter`
   in `agent.ts`), in which case the print is deferred: whichever pass runs decides the primary visible
@@ -468,27 +609,46 @@ intent → criteria (once per turn) → probes → review → pass? done
   shapes, whether 429s are handled at all — and the criterion fails a change that shows no sign the
   current API was actually looked up. Recalled API knowledge is the failure that passes every review and
   breaks only against the live service.
-- **The `arduino` / `arduino-wiring` bars exist because a generic reviewer reads a correct fact as a
-  mistake.** `probeArduinoProject` (`qa/probes.ts`) detects the project from any changed `.ino`/`.pde`
-  file or a `platformio.ini`/`sketch.yaml` at the root, and measures — as a fact, not an opinion —
-  whether each changed sketch's filename matches its containing folder. That match is a **hard
-  requirement of the Arduino toolchain** (the IDE and `arduino-cli` both refuse to build a sketch named
-  anything else): the reported false positive was a reviewer with no Arduino-specific knowledge reading
-  a correctly-renamed file as an unexplained duplication. The `arduino` bar states the rule explicitly so
-  a match is never flagged and a genuine mismatch always is, by name.
-  - `.ino`/`.pde` were **missing from `CODE_EXT`** before this — not cosmetic: an unclassified file gets
-    `kind: 'other'`, and `qaChangedFiles()` **drops** anything of kind `'other'` from the review
-    entirely. An Arduino sketch was invisible to the gate outright, independent of the naming question.
-  - **`arduino-wiring` is a separate dimension, deliberately not folded into `arduino`** — so a
-    comment-typo fix does not suddenly need a wiring diagram. It only applies when the
-    change actually touches a pin (`pinMode`/`digitalWrite`/`digitalRead`/`analogRead`/`analogWrite`/
-    `attachInterrupt`, or the text otherwise discusses wiring), and requires the reply to reference the
-    `arduino_diagram` tool's validated PlantUML/SVG output, not prose describing which pin connects to
-    what — see the `arduino_diagram` tool below, which this bar exists to make mandatory rather than
-    optional.
-  - A modest **`arduino-quality`** bar carries soft, non-blocking recommendations (named pin constants
-    over magic numbers, `delay()` in `loop()` only when genuinely meant to block, `Serial.begin` baud
-    consistency) — raised only when clearly ignored, never invented work.
+- **Project-type bars are chosen by the QA EXECUTOR, not by file shape.** `dimensionsOf` used to
+  compute two extra Arduino dimensions from a probe; the Arduino bars are now requested **by id** from
+  `executors/qa/arduino`, which selects them from its own deterministic facts — it knows whether a
+  diagram was actually produced and whether a compiler actually ran, and `dimensionsOf` cannot. The
+  criteria themselves still live in `prompts/qa/*.txt`; `baselineFor()` **throws** if an executor names
+  an id the table does not have, because a bar nobody can see is a bar the change cannot fail. The five:
+  - **`arduino-sketch-naming`** — a generic reviewer reads a correct fact as a mistake. A sketch's
+    filename matching its containing folder is a **hard requirement of the Arduino toolchain** (the IDE
+    and `arduino-cli` both refuse to build anything else); the reported false positive was a reviewer
+    with no Arduino knowledge flagging `Blinker/Blinker.ino` as unexplained duplication. The bar states
+    the rule so a match is never flagged and a genuine mismatch always is, by name.
+  - **`arduino-compiles`** — `arduino-cli compile` is actually run against the project's target board
+    (`arduino-toolchain.ts`), into a temp `--build-path` so the probe stays read-only. Every other
+    Arduino check is either deterministic but shallow or deep but a model's opinion; this one is both
+    deep and deterministic, and it answers in ~1.5 s with the compiler's own line number. **A gate that
+    has a compiler available and asks a language model to eyeball the C++ instead is choosing the worse
+    instrument and paying GPU time for it.** A skipped compile (no CLI, no core) is reported as an
+    unknown, never as a pass.
+  - **`arduino-wiring-diagram`** — the diagram is generated in `prepare()`, *before* the judge reads
+    anything, so the evidence states as a fact whether the `.wiring.puml` exists and whether the real
+    PlantUML renderer parses it. Fails on missing or invalid, and on a wall of prose where a rendered
+    diagram was available.
+  - **`arduino-deliverables`** — sketch, README and diagram, checked as files on disk.
+  - **`arduino-quality`** — soft, non-blocking recommendations (named pin constants over magic numbers,
+    `delay()` in `loop()` only when genuinely meant to block, `Serial.begin` baud consistency), raised
+    only when clearly ignored, never invented work.
+  - `.ino`/`.pde` were **missing from `CODE_EXT`** before all this — not cosmetic: an unclassified file
+    gets `kind: 'other'`, and `qaChangedFiles()` **drops** anything of kind `'other'` from the review
+    entirely. An Arduino sketch was invisible to the gate outright.
+  - One more fact no reading can establish: **`analogWrite` on a pin with no hardware PWM**. It compiles
+    perfectly, reviews perfectly, and produces a pin that is only ever fully on or fully off — an RGB
+    LED with eight colours instead of sixteen million.
+- **Change detection has a non-git fallback, and it is load-bearing.** `qaChangedFiles()` is
+  tool-tracked writes ∪ `git status`, and the git half is what catches files written through `bash`.
+  Outside a repo it returns null — so a turn that wrote everything with a heredoc reports **zero changed
+  files**, and `qaShouldRun` declines with "nothing changed this turn". **The gate does not fail; it
+  silently does not run**, which is strictly worse and completely invisible. Measured on the Arduino
+  benchmark, whose projects live in fresh non-git directories: three of them shipped sketches that
+  **could not compile**, past a naming bar and a compile probe that both existed and never got to look.
+  `filesModifiedSince()` closes it with a bounded mtime scan since the turn began.
 - **Probes** (`qa/probes.ts`, no LLM, read-only) supply the facts a reviewer cannot get by reading: a
   real HTTP GET on loopback **and** on this machine's LAN address (so *up but loopback-only* is its own
   verdict — a dev server bound to localhost looks perfect on the machine that built it and is invisible
@@ -524,8 +684,9 @@ model gateway.
 **Config** (`prompts.json` → `config`): `qaMaxPasses`, `qaMinAnswerChars`, `pollMinIntervalMs`,
 `pollMaxPerTurn`, `planMinChars`, `planExploreCalls`. **Prompts** (editable `.txt` files, see the
 Prompts section): `ayin/qaCriteria`, `ayin/qaReview`, `ayin/planTriage`, `ayin/planDocument`, the six
-`qa/baseline*` criteria, and `plan/*`. **Env:** `AYIN_QA=0`, `AYIN_PLAN=0`, `AYIN_PLAN_DIR`,
-`AYIN_QA_PORT`, `AYIN_QA_PORT_DENY`.
+`qa/baseline*` criteria, and `plan/*`. **Env:** `AYIN_QA=0|1`, `AYIN_PLAN=0|1` (`0` kills, `1` forces
+the session toggle on — the only way to exercise either gate headlessly), `AYIN_PLAN_DIR`,
+`AYIN_QA_PORT`, `AYIN_QA_PORT_DENY`, `AYIN_ARDUINO_CLI`, `AYIN_ARDUINO_FQBN`.
 
 ## Tool-call format & parser (`parser.ts`)
 
@@ -657,6 +818,19 @@ configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
     for third-party APIs, applied to component wiring instead. `arduino-diagram.ts` also calls
     `getArduinoComponent`/`ARDUINO_COMPONENTS` directly to ground its per-component rectangles and the
     grounding LLM call — same data, two consumers.
+  - **`retrieveCatalog(query)` — prompts RETRIEVE the catalog, they do not dump it.** Every Arduino
+    prompt used to interpolate all 28 entries at full detail: **10,196 characters, ~2,550 tokens, on
+    every plan and every grounding call**, for a project that typically uses three or four of them. That
+    is roughly two dozen irrelevant part descriptions sitting beside the four that matter — precisely
+    the distractor load measured to degrade instruction-following, and worse the longer the input. The
+    keyword scorer was already sitting in the same file; the code next to it ignored it. Now: full
+    entries for what the query selects, a bare-id **index** for the rest (~20 chars each, so the model
+    still knows what exists and can name one), and `arduino_db(id=…)` to fetch any of them in full.
+    Measured on the RGB-LED-plus-button request, the grounding block went **11,849 → 3,757 characters
+    (68% smaller)** with the two relevant components ranked first and second. Retrieval, an index, and a
+    lookup — the shape a RAG system would use, for a corpus small enough that the retriever is a
+    keyword scorer. `limit` is generous on purpose: missing a component the project really uses costs a
+    wrong diagram, carrying one extra costs a few hundred characters, and those are not symmetric.
 - **`arduino-explain`** (`tools/arduino-explain.ts`) is now **pure shared infrastructure** — extraction
   and grounding only, no rendering. It grew a redundant, format-inconsistent HTML wiring renderer once;
   that renderer is gone (see `arduino_diagram` below), and this file kept only the deterministic and
@@ -706,25 +880,65 @@ configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
     caught in smoke-testing before shipping, not by a user report. Fixed with a normalize-then-score
     fallback: exact match first, else the catalog leg with the most overlapping words, else the first leg
     — a connection is **never silently dropped**.
-  - **`board: 'uno' | 'nano'`** (tool param, default `uno`) only changes the board rectangle's title —
-    pins shown are always just what the code actually touches, never a full physical pinout.
-  - **`regenerateTouchedDiagrams`** (exported from this module) is the ONE shared entry point two call
-    sites use — the Presenter pass (above) and the QA-pass hook below — so "Arduino work being
-    presented/QA'd necessitates a current wiring diagram" has exactly one implementation, not two
-    drifting copies. It takes a `skip` set: Presenter runs first and regenerates whatever it touches, then
-    hands the QA-pass hook the paths it already covered, so a single Arduino change never re-spends its
-    one-LLM-call-per-sketch grounding twice in the same turn.
-  - **QA-pass regeneration (`agent.ts`, right after the QA gate's `pass` card).** Passing Arduino QA
-    (the existing `arduino`/`arduino-wiring` bars, unchanged) on a turn that touched a sketch
-    **necessitates regenerating that sketch's `.wiring.puml`/`.svg`** if Presenter hasn't already —
-    deliberately **not** opened in an editor here — only the explicit `/arduino-explain` command (or the
-    `arduino_diagram` tool call) does that; popping VS Code open after every unrelated QA pass on an
-    Arduino repo would be disruptive. A regenerate failure is logged, never thrown — this must not break
-    the turn it rides on.
-  - **Verified against real renders, not assumed**: a 3-component fixture (push button, resistor, LED)
-    rendered to both SVG and PNG via the real `plantuml` binary and visually confirmed — clean layout, all
-    wires drawn, notes/legend rendering correctly — after fixing the `matchLeg` bug above with more
-    realistic free-form leg text ("signal side", "input side", "anode, through a resistor").
+  - **`board`** comes from the project (`sketch.yaml`'s `default_fqbn`, or `AYIN_ARDUINO_FQBN`, else
+    `arduino:avr:uno`) unless a tool call names one. It selects the **PWM map**, not just the title — the
+    diagram labels each pin with what it can actually do, and marks `analogWrite` on a pin with no
+    hardware PWM. Pins shown are always just what the code touches, never a full physical pinout.
+  - **`regenerateTouchedDiagrams`** is the ONE shared entry point, used by the present executor and by
+    the QA executor's `prepare()`, so "Arduino work necessitates a current wiring diagram" has one
+    implementation rather than two drifting copies. Its `skip` set is how the two gates stay off each
+    other's toes; the QA executor additionally skips sketches whose diagram is already **newer** than
+    the sketch, so a three-pass gate does not redraw an unchanged circuit three times.
+
+  **The 2026-08 rework — every item observed in a rendered image, not reasoned about:**
+
+  | Was | Now |
+  |---|---|
+  | **Series resistors missing entirely.** The catalog says, on the leg itself, that an LED anode connects to *"a PWM pin through a ~220 Ω resistor"*. The renderer drew `pin 9 → red anode`. A beginner following that diagram wires an LED straight to a GPIO pin and destroys one or both. **The catalog had the fact; the picture contradicted it.** | `seriesPartFor()` reads the value out of the catalog's own `connectsTo` prose — one source of truth, no lookup table — and the part is drawn as a real node in the wire: `PIN_9 → 220 Ω → red anode`. A stated range (`~150-220Ω` on the blue channel) stays a range. |
+  | Every box captioned `«pin»` / `«comp»` / `«board»` — internal styling tags rendered as if they were information. | Styling is inline colour (`#back:…;line:…;text:…`), so there are no stereotypes to leak. `hide stereotype` as belt and braces. |
+  | Notes hard-truncated mid-word at 100 characters: *"…get it wrong and none o…"*. The wiring note's second half is its useful half. | `wrapText()` — whole words, wrapped to a column, several lines tall, capped in height rather than amputated. |
+  | Pins in Map-iteration order — `9, 10, 11, GND, 2`, with the ground pin between the signal pins. | Ordered as a human reads a header: digital ascending, then analog, then unresolved constants, then power and ground. |
+  | PWM capability invisible. | Each pin labeled with the calls that drive it and whether the board can actually PWM it. |
+  | Legend was four colour swatches. | A **parts list** (name + how to spot it, straight from the catalog) plus the key plus the board's PWM pins. |
+  | Component legs all identical grey. | An RGB LED's three channels are red/green/blue; ground legs are dark. |
+
+  - **`matchLeg`** — `groundWiring`'s `leg` field is deliberately **free-form project phrasing** (the
+    prompt asks for e.g. `"cathode"`, `"signal wire"`, never a restatement of the catalog's exact
+    `legName`), so it cannot be looked up by exact string match. A first draft assumed exact match and
+    silently dropped every wire whose leg text didn't match verbatim. Fixed with normalize-then-score:
+    exact match first, else the catalog leg with the most overlapping words, else the first leg — a
+    connection is **never silently dropped**.
+  - **Pin extraction sees more than `pinMode`.** Three gaps, all found by benchmark run 1 producing a
+    real, useless artifact:
+    - A pin passed to a **library constructor** (`DHT dht(DHT_PIN, DHT_TYPE)`) is configured inside the
+      library, so the sketch never calls `pinMode` on it. A correct climate-display sketch produced a
+      diagram containing **one rectangle** — the empty board — and no components at all: valid
+      PlantUML, entirely useless. `LIBRARY_PIN_ARGS` is a **curated** map of type → pin argument
+      positions, deliberately not a general "first integer argument" rule, because
+      `LiquidCrystal_I2C lcd(0x27, 16, 2)` takes an address and a geometry and reading those as pins
+      would put fictional wires in a diagram whose entire purpose is to be trustworthy.
+    - **I2C's pins appear nowhere in the source.** They are fixed (A4/A5 on Uno/Nano), so an I2C display
+      was absent from its own wiring diagram — and "SDA→A4, SCL→A5" is exactly what a beginner needs it
+      to say. Added only when the sketch actually includes an I2C library.
+    - `const int led = LED_BUILTIN;` resolved to nothing, so blink's diagram labelled the pin `led`
+      rather than `13`. `CORE_PIN_MACROS` plus one transitive alias pass; only genuinely universal
+      macros belong there, since a guess about a board-specific pin is the recalled hardware fact this
+      whole subsystem refuses to make.
+  - **`esc()`** neutralises Creole in free text. Doubled markup runs (`**`, `__`, `~~`, `//`) get
+    PlantUML's `~` escape; single `_` mid-word does not, because identifiers are full of them
+    (`RED_PIN`, `INPUT_PULLUP`) and escaping every one turns readable source into `RED~_PIN`. This
+    function exists because of a real render bug: a `~` written to mark a PWM pin escaped the `**` that
+    followed it and the label came out as the literal text `**9**`.
+  - **`validatePuml` / `validatePumlFile`** are exported, because "the diagram exists" and "the diagram
+    parses" are different facts and only the second means the file is any use. The QA executor reports
+    the second. Validation runs **before** rendering: a render attempt on invalid source wastes a JVM
+    start and leaves a stale SVG from a previous run looking current.
+  - **Verified against real renders, not assumed.** The reworked renderer was run against the real
+    target project (RGB LED on three PWM pins + a button on pin 2), rendered to PNG with the real
+    `plantuml` binary and **looked at**. That is how the single-line `skinparam rectangle { … }` bug was
+    found — valid-looking source that PlantUML rejects with an unhelpful *"Syntax Error? (Assumed
+    diagram type: sequence)"*. The block form must span several lines; the flat form
+    (`skinparam RectangleRoundCorner 10`) is what the generator emits now.
 - **`web_search`** (`tools/web-search.ts`) mirrors maradel's pipeline (`backend/src/tasks/webSearch.ts`),
   in-process and dependency-free: **SearXNG** (keyless self-hosted metasearch, JSON API) PRIMARY →
   **DuckDuckGo HTML** fallback → **DDG Instant Answer** last resort; rank + dedup → fetch top 4 pages →
@@ -876,6 +1090,35 @@ in `~/.ayin-cli/prompts.json` — settings are not prompts. Installs predating t
 migrated on first run: prompt entries move out of `prompts.json` into `.txt` files (operator edits
 preserved), and the original is kept as `prompts.json.pre-filestore`. The `:7773` editor UI projects
 the file store into one JSON document keyed `<namespace>/<id>` and fans saves back out to the files.
+
+### Variable drift — the silent failure "never overwrite" creates
+
+Materialization never overwriting is right for **wording**, which is the operator's. It is wrong for
+`{{VAR}}` placeholders, which are the **interface between the code and the text**. When the code starts
+passing `{{DELIVERABLES}}` and the local copy predates that variable, the code supplies the data, the
+prompt never asks for it, and the model is simply never told. Nothing errors. Nothing logs. An entire
+feature is silently absent.
+
+That is not hypothetical — it was found by auditing, not by noticing. A local `planDocument.txt` several
+versions behind meant a whole new plan section reached the model as nothing, and a local `system.txt`
+was missing the **"Ready for QA"** line, so the QA gate's explicit trigger never fired at all.
+
+So `register()` compares the variable SETS (never the text) and records a `PromptDrift`;
+`promptDriftWarnings()` is printed at boot on every path, headless included. `restoreDefaults()`
+remains the only overwriting path — the operator is told, loudly, and decides.
+
+### Prompt economy — see CLAUDE.md §3a
+
+Prompts here are read by a coding agent doing tool calls, on a turn the operator is waiting through.
+A token you add costs a slice of the attention available to **every other token, including your hard
+constraints** — 18 of 18 frontier models degrade as input grows, one distractor measurably hurts, and
+mid-context material loses >30%. The rules (delete politeness, justification, non-format examples,
+hedges; budget `MUST`/caps to ≤3 per prompt; constraints first or last) live in CLAUDE.md §3a.
+
+**Measure the variables before tuning the wording.** `npm run audit:prompts` dumps every prompt with
+its effective text, call sites, size and variable drift. The lesson that produced this section:
+tightening the prose of `planGrounding.txt` saved ~800 characters; retrieving instead of dumping the
+`{{CATALOG}}` it wrapped saved ~8,100.
 
 ## Retrieval
 
@@ -1331,18 +1574,34 @@ src/
 ├── tools.ts            tool registry (a static array — every tool ships inside this repo)
 │                       + the system prompt assembler
 ├── tools/              explore.ts · status.ts · signals.ts · web-search.ts (SearXNG→DDG) ·
-│                       diagram.ts (validated PlantUML) · send-push.ts
+│                       diagram.ts (validated PlantUML) · send-push.ts ·
+│                       arduino-{db,components-data,explain,diagram,toolchain}.ts
+│                       (toolchain.ts is the one place that knows arduino-cli and PWM pin maps)
 ├── tool-guard.ts       per-turn repeat/deny/poll policy: warn → BLOCK → say so in the system prompt
 ├── activity.ts         the current named phase (PLAN / QA n/m) → thinking line + status-bar chip;
 │                       read by wait-narrator so a gate is never repainted as plain "thinking"
+├── executors/          plan / QA / present, specialised PER PROJECT TYPE:
+│   ├── types.ts        the three contracts + ProjectType + Deliverable + ProbeFact
+│   ├── detect.ts       which project this is — tree first, request only when the tree is silent;
+│   │                   RECOMPUTED on every call (the working directory changes mid-session)
+│   ├── registry.ts     reads every config.json, selects by project type + priority; throws on
+│   │                   any config↔import mismatch — a declared handler that never runs looks
+│   │                   exactly like support
+│   ├── deliverables.ts glob-ish pattern → "is this file actually on disk"
+│   ├── plan/{base,arduino}/     index.ts + config.json
+│   ├── qa/{base,arduino}/       index.ts + config.json
+│   └── present/{base,arduino}/  index.ts + config.json
 ├── plan/               plan mode for big cross-feature prompts:
-│   ├── survey.ts       deterministic project survey (what it is, can serve, how it's observed)
-│   └── index.ts        size trigger + triage → survey → explore → ayin-plan-<ts>.md → pre-prompt
+│   ├── survey.ts       the GENERIC project survey (used by the base plan executor)
+│   └── index.ts        size trigger + triage → detect → scaffold → survey → explore → grounding →
+│                       ayin-plan-<ts>.md → pre-prompt
 ├── qa/                 post-completion QA gate:
 │   ├── probes.ts       deterministic evidence: LAN reachability, README staleness, md richness, SRP
-│   ├── criteria.ts     acceptance criteria from the user's own prompts, before artifacts are seen
+│   ├── criteria.ts     acceptance criteria from the user's own prompts, before artifacts are seen;
+│   │                   baseline bars by file kind, plus the ids the QA executor asks for
 │   ├── review.ts       one judged pass → {verdict, summary, issues[]}
-│   └── index.ts        the trigger, the turn state, the ≤3-pass fix loop, the verdict card
+│   └── index.ts        the trigger, the turn state, executor prepare→probe→criteria, the ≤3-pass
+│                       fix loop, the verdict card
 ├── permissions.ts      approval dialogs + allow-lists
 ├── summary.ts          rolling session summary
 ├── goal.ts             auto-determined session goal (anti-wander anchor; LLM-distilled, cursive)

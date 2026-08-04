@@ -1,0 +1,7 @@
+{
+  "id": "arduino",
+  "kind": "qa",
+  "projectTypes": ["arduino"],
+  "priority": 100,
+  "description": "Arduino QA — generates the wiring diagram BEFORE judging (so the wiring criterion is answerable on pass 1), then compile-checks with arduino-cli, validates the generated PlantUML, asserts the sketch/README/diagram deliverables and catches analogWrite on non-PWM pins."
+}

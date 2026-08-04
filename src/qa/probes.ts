@@ -17,7 +17,7 @@
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
@@ -110,6 +110,46 @@ export function gitDirtySet(cwd = process.cwd()): Set<string> | null {
     return null;
   }
 }
+
+/**
+ * Files under `root` modified at or after `sinceMs` — the fallback for when `gitDirtySet()` cannot
+ * answer because this is not a git repository.
+ *
+ * WHY IT EXISTS. `qaChangedFiles()` is tool-tracked writes ∪ git-dirty, and the git half is what
+ * catches changes made through `bash` (a heredoc, a script, a formatter). Outside a repo that half
+ * returns null, so a turn that wrote every one of its files with `bash` reports ZERO changed files —
+ * and `qaShouldRun` then declines with "nothing changed this turn". **The gate does not fail; it
+ * silently does not run**, which is strictly worse, and nothing in the output says so.
+ *
+ * Observed, not theorised: a benchmark project whose files were all written via `bash` in a fresh
+ * (non-git) directory shipped a sketch whose filename did not match its folder — it could not compile
+ * — and the QA gate never looked at it. Both the naming bar and the compile probe existed and would
+ * have caught it on the first pass.
+ *
+ * Bounded like every other probe here: vendor/build directories skipped, depth capped, count capped.
+ * A new project directory is small; this costs a few milliseconds.
+ */
+export function filesModifiedSince(root: string, sinceMs: number, maxDepth = 5, limit = 200): string[] {
+  const out: string[] = [];
+  const walk = (dir: string, depth: number): void => {
+    if (depth > maxDepth || out.length >= limit) return;
+    let entries: string[];
+    try { entries = readdirSync(dir); } catch { return; }
+    for (const entry of entries) {
+      if (out.length >= limit) return;
+      if (IGNORE_DIR_RE.test(entry)) continue;
+      const full = join(dir, entry);
+      let st: ReturnType<typeof statSync>;
+      try { st = statSync(full); } catch { continue; }
+      if (st.isDirectory()) { walk(full, depth + 1); continue; }
+      if (st.mtimeMs >= sinceMs) out.push(full);
+    }
+  };
+  walk(root, 0);
+  return out;
+}
+
+const IGNORE_DIR_RE = /^(node_modules|\.git|dist|build|out|\.next|coverage|__pycache__|\.pio|\.vscode|\.build|target|\.venv)$/;
 
 // ── webview: is it actually up, and reachable from another machine? ────
 
@@ -520,9 +560,20 @@ export interface Evidence {
   srp: SrpProbe[];
   api: ApiProbe;
   arduino: ArduinoProbe;
+  /**
+   * Facts contributed by the project-type QA executor — a real compile result, a real PlantUML parse,
+   * a real deliverable check. Kept as an opaque list rather than typed per project type so this
+   * module stays what it is: the generic probe layer. The executor owns the meaning; this owns the
+   * rendering. (Typed as a structural shape, not imported from `executors/types`, to keep the
+   * dependency pointing one way — executors know about probes, probes do not know about executors.)
+   */
+  executorFacts: Array<{ key: string; ok: boolean; detail: string }>;
 }
 
-export async function gatherEvidence(files: ChangedFile[]): Promise<Evidence> {
+export async function gatherEvidence(
+  files: ChangedFile[],
+  executorFacts: Array<{ key: string; ok: boolean; detail: string }> = [],
+): Promise<Evidence> {
   return {
     files,
     webview: await probeWebview(files),
@@ -531,6 +582,7 @@ export async function gatherEvidence(files: ChangedFile[]): Promise<Evidence> {
     srp: files.map(probeSrp).filter((s): s is SrpProbe => !!s),
     api: probeThirdPartyApi(files),
     arduino: probeArduinoProject(files),
+    executorFacts,
   };
 }
 
@@ -553,6 +605,16 @@ export function renderEvidence(e: Evidence): string {
   if (e.markdown.length) {
     out.push('\nMARKDOWN RICHNESS:');
     for (const m of e.markdown) out.push(`  ${m.note}`);
+  }
+  if (e.executorFacts.length) {
+    // Last and clearly separated, because these are the STRONGEST facts in the block — a compiler's
+    // own verdict and a renderer's own parse, not a heuristic. The prefix makes each one's polarity
+    // unmissable so a judge skimming cannot read a failure as a pass.
+    out.push('\nPROJECT-TYPE CHECKS (run by the real toolchain — these outrank any reading of the code):');
+    for (const f of e.executorFacts) {
+      const head = `  [${f.ok ? 'OK  ' : 'FAIL'}] ${f.key}: `;
+      out.push(`${head}${f.detail.split('\n').join(`\n${' '.repeat(10)}`)}`);
+    }
   }
   return out.join('\n');
 }

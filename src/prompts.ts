@@ -80,6 +80,25 @@ migrateLegacyPromptsJson();
 /** ayin's prompts, materialized into the local store at import time. */
 export const ayinPrompts = prompts.register(AYIN_NS, packagePath('prompts', AYIN_NS)).bundle;
 
+/**
+ * Local prompts whose `{{VAR}}` contract no longer matches the shipped one, across every namespace
+ * registered so far — rendered as lines for the caller to SHOW, not just log.
+ *
+ * The caller shows this at boot because the failure it describes is completely invisible otherwise.
+ * A local copy that predates a new variable means the code passes the data, the prompt never asks
+ * for it, and the model is never told — no error, no log line, an entire feature silently absent. A
+ * degraded LLM call that looks like it worked is worse than a crash, so this is loud on purpose.
+ */
+export function promptDriftWarnings(): string[] {
+  return prompts.drifts().map((d) => {
+    const bits: string[] = [];
+    if (d.missingVars.length) bits.push(`your copy never receives ${d.missingVars.map((v) => `{{${v}}}`).join(', ')}`);
+    if (d.staleVars.length) bits.push(`${d.staleVars.map((v) => `{{${v}}}`).join(', ')} is no longer supplied and will render literally`);
+    return `PROMPT OUT OF DATE — ${d.namespace}/${d.id}: ${bits.join('; ')}. `
+      + `Fix with /prompts (restore ${d.namespace}/${d.id}), or hand-merge ${d.localPath}.`;
+  });
+}
+
 // ── accessors ────────────────────────────────────────────────────────────────────────────────
 
 /** Get one of ayin's own prompts by id, substituting `{{VAR}}` placeholders. */

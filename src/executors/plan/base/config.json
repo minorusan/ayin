@@ -1,0 +1,7 @@
+{
+  "id": "base",
+  "kind": "plan",
+  "projectTypes": ["*"],
+  "priority": 0,
+  "description": "Generic project planning — the Node/web-shaped survey, no domain grounding. Serves every project type no specific handler claims."
+}

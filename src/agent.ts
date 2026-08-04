@@ -37,7 +37,7 @@ import { getRules } from './rules.js';
 import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { extractSignals } from './tools/signals.js';
-import { qaBeginTurn, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn } from './qa/index.js';
+import { qaBeginTurn, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn, qaPreparedUnits } from './qa/index.js';
 import { regenerateTouchedDiagrams } from './tools/arduino-diagram.js';
 import { presenterPass, shouldRunPresenterThisTurn } from './presenter/index.js';
 import { clearActivity } from './activity.js';
@@ -713,7 +713,16 @@ export async function runAgent(userInput: string): Promise<void> {
       // short-circuited behind `gate.run`) because a one-shot force must be consumed exactly once per
       // turn regardless of whether this particular turn even has the shape to act on — otherwise an
       // unspent force flag would silently fire on a LATER, unrelated turn instead.
-      const gate = qaShouldRun(response);
+      // THE SHAPE CHECK MUST SEE THE SUBSTANTIVE MESSAGE, not whatever the last round happened to
+      // emit. In headless, the loop exits on DOUBLE TEXT: round N prints the real completion report,
+      // round N+1 repeats or says nothing, and the loop ends there. `response` is then round N+1 —
+      // frequently empty — so `qaShouldRun` saw no completion report and declined. Measured: blink
+      // logged `run:false, why:"final message is not a completion report", files:2, hasText:false`
+      // while the text it had just printed ended with the literal words "Ready for QA". The gate was
+      // reading the wrong message, and the fix for the OTHER change-detection bug (files:2, correctly
+      // found) had already done its job — this was a second, independent reason QA never ran.
+      const finalText = parsed.text?.trim() ? parsed.text : (lastPrintedText || response);
+      const gate = qaShouldRun(finalText);
       const qaWantsToRun = shouldRunQaThisTurn();
       const presenterWantsToRun = shouldRunPresenterThisTurn();
       const doQa = gate.run && qaWantsToRun;
@@ -770,10 +779,11 @@ export async function runAgent(userInput: string): Promise<void> {
       if (!interrupted) {
         log('INFO', 'qa_gate_condition', { run: String(gate.run), why: gate.why, files: String(gate.files.length), qa: String(doQa), presenter: String(doPresenter) });
         if (doQa || doPresenter) {
-          let presenterArduinoRegen = new Set<string>();
           if (doPresenter) {
-            const presenterOutcome = await presenterPass(getGoal() || currentGoal, response, gate.files);
-            presenterArduinoRegen = presenterOutcome.arduinoRegenerated;
+            // Presenter's project-type executor regenerates artifacts too, so it is handed whatever
+            // the QA executor's `prepare()` already covered in an earlier pass of this same turn —
+            // one grounding call per unit per turn, never two, whichever gate ran first.
+            const presenterOutcome = await presenterPass(getGoal() || currentGoal, response, gate.files, qaPreparedUnits());
             if (presenterOutcome.presented && presenterOutcome.text) {
               addMessage('assistant', presenterOutcome.text);
               // TESTING-ERA ONLY, per the operator: still show the raw reply too, de-emphasized in
@@ -811,24 +821,39 @@ export async function runAgent(userInput: string): Promise<void> {
               continue;
             }
 
-            // Arduino QA passing NECESSITATES the wiring explainer being current — a sketch that just
-            // cleared the `arduino`/`arduino-wiring` bars with new pin usage but an unregenerated
-            // `*.wiring.puml`/`.svg` would leave a beginner reading a stale diagram. `presenterArduinoRegen`
-            // skips any sketch Presenter already regenerated moments ago in this same pass — one LLM
-            // call per sketch per turn, not two. Never `open`ed here: popping VS Code open after every
-            // unrelated QA pass on an Arduino repo would be disruptive; only the explicit
-            // `/arduino-explain` command opens an editor.
-            if (outcome.action === 'pass') {
-              try {
-                const regen = await regenerateTouchedDiagrams(process.cwd(), gate.files, presenterArduinoRegen);
-                if (regen && regen.results.length > 0) {
-                  addMessage('system', `Arduino QA passed — wiring diagram regenerated: ${regen.results.map((r) => r.svgPath ?? r.pumlPath).join(', ')}`);
-                }
-              } catch (err) {
-                log('WARN', 'arduino_explain_regenerate_failed', { error: err instanceof Error ? err.message : String(err) });
-              }
-            }
+            // The wiring diagram used to be regenerated HERE, after a passing verdict. That ordering
+            // was the bug: the `arduino-wiring-diagram` criterion asks whether a rendered `.wiring.puml`
+            // exists, so on pass 1 the judge was shown a project whose diagram had not been written
+            // yet, failed it, and spent an entire fix pass — two LLM calls plus another agent round —
+            // producing what this line was about to produce anyway. Artifact generation now happens in
+            // the QA executor's `prepare()`, BEFORE the judge reads anything (see
+            // executors/qa/arduino/index.ts), so the criterion is answerable on the first pass and the
+            // common case costs one pass instead of two.
           }
+        }
+      }
+
+      // ── required project-type artifacts, UNCONDITIONALLY ──────────────
+      // A REQUIRED DELIVERABLE MUST NOT DEPEND ON A CONDITIONAL GATE. The Arduino wiring diagram was
+      // produced in two places, both optional: the agent calling `arduino_diagram` itself, and the QA
+      // executor's `prepare()`. Measured on the benchmark: blink scored 13/13 in one run and 10/13 in
+      // the next with no diagram at all, because the first run's PLAN listed "run arduino_diagram" as a
+      // step and the second run had no plan, while QA — the backstop — declined for an unrelated
+      // reason. Two conditional producers, both off, and a required file simply absent.
+      //
+      // Cheap and idempotent: `regenerateTouchedDiagrams` returns null unless a sketch is among this
+      // turn's changed files, and `isDiagramCurrent` skips any sketch whose diagram is already newer
+      // AND carries the tool's provenance stamp. So a question-answering turn costs nothing, a second
+      // pass over unchanged code costs nothing, and the one case that does spend a grounding call is
+      // the case where the deliverable is genuinely stale.
+      if (!interrupted && gate.files.length > 0) {
+        try {
+          const regen = await regenerateTouchedDiagrams(process.cwd(), gate.files, qaPreparedUnits());
+          if (regen && regen.results.length > 0) {
+            addMessage('system', `Wiring diagram: ${regen.results.map((r) => r.svgPath ?? r.pumlPath).join(', ')}`);
+          }
+        } catch (err) {
+          log('WARN', 'arduino_diagram_deliverable_failed', { error: err instanceof Error ? err.message : String(err) });
         }
       }
 

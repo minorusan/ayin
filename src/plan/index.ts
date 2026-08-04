@@ -27,18 +27,33 @@
  * thing that misfires unpredictably from outside one specific conversation. `/planthis` is unambiguous.
  *
  * THE PLAN, IN ORDER (each step feeds the next):
- *   1. SURVEY   — deterministic: what this project is, what it can serve, how it can be observed.
- *   2. API RESEARCH — MANDATORY when a third-party API is involved: its CURRENT shape, off the web,
+ *   0. DETECT   — which KIND of project this is, from the tree and (when the tree is empty) from the
+ *      request itself. That choice selects the PLAN EXECUTOR for every step below; see
+ *      `executors/detect.ts` and `executors/plan/`. It is recomputed every turn, because the working
+ *      directory changes and a stale answer would plan a Unity project with Arduino rules.
+ *   1. SCAFFOLD — deterministic file creation for the chosen project type. A README the project must
+ *      have is written NOW, as a file operation, rather than left as a criterion the agent is asked
+ *      to remember and the QA gate spends a whole fix pass enforcing.
+ *   2. SURVEY   — what this project is, what it can serve, how it can be observed — IN ITS OWN TERMS.
+ *      The generic survey talks about HTTP servers, bundlers and logger modules; on an Arduino sketch
+ *      every one of those is wrong in a way that steers the plan toward work the project does not
+ *      need. The executor decides what a survey of its project type says.
+ *   3. API RESEARCH — MANDATORY when a third-party API is involved: its CURRENT shape, off the web,
  *      because that is the one thing a model must never answer from memory (see `researchApis`).
- *      An Arduino project gets the same "don't recall it" treatment: `isArduinoProject` gates a
- *      deterministic dump of arduino_db's catalog into the prompt, so component facts are grounded in
- *      the shipped reference instead of guessed at.
- *   3. EXPLORE  — the context around the problem: what already exists, who calls it, what it assumes.
- *   4. DEPENDENCIES — for a new webview specifically: can this project even serve one? What's missing?
- *   5. GAPS     — what is still unknown or undecided, named rather than guessed at.
- *   6. FILES    — the key files to change, with the change outlined per file.
- *   7. OBSERVABILITY — the log coverage and debug affordances this system already provides, wired
- *      into the plan, so the feature can be watched working instead of merely believed.
+ *   4. DOMAIN GROUNDING — the executor's shipped reference material (for Arduino: the component
+ *      catalog), so real-world facts come from a reviewed file rather than from recall. This is now
+ *      keyed off the DETECTED project type, which is what finally makes it work on the turn that
+ *      CREATES the project — the old `isArduinoProject(root)` check needed an `.ino` to already
+ *      exist, so grounding was withheld on exactly the turn that needed it most.
+ *   5. EXPLORE  — the context around the problem: what already exists, who calls it, what it assumes.
+ *      Skipped entirely for a greenfield project: two agentic loops over an empty directory can only
+ *      report "nothing found".
+ *   6. DELIVERABLES — what must exist ON DISK when the work is done, stated by the executor and later
+ *      checked by QA as files rather than as claims.
+ *   7. GAPS     — what is still unknown or undecided, named rather than guessed at.
+ *   8. FILES    — the key files to change, with the change outlined per file.
+ *   9. OBSERVABILITY — how work in THIS kind of project is watched working: a logger module and an
+ *      env switch in a service, Serial Monitor and `arduino-cli compile` in firmware.
  *
  * The document is written to `ayin-plan-<timestamp>.md` (cwd, or `AYIN_PLAN_DIR`) — on disk BEFORE
  * the agent starts, so a machine that dies mid-implementation leaves the thinking behind rather than
@@ -58,12 +73,11 @@ import { prompts as promptsService, packagePath } from '../prompts-service.js';
 import { recentPrompts } from '../session-record.js';
 import { exploreExecute } from '../tools/explore.js';
 import { webSearch } from '../tools/web-search.js';
-import { isArduinoProject } from '../tools/arduino-explain.js';
-import { ARDUINO_COMPONENTS } from '../tools/arduino-components-data.js';
-import { catalogLine } from '../tools/arduino-db.js';
 import { pushActivity, setActivityDetail } from '../activity.js';
 import { addMessage, setAgentStatus } from '../ui.js';
-import { renderSurvey, surveyProject, type Survey } from './survey.js';
+import { detectProject, describeProject } from '../executors/detect.js';
+import { planExecutorFor } from '../executors/registry.js';
+import type { Deliverable, ProjectContext } from '../executors/types.js';
 
 /**
  * The `plan` namespace — everything plan mode *says* to a model that is not the two big documents
@@ -73,9 +87,36 @@ import { renderSurvey, surveyProject, type Survey } from './survey.js';
 const planPrompts = promptsService.register('plan', packagePath('prompts', 'plan')).bundle;
 
 export interface PlanResult {
+  /**
+   * `plan` — the full written document. `grounding` — the project type's reference material only, no
+   * document, no file on disk.
+   *
+   * THE SECOND MODE EXISTS BECAUSE THE FIRST ONE IS EXPENSIVE AND WAS BEING SPENT ON BLINK. Making a
+   * triage veto yield to domain grounding fixed a real hole (a single-feature Arduino request got no
+   * component catalog, no PWM rule, no sketch-naming rule — and shipped a sketch that could not
+   * compile). But it fixed it by writing a full nine-section plan for "blink the built-in LED once per
+   * second": measured at 193s versus 48s, ~145s of it one long generation nobody needed. What that
+   * request needed was the four build-breaking rules, which cost nothing to inject — they are a
+   * deterministic string.
+   *
+   * So the two purposes are separated. Triage says complex, or the user said `/planthis` → a plan.
+   * Triage says simple but the project type has reference material → grounding alone, no document.
+   */
+  kind: 'plan' | 'grounding';
+  /** Where the document was written. Empty for `grounding` — there is no document. */
   path: string;
   body: string;
   features: string[];
+  /**
+   * The rendered deliverable list. Carried on the `grounding` result because the plan document was the
+   * ONLY place the deliverables were ever stated, and dropping the document silently dropped them.
+   *
+   * Measured: on the grounding path the scaffolded README stayed an untouched stub, because nothing
+   * told the agent to fill it in — and a stub is WORSE than no file, since it satisfies "the README
+   * exists" while containing nothing. The diagram went missing for the same reason: the plan used to
+   * carry "run arduino_diagram" as a step.
+   */
+  deliverables?: string;
 }
 
 /**
@@ -86,7 +127,14 @@ export interface PlanResult {
  * behave exactly as before. With it off — the default — NEITHER door applies; only `/planthis <text>`
  * still gets through, once, regardless of the toggle.
  */
-let sessionEnabled = false;
+/**
+ * `AYIN_PLAN=1` is the mirror of the existing `AYIN_PLAN=0` kill switch: force the session toggle ON
+ * from the environment. It exists because headless (`-p`) has no TUI and therefore no way to type
+ * `/plan`, which made plan mode untestable in any automated harness — including the Arduino benchmark,
+ * whose whole subject is how well ayin plans. A feature that can only be exercised by a human pressing
+ * keys cannot be regression-tested.
+ */
+let sessionEnabled = process.env.AYIN_PLAN === '1';
 
 export function togglePlanSession(): boolean {
   sessionEnabled = !sessionEnabled;
@@ -109,6 +157,17 @@ let forced = false;
 
 export function forcePlanNextTurn(): void {
   forced = true;
+}
+
+/**
+ * The deliverable list as prompt text. One renderer, used by BOTH the plan document and the
+ * grounding-only block — they were separate, and the grounding path simply had no deliverables,
+ * which is how a scaffolded README stayed an empty stub and a required diagram went unwritten.
+ */
+function renderDeliverableList(deliverables: Deliverable[]): string {
+  return deliverables
+    .map((d) => `- ${d.label} — \`${d.patterns[0]}\`${d.required ? ' (REQUIRED)' : ' (optional)'}: ${d.why}`)
+    .join('\n');
 }
 
 /** `ayin-plan-20260728-143012.md` — sortable, unique enough for a session, readable in a listing. */
@@ -186,9 +245,17 @@ async function researchApis(apis: string[]): Promise<string> {
  * `planExploreCalls` and the questions are fixed rather than model-chosen. Two questions cover the
  * ground that matters: what exists already, and what would have to change.
  */
-async function exploreContext(userInput: string, features: string[], survey: Survey): Promise<string[]> {
+async function exploreContext(userInput: string, features: string[], ctx: ProjectContext): Promise<string[]> {
   const budget = getConfig('planExploreCalls', 2);
   if (budget <= 0) return [];
+  // A greenfield project has NO code to explore. Two `explore` calls against an empty directory are
+  // two full agentic loops that can only report "nothing found" — pure GPU time for an answer the
+  // detector already gave us. Skipping them is most of the reason a "create a new project" plan used
+  // to take minutes.
+  if (ctx.greenfield) {
+    log('INFO', 'plan_explore_skipped', { reason: 'greenfield — nothing on disk to explore' });
+    return [];
+  }
   const subject = features.length ? features.join('; ') : userInput.slice(0, 400);
   const questions = [
     planPrompts.get('exploreExisting', { SUBJECT: subject }),
@@ -199,7 +266,7 @@ async function exploreContext(userInput: string, features: string[], survey: Sur
   for (let i = 0; i < questions.length; i++) {
     setActivityDetail(`exploring the code (${i + 1}/${questions.length})`);
     try {
-      const r = await exploreExecute({ question: questions[i], context: `Project: ${survey.kind} at ${survey.root}` });
+      const r = await exploreExecute({ question: questions[i], context: `Project: ${ctx.type} at ${ctx.root}` });
       if (r && r.length > 40) findings.push(r.slice(0, 8000));
     } catch (err) {
       log('WARN', 'plan_explore_failed', { index: String(i), error: err instanceof Error ? err.message : String(err) });
@@ -224,11 +291,22 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
   // stop — neither door below is even evaluated. `/plan` (bare) flips this for the rest of the session.
   if (!explicit && !sessionEnabled) return null;
 
-  // Two doors, now that the feature applies at all this turn. SIZE is the automatic one; an EXPLICIT
-  // ask ignores the size threshold entirely — "plan the auth rewrite" is nine words and deserves a
-  // plan more than a 2000-character bug report does.
+  // The size door, now that the feature applies at all this turn.
+  //
+  // THE THRESHOLD USED TO BE 2000 CHARACTERS, AND THAT WAS WRONG ONCE `/plan` BECAME AN OPT-IN
+  // SESSION TOGGLE. It made sense when plan mode was implicitly available on every turn: a length
+  // proxy kept a cheap triage call off ordinary conversation. But an operator who has explicitly
+  // typed `/plan` has already said "plan my work this session", and then watched a 150-character
+  // request — "create an Arduino project that cycles an RGB LED, button toggles it" — sail straight
+  // past the gate with no plan and no explanation, because it was not two thousand characters long.
+  // A request being short is not evidence that it is simple; it is evidence that it is well phrased.
+  //
+  // So with the toggle on, the floor is only high enough to keep "hi" and "yes" from spending a
+  // triage call (`planToggledMinChars`, default 60), and triage — one cheap call — makes the real
+  // decision. `planMinChars: 0` remains the operator's absolute off switch for the automatic door.
   const minChars = getConfig('planMinChars', 2000);
-  if (!explicit && (minChars <= 0 || userInput.length < minChars)) return null;
+  if (!explicit && minChars <= 0) return null;
+  if (!explicit && userInput.length < getConfig('planToggledMinChars', 60)) return null;
 
   // One named phase for the whole planning pass. The wait narrator leads its line with this and the
   // status bar keeps `▣ PLAN` lit, so minutes of triage → research → exploration → writing never look
@@ -243,9 +321,42 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       complex: String(t.complex), explicit: String(explicit), features: String(t.features.length),
       chars: String(userInput.length), reason: t.reason.slice(0, 160),
     });
-    if (!explicit && !t.complex) {
+
+    // Detected here rather than after the veto, because the veto has to be able to consult it.
+    const ctx = detectProject(process.cwd(), userInput);
+    const executor = planExecutorFor(ctx);
+
+    // TRIAGE'S VETO IS ABOUT FEATURE COUNT, AND THAT IS NOT THE ONLY REASON TO PLAN.
+    //
+    // A project type with its own DOMAIN REFERENCE has facts a model must never answer from memory,
+    // and a plan is where those get stated before any code is written. Triage does not know that: it
+    // asks "is this several features wearing one paragraph", and for "build a reaction timer" the
+    // honest answer is no. Observed in a benchmark run — that exact request was vetoed with
+    // "single-feature request (255 chars)", so the Arduino block never reached the model at all: no
+    // component catalog, no PWM-pin rule, no sketch-naming rule. It then shipped a sketch whose
+    // filename did not match its folder and therefore could not compile. One feature, three facts it
+    // needed and did not get.
+    //
+    // So a veto is only honoured when this project type brings nothing extra to ground in. Computed
+    // once here and reused as the prompt block further down — the user's own words are the retrieval
+    // query, so this is the same string either way.
+    const grounding = executor.grounding(ctx, userInput);
+    const hasDomainGrounding = grounding.trim().length > 0;
+    if (!explicit && !t.complex && !hasDomainGrounding) {
       addMessage('system', `Plan mode: not needed — single-feature request (${userInput.length} chars).`);
       return null;
+    }
+    // GROUNDING-ONLY: the cheap path. The facts reach the model; no document is generated and none is
+    // written. Costs nothing beyond the triage call that already happened — `grounding` is a
+    // deterministic string, so this branch adds zero LLM calls.
+    if (!explicit && !t.complex && hasDomainGrounding) {
+      log('INFO', 'plan_grounding_only', { project: ctx.type, chars: String(grounding.length) });
+      addMessage('system', `Plan mode: single-feature — skipping the plan document, but injecting the ${ctx.type} reference material so nothing is answered from recall.`);
+      // Scaffolding still happens: a README that must exist is a file operation either way, and it is
+      // the thing the QA gate would otherwise spend a whole fix pass creating.
+      const scaffoldedNow = executor.scaffold(ctx);
+      if (scaffoldedNow.length) addMessage('system', `Created ${scaffoldedNow.join(', ')}`);
+      return { kind: 'grounding', path: '', body: grounding, features: t.features, deliverables: renderDeliverableList(executor.deliverables(ctx)) };
     }
 
     const why = explicit
@@ -254,22 +365,33 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     addMessage('system', `Plan mode: ${why} — planning before executing.${!explicit && t.reason ? ` ${t.reason}` : ''}`);
 
     setActivityDetail('surveying the project');
-    const survey = surveyProject();
+    // `ctx` and `executor` were resolved above the triage veto — the veto needs to consult whether
+    // this project type has domain grounding. Detection is from the REQUEST as well as the tree, which
+    // is what makes it work on the turn that CREATES the project: every Arduino hook used to key off
+    // `isArduinoProject(root)`, which needs an `.ino` to already exist, so the catalog was withheld
+    // exactly when it mattered most. See executors/detect.ts.
+    log('INFO', 'plan_executor', { project: describeProject(ctx), executor: executor.config.id });
+    addMessage('system', `Plan mode: ${describeProject(ctx)} → "${executor.config.id}" plan executor.`);
+
+    // Deterministic scaffolding, BEFORE the plan is written: a project that must have a README gets
+    // one now, as a file operation, instead of being a criterion the agent is asked to remember and
+    // the QA gate spends a whole fix pass enforcing.
+    const scaffolded = executor.scaffold(ctx);
+    if (scaffolded.length) addMessage('system', `Plan mode: created ${scaffolded.join(', ')}`);
+
     // Mandatory, before exploration: if somebody else's API is involved, get its CURRENT shape from
     // the web. Everything downstream (the plan, then the implementation) is written against this
     // instead of against recall.
     const apiResearch = await researchApis(t.apis);
     if (t.apis.length) addMessage('system', `Plan mode: third-party API research — ${t.apis.join(', ')}`);
-    const findings = await exploreContext(userInput, t.features, survey);
+    const findings = await exploreContext(userInput, t.features, ctx);
 
-    // Arduino projects get the SAME "don't recall it, look it up" treatment as a third-party API —
-    // deterministic (no LLM call, arduino_db is a plain keyword catalog), so the writer has real
-    // component facts instead of guessing at pinouts/identification from training data. Component
-    // WIRING LEGS aren't dumped here (would bloat the prompt); the block instructs the plan to send
-    // implementation to the arduino_db TOOL for those, and to web_search only for what the catalog
-    // doesn't cover (a specific datasheet, a library's own API).
-    const arduino = isArduinoProject(survey.root);
-    if (arduino) addMessage('system', 'Plan mode: Arduino project detected — grounding the plan in arduino_db\'s component catalog');
+    // `grounding` was resolved above the triage veto (it decides whether a veto applies at all). The
+    // user's own words were the retrieval query — see `PlanExecutor.grounding`; retrieving rather than
+    // dumping the corpus is what keeps the Arduino catalog block at ~2.5k characters instead of 10.2k.
+    if (grounding) addMessage('system', `Plan mode: grounding the plan in the ${ctx.type} reference material rather than recall.`);
+
+    const deliverables = executor.deliverables(ctx);
 
     setActivityDetail('writing the plan');
     const prompts = recentPrompts(12);
@@ -280,13 +402,17 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
         PROMPTS: prompts.map((p, i) => `${i + 1}. ${p.slice(0, 600)}`).join('\n') || '(this is the first prompt)',
         GOAL: goal || '(none derived)',
         FEATURES: t.features.length ? t.features.map((f) => `- ${f}`).join('\n') : '- (not decomposed by triage)',
-        SURVEY: renderSurvey(survey),
-        FINDINGS: findings.length ? findings.map((f, i) => `### Exploration ${i + 1}\n${f}`).join('\n\n') : '(exploration produced nothing — say so in the Gaps section)',
+        SURVEY: executor.survey(ctx),
+        FINDINGS: findings.length
+          ? findings.map((f, i) => `### Exploration ${i + 1}\n${f}`).join('\n\n')
+          : ctx.greenfield
+            ? '(nothing on disk yet — this plan creates the project from scratch; do not describe existing code)'
+            : '(exploration produced nothing — say so in the Gaps section)',
         APIS: t.apis.length ? t.apis.join(', ') : '(none identified)',
         API_RESEARCH: apiResearch || '(no third-party API involved — omit the API section)',
-        ARDUINO_BLOCK: arduino
-          ? `ARDUINO PROJECT DETECTED. Ground every component fact below in this shipped catalog (query the arduino_db tool for the full entry — legs, wiring notes — during implementation; this list is names/identify only):\n${ARDUINO_COMPONENTS.map(catalogLine).join('\n')}\n\nUse web_search only for what this catalog doesn't cover (a specific datasheet, a library's own API). Never guess a pinout or wiring fact from memory when arduino_db has an entry for it.`
-          : '(not an Arduino project — omit the Arduino reference section)',
+        DOMAIN_REFERENCE: grounding || '(no domain reference for this project type — omit the domain reference section)',
+        DELIVERABLES: renderDeliverableList(deliverables),
+        OBSERVABILITY: executor.observability(ctx),
       }),
     }]);
 
@@ -316,7 +442,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
 
     log('INFO', 'plan_written', { path, chars: String(body.length), explorations: String(findings.length), trigger: explicit ? 'explicit' : 'size' });
     addMessage('system', `Plan written: ${path}`);
-    return { path, body: body.trim(), features: t.features };
+    return { kind: 'plan', path, body: body.trim(), features: t.features };
   } catch (err) {
     log('WARN', 'plan_failed', { error: err instanceof Error ? err.message : String(err) });
     return null;
@@ -328,5 +454,15 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
 
 /** The plan as the pre-prompt block for this turn's base call. */
 export function planContextBlock(plan: PlanResult): string {
+  // A `grounding` result has no document and no path, so the `<plan>` wrapper — which instructs the
+  // model to FOLLOW the plan, work its steps in order and cite its path — would be describing a file
+  // that does not exist. That is the kind of confidently wrong context that produces a model inventing
+  // step numbers to follow.
+  if (plan.kind === 'grounding') {
+    return planPrompts.get('groundingContext', {
+      BODY: plan.body.slice(0, 12_000),
+      DELIVERABLES: plan.deliverables ?? '(none declared for this project type)',
+    });
+  }
   return planPrompts.get('planContext', { PATH: plan.path, BODY: plan.body.slice(0, 12_000) });
 }

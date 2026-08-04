@@ -22,14 +22,14 @@ import { HEADLESS, THINKING_MODE } from './headless.js';
 import { screen, render } from './screen.js';
 import { registerStack, relayout } from './layout.js';
 import { installKeyRouter, type GlobalKeyHandler } from './keys.js';
-import { ChatLog, formatToolResultForChat, formatToolCallForChat, formatGateCardForChat, escapeBlessedTags, toItalic, type MessageRole } from './widgets/chat.js';
+import { ChatLog, formatToolResultForChat, formatToolCallForChat, formatGateCardForChat, escapeBlessedTags, stripBlessedTags, toItalic, type MessageRole } from './widgets/chat.js';
 import { InputBar } from './widgets/input.js';
 import { CmdHints, registerCommand, type SlashCommand } from './widgets/hints.js';
 import { StatusBar, type StatusState } from './widgets/status.js';
 import { AlertRow, type Alert, type AlertLevel } from './widgets/alert.js';
 import type { AgentState } from './widgets/thinking.js';
 
-export { HEADLESS, THINKING_MODE, screen, registerCommand, formatToolResultForChat, formatToolCallForChat, formatGateCardForChat, escapeBlessedTags, toItalic };
+export { HEADLESS, THINKING_MODE, screen, registerCommand, formatToolResultForChat, formatToolCallForChat, formatGateCardForChat, escapeBlessedTags, stripBlessedTags, toItalic };
 export type { SlashCommand, StatusState, AgentState, MessageRole, Alert, AlertLevel };
 
 // ── construct widgets (order matters only for z-stacking of overlays) ─

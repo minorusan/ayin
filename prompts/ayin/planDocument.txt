@@ -1,6 +1,5 @@
-Write the implementation plan for the request below. It will be saved as a markdown document and
-then handed to the agent that does the work — so it must be executable, concrete and honest about what is
-not yet known.
+Write the implementation plan for the request below. It is saved as markdown and handed to the agent
+that does the work: executable, concrete, honest about what is not yet known.
 
 SESSION GOAL:
 {{GOAL}}
@@ -14,7 +13,7 @@ EVERY PROMPT THIS SESSION, oldest first (earlier requirements still count):
 FEATURES IDENTIFIED:
 {{FEATURES}}
 
-PROJECT SURVEY (measured, not guessed — this is what the project actually is):
+PROJECT SURVEY (measured, not guessed):
 {{SURVEY}}
 
 EXPLORATION FINDINGS (what already exists in the code):
@@ -22,13 +21,19 @@ EXPLORATION FINDINGS (what already exists in the code):
 
 THIRD-PARTY APIS INVOLVED: {{APIS}}
 
-FRESH WEB RESEARCH ON THOSE APIS (fetched just now — this, not your memory, is the truth about them):
+FRESH WEB RESEARCH ON THOSE APIS (fetched just now):
 {{API_RESEARCH}}
 
-ARDUINO COMPONENT REFERENCE:
-{{ARDUINO_BLOCK}}
+DOMAIN REFERENCE FOR THIS PROJECT TYPE (shipped reference material):
+{{DOMAIN_REFERENCE}}
 
-Produce markdown with EXACTLY these sections, in this order:
+REQUIRED DELIVERABLES — checked as files on disk, not as claims:
+{{DELIVERABLES}}
+
+HOW WORK IN THIS PROJECT TYPE IS OBSERVED:
+{{OBSERVABILITY}}
+
+Produce markdown with exactly these sections, in this order.
 
 ## Reasoning
 Why this is more than one piece of work, and the order the pieces must land in. Name the coupling that
@@ -38,48 +43,52 @@ forces that order.
 What the exploration found: real files, real functions, what they currently assume. Cite paths.
 
 ## Dependencies
-What must be present before the work starts. If any part of this is a NEW WEBVIEW, state explicitly what
-serves it, what builds it, on what interface it binds, and how it is reached from another machine on the
-local network — closing the webview gaps in the survey. Say plainly if a dependency has to be added.
+What must be present before the work starts, and whether any of it has to be added. For a new webview:
+what serves it, what builds it, what interface it binds on, how another machine on the network reaches it.
 
 ## Third-party API research
-MANDATORY whenever THIRD-PARTY APIS INVOLVED is not empty; omit the section entirely only when it is.
-Write it from the FRESH WEB RESEARCH above and nothing else. Per API: current base URL, current auth
-scheme (and how the credential is obtained and stored), the exact endpoints and fields this work needs,
-version and any deprecation or sunset date, rate limits and quotas, and the error responses the code must
-handle. **Cite the source URL for each claim.** Where the research did not answer something, say
-"UNVERIFIED — look up X first" and make that an early step; never fill the gap from memory. If the
-research failed outright, the first step of this plan is to read the vendor's current documentation, and
-this section says so instead of listing endpoints you recall.
+Omit this section entirely when no API is involved; otherwise it is required. Write it from the fresh
+research above and nothing else. Per API: current base URL, current auth scheme and how the credential
+is obtained and stored, the exact endpoints and fields this work needs, version and any deprecation
+date, rate limits, and the error responses the code must handle. Cite a source URL per claim. If the
+research failed, step one of this plan is reading the vendor's current documentation, and this section
+says that instead of listing endpoints.
 
-## Arduino component reference
-MANDATORY whenever ARDUINO COMPONENT REFERENCE above is not the "(not an Arduino project...)" line;
-omit the section entirely only when it is. Name every physical component this plan involves and match
-it against the catalog given — use ITS wording (identify/what it does), never a recalled substitute.
-For any component the catalog has no entry for, say so plainly and make looking it up (web_search, or
-the arduino_db tool once more specifics are known) an early step rather than describing it from memory.
+## Domain reference
+Omit this section entirely when the domain reference above is the "(no domain reference…)" line;
+otherwise it is required. Name every real-world thing this plan involves — components, boards, parts —
+and match each against the reference, in its wording. For anything the reference lacks, say so and make
+looking it up an early step.
+
+## Deliverables
+A markdown table: | Deliverable | Path | Produced by which step |
+One row per required deliverable above, plus any this request adds. Concrete paths, not descriptions.
+A deliverable with no step is an incomplete plan, and this table is where that shows.
 
 ## Gaps and open questions
-What is genuinely unknown or undecided, and for each: how to resolve it (a command to run, a file to read,
-or a decision only the user can make). Never fill a gap with a guess — an unnamed assumption is the failure
-mode this section exists to prevent.
+What is genuinely unknown or undecided, and for each: the command to run, the file to read, or the
+decision only the user can make.
 
 ## Files to change
-A markdown TABLE: | File | Current responsibility | Change |
-One row per file. Concrete paths from the exploration. Note where a change would break single
-responsibility and what should be split out instead.
+A markdown table: | File | Current responsibility | Change |
+One row per file, concrete paths from the exploration. Note where a change would break single
+responsibility, and what to split out instead.
 
 ## Steps
-Numbered, ordered, each step independently verifiable. Say what proves each one worked.
+Numbered, ordered, each independently verifiable. Say what proves each one worked.
 
-## Log coverage and debugging
-Use the survey's logging and debug facilities BY NAME. For each feature: what it logs, at what level,
-through which existing logger; which env switch or introspection route makes it observable; and the exact
-command that shows it working. If the survey found no facility, the plan's first step is to add one.
+## Observability
+Write this from the observability block above and nothing else. Do not propose a facility it does not
+name, and do not import the conventions of a different kind of project. Per feature: what it emits,
+through what, and the exact command that shows it working.
 
 ## Risks
-What breaks at scale, under interruption, under concurrency, or when a dependency is down or slow. Include
-the blast radius: what else calls the code being changed.
+What breaks at scale, under interruption, under concurrency, or when a dependency is slow or down.
+Include the blast radius: what else calls the code being changed.
 
-Rules: use the format's range — headings, tables, fenced code with a language tag, lists. Be specific;
-every claim traceable to the survey or the findings. No filler, no restating the request.
+Rules:
+- Never fill a gap from memory. An unnamed assumption is the failure this plan exists to prevent — say
+  "unverified" and make resolving it a step.
+- Every claim traceable to the survey, the findings, or the research above.
+- Use the format's range: headings, tables, fenced code with a language tag, lists.
+- No filler, no restating the request.

@@ -35,7 +35,7 @@ import { getSessionArtifacts, readArtifact } from './artifacts.js';
 import { renderMarkdown } from './markdown.js';
 import { HEADLESS } from './ui.js';
 import { loadRules } from './rules.js';
-import { setConfigValue, resetPromptsToDefaults } from './prompts.js';
+import { setConfigValue, resetPromptsToDefaults, promptDriftWarnings } from './prompts.js';
 import { getGoal, setGoal, clearGoal, refreshGoal } from './goal.js';
 import { runArduinoDiagram, formatArduinoDiagramOutcome } from './tools/arduino-diagram.js';
 import { runExplain, formatExplainOutcome as formatExplainReportOutcome } from './explain/index.js';
@@ -814,6 +814,14 @@ async function main(): Promise<void> {
     return;
   }
   loadRules(process.cwd());
+  // A local prompt whose {{VAR}} contract has fallen behind the shipped one is INVISIBLE at every
+  // other layer: the code passes the data, the prompt never asks for it, the model is never told,
+  // nothing errors. Say so before anything else runs, on every path — headless included, where a
+  // silently-degraded prompt is even harder to notice. See prompts.ts#promptDriftWarnings.
+  for (const warning of promptDriftWarnings()) {
+    log('WARN', 'prompt_drift', { detail: warning });
+    process.stderr.write(`ayin: ${warning}\n`);
+  }
   // Decide WHICH LLM provider serves this machine before anything paints or asks for a capability.
   // Never throws: an endpoint that exposes no resource surface (or none at all) lands on `direct`.
   await initLlmProvider();

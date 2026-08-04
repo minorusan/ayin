@@ -1,0 +1,10 @@
+<reference>
+Reference material for this project type, shipped with ayin. These are facts, not suggestions — they
+outrank anything you recall about this hardware.
+
+{{BODY}}
+
+REQUIRED DELIVERABLES — this project is finished when all of these exist on disk. They are checked as
+files, not as claims. A stub file with empty headings counts as MISSING, not as present:
+{{DELIVERABLES}}
+</reference>

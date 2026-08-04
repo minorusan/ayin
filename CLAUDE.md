@@ -163,6 +163,53 @@ path and it is explicit. That is the whole upgrade story — do not add another.
 
 ---
 
+## 3a · Every character in a prompt costs a million dollars
+
+Not as a budget metaphor — as a statement about **attention**. Chroma's context-rot study tested 18
+frontier models and every one degrades as input grows, *on trivial tasks*: a single distractor
+measurably hurts, four compound, and relevant text buried mid-context loses >30%. So a token you add
+does not cost you a token. It costs a slice of the attention available to **every other token in the
+prompt, including your hard constraints**. That is the price. Write like it.
+
+ayin is a **coding agent, not a chat partner.** Its prompts are read by a model doing tool calls, and
+every one of them is loaded on a turn the operator is waiting through.
+
+**The metric is information density, not length.** These are different, and confusing them is its own
+bug: a 400-character unambiguous instruction beats a 100-character ambiguous one, because the failure
+costs a whole QA fix pass — two LLM calls plus another agent round. Cutting a sentence that prevents a
+class of error is a bad trade *even though it is shorter*. Ask of every character: **does this change
+what the model does?** If not, delete it.
+
+**Delete on sight:**
+
+| Cut | Why |
+|---|---|
+| Politeness — "please", "kindly", "if you could" | Zero task information. (Not because rudeness helps: the rude-prompt result is n=250 on one model with a 4pp spread and the authors caveat it. It is simply uninformative.) |
+| Justification and rhetoric — "this matters because…", "it is important to…", "X is wrong, not merely terse" | You are not persuading it. State the constraint. |
+| Examples that are not pinning an output FORMAT | Zero-shot matches or beats few-shot on instruction-tuned models, and an example that is not the actual input is structurally a **distractor** — the exact thing measured to degrade performance. A JSON shape is the one earned exception. |
+| Restating the task in different words | Redundancy is dilution wearing a helpful face. |
+| Hedges — "try to", "generally", "where appropriate" | An agent cannot act on a hedge. Decide, or leave it out. |
+
+**Emphasis is a budget, not a flavour.** `MUST` / `NEVER` / ALL-CAPS are priority markers — an agent
+triaging conflicting instructions genuinely needs to know which rules are build-breaking. Keep them.
+But **when everything shouts, nothing does**: a prompt with six MUSTs and eighty-three shouted phrases
+has no priority signal at all, only noise (`planDocument.txt` was exactly that). Rule of thumb: **at
+most three emphasis markers per prompt**, reserved for constraints that are load-bearing or
+build-breaking. Everything else is plain prose.
+
+**Position is load-bearing.** Performance is U-shaped in position — the beginning and end of a prompt
+are read, the middle is skimmed. Hard constraints go **first or last**, never buried mid-paragraph.
+
+**The biggest waste is never your adjectives — it is what you interpolate.** Tightening prose in
+`planGrounding.txt` saved ~300 characters. The `{{CATALOG}}` it wrapped was **10,196 characters of all
+28 components, for a project that uses four** — ~24 distractors injected into every plan. Retrieve,
+never dump: filter the payload to what the request is actually about and give the model a tool to
+fetch the rest. Before tuning wording, **measure what the variables carry** —
+`npm run audit:prompts` reports every prompt's size, and a `{{VAR}}` is not free just because it is
+short in the file.
+
+---
+
 ## 4 · This repo is PUBLIC — never commit a fact about the machine it runs on
 
 Every commit is world-readable forever, and a clone cannot be un-read.

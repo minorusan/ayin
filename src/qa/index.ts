@@ -43,8 +43,10 @@ import { getConfig } from '../prompts.js';
 import { recordQa } from '../session-record.js';
 import { addMessage, formatGateCardForChat, setAgentStatus, HEADLESS } from '../ui.js';
 import { deriveCriteria, dimensionsOf, type Criterion, type Dimension } from './criteria.js';
-import { describeFile, gatherEvidence, gitDirtySet, probeArduinoProject, probeThirdPartyApi, probeWebview, type ChangedFile } from './probes.js';
+import { describeFile, filesModifiedSince, gatherEvidence, gitDirtySet, probeThirdPartyApi, probeWebview, projectRoot, type ChangedFile } from './probes.js';
 import { reviewArtifacts, type QaIssue, type QaVerdict } from './review.js';
+import { detectProject, describeProject } from '../executors/detect.js';
+import { qaExecutorFor } from '../executors/registry.js';
 
 export type { QaIssue, QaVerdict };
 
@@ -53,17 +55,41 @@ export type { QaIssue, QaVerdict };
 interface TurnState {
   touched: Set<string>;
   dirtyBefore: Set<string> | null;
+  /** Wall-clock start of the turn — the non-git fallback's "changed since" baseline. */
+  startedMs: number;
   passes: number;
   criteria: Criterion[] | null;
   lastIssues: QaIssue[];
+  /** Units (Arduino sketches) whose artifacts the executor already regenerated this turn. */
+  prepared: Set<string>;
 }
 
-let turn: TurnState = { touched: new Set(), dirtyBefore: null, passes: 0, criteria: null, lastIssues: [] };
+function freshTurn(): TurnState {
+  return {
+    touched: new Set(),
+    dirtyBefore: gitDirtySet(),
+    // One second of slack: a file written in the same second the turn began can carry an mtime a hair
+    // earlier than `Date.now()` here, and missing this turn's own first write would defeat the point.
+    startedMs: Date.now() - 1000,
+    passes: 0,
+    criteria: null,
+    lastIssues: [],
+    prepared: new Set(),
+  };
+}
+
+let turn: TurnState = freshTurn();
 
 /** Start a turn: forget the last one and snapshot what was ALREADY dirty, so pre-existing
  *  uncommitted work is never mistaken for this turn's output. */
 export function qaBeginTurn(): void {
-  turn = { touched: new Set(), dirtyBefore: gitDirtySet(), passes: 0, criteria: null, lastIssues: [] };
+  turn = freshTurn();
+}
+
+/** What the QA executor already regenerated this turn — handed to Presenter as its skip set so one
+ *  turn never spends its one-grounding-call-per-unit budget twice. */
+export function qaPreparedUnits(): Set<string> {
+  return turn.prepared;
 }
 
 /** A file this turn wrote. Called from the agent's tool loop for write_file / str_replace. */
@@ -89,6 +115,14 @@ export function qaChangedFiles(): ChangedFile[] {
   const after = gitDirtySet();
   if (after && turn.dirtyBefore) {
     for (const p of after) if (!turn.dirtyBefore.has(p)) paths.add(p);
+  } else {
+    // NOT A GIT REPO — and this branch is load-bearing, not a nicety. The git half of this union is
+    // what catches files written through `bash`; without it, a turn that wrote everything with a
+    // heredoc reports zero changed files and `qaShouldRun` declines with "nothing changed this turn".
+    // The gate then does not fail, it SILENTLY DOES NOT RUN, which is worse and invisible. Measured on
+    // a benchmark project in a fresh directory: it shipped a sketch that could not compile, past a
+    // naming bar and a compile probe that both existed and never got the chance to look.
+    for (const p of filesModifiedSince(projectRoot(), turn.startedMs)) paths.add(p);
   }
   const touchedAbs = new Set([...turn.touched].map((p) => describeFile(p).path));
   return [...paths]
@@ -128,7 +162,10 @@ export function qaEnabled(): boolean {
  * additional gate the caller ANDs with `qaShouldRun(...).run`, never folded into that function itself,
  * so Presenter can keep using the identical shape check without inheriting QA's own toggle state.
  */
-let sessionEnabled = false;
+/** `AYIN_QA=1` force-enables the session toggle from the environment — the mirror of the existing
+ *  `AYIN_QA=0` kill switch, and the only way to exercise the gate headlessly, where there is no TUI
+ *  to type `/qa` into. See `plan/index.ts`'s identical note. */
+let sessionEnabled = process.env.AYIN_QA === '1';
 let forceNextTurn = false;
 
 export function toggleQaSession(): boolean {
@@ -267,19 +304,39 @@ export async function qaGate(
   // spending the user's GPU never looks like an ordinary turn. See activity.ts.
   const endPhase = pushActivity(`QA ${pass}/${maxPasses}`, `probing ${files.length} changed file(s)`);
   try {
+    // Which project this is, decided fresh every pass — the working directory can change mid-session
+    // and a stale answer would apply one project type's bar to another's code. See executors/detect.ts.
+    const ctx = detectProject();
+    const executor = qaExecutorFor(ctx);
+    log('INFO', 'qa_executor', { project: describeProject(ctx), executor: executor.config.id, pass: String(pass) });
+
+    // PREPARE FIRST. The executor produces the artifacts its own criteria are about (for Arduino:
+    // the wiring diagram) BEFORE anything is judged. Doing this after the verdict — which is what
+    // happened before — meant pass 1 reliably failed a criterion the very next step would satisfy,
+    // burning a whole fix pass on nothing. See executors/qa/arduino/index.ts for the measurement.
+    setActivityDetail(`preparing ${ctx.type} artifacts before review`);
+    const prepared = await executor.prepare(ctx, files);
+    if (prepared.produced.length) {
+      log('INFO', 'qa_prepared', { count: String(prepared.produced.length), paths: prepared.produced.join(',') });
+    }
+    turn.prepared = prepared.handled;
+    if (isInterrupted()) return { action: 'skipped', pass, maxPasses, verdict: null, card: { kind: 'info', title: 'QA skipped', body: ['interrupted'] } };
+
+    setActivityDetail(`checking ${ctx.type} project facts`);
+    const facts = await executor.probe(ctx, files);
+
     const webview = await probeWebview(files);
     const api = probeThirdPartyApi(files);
-    const arduino = probeArduinoProject(files);
-    const dims: Set<Dimension> = dimensionsOf(files, webview.applies, api.applies, arduino.applies, arduino.wiringLikely);
+    const dims: Set<Dimension> = dimensionsOf(files, webview.applies, api.applies);
 
     if (!turn.criteria) {
       setActivityDetail('deriving acceptance criteria from your prompts');
-      turn.criteria = await deriveCriteria(files, goal, dims);
+      turn.criteria = await deriveCriteria(files, goal, dims, executor.criteria(ctx, files, facts));
     }
     if (isInterrupted()) return { action: 'skipped', pass, maxPasses, verdict: null, card: { kind: 'info', title: 'QA skipped', body: ['interrupted'] } };
 
     setActivityDetail(`reviewing ${files.length} artifact(s) against ${turn.criteria.length} criteria`);
-    const evidence = await gatherEvidence(files);
+    const evidence = await gatherEvidence(files, facts);
     const verdict = await reviewArtifacts(turn.criteria, evidence, goal, answer, pass);
     turn.lastIssues = verdict.issues;
     recordQa(verdict.verdict, pass, verdict.summary, verdict.issues.length);

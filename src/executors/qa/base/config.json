@@ -1,0 +1,7 @@
+{
+  "id": "base",
+  "kind": "qa",
+  "projectTypes": ["*"],
+  "priority": 0,
+  "description": "Generic QA — the standing deterministic probes plus a README substance fact (a stub with TODOs counts as missing). Serves every project type no specific handler claims."
+}

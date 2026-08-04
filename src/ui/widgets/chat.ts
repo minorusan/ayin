@@ -163,8 +163,12 @@ export class ChatLog {
 
   add(role: MessageRole, content: string): void {
     if (HEADLESS) {
-      if (role === 'assistant') process.stdout.write(content + '\n');
-      else process.stderr.write(`[${role}] ${content}\n`);
+      // Strip TUI markup here, at the one place headless output is written, rather than asking every
+      // call site to know which mode it is in. The widget owns how a message looks; in headless, how
+      // it looks is plain text.
+      const plain = stripBlessedTags(content);
+      if (role === 'assistant') process.stdout.write(plain + '\n');
+      else process.stderr.write(`[${role}] ${plain}\n`);
       return;
     }
     this.messages.push({ role, content });
@@ -324,6 +328,32 @@ export function escapeBlessedTags(text: string): string {
   // blessed's escape syntax is {open}/{close} — NOT backslashes (those render literally).
   // Single pass so the '}' of an inserted '{open}' is never re-escaped.
   return text.replace(/[{}]/g, m => (m === '{' ? '{open}' : '{close}'));
+}
+
+/**
+ * The inverse, for output that is NOT going to a blessed screen.
+ *
+ * Headless (`-p`) writes straight to stdout/stderr, but the strings it is handed were already
+ * formatted for the TUI by `formatToolResultForChat` and friends at the call site. The result was raw
+ * markup in a script's output — `{#eafff1-fg}{#173d2d-bg} + const int RED_PIN = 9; {/#173d2d-bg}{/}`
+ * — and worse, every literal brace in the source code being written showed up as `{open}`/`{close}`,
+ * so a C++ function body read as `void setup() {open} … {close}`. Anything parsing that output (a
+ * script, `ayin watch`, a benchmark log) sees garbage. Found while reading a benchmark run's log.
+ *
+ * ORDER MATTERS. `{open}`/`{close}` are themselves tag-shaped, so they are lifted out to sentinels
+ * before tags are stripped and restored afterwards — otherwise the brace-strip eats them and the code
+ * loses its braces entirely, which is worse than the markup.
+ */
+export function stripBlessedTags(text: string): string {
+  const OPEN = ' AYIN_OPEN ';
+  const CLOSE = ' AYIN_CLOSE ';
+  return text
+    .replace(/\{open\}/g, OPEN)
+    .replace(/\{close\}/g, CLOSE)
+    // A style tag: `{bold}`, `{/}`, `{#aabbcc-fg}`, `{red-bg}`, `{/#aabbcc-bg}`. Never a bare `{`.
+    .replace(/\{\/?[a-zA-Z#][\w#-]*\}|\{\/\}/g, '')
+    .replace(new RegExp(OPEN, 'g'), '{')
+    .replace(new RegExp(CLOSE, 'g'), '}');
 }
 
 /** Fake italic for a blessed TUI (which has no italic attribute — see docs): map ASCII letters

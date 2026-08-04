@@ -1,0 +1,388 @@
+{
+  "$comment": [
+    "The Arduino benchmark suite. Each entry is ONE prompt you hand ayin in an empty directory, plus",
+    "the traps that prompt sets and what a correct answer must contain.",
+    "",
+    "WHY THE TRAPS ARE THE POINT. Any model can emit a blink sketch. What separates a useful Arduino",
+    "agent from a plausible one is the small set of facts that are invisible in the code and expensive",
+    "in the world: analogWrite on a pin with no hardware PWM compiles perfectly and gives you eight",
+    "colours; an LED without a series resistor works right up until it doesn't; delay() inside loop()",
+    "makes a button unresponsive in a way that reads as a hardware fault; a common-anode RGB LED needs",
+    "inverted logic. Every project below is chosen for the traps it sets, and they escalate.",
+    "",
+    "`grep` entries are checked against the sketch source, `notGrep` must NOT appear. `components` are",
+    "arduino_db ids the wiring diagram is expected to match. Run with: node tool/arduino-bench.mjs"
+  ],
+
+  "projects": [
+    {
+      "id": "blink",
+      "level": 1,
+      "title": "Blink",
+      "prompt": "Create an Arduino project that blinks the board's built-in LED once per second.",
+      "components": [],
+      "traps": [
+        "No external component at all — the wiring diagram must say so honestly rather than inventing an LED and a resistor.",
+        "LED_BUILTIN is a core macro, not a #define in the sketch, so pin resolution must leave it as-is instead of guessing a number."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["LED_BUILTIN|\\b13\\b", "pinMode", "digitalWrite"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "rgb-cycle",
+      "level": 2,
+      "title": "RGB cycle with a toggle button",
+      "prompt": "Create an Arduino project with an RGB LED that goes green → yellow → red over 10 seconds and then starts over. Pressing a button stops or starts this behaviour.",
+      "components": ["rgb-led-common-cathode", "push-button", "resistor"],
+      "traps": [
+        "Three colour channels need three PWM pins. On an Uno that is 3, 5, 6, 9, 10 or 11 — anywhere else analogWrite silently degrades to on/off.",
+        "Each channel needs its OWN series resistor. The catalog says so on the leg; a diagram without them is wrong, not terse.",
+        "Yellow is red+green mixed, not a colour the LED has. A plan that treats it as a third channel has misunderstood the part.",
+        "The button must stay responsive across a 10-second cycle, so the cycle cannot be built from delay().",
+        "A mechanical button bounces; a naive digitalRead toggles several times per press."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["analogWrite", "INPUT_PULLUP", "millis\\(\\)"],
+        "$grepNote": "the per-channel-resistor trap is checked in the DIAGRAM (three SERIES_ nodes), not the source — a resistor is a physical part and appears in no sketch.",
+        "notGrep": ["delay\\(\\s*[1-9]\\d{3,}"],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "traffic-light",
+      "level": 3,
+      "title": "Pedestrian crossing",
+      "prompt": "Create an Arduino traffic light with red, yellow and green LEDs on its own timing, plus a pedestrian button that requests a crossing. The request must be remembered until the next safe point in the cycle, not acted on instantly.",
+      "components": ["standard-led", "push-button", "resistor"],
+      "traps": [
+        "This is a state machine. Written with delay() it cannot register a button press during the phase it is sleeping through — the classic beginner failure, and it presents as 'the button doesn't work'.",
+        "'Remembered until the next safe point' means a latched flag, not a poll at the moment of transition.",
+        "Three separate LEDs, three separate resistors."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["millis\\(\\)", "INPUT_PULLUP", "(enum|switch|state)"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "night-light",
+      "level": 3,
+      "title": "Automatic night light",
+      "prompt": "Create an Arduino night light: an LDR measures how dark the room is and an LED fades up smoothly as the light drops. Print the sensor reading to the Serial Monitor so I can calibrate the threshold.",
+      "components": ["photoresistor-ldr", "standard-led", "resistor"],
+      "traps": [
+        "An LDR is not a sensor with an output pin — it is half a voltage divider, and needs a fixed resistor to ground. Wiring it straight to an analog pin reads noise.",
+        "analogRead returns 0–1023, analogWrite takes 0–255. Feeding one to the other directly is a four-times-too-bright bug that compiles.",
+        "The LED must be on a PWM pin to fade at all.",
+        "Serial.begin's baud has to match whatever the README tells the user to open the monitor at."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["analogRead", "analogWrite", "map\\(|/\\s*4", "Serial\\.begin"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "reaction-timer",
+      "level": 4,
+      "title": "Reaction timer",
+      "prompt": "Create an Arduino reaction timer. After a random delay the LED lights up; the player presses the button as fast as they can and the reaction time in milliseconds is printed to the Serial Monitor. Detect and call out a press that happened before the light.",
+      "components": ["standard-led", "push-button", "resistor"],
+      "traps": [
+        "'Detect a press before the light' is the whole exercise — it needs the button watched DURING the random wait, not only after it.",
+        "randomSeed from an unconnected analog pin, or every run has the identical 'random' sequence.",
+        "Timing must come from millis()/micros() deltas, not from counting loop iterations.",
+        "Debounce, or one press reports two reaction times."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["millis\\(\\)|micros\\(\\)", "randomSeed", "random\\(", "Serial\\.print", "INPUT_PULLUP"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "servo-dial",
+      "level": 4,
+      "title": "Potentiometer-controlled servo",
+      "prompt": "Create an Arduino project where turning a potentiometer moves a micro servo to the matching angle, and the current angle is shown on the Serial Monitor.",
+      "components": ["sg90-micro-servo", "potentiometer"],
+      "traps": [
+        "Servo.h owns its pin — it never calls pinMode or digitalWrite, so a pin-usage extractor that only looks for those finds nothing. `.attach()` is the signal.",
+        "map(0..1023, 0..180) — the pot's range and the servo's are unrelated numbers.",
+        "A servo under load browns out a USB-powered Uno; the README should say to power it separately and share ground.",
+        "Servo.h uses Timer1, which disables PWM on pins 9 and 10 — so those are the wrong pins for anything else here."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["#include <Servo.h>", "\\.attach\\(", "map\\(", "analogRead"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "parking-sensor",
+      "level": 5,
+      "title": "Parking sensor",
+      "prompt": "Create an Arduino parking sensor: an ultrasonic sensor measures distance and a buzzer beeps faster the closer an object gets, going solid under 10 cm. An LED mirrors the same warning.",
+      "components": ["ultrasonic-distance-sensor-hc-sr04", "piezo-buzzer", "standard-led", "resistor"],
+      "traps": [
+        "HC-SR04 needs a 10 µs trigger pulse and pulseIn on echo — a plain digitalRead returns nothing useful.",
+        "duration × 0.034 / 2 — forgetting the /2 reports double the distance, and it looks plausible.",
+        "'Beeps faster' with delay() blocks the measurement it depends on; the beep interval and the measurement both need millis().",
+        "A passive buzzer needs tone(); digitalWrite gives a faint click. The two types look identical.",
+        "pulseIn blocks for up to a second with nothing in front of the sensor unless a timeout is passed."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["pulseIn", "delayMicroseconds", "millis\\(\\)", "(tone\\(|noTone\\()", "(/\\s*2|\\*\\s*0?\\.0?17)"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "climate-display",
+      "level": 6,
+      "title": "Room climate display",
+      "prompt": "Create an Arduino project that reads temperature and humidity from a DHT sensor and shows them on a 16x2 I2C LCD, updating a couple of times a second at most. Show a clear message on the LCD while the first reading is still pending.",
+      "components": ["dht11-dht22-temp-humidity-sensor", "lcd1602-i2c-backpack"],
+      "traps": [
+        "TWO third-party libraries that must actually be installed — the plan has to name `arduino-cli lib install` for both, and the README has to as well, or the project does not build on anyone else's machine.",
+        "A DHT11 cannot be polled faster than about once per second; reading it in a tight loop returns NaN.",
+        "The LCD's I2C address is 0x27 or 0x3F depending on the manufacturer. Hardcoding one without saying so is a blank screen with no error.",
+        "I2C is A4/A5 on an Uno — fixed pins, not a choice.",
+        "A failed read returns NaN, which prints as 'nan' on the LCD rather than failing loudly."
+      ],
+      "expect": {
+        "compiles": false,
+        "compilesNote": "needs `arduino-cli lib install \"DHT sensor library\" \"LiquidCrystal I2C\"` first — this project tests whether ayin TELLS you that",
+        "grep": ["#include", "0x27|0x3F", "isnan|is_nan|NAN"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "shift-register-bar",
+      "level": 7,
+      "title": "Eight-LED bar from three pins",
+      "prompt": "Create an Arduino project that drives eight LEDs as a level meter from a potentiometer, using a 74HC595 shift register so it only costs three Arduino pins. The bar should fill from the bottom as the pot turns up.",
+      "components": ["74hc595-shift-register", "potentiometer"],
+      "$componentsNote": "standard-led is deliberately NOT expected in the diagram. The eight LEDs hang off the shift register's Q0-Q7 outputs, not off Arduino pins, and the diagram shows what the CODE drives — the register's own catalog note carries 'Q0-Q7 → LEDs, each through its own resistor'. Attempt 1 grounded the register and the pot correctly and was marked down for this; the expectation was wrong, not the diagram. Following the chain downstream of an IC is a real open question, recorded in RESULTS.md rather than papered over.",
+      "traps": [
+        "Eight LEDs, eight resistors — one per output, not one shared on the common line, or brightness changes with how many are lit.",
+        "shiftOut with latch held LOW then pulsed HIGH; latching per bit makes the bar flicker visibly.",
+        "MSBFIRST vs LSBFIRST decides which end of the bar fills — a 50/50 guess that looks like a wiring mistake.",
+        "OE must be tied LOW and MR tied HIGH or nothing lights, and neither is visible in the sketch.",
+        "A bar graph is a bitmask built from the level, not eight separate digitalWrites."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["shiftOut", "(MSBFIRST|LSBFIRST)", "digitalWrite\\(.*latch|latchPin", "analogRead"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "neopixel-mood",
+      "level": 8,
+      "title": "Addressable strip with modes",
+      "prompt": "Create an Arduino project driving a WS2812B strip of 30 LEDs with three modes cycled by a button: a slow colour wash, a chase, and solid warm white. The button must respond immediately in every mode.",
+      "components": ["ws2812b-neopixel-strip", "push-button"],
+      "traps": [
+        "WS2812B at full white draws about 60 mA per LED — 1.8 A for 30. USB cannot supply that; the README must say external 5 V with a shared ground, or the board browns out and resets.",
+        "The strip wants a ~330 Ω resistor on the data line and a big capacitor across its supply — neither appears anywhere in the code.",
+        "'Responds immediately in every mode' rules out delay() entirely; every animation must be a millis()-driven state machine.",
+        "FastLED/Adafruit_NeoPixel is a third-party library that has to be installed.",
+        "Data goes into DIN at one end of the strip — a reversed strip is silent, not an error."
+      ],
+      "expect": {
+        "compiles": false,
+        "compilesNote": "needs a NeoPixel/FastLED library installed — the point is whether ayin says so before you find out",
+        "grep": ["#include", "millis\\(\\)", "INPUT_PULLUP"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "$ladder2": "── LADDER 2 ─────────────────────────────────────────────────────────────────────────────────",
+      "$rationale": [
+        "Ladder 1 covered digital I/O, PWM, analog-in, non-blocking timing, ultrasonic and I2C. Repeating",
+        "that with different components would measure sampling noise, not skill. Ladder 2 goes at what",
+        "ladder 1 never touched, and every project is chosen for a trap that has NO analogue in ladder 1:",
+        "",
+        "  interrupts and volatile        · a counter incremented in an ISR and read in loop()",
+        "  the Steinhart-Hart equation    · float maths on a chip with no FPU, from a resistance reading",
+        "  a transistor as a switch       · a load an Arduino pin physically cannot drive",
+        "  mains-adjacent relay safety    · the one project where wrong wiring is dangerous to a person",
+        "  quadrature decoding            · two pins whose ORDER carries the information",
+        "  multiplexed display refresh    · persistence of vision, where delay() is visible as flicker",
+        "  UART on a second serial port   · SoftwareSerial, and TX/RX crossing over"
+      ],
+      "id": "pir-alarm",
+      "level": 3,
+      "title": "Motion alarm with a latching siren",
+      "prompt": "Create an Arduino motion alarm: a PIR sensor triggers a buzzer siren that keeps sounding for 30 seconds after the last movement, and an LED shows armed/triggered state. Use an interrupt for the PIR so motion is never missed while the siren is running.",
+      "components": ["pir-motion-sensor-hc-sr501", "piezo-buzzer", "standard-led", "resistor"],
+      "traps": [
+        "An interrupt handler must be attachInterrupt on pin 2 or 3 on an Uno — no other pin can do it, and the code compiles happily on the wrong one.",
+        "A variable shared between an ISR and loop() must be `volatile`, or the compiler caches it in a register and loop() never sees the change. This is the classic silent interrupt bug.",
+        "An ISR must not call delay(), Serial.print() or tone() — it must set a flag and return.",
+        "The HC-SR501 has its own onboard retrigger jumper and a 3-300s delay pot; the README has to say the software timer is in addition to that hardware behaviour, or the timings will not match.",
+        "'Keeps sounding for 30 seconds after the LAST movement' is a resettable timer, not a fixed 30s pulse."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["attachInterrupt", "volatile", "millis\\(\\)", "(tone\\(|noTone\\()"],
+        "notGrep": ["void\\s+\\w*[Ii]sr\\w*\\s*\\([^)]*\\)\\s*\\{[^}]*\\bdelay\\("],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "thermostat",
+      "level": 5,
+      "title": "Thermistor thermostat with hysteresis",
+      "prompt": "Create an Arduino thermostat: read the temperature from a thermistor, print it in Celsius to the Serial Monitor, and switch a relay on below 20 C and off above 22 C. The two thresholds are deliberate — the relay must not chatter around a single setpoint.",
+      "components": ["thermistor", "relay-module-5v", "resistor"],
+      "traps": [
+        "A thermistor gives a RESISTANCE, not a temperature. Converting needs the divider maths and then Steinhart-Hart (or a beta-value approximation) — a linear map() is simply wrong and looks plausible.",
+        "The AVR has no floating-point unit; log() and float maths work but cost time and flash. Using double changes nothing on this chip and wastes space.",
+        "20 C on / 22 C off IS hysteresis — implementing a single 21 C setpoint makes the relay chatter, which is the failure the two numbers exist to prevent.",
+        "A relay module is active-LOW on most boards: digitalWrite(pin, LOW) energises it. Getting this backwards means the heater runs whenever the code thinks it is off.",
+        "The relay coil needs more current than a pin can source — the module has a transistor and flyback diode on board, and the README should say why you must not wire a bare relay to a pin."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["analogRead", "(log\\(|logf\\(|Steinhart|BETA|beta)", "Serial\\.print", "(20|22)"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "motor-transistor",
+      "level": 5,
+      "title": "PWM fan driven through a transistor",
+      "prompt": "Create an Arduino project that drives a small DC motor as a fan at four speeds cycled by a button, using an NPN transistor as the switch because the motor draws more current than a pin can supply. Show the current speed on the Serial Monitor.",
+      "components": ["npn-transistor-switch", "dc-motor-l298n-driver", "push-button", "resistor"],
+      "traps": [
+        "An Arduino pin sources 20 mA; a small DC motor wants hundreds. Wiring the motor to a pin is the failure this project exists to prevent, and it does not announce itself — the pin just dies.",
+        "The transistor needs a base resistor (~1k) or the pin sees a near short.",
+        "A motor is an inductive load and needs a flyback diode across it, or the back-EMF spike kills the transistor. Nothing in the code hints at this.",
+        "The motor's supply must be external with a SHARED GROUND — a floating ground means nothing works and nothing errors.",
+        "Four speeds means analogWrite values, so the transistor's base must be on a PWM pin."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["analogWrite", "INPUT_PULLUP", "Serial\\.print"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "encoder-menu",
+      "level": 6,
+      "title": "Rotary encoder menu on an OLED",
+      "prompt": "Create an Arduino project where a rotary encoder scrolls a three-item menu on an SSD1306 OLED and pressing the encoder selects an item. Turning it must feel smooth with no skipped or doubled steps.",
+      "components": ["rotary-encoder-ky-040", "oled-ssd1306-096"],
+      "traps": [
+        "A rotary encoder is QUADRATURE: the information is in the ORDER of the two edges, not in either pin alone. Polling one pin with digitalRead gives direction that is wrong half the time.",
+        "'No skipped steps' means CLK belongs on an interrupt pin (2 or 3 on an Uno), not in a polled loop that is also driving a display.",
+        "The encoder's own switch needs INPUT_PULLUP and debouncing, like any button.",
+        "The SSD1306 is I2C on the same fixed A4/A5 as any other I2C device, and its address is 0x3C or 0x3D — NOT the 0x27 an I2C LCD uses. Confusing the two gives a blank screen with no error.",
+        "Redrawing the whole OLED every loop iteration is slow enough to make the encoder feel laggy — the display should only be redrawn when the selection actually changes."
+       ],
+      "expect": {
+        "compiles": false,
+        "compilesNote": "needs Adafruit_SSD1306 + Adafruit_GFX installed — the point is whether ayin names them before you find out",
+        "grep": ["#include", "(attachInterrupt|volatile)", "0x3C|0x3D", "INPUT_PULLUP"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "seven-seg-counter",
+      "level": 6,
+      "title": "Multiplexed two-digit counter",
+      "prompt": "Create an Arduino project that counts 00-99 on two 7-segment displays, incrementing once per second, with a button that resets it to zero. Both digits must appear lit at the same time without visible flicker.",
+      "components": ["seven-segment-display", "push-button", "resistor"],
+      "traps": [
+        "Two digits on shared segment pins means MULTIPLEXING — light one digit, switch, light the other, fast enough that persistence of vision fuses them. There is no way to light both simultaneously.",
+        "The multiplex refresh must be faster than about 100 Hz per digit or the flicker is visible. Any delay() in the loop shows up as flicker, which is the trap.",
+        "A common-cathode display lights a segment with HIGH; common-anode needs LOW. The catalog says which this part is; guessing gives an inverted display.",
+        "Every segment needs its own current-limiting resistor — one resistor on the common pin makes brightness change with how many segments are lit.",
+        "The one-second count and the millisecond multiplex are two independent timers; neither can be a delay()."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["millis\\(\\)|micros\\(\\)", "INPUT_PULLUP"],
+        "notGrep": ["delay\\(\\s*[1-9]\\d{2,}"],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "ir-remote-lamp",
+      "level": 7,
+      "title": "IR remote controlled lamp",
+      "prompt": "Create an Arduino project where a TV remote controls a lamp through a relay: one button toggles it, and two others step the brightness of a separate LED up and down. Print each decoded remote code to the Serial Monitor so unknown buttons can be learned.",
+      "components": ["ir-receiver-module", "relay-module-5v", "standard-led", "resistor"],
+      "traps": [
+        "IR codes are specific to the remote in the user's hand — the sketch CANNOT hardcode codes it has never seen. The 'print each code so unknown buttons can be learned' clause is the whole design: it must ship a learning path, not invented constants.",
+        "The IRremote library's API changed substantially between v2 and v3+ (IrReceiver.decode() vs irrecv.decode(&results)). Writing v2 code against an installed v3 fails to compile in a way that reads like a broken install.",
+        "The receiver's pinout is NOT standardised across manufacturers — the catalog says to check the silkscreen, and reversing VCC/GND destroys it.",
+        "IRremote uses a hardware timer that conflicts with analogWrite on some pins (notably 3 and 11 on an Uno) — the dimmed LED must avoid whichever timer the library claims.",
+        "A relay module is active-LOW on most boards; a toggle written the obvious way runs the lamp inverted."
+      ],
+      "expect": {
+        "compiles": false,
+        "compilesNote": "needs IRremote installed; also tests whether ayin says WHICH major version its code targets",
+        "grep": ["#include", "Serial\\.print", "analogWrite"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    },
+
+    {
+      "id": "bluetooth-logger",
+      "level": 8,
+      "title": "Bluetooth soil-moisture logger",
+      "prompt": "Create an Arduino project that reads a soil moisture sensor every five seconds and sends a reading over an HC-05 Bluetooth module to a phone, accepting a single-character command back to change the interval. Keep the USB Serial Monitor working at the same time for debugging.",
+      "components": ["soil-moisture-sensor-module", "hc05-hc06-bluetooth-module"],
+      "traps": [
+        "'Keep USB Serial working at the same time' forces SoftwareSerial on two other pins — the Uno has ONE hardware UART and it is the USB port. Using Serial for both is the mistake the requirement is built to catch.",
+        "TX and RX must CROSS: the module's TX goes to the Arduino's RX. Wiring straight-through is silent, and it is the single most common HC-05 failure.",
+        "The HC-05's logic is 3.3V on RX; feeding it 5V from an Uno needs a divider or level shifter. The catalog says so; the code cannot.",
+        "SoftwareSerial cannot reliably do 115200 on a 16 MHz AVR — 9600 is the safe default, and the HC-05's factory default is 9600 for data but 38400 in AT mode.",
+        "A resistive soil sensor corrodes if left continuously powered; the README should mention powering it from a pin only while reading.",
+        "Reading every five seconds while staying responsive to an incoming command means neither may block."
+      ],
+      "expect": {
+        "compiles": true,
+        "grep": ["#include <SoftwareSerial.h>", "analogRead", "millis\\(\\)", "available\\(\\)"],
+        "notGrep": [],
+        "deliverables": ["sketch", "readme", "diagram"]
+      }
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 {
   "name": "ayin",
-  "version": "1.0.221",
+  "version": "1.0.223",
   "description": "A small, model-agnostic terminal coding agent — an agentic loop in your shell against a self-hosted LLM (Ollama or any OpenAI-compatible endpoint).",
   "type": "module",
   "main": "dist/index.js",
@@ -17,14 +17,16 @@
   ],
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch",
+    "dev": "node tool/copy-executor-configs.mjs && tsc --watch",
     "prepublishOnly": "node tool/check-registry.mjs",
     "check:glyphs": "node tool/check-glyphs.mjs",
     "check:gates": "node tool/check-gates.mjs",
     "check:explore": "node tool/check-explore.mjs",
     "prebuild": "node tool/check-glyphs.mjs",
     "check:prompts": "node tool/check-prompts.mjs",
-    "postbuild": "node tool/check-prompts.mjs",
+    "audit:prompts": "node tool/dump-prompts.mjs",
+    "bench:arduino": "node tool/arduino-bench.mjs",
+    "postbuild": "node tool/copy-executor-configs.mjs && node tool/check-prompts.mjs",
     "release": "npm publish --registry ${AYIN_REGISTRY:?set AYIN_REGISTRY to your private registry}"
   },
   "dependencies": {

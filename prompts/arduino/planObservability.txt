@@ -1,0 +1,12 @@
+Arduino has no logger module, no env switch, no introspection route. Do not name one. The equivalents:
+
+- Serial.begin(9600) in setup(), Serial.println at each state change worth watching. Say which
+  transitions print, and at what baud — a baud the monitor disagrees with garbles output silently.
+- LED_BUILTIN (pin 13) as a zero-wiring heartbeat when the feature has no visible output of its own.
+- `arduino-cli compile --fqbn {{FQBN}}` — the verification command for every code step, and the only
+  "does it work" check that runs with no hardware attached.
+- `arduino-cli upload -p <port> --fqbn {{FQBN}}` then `arduino-cli monitor -p <port>`, with a board.
+- The wiring diagram (arduino_diagram) makes the circuit observable the way a log makes control flow
+  observable. It is generated from real pin usage, so a pin in it you did not intend is a visible bug.
+
+Write the observability section in these terms.

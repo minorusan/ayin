@@ -42,13 +42,19 @@ export interface Criterion {
   source: 'baseline' | 'intent';
 }
 
-/** Which bars apply, from what the turn actually touched. */
+/**
+ * Which bars apply, from what the turn actually touched.
+ *
+ * PROJECT-TYPE BARS ARE NOT DECIDED HERE ANY MORE. The Arduino criteria used to be reached through
+ * two extra dimensions computed from a file-shape probe; they are now owned by the Arduino QA
+ * executor (`executors/qa/arduino`), which selects them from its own deterministic facts — it knows
+ * whether a diagram was actually produced and whether a compiler actually ran, and this function
+ * cannot. What is left here is genuinely file-kind-driven and applies to every project type.
+ */
 export function dimensionsOf(
   files: ChangedFile[],
   webviewApplies: boolean,
   apiApplies = false,
-  arduinoApplies = false,
-  arduinoWiringLikely = false,
 ): Set<Dimension> {
   const dims = new Set<Dimension>();
   for (const f of files) {
@@ -58,30 +64,44 @@ export function dimensionsOf(
   }
   if (webviewApplies) dims.add('webview');
   if (apiApplies) dims.add('api');
-  if (arduinoApplies) dims.add('arduino');
-  // A SEPARATE dimension, not folded into 'arduino': the filename rule applies to every Arduino
-  // change, the diagram requirement only when the change actually touches pins — conflating them
-  // would demand a wiring diagram for a comment typo fix.
-  if (arduinoApplies && arduinoWiringLikely) dims.add('arduino-wiring');
   return dims;
 }
 
-/** The standing bar: criterion id → dimension it applies to → the `qa` prompt id holding its text. */
-const BASELINE: Array<{ id: string; dimension: Dimension; prompt: string }> = [
-  { id: 'ui-not-mvp', dimension: 'ui', prompt: 'baselineUiNotMvp' },
-  { id: 'webview-reachable', dimension: 'webview', prompt: 'baselineWebviewReachable' },
-  { id: 'code-srp', dimension: 'code', prompt: 'baselineCodeSrp' },
-  { id: 'code-readme', dimension: 'code', prompt: 'baselineCodeReadme' },
-  { id: 'api-researched', dimension: 'api', prompt: 'baselineApiResearched' },
-  { id: 'docs-rich', dimension: 'docs', prompt: 'baselineDocsRich' },
-  { id: 'arduino-sketch-naming', dimension: 'arduino', prompt: 'baselineArduinoSketchNaming' },
-  { id: 'arduino-quality', dimension: 'arduino', prompt: 'baselineArduinoQuality' },
-  { id: 'arduino-wiring-diagram', dimension: 'arduino-wiring', prompt: 'baselineArduinoWiringDiagram' },
+/**
+ * The standing bar. Each row is a criterion id, the dimension that pulls it in automatically (or
+ * `null` when only an executor asks for it by id), and the `qa` prompt holding its text.
+ */
+const BASELINE: Array<{ id: string; dimension: Dimension; prompt: string; auto: boolean }> = [
+  { id: 'ui-not-mvp', dimension: 'ui', prompt: 'baselineUiNotMvp', auto: true },
+  { id: 'webview-reachable', dimension: 'webview', prompt: 'baselineWebviewReachable', auto: true },
+  { id: 'code-srp', dimension: 'code', prompt: 'baselineCodeSrp', auto: true },
+  { id: 'code-readme', dimension: 'code', prompt: 'baselineCodeReadme', auto: true },
+  { id: 'api-researched', dimension: 'api', prompt: 'baselineApiResearched', auto: true },
+  { id: 'docs-rich', dimension: 'docs', prompt: 'baselineDocsRich', auto: true },
+  // Requested BY ID from the Arduino QA executor, never by file shape — see `dimensionsOf` above.
+  { id: 'arduino-sketch-naming', dimension: 'arduino', prompt: 'baselineArduinoSketchNaming', auto: false },
+  { id: 'arduino-quality', dimension: 'arduino', prompt: 'baselineArduinoQuality', auto: false },
+  { id: 'arduino-wiring-diagram', dimension: 'arduino-wiring', prompt: 'baselineArduinoWiringDiagram', auto: false },
+  { id: 'arduino-deliverables', dimension: 'arduino', prompt: 'baselineArduinoDeliverables', auto: false },
+  { id: 'arduino-compiles', dimension: 'arduino', prompt: 'baselineArduinoCompiles', auto: false },
 ];
 
-function baselineFor(dims: Set<Dimension>): Criterion[] {
-  return BASELINE.filter((b) => dims.has(b.dimension))
-    .map((b) => ({ id: b.id, dimension: b.dimension, text: qaPrompts.get(b.prompt), source: 'baseline' as const }));
+/** Every criterion id the baseline can serve — used by the prompt gate and by `/executors`. */
+export function baselineIds(): string[] {
+  return BASELINE.map((b) => b.id);
+}
+
+function baselineFor(dims: Set<Dimension>, extraIds: string[] = []): Criterion[] {
+  const wanted = new Set(extraIds);
+  const rows = BASELINE.filter((b) => (b.auto && dims.has(b.dimension)) || wanted.has(b.id));
+  // An executor naming an id that does not exist is a wiring mistake, not a criterion to skip
+  // silently — a bar nobody can see is a bar the change cannot fail.
+  for (const id of wanted) {
+    if (!BASELINE.some((b) => b.id === id)) {
+      throw new Error(`QA executor asked for criterion "${id}", which is not in the baseline table (have: ${baselineIds().join(', ')})`);
+    }
+  }
+  return rows.map((b) => ({ id: b.id, dimension: b.dimension, text: qaPrompts.get(b.prompt), source: 'baseline' as const }));
 }
 
 /** Pull `{"criteria":[…]}` out of whatever the model wrapped it in. */
@@ -114,8 +134,13 @@ function parseIntentCriteria(raw: string): string[] {
  * Never throws: with the model down, the baseline alone is still a real bar, and a QA gate that
  * crashes the turn it was meant to protect would be worse than no gate.
  */
-export async function deriveCriteria(files: ChangedFile[], goal: string, dims: Set<Dimension>): Promise<Criterion[]> {
-  const baseline = baselineFor(dims);
+export async function deriveCriteria(
+  files: ChangedFile[],
+  goal: string,
+  dims: Set<Dimension>,
+  extraIds: string[] = [],
+): Promise<Criterion[]> {
+  const baseline = baselineFor(dims, extraIds);
   const prompts = recentPrompts(12);
   if (prompts.length === 0) return baseline;
 

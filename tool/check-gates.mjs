@@ -26,7 +26,7 @@
 if (!process.argv.includes('-p')) process.argv.push('-p');
 
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -386,12 +386,84 @@ console.log('\narduino project probe');
   const notArduino = p.probeArduinoProject([p.describeFile(join(REPO, 'src/qa/probes.ts'))], REPO);
   ok(notArduino.applies === false, 'an ordinary TypeScript project is not misidentified as Arduino');
 
-  // dimensionsOf wires both dimensions in correctly, and independently.
+  // Project-type criteria are NOT decided by file shape any more — the Arduino QA executor selects
+  // them from its own deterministic facts (see executors/qa/arduino). dimensionsOf keeps only the
+  // bars that are genuinely file-kind-driven and apply to every project type.
   const qc = await import(`file://${join(DIST, 'qa/criteria.js')}`);
-  const dims1 = qc.dimensionsOf([], false, false, true, true);
-  ok(dims1.has('arduino') && dims1.has('arduino-wiring'), 'dimensionsOf includes both arduino dimensions when wiring is likely');
-  const dims2 = qc.dimensionsOf([], false, false, true, false);
-  ok(dims2.has('arduino') && !dims2.has('arduino-wiring'), 'the wiring dimension is independent — a non-wiring Arduino change gets the naming bar only, not the diagram requirement');
+  const dims = qc.dimensionsOf([p.describeFile(join(REPO, 'src/qa/probes.ts'))], false, false);
+  ok(dims.has('code') && !dims.has('arduino'), 'dimensionsOf no longer invents project-type dimensions — that is the executor\'s job');
+  ok(qc.baselineIds().includes('arduino-compiles'), 'the baseline table carries the executor-requested criteria by id');
+}
+
+// ── the QA gate's non-git change detection ──────────────────────────
+// From benchmark run 1, and the most consequential finding in it: a fresh Arduino directory is NOT a
+// git repo, so `gitDirtySet()` returns null and the half of change-detection that catches files
+// written through `bash` is gone. Three projects reported ZERO changed files, so `qaShouldRun`
+// declined — the gate did not fail, it SILENTLY DID NOT RUN — and they shipped sketches that could not
+// compile, past a naming bar and a compile probe that both existed and never looked.
+console.log('\nqa: change detection outside a git repo');
+{
+  const p = await import(`file://${join(DIST, 'qa/probes.js')}`);
+  const dir = mkdtempSync(join(tmpdir(), 'ayin-nogit-'));
+  ok(p.gitDirtySet(dir) === null, 'a non-git directory yields null from the git probe — the condition that caused the bug');
+
+  const before = Date.now() - 1000;
+  mkdirSync(join(dir, 'Sketch'), { recursive: true });
+  writeFileSync(join(dir, 'Sketch', 'Sketch.ino'), 'void setup(){} void loop(){}\n');
+  writeFileSync(join(dir, 'README.md'), '# x\n');
+  const found = p.filesModifiedSince(dir, before).map((f) => f.slice(dir.length + 1)).sort();
+  ok(found.includes('README.md') && found.includes('Sketch/Sketch.ino'), 'the mtime fallback finds files written since the turn began, at any depth', JSON.stringify(found));
+
+  // It must not sweep in everything that merely EXISTS, or every turn would review the whole tree.
+  writeFileSync(join(dir, 'old.txt'), 'x\n');
+  const past = Date.now() + 60_000;
+  ok(p.filesModifiedSince(dir, past).length === 0, 'nothing is reported as changed when the baseline is in the future — this is a since-filter, not a tree dump');
+
+  mkdirSync(join(dir, 'node_modules', 'junk'), { recursive: true });
+  writeFileSync(join(dir, 'node_modules', 'junk', 'index.js'), 'x\n');
+  ok(!p.filesModifiedSince(dir, before).some((f) => f.includes('node_modules')), 'vendor directories are skipped, same as every other probe here');
+  rmSync(dir, { recursive: true, force: true });
+}
+
+// ── executors: project detection and config-driven selection ────────
+console.log('\nexecutors: detection + registry');
+{
+  const det = await import(`file://${join(DIST, 'executors/detect.js')}`);
+  const reg = await import(`file://${join(DIST, 'executors/registry.js')}`);
+
+  // Every shipped config parses and cross-checks against an imported instance. loadRegistry THROWS
+  // on any mismatch, so simply getting a list back is the assertion.
+  const configs = reg.listExecutors();
+  ok(configs.length === 6, 'six executors are declared and wired (base + arduino, for plan/qa/present)', String(configs.length));
+  ok(configs.every((c) => c.projectTypes.length > 0), 'every config declares at least one project type');
+
+  // The tree wins when it says anything.
+  const tsCtx = det.detectProject(REPO, 'build me an arduino thing with an LED on a pin');
+  ok(tsCtx.type === 'node' && tsCtx.greenfield === false, 'a real repo is detected from its files, and the request never overrides the tree', tsCtx.type);
+
+  // Greenfield: an empty directory plus a request that names the domain. THE case that used to get
+  // no Arduino treatment at all, because every hook required an .ino to already exist.
+  const empty = mkdtempSync(join(tmpdir(), 'ayin-gate-empty-'));
+  const green = det.detectProject(empty, 'create an arduino project: RGB LED green to yellow to red over 10 seconds, a button toggles it');
+  ok(green.type === 'arduino' && green.greenfield === true, 'an empty directory + an Arduino request detects as greenfield arduino', `${green.type}/${green.greenfield}`);
+  const silent = det.detectProject(empty, 'refactor the payment service');
+  ok(silent.type === 'unknown', 'an empty directory with an unrelated request stays unknown, not guessed');
+
+  // Selection is by config: arduino beats the wildcard base, everything else gets base.
+  ok(reg.planExecutorFor(green).config.id === 'arduino', 'the arduino plan executor wins for an arduino project (priority 100 over the base wildcard)');
+  ok(reg.qaExecutorFor(green).config.id === 'arduino', 'the arduino QA executor wins for an arduino project');
+  ok(reg.presentExecutorFor(green).config.id === 'arduino', 'the arduino present executor wins for an arduino project');
+  ok(reg.planExecutorFor(silent).config.id === 'base', 'an unknown project falls to the base executor, which declares "*"');
+  ok(reg.qaExecutorFor(tsCtx).config.id === 'base', 'a Node project gets base QA — the arduino bars never apply to it');
+
+  // The deterministic README scaffold: created when missing, never overwritten.
+  const bp = await import(`file://${join(DIST, 'executors/plan/base/index.js')}`);
+  const made = bp.basePlanExecutor.scaffold({ root: empty, type: 'unknown', evidence: 'test', greenfield: true });
+  ok(made.length === 1 && existsSync(join(empty, 'README.md')), 'scaffold creates README.md in a project that has none');
+  writeFileSync(join(empty, 'README.md'), '# mine\n');
+  const again = bp.basePlanExecutor.scaffold({ root: empty, type: 'unknown', evidence: 'test', greenfield: false });
+  ok(again.length === 0 && readFileSync(join(empty, 'README.md'), 'utf8') === '# mine\n', 'scaffold NEVER overwrites an existing README — it is the operator\'s');
+  rmSync(empty, { recursive: true, force: true });
 }
 
 // ── arduino_diagram: the pure PUML renderer, esp. the free-form-leg-name fuzzy matcher ──
@@ -448,11 +520,114 @@ console.log('\narduino wiring diagram render');
     { pin: '11', componentId: 'rgb-led-common-cathode', leg: 'blue channel', label: 'RGB LED' },
   ];
   const puml4 = ad.renderArduinoWiringPuml('Janitor', 'uno', rgbPins, rgbConn);
-  ok(/PIN_9 --> COMP_rgb_led_common_cathode_LEG_red_anode : signal/.test(puml4), 'a multi-pin component: pin 9 wires to its OWN leg (red anode), not lost or relabeled');
-  ok(/PIN_10 --> COMP_rgb_led_common_cathode_LEG_green_anode : signal/.test(puml4), 'a multi-pin component: pin 10 wires to its OWN leg (green anode) — a second connection to the same component must not overwrite the first');
-  ok(/PIN_11 --> COMP_rgb_led_common_cathode_LEG_blue_anode : signal/.test(puml4), 'a multi-pin component: pin 11 wires to its OWN leg (blue anode) — a third connection must not be dropped either');
-  ok((puml4.match(/rectangle "(RED_PIN|GREEN_PIN|BLUE_PIN)/g) || []).length === 3, 'all three real board pins get their own rectangle, not just the first one seen');
+  // Each channel now runs board pin -> SERIES resistor -> leg, because the catalog's own connectsTo
+  // text for every anode says "through a ~220Ω resistor". The previous renderer drew the wire
+  // straight to the anode: a picture that contradicted the data it was built from, and that a
+  // beginner following it would use to destroy an LED or a GPIO pin.
+  for (const [pin, leg] of [['PIN_9', 'red_anode'], ['PIN_10', 'green_anode'], ['PIN_11', 'blue_anode']]) {
+    const via = puml4.match(new RegExp(`${pin} --> (SERIES_\\d+) : signal`));
+    ok(!!via, `${pin} wires through a series part, not straight to the LED leg`);
+    ok(new RegExp(`${via?.[1]} --> COMP_rgb_led_common_cathode_LEG_${leg}\\b`).test(puml4),
+      `that series part continues to this channel's OWN leg (${leg}) — a second connection must not overwrite the first`);
+  }
+  const seriesBoxes = puml4.match(/rectangle "[^"]*Ω[^"]*" as SERIES_\d+/g) || [];
+  ok(seriesBoxes.length === 3, 'each RGB channel gets its OWN resistor — the catalog says "not just one shared one"', String(seriesBoxes.length));
+  // The blue channel's catalog text states a RANGE ("~150-220Ω"), and that survives as a range
+  // rather than being flattened to whichever end a lookup table would have picked.
+  ok(seriesBoxes.some((b) => /150–220 Ω/.test(b)), 'the blue channel keeps the range the catalog actually states', seriesBoxes.join(' | '));
+  ok((puml4.match(/rectangle "[^"]*(RED_PIN|GREEN_PIN|BLUE_PIN)/g) || []).length === 3, 'all three real board pins get their own rectangle, not just the first one seen');
   ok(/COMP_rgb_led_common_cathode_LEG_common_cathode_longest_leg --> BOARD_GND : ground/.test(puml4), 'the shared cathode leg still wires to GND exactly once');
+
+  // Pins are ordered as a human reads a header, not in Map insertion order (which put GND between
+  // pins 11 and 2 in a real render).
+  const mixedPins = [
+    { raw: '11', resolved: '11', calls: ['analogWrite'] },
+    { raw: '2', resolved: '2', calls: ['digitalRead'] },
+    { raw: 'A0', resolved: 'A0', calls: ['analogRead'] },
+  ];
+  const puml5 = ad.renderArduinoWiringPuml('Order', 'uno', mixedPins, []);
+  const order = [...puml5.matchAll(/as (PIN_\w+|BOARD_GND|BOARD_5V)/g)].map((m) => m[1]);
+  ok(order.indexOf('PIN_2') < order.indexOf('PIN_11') && order.indexOf('PIN_11') < order.indexOf('PIN_A0'),
+    'board pins render in header order: digital ascending, then analog', order.join(','));
+
+  // Wiring notes are wrapped, never amputated mid-word at a fixed character count.
+  ok(!/…\n/.test(puml4) || ad.wrapText('a '.repeat(200)).length <= 7, 'notes wrap to multiple lines instead of being truncated');
+  const wrapped = ad.wrapText('the quick brown fox jumps over the lazy dog and keeps running for quite a while longer', 30, 5);
+  ok(wrapped.every((l) => l.length <= 32) && wrapped.join(' ').includes('lazy dog'), 'wrapText breaks on whole words and keeps the text', JSON.stringify(wrapped));
+
+  // THE PIN FIELD TOLERATES NATURAL PHRASING. An exact-string compare on the model's `pin` answer meant
+  // "D2", "pin 2", "GPIO2" or "a0" dropped every connection, the repair round produced the same
+  // phrasing, and the whole grounding call exhausted — rendering a diagram of bare pins. Same bug class
+  // as matchLeg, on the field next to it.
+  {
+    const ae2 = await import(`file://${join(DIST, 'tools/arduino-explain.js')}`);
+    // parseConnections must keep whatever the model wrote; the NORMALISATION happens in groundWiring,
+    // so this asserts the parser is not the thing throwing them away.
+    const parsed = ae2.parseConnections('{"connections":[{"pin":"D2","componentId":"push-button","leg":"left"}]}');
+    ok(parsed?.length === 1 && parsed[0].pin === 'D2', 'the parser preserves the model\'s pin phrasing verbatim for the matcher to normalise');
+  }
+
+  // EXHAUSTED GROUNDING vs NOTHING TO GROUND — identical pictures, opposite meanings, and the first cut
+  // of this check failed blink for being CORRECT. Blink drives only LED_BUILTIN: there is no external
+  // part, so an all-unknown diagram is the honest answer and inventing an LED would be the bug. A
+  // five-pin traffic light whose grounding call died renders the same shape and is worthless.
+  const pumlNothing = ad.renderArduinoWiringPuml('Blink', 'uno', [{ raw: '13', resolved: '13', calls: ['digitalWrite'] }], [], false);
+  const pumlDead = ad.renderArduinoWiringPuml('Blink', 'uno', [{ raw: '13', resolved: '13', calls: ['digitalWrite'] }], [], true);
+  ok(ad.diagramGrounding(pumlNothing).exhausted === false, 'a successful grounding call that matched nothing is NOT recorded as exhausted');
+  ok(ad.diagramGrounding(pumlDead).exhausted === true, 'an exhausted grounding call IS recorded, so the two cases are distinguishable from the file alone');
+  ok(ad.diagramGrounding(puml4).components > 0, 'a real multi-component diagram reports its grounded component count');
+
+  // PROVENANCE. From benchmark run 1: the model wrote its own `traffic-light.wiring.puml` — valid
+  // PlantUML, plausible, resistors and all, grounded in nothing — and it survived because the
+  // regeneration skip assumed this tool was the only writer of that path. A plausible wrong pinout is
+  // worse than no diagram, because someone wires it.
+  ok(ad.isGeneratedPuml(puml1), 'a generated diagram carries the provenance stamp');
+  ok(!ad.isGeneratedPuml('@startuml\nrectangle "Red LED" as red\n@enduml'), 'a hand-written diagram is identified as such');
+  ok(/^'/.test(ad.PROVENANCE_MARK), 'the stamp is a PlantUML comment, so it never renders and never breaks -syntax');
+
+  // A SIGNAL PIN MUST NEVER BE WIRED TO A GROUND LEG, and two pins must never share one leg.
+  // Found by auditing a rendered diagram against its own sketch and README: the model's free-form leg
+  // text ("green channel, via a resistor to the common cathode") shares TWO words with the catalog's
+  // "common cathode (longest leg)" and only ONE with "green anode", so plain word-overlap wired pins 10
+  // AND 11 into the cathode, left the green and blue anodes unwired, and drew no ground wire. A dead
+  // circuit, in a diagram that was valid, stamped and catalog-grounded.
+  const cathodeBait = ['red', 'green', 'blue'].map((c, i) => ({
+    pin: String(9 + i), componentId: 'rgb-led-common-cathode',
+    leg: `${c} channel, via a resistor to the common cathode`, label: c,
+  }));
+  const pumlBait = ad.renderArduinoWiringPuml('RgbCycle', 'uno', rgbPins, cathodeBait);
+  for (const [pin, leg] of [['PIN_9', 'red_anode'], ['PIN_10', 'green_anode'], ['PIN_11', 'blue_anode']]) {
+    const via = pumlBait.match(new RegExp(`${pin} --> (SERIES_\\d+) : signal`));
+    ok(!!via && new RegExp(`${via[1]} --> COMP_rgb_led_common_cathode_LEG_${leg}\\b`).test(pumlBait),
+      `${pin} reaches its OWN anode (${leg}) despite leg text that name-drops the cathode`);
+  }
+  ok(!/PIN_\d+ --> COMP_rgb_led_common_cathode_LEG_common_cathode/.test(pumlBait),
+    'no signal pin is ever wired to a leg the catalog sends to GND');
+  ok(/COMP_rgb_led_common_cathode_LEG_common_cathode_longest_leg --> BOARD_GND : ground/.test(pumlBait),
+    'and the cathode still gets its ground wire');
+
+  // THREE DISCRETE LEDS ARE THREE PARTS. Seen in a real render: pins 9/10/11 driving three separate
+  // standard-leds collapsed into ONE box with three wires into the same anode — a circuit nobody built.
+  // The catalog's leg list is the proof: standard-led has one driveable leg (anode; cathode is GND), so
+  // three pins cannot be one part. An RGB LED has three driveable anodes, so it must NOT split.
+  const threeLeds = [
+    { raw: '9', resolved: '9', calls: ['digitalWrite'] },
+    { raw: '10', resolved: '10', calls: ['digitalWrite'] },
+    { raw: '11', resolved: '11', calls: ['digitalWrite'] },
+  ];
+  const ledConn = threeLeds.map((p) => ({ pin: p.resolved, componentId: 'standard-led', leg: 'anode', label: 'LED' }));
+  const pumlLeds = ad.renderArduinoWiringPuml('TrafficLight', 'uno', threeLeds, ledConn);
+  // `alias()` collapses runs of non-alphanumerics, so the instance suffix is `_9`, not `__9`.
+  const ledBoxes = (pumlLeds.match(/as COMP_standard_led_\d+ /g) || []).length;
+  ok(ledBoxes === 3, 'three pins driving a one-driveable-leg part render as THREE component boxes', String(ledBoxes));
+  ok((pumlLeds.match(/rectangle "[^"]*Ω[^"]*" as SERIES_\d+/g) || []).length === 3, 'and each of the three gets its own series resistor');
+  const rgbBoxes = (puml4.match(/as COMP_rgb_led_common_cathode[ _]/g) || []).length;
+  ok(!/as COMP_rgb_led_common_cathode_\d+ /.test(puml4), 'an RGB LED with three driveable anodes is NOT split — it is one physical part', String(rgbBoxes));
+
+  // Series-part detection reads the catalog's own prose — one source of truth, no lookup table.
+  ok(ad.seriesPartFor('a PWM pin through a ~220Ω resistor')?.label === '220 Ω', 'a stated resistor value is read out of the catalog text');
+  ok(ad.seriesPartFor('a PWM pin through a ~150-220Ω resistor')?.label === '150–220 Ω', 'a stated RANGE is kept as a range, not rounded to one end');
+  ok(ad.seriesPartFor('Arduino GND') === null, 'a leg with no series part in its description gets a direct wire');
 }
 
 // ── arduino-db: keyword search, no embeddings, no network ──────────
@@ -519,6 +694,34 @@ console.log('\narduino-explain pipeline (no LLM)');
   ok(byRaw['A0']?.calls.includes('analogRead'), 'an analog pin token (A0) is captured as-is, not treated as a name to resolve');
   ok(ae.extractPinUsage('void setup(){} void loop(){}').length === 0, 'a sketch touching no pins at all extracts an empty list, not a crash');
 
+  // ── the four extraction gaps found by BENCHMARK RUN 1, each a real shipped artifact ──
+  //
+  // 1. A pin passed to a LIBRARY CONSTRUCTOR is configured inside the library, so the sketch never
+  //    calls pinMode on it. A correct climate-display sketch produced a wiring diagram with ONE
+  //    rectangle (the empty board) and no components — valid PlantUML, entirely useless.
+  const dhtSrc = `
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+#define DHT_PIN 2
+#define DHT_TYPE DHT22
+DHT dht(DHT_PIN, DHT_TYPE);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+void setup(){} void loop(){}`;
+  const dhtPins = Object.fromEntries(ae.extractPinUsage(dhtSrc).map((p) => [p.raw, p]));
+  ok(dhtPins['DHT_PIN']?.resolved === '2', 'a pin passed to a library constructor (DHT) is extracted and resolved', JSON.stringify(dhtPins['DHT_PIN']));
+  // 2. The SAME constructor scan must not read an I2C address or a geometry as a pin — a fictional
+  //    wire in a wiring diagram is worse than a missing one.
+  ok(!Object.keys(dhtPins).some((k) => /^0x/i.test(k) || k === '16'), 'LiquidCrystal_I2C(0x27, 16, 2) contributes NO pins — an address and a geometry are not wires', JSON.stringify(Object.keys(dhtPins)));
+  // 3. I2C's pins are fixed and appear nowhere in the source, so an I2C display was absent from its
+  //    own diagram. "SDA→A4, SCL→A5" is precisely what the diagram exists to say.
+  ok(dhtPins['A4']?.calls.some((c) => /SDA/.test(c)) && dhtPins['A5']?.calls.some((c) => /SCL/.test(c)), 'an I2C include adds the fixed SDA/SCL pins, labelled', JSON.stringify([dhtPins['A4'], dhtPins['A5']]));
+  ok(!Object.keys(Object.fromEntries(ae.extractPinUsage('void setup(){pinMode(3,OUTPUT);} void loop(){}').map((p) => [p.raw, p]))).includes('A4'), 'a sketch with no I2C library gets no synthetic I2C pins');
+  // 4. `const int led = LED_BUILTIN;` resolved to nothing, so blink's diagram labelled the pin "led"
+  //    instead of 13 — honest, but useless to the beginner the diagram is for.
+  const builtinPins = Object.fromEntries(ae.extractPinUsage('const int led = LED_BUILTIN;\nvoid setup(){pinMode(led,OUTPUT);}').map((p) => [p.raw, p]));
+  ok(builtinPins['led']?.resolved === '13', 'an alias for the LED_BUILTIN core macro resolves transitively to pin 13', JSON.stringify(builtinPins['led']));
+
   // parseConnections: the model's JSON discipline is what's most likely to drift, not the render.
   ok(ae.parseConnections('not json') === null, 'garbage input returns null rather than throwing');
   ok(ae.parseConnections('{"connections": "nope"}') === null, 'a non-array connections field is rejected');
@@ -553,16 +756,22 @@ console.log('\npresenter pass (no LLM)');
   const noFilesField = pr.parsePresentation('{"presentable": true, "satisfies": "did a thing"}');
   ok(Array.isArray(noFilesField?.files) && noFilesField.files.length === 0, 'a presentable response with no files field defaults to an empty array, not a crash');
 
-  const text = pr.formatPresentation('fix the login bug', wrapped, null);
+  const text = pr.formatPresentation('fix the login bug', wrapped, []);
   ok(text.startsWith('> fix the login bug'), 'the formatted text quotes the goal first, as the "what this satisfies" offset');
   ok(text.includes('added the widget'), 'the satisfies sentence is included');
   ok(text.includes('a.ts — added an export'), 'a file bullet reads "path — summary"');
-  ok(!/wiring diagram regenerated/.test(text), 'no Arduino note when none was passed in');
+  ok(!/wiring diagram/.test(text), 'no artifact bullets when the executor produced none');
 
-  const withArduino = pr.formatPresentation('blink an LED', wrapped, 'wiring diagram regenerated (arduino-diagram): /tmp/x.wiring.svg');
-  ok(withArduino.includes('wiring diagram regenerated'), 'an Arduino note, when given, appears as its own bullet');
+  // The artifact lines are a LIST now, not one optional Arduino string: a project type can owe the
+  // user more than one artifact, and which ones exist is the executor's business, not the formatter's.
+  const withArtifacts = pr.formatPresentation('blink an LED', wrapped, [
+    '/tmp/x.wiring.svg — wiring diagram regenerated',
+    'STILL MISSING: README (README.md)',
+  ]);
+  ok(withArtifacts.includes('- /tmp/x.wiring.svg — wiring diagram regenerated'), 'each executor artifact line appears as its own bullet');
+  ok(withArtifacts.includes('- STILL MISSING: README (README.md)'), 'a missing required deliverable is surfaced in the presentation, not hidden');
 
-  const emptyFiles = pr.formatPresentation('do a thing', { presentable: true, satisfies: '', files: [] }, null);
+  const emptyFiles = pr.formatPresentation('do a thing', { presentable: true, satisfies: '', files: [] }, []);
   ok(/no file-level changes reported/.test(emptyFiles), 'an empty file list still renders an honest line instead of a bare "Changed:" header');
 }
 

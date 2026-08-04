@@ -60,6 +60,38 @@ export interface RegisterResult {
   materialized: string[];
   /** Ids left untouched because the operator already has a local copy. */
   kept: string[];
+  /** Local copies that can no longer receive the data the code passes — see `PromptDrift`. */
+  drifted: PromptDrift[];
+}
+
+/**
+ * A local prompt whose VARIABLE CONTRACT no longer matches the shipped one.
+ *
+ * This is not the same thing as an operator having edited a prompt, and conflating the two is how a
+ * whole feature can ship and do nothing. Materialization never overwrites — a local file is the
+ * operator's, full stop — which is right for WORDING. But `{{VAR}}` placeholders are not wording,
+ * they are the interface between the code and the text: when the code starts passing
+ * `{{DELIVERABLES}}` and the local copy predates that variable, the code supplies the data, the
+ * prompt never asks for it, and the model is simply never told. Nothing errors. Nothing logs. The
+ * feature is silently absent.
+ *
+ * This is exactly that bug, found by auditing rather than by noticing: a local `planDocument.txt`
+ * several versions behind the shipped one meant an entire new plan section reached the model as
+ * nothing at all. `restoreDefaults(ns, id)` is the fix, and it stays explicit — but the operator has
+ * to be TOLD, loudly, that a prompt they are running cannot carry what the code now sends it.
+ */
+export interface PromptDrift {
+  namespace: string;
+  id: string;
+  /** Declared by the shipped prompt, absent from the local one — data the model will never see. */
+  missingVars: string[];
+  /** In the local prompt but no longer supplied by the code — will render as a literal `{{VAR}}`. */
+  staleVars: string[];
+  localPath: string;
+}
+
+function varsIn(body: string): Set<string> {
+  return new Set([...body.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]));
 }
 
 function readTxt(dir: string, id: string): string | null {
@@ -150,6 +182,7 @@ class Bundle implements PromptBundle {
 class PromptsService {
   private readonly bundles = new Map<string, Bundle>();
   private readonly sources = new Map<string, string>();
+  private readonly drift: PromptDrift[] = [];
 
   /**
    * Register a namespace's SOURCE directory, materialize anything missing into the LOCAL store, and
@@ -165,12 +198,29 @@ class PromptsService {
 
     const materialized: string[] = [];
     const kept: string[] = [];
+    const drifted: PromptDrift[] = [];
 
     if (existsSync(sourceDir)) {
       for (const id of idsIn(sourceDir)) {
         const dest = join(dir, `${id}.txt`);
-        if (existsSync(dest)) { kept.push(id); continue; }
-        writeAtomic(dest, readFileSync(join(sourceDir, `${id}.txt`), 'utf8'));
+        const shipped = readFileSync(join(sourceDir, `${id}.txt`), 'utf8');
+        if (existsSync(dest)) {
+          kept.push(id);
+          // The variable CONTRACT is checked even though the text is not touched. Wording is the
+          // operator's; placeholders are the code's interface to the text, and a local copy that
+          // cannot receive what the code now passes is broken, not customised.
+          try {
+            const localVars = varsIn(readFileSync(dest, 'utf8'));
+            const shippedVars = varsIn(shipped);
+            const missingVars = [...shippedVars].filter((v) => !localVars.has(v)).sort();
+            const staleVars = [...localVars].filter((v) => !shippedVars.has(v)).sort();
+            if (missingVars.length || staleVars.length) {
+              drifted.push({ namespace, id, missingVars, staleVars, localPath: dest });
+            }
+          } catch { /* unreadable local file — `get()` will throw loudly on first use */ }
+          continue;
+        }
+        writeAtomic(dest, shipped);
         materialized.push(id);
       }
       this.sources.set(namespace, sourceDir);
@@ -181,7 +231,13 @@ class PromptsService {
       bundle = new Bundle(namespace, dir);
       this.bundles.set(namespace, bundle);
     }
-    return { bundle, materialized, kept };
+    for (const d of drifted) this.drift.push(d);
+    return { bundle, materialized, kept, drifted };
+  }
+
+  /** Every drift found since boot, for the startup warning and for `/prompts`. */
+  drifts(): PromptDrift[] {
+    return [...this.drift];
   }
 
   /** An already-registered namespace's bundle. Throws if it was never registered. */

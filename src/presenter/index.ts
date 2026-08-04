@@ -20,10 +20,11 @@
  * raw reply will stop being shown when Presenter produces a presentation — that switch lives in
  * `agent.ts`, not here, since it's about what gets printed, not about the decision itself.
  *
- * ARDUINO. A presentation of Arduino work is only accurate if the wiring diagram it can reference is
- * current, so Presenter calls the same `regenerateTouchedDiagrams` (arduino-diagram.ts) the QA-pass
- * hook uses — see that function's own doc for why the two share one implementation with a skip-set
- * instead of each having their own copy.
+ * PROJECT-TYPE ARTIFACTS. What a presentation owes the user beyond the file list depends on the kind
+ * of project: an Arduino turn owes a current wiring diagram (a presentation that points at a stale
+ * one is worse than one that points at nothing), a generic project owes nothing extra. That decision
+ * lives in the PRESENT EXECUTOR selected for the detected project type, not here — see
+ * `executors/present/`. Presenter's own job is unchanged: classify, then format.
  *
  * OFF BY DEFAULT for the session — `/present` (bare, in `index.ts`) toggles it on for the rest of the
  * session; `/presentthis <message>` forces it for exactly one turn regardless of the toggle. This is
@@ -36,7 +37,8 @@ import { pushActivity, setActivityDetail } from '../activity.js';
 import { llmChat } from '../llm/manager.js';
 import { log } from '../log.js';
 import { prompts, packagePath } from '../prompts-service.js';
-import { regenerateTouchedDiagrams } from '../tools/arduino-diagram.js';
+import { detectProject, describeProject } from '../executors/detect.js';
+import { presentExecutorFor } from '../executors/registry.js';
 import type { ChangedFile } from '../qa/probes.js';
 
 const presenterPrompts = prompts.register('presenter', packagePath('prompts', 'presenter')).bundle;
@@ -81,8 +83,9 @@ export interface PresenterOutcome {
   presented: boolean;
   text?: string;
   reason?: string;
-  /** Sketch paths this pass already regenerated the wiring explainer for — the caller hands this to
-   *  the QA-pass hook's `regenerateTouchedSketches` call as `skip` so it isn't redone. */
+  /** Units (Arduino sketches) whose artifacts this pass regenerated — the caller carries these so a
+   *  later gate in the same turn does not redo the work. Mirrors `qaPreparedUnits()` in the other
+   *  direction; whichever gate runs first tells the second what it already covered. */
   arduinoRegenerated: Set<string>;
 }
 
@@ -122,8 +125,13 @@ export function parsePresentation(raw: string): ParsedPresentation | null {
   }
 }
 
-/** Pure formatter: parsed classification + an optional Arduino note → the text shown to the user. */
-export function formatPresentation(goal: string, parsed: ParsedPresentation, arduinoNote: string | null): string {
+/**
+ * Pure formatter: parsed classification + the project-type executor's artifact lines → the text
+ * shown to the user. `artifactLines` used to be a single optional Arduino string; it is a list now
+ * because a project type can owe the user more than one artifact, and because which lines exist is
+ * the executor's business rather than this formatter's.
+ */
+export function formatPresentation(goal: string, parsed: ParsedPresentation, artifactLines: string[] = []): string {
   const lines: string[] = [];
   lines.push(`> ${goal || '(no goal recorded this session)'}`);
   lines.push('');
@@ -133,7 +141,7 @@ export function formatPresentation(goal: string, parsed: ParsedPresentation, ard
   const files = parsed.files ?? [];
   if (files.length === 0) lines.push('- (no file-level changes reported)');
   for (const f of files) lines.push(`- ${f.path}${f.summary ? ` — ${f.summary}` : ''}`);
-  if (arduinoNote) lines.push(`- ${arduinoNote}`);
+  for (const line of artifactLines) lines.push(`- ${line}`);
   return lines.join('\n');
 }
 
@@ -142,7 +150,12 @@ export function formatPresentation(goal: string, parsed: ParsedPresentation, ard
  * `presented: false`, which is always safe: the caller still shows the raw reply exactly as it did
  * before Presenter existed.
  */
-export async function presenterPass(goal: string, response: string, files: ChangedFile[]): Promise<PresenterOutcome> {
+export async function presenterPass(
+  goal: string,
+  response: string,
+  files: ChangedFile[],
+  skip: Set<string> = new Set(),
+): Promise<PresenterOutcome> {
   const none: PresenterOutcome = { presented: false, arduinoRegenerated: new Set() };
   if (!presenterEnabled()) return { ...none, reason: 'disabled (AYIN_PRESENTER=0)' };
 
@@ -176,21 +189,23 @@ export async function presenterPass(goal: string, response: string, files: Chang
     }
 
     setActivityDetail('building the presentation');
-    let arduinoNote: string | null = null;
+    // Which project this is, decided fresh — never cached across turns; the directory changes.
+    const ctx = detectProject();
+    const executor = presentExecutorFor(ctx);
+    let artifactLines: string[] = [];
     let arduinoRegenerated = new Set<string>();
     try {
-      const regen = await regenerateTouchedDiagrams(process.cwd(), files);
-      if (regen) {
-        arduinoRegenerated = regen.regeneratedPaths;
-        arduinoNote = regen.results.length
-          ? `wiring diagram regenerated (arduino-diagram): ${regen.results.map((r) => r.svgPath ?? r.pumlPath).join(', ')}`
-          : null;
-      }
+      const produced = await executor.artifacts(ctx, files, skip);
+      artifactLines = produced.lines;
+      arduinoRegenerated = produced.handled;
+      log('INFO', 'presenter_executor', { project: describeProject(ctx), executor: executor.config.id, lines: String(artifactLines.length) });
     } catch (err) {
-      log('WARN', 'presenter_arduino_regen_failed', { error: err instanceof Error ? err.message : String(err) });
+      // A presentation without its artifact lines is still a presentation. Never let this take the
+      // pass down — the caller's fallback is the raw reply, which is strictly worse.
+      log('WARN', 'presenter_artifacts_failed', { error: err instanceof Error ? err.message : String(err) });
     }
 
-    const text = formatPresentation(goal, parsed, arduinoNote);
+    const text = formatPresentation(goal, parsed, artifactLines);
     log('INFO', 'presenter_presented', { files: String(parsed.files?.length ?? 0) });
     return { presented: true, text, arduinoRegenerated };
   } finally {

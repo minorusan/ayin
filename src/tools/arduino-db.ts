@@ -75,6 +75,50 @@ export function catalogLine(c: ArduinoComponent): string {
   return `${c.id} — ${c.name} [${c.category}]: ${c.identify}`;
 }
 
+/** Just the id — the index line, for components the query did not select. ~20 chars, not ~364. */
+export function catalogIndexLine(c: ArduinoComponent): string {
+  return c.id;
+}
+
+/**
+ * The catalog, RETRIEVED for a query instead of dumped whole.
+ *
+ * WHY THIS EXISTS. Every Arduino prompt used to interpolate all 28 components at full `catalogLine`
+ * detail: 10,196 characters, ~2,550 tokens, on every plan and every grounding call. A typical project
+ * uses three or four of them, so roughly twenty-four irrelevant part descriptions were being injected
+ * alongside the four that mattered. That is not merely wasteful — it is the specific thing measured to
+ * degrade model performance: a single distractor hurts, several compound, and the effect is worse the
+ * longer the input. The tool had a perfectly good keyword scorer (`searchArduinoComponents`) sitting
+ * next to the code that ignored it.
+ *
+ * So: full detail for what the query is actually about, a bare id INDEX for everything else (~20 chars
+ * each, so the model still knows the rest exists and can name one), and the `arduino_db` tool to fetch
+ * any of them in full. Retrieval, an index, and a lookup — the same shape any RAG system would use,
+ * for a corpus small enough that the retriever is a keyword scorer rather than a vector store.
+ *
+ * `limit` is generous on purpose. Missing a component the project genuinely uses costs a wrong
+ * diagram; carrying one extra costs a few hundred characters. Those are not symmetric.
+ */
+export function retrieveCatalog(query: string, limit = 8): { selected: ArduinoComponent[]; text: string } {
+  const selected = searchArduinoComponents(query, limit);
+  // No keyword hit at all (an empty or purely abstract request) — fall back to the full INDEX rather
+  // than to the full catalog. The model still learns every id that exists; it just does not get 10k
+  // characters of descriptions it has no use for.
+  const selectedIds = new Set(selected.map((c) => c.id));
+  const rest = ARDUINO_COMPONENTS.filter((c) => !selectedIds.has(c.id));
+
+  const text = [
+    selected.length
+      ? `MATCHED THIS REQUEST (full entry via the arduino_db tool — legs, what each connects to, wiring notes):\n${selected.map(catalogLine).join('\n')}`
+      : 'No catalog component matched this request by keyword.',
+    rest.length
+      ? `\nALSO IN THE CATALOG (ids only — call arduino_db(id=…) for any of them):\n${rest.map(catalogIndexLine).join(', ')}`
+      : '',
+  ].filter(Boolean).join('\n');
+
+  return { selected, text };
+}
+
 export function formatArduinoComponent(c: ArduinoComponent): string {
   const legs = c.legs.map((l) => `  - ${l.legName} → ${l.connectsTo} (${l.explanation})`).join('\n');
   return [
