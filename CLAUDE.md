@@ -257,6 +257,6 @@ assuming it renders.
 ## Before declaring any task done
 
 1. `npm run build` passes (this runs the glyph gate before and the prompt gate after `tsc`).
-2. `npm run check:gates` and `npm run check:explore` pass.
+2. `npm run check:gates`, `npm run check:explore` and `npm run check:watch` pass.
 3. The behaviour was **actually exercised** — a real run, not a compile.
 4. `docs/` matches the new reality.

@@ -108,6 +108,13 @@ asked-for deliverable exists), a lightweight **judge** (is there enough evidence
 an internal **critic** (sanity-check substantial `write_file` output against gathered facts),
 and a self-audit on hitting the round cap.
 
+**Round budget (`getMaxRounds`).** Interactive uses `config.maxToolRounds` (15); headless gets a
+long leash (1000) because a `-p` task is expected to finish the job. **`AYIN_MAX_ROUNDS` overrides
+both** — for a caller that wants a short, forced-spend run rather than an open-ended one. The
+`ayin watch` hound sets it: its job is to make a handful of greps and answer, and a 1000-round
+leash on that shape produces deliberation, not evidence. Values below 1 or unparseable are ignored,
+so a typo cannot wedge the loop at zero rounds.
+
 Three gates wrap the loop, each on a **deterministic trigger** — no model decides whether they run.
 Plan mode, the Presenter pass, and the QA gate are also each **OFF by default for the session** — a
 bare toggle (`/plan`, `/present`, `/qa`) turns one on for the rest of the session; a one-shot force
@@ -1016,29 +1023,60 @@ The moving parts, designed to survive interruption at any point:
   `AYIN-REPORT-SMELLS-*.md`) and the agent-file pointer block above, are the Claude Code hound
   hook described next.
 - **Claude Code hound hook** (installed alongside the git hooks, self-healed the same way):
-  `.claude/hooks/ayin-hound.sh` + a Stop-hook entry upserted into `.claude/settings.json`
-  (`AYIN_WATCH_HOUND=0` to skip installing it — existing installs are left as-is). At the end of
-  a Claude Code turn, if there's a staged diff, it runs **ayin itself** — read-only
-  (`AYIN_READONLY=1`, so it can only grep/read, never edit) — against that diff and, if ayin
-  reports anything, **blocks the stop** with the finding: Claude reacts to ayin, not the other
-  way round. The engine is ayin, not `claude -p` — no LAN address to hardcode, no separate config;
-  it inherits whatever `AYIN_LLM_URL` this ayin install already talks to. In a Unity repo
-  (`isUnityRepo`), the check is narrow and C#-quality-focused — excessive comments, a
-  CancellationToken missing or not propagated/checked, a single-responsibility violation — gated
-  on at least one staged `.cs` file (no point asking about a `.prefab`-only change). Every repo,
-  Unity or not, also gets a "this staged diff is big and complete — commit it now" nudge, gated on
-  the staged diff being large enough to matter (a cheap line-count pre-filter). Same debounce
-  (atomic `mkdir` lock, hashed per diff) and timeout-bounded pattern as a hand-wired Claude Code
-  Stop-hook skeptic; `AYIN_HOUND_SELFTEST=1` stubs the model call for testing the plumbing without
-  spending one. The JSON merge into `settings.json` only ever touches the
-  one Stop-hook group whose command names `ayin-hound.sh` — every other key, every other Stop
-  entry, every other hook event is left exactly as it was; an unparseable existing file is left
-  alone rather than risking a hand-edited config. Both the hook script and `settings.json` are
-  written via `writeAtomic()` (temp file + rename) — `writeIfChanged()`, the same helper the
-  CLAUDE.md/GEMINI.md pointer block already used, now goes through it too: a power cut mid-write
-  can never leave a truncated `settings.json` for the next Claude Code turn to choke on (an
-  unparseable file would otherwise be presumed hand-edited and left alone forever, exactly the
-  case a self-inflicted truncation must not fall into).
+  `.claude/hooks/ayin-hound.mjs` + a Stop-hook entry upserted into `.claude/settings.json`
+  (`AYIN_WATCH_HOUND=0` to skip installing it — existing installs are left as-is). The script is
+  the shipped `assets/ayin-hound.mjs` copied in verbatim under a one-constant header carrying the
+  reviewer prompt (which lives in the prompt store, never in the asset). It runs in **two stages**:
+
+  **1 · Facts, computed by git, with no model at all.** Six mechanical checks whose answers are
+  true by construction:
+  | check | fires when | why it matters |
+  |---|---|---|
+  | `staged-foreign` | a staged **M/D/R** file no commit on this branch (since its merge-base with `origin/HEAD`/`main`/`master`/`develop`) ever touched | unrelated work swept into the index |
+  | `meta-guid-changed` | a staged `.meta` whose **`guid:` line actually changed** | every asset referencing the old guid is unbound |
+  | `serialized-field-removed` | a `[SerializeField]`/public field present at HEAD and gone in the index | its stored value is dropped from every prefab/scene/asset |
+  | `enum-ordinal-shift` | the old member list is **not a prefix** of the new one (or an explicit value changed) | every serialized int now means a different member |
+  | `interface-member-added` | an `interface I…` body gained a member | every implementer must implement it — and implementers are exactly what the diff cannot show |
+  | `asmdef-reference-removed` | a `.asmdef`'s `references` array lost an entry | that assembly's scripts lose those types |
+
+  Two of these are deliberately self-silencing, because a hound that barks every batch is a hound
+  nobody hears: newly **added** files are exempt from the provenance check (they are almost always
+  the session's own work), and the check is skipped entirely when *every* staged file is foreign —
+  that means the branch simply hasn't committed in this area yet, and there is no outlier to point
+  at. `.meta` files fire only on a changed `guid:`, never on a touch: Unity rewrites them constantly.
+
+  **2 · Verification by ayin itself**, read-only (`AYIN_READONLY=1` → `grep`/`read_file`/`find_files`
+  only, never edit; `bash` denied), capped by `AYIN_MAX_ROUNDS` so it spends its budget on greps
+  instead of deliberating. Each fact carries the **exact ayin tool call** that answers it — `grep
+  pattern="…" path="Assets"` — not a shell command, because the agent has no shell and refused
+  `bash` calls burn the whole budget. Searches are scoped to `Assets/` in a Unity repo: `Library/`
+  is gigabytes of generated cache that git ignores and `grep -r` does not. The engine is ayin, not
+  `claude -p` — no LAN address to hardcode; it inherits whatever `AYIN_LLM_URL` this install uses.
+
+  **The output contract is enforced in the script, not requested in the prompt.** A finding whose
+  citation does not resolve to a real path in the repo is **dropped** (this is what makes an
+  invented `DebugLogger.cs` worthless), `greps_run: 0` **forces** `UNVERIFIED`, and an `ISSUES`
+  verdict with no surviving citation degrades to `UNVERIFIED`. Blocking a stop costs a whole extra
+  turn, so it is reserved for a verified, cited finding (`decision: "block"`); deterministic flags,
+  `UNVERIFIED` results and the commit nudge ride out as non-blocking
+  `hookSpecificOutput.additionalContext`, which Claude reads without being stopped. A missing or
+  unreachable model does **not** silence the hook — the git-computed facts are still true, and go
+  out with the shell commands a human should run. Nothing staged, or no fact and a diff under 80
+  lines → the hook exits silently without a model call at all.
+
+  Loop-safe and cheap: `stop_hook_active` on the hook payload is honoured (a stop that is already
+  the continuation of a block never blocks again), the recursion guard `AYIN_HOUND=1` is set on the
+  child, and an atomic `mkdir` lock hashed per staged diff debounces repeats (swept after a day).
+  `AYIN_HOUND_SELFTEST=1` stubs the model call; `--facts` prints the deterministic facts as JSON and
+  `--dry` prints the prompt, both without spending a generation. The JSON merge into `settings.json`
+  only ever touches the one Stop-hook group whose command names `ayin-hound.mjs` **or** the
+  pre-1.0.224 `ayin-hound.sh` — so an upgrade replaces the old bash hound (and deletes its script)
+  instead of running two per stop; every other key, every other Stop entry, every other hook event
+  is left exactly as it was, and an unparseable existing file is left alone rather than risking a
+  hand-edited config. Both the hook script and `settings.json` are written via `writeAtomic()`
+  (temp file + rename) — a power cut mid-write can never leave a truncated `settings.json` for the
+  next Claude Code turn to choke on (an unparseable file would otherwise be presumed hand-edited
+  and left alone forever, exactly the case a self-inflicted truncation must not fall into).
 - **Guards**: commits touching only `reviews/**` (or a root `AYIN-REPORT-*.md`) are skipped (no
   review-of-review loop); the agent files and everything under `reviews/` are excluded from the
   working-tree fingerprint, the review diff, and auto-staging — so ayin writing its own reports
@@ -1055,17 +1093,36 @@ The moving parts, designed to survive interruption at any point:
   scratch files, editor cruft — defaulting to `false` when unsure. Its plan is re-filtered through
   the same gate before `git add` runs, plus a 2 MB size cap. Never commits — only stages/unstages
   and drafts `.git/COMMIT_EDITMSG`.
-- **Unity core assets are always staged**, unconditionally (in Unity repos only, matched by
-  `UNITY_ALWAYS_STAGE_RE`: `.cs`, `.anim`, `.controller`, `.overrideController`, `.asset`,
-  `.prefab`). This runs *before* the model's plan is applied and even if the plan fails to parse —
-  a renamed animator state or a prefab fix left unstaged is real work, never debug scratch, so
-  there's no judgement call to make. It also means a reviewer that only inspects staged changes
-  (`git diff --cached`) actually sees Unity binding changes instead of missing whatever the model
-  happened to leave unstaged. The status scan behind this (and the model's file list) uses
-  `-uall`/`--untracked-files=all` — without it, git collapses a brand-new, never-before-seen
-  directory to one summary line (`?? Assets/NewFeature/`) instead of the files inside it, so a new
-  Unity feature folder added all at once (script + prefab + anim together — a common workflow)
-  would silently match nothing, always-stage included.
+- **In a Unity repo the model does not decide staging at all** — an ALLOWLIST does
+  (`unityStageReason`), and it is the whole policy. Exactly three kinds are staged:
+  1. **animator controllers and clips** — `.anim`, `.controller`, `.overrideController`;
+  2. **custom ScriptableObject assets** — a `.asset` under `Assets/` whose
+     `m_Script: {fileID: 11500000, guid: …}` resolves to a `.cs` in this project (one cached
+     `git grep` over `Assets/*.cs.meta` per distinct guid). A `.asset` that is baked data, a
+     built-in type, package-owned, or outside `Assets/` is left alone;
+  3. **`.cs` files that add no debug code** — the added lines (working tree vs HEAD; the whole file
+     when untracked) are checked against `DEBUG_CODE_RE` — `Debug.Log`/`LogFormat`, `print(`,
+     `Console.Write*`, `System.Diagnostics.Debug.Write*` — with `//` line comments stripped first,
+     so a commented-out `// print(x)` is a smell for the report, not an invisible staging veto.
+     `Debug.LogError`/`LogWarning`/`LogException` are deliberate error reporting and do not
+     disqualify a file.
+
+  Plus the `.meta` sidecar of anything staged above (`stageWithSidecar`) — a new asset committed
+  without its `.meta` is a broken Unity commit. **Prefabs and scenes are never auto-staged**:
+  opening a scene rewrites it, which made them the largest source of accidental churn in the index.
+  Stage those deliberately, by hand.
+- **Unstaging is limited to ayin's own work.** `worktree-state.json` carries a per-repo `staged`
+  ledger of what ayin put in the index; a path is unstaged only if it is in that ledger and no
+  longer qualifies. A developer's own `git add` is never reverted — unstaging deliberate work is a
+  worse failure than leaving junk behind. The ledger is persisted, so a power cut between staging
+  and the next pass cannot re-attribute ayin's staging to the developer.
+- The status scan behind all of this (and the model's file list) uses `-uall`/`--untracked-files=all`
+  — without it, git collapses a brand-new, never-before-seen directory to one summary line
+  (`?? Assets/NewFeature/`) instead of the files inside it, so a new Unity feature folder added all
+  at once (script + anim together — a common workflow) would silently match nothing.
+- `npm run check:watch` (`tool/check-watch.mjs`) is the offline gate for both halves of what
+  `ayin watch` writes into a repo: the hound's deterministic facts and this allowlist. No model, no
+  network — it builds a throwaway Unity-ish repo in the temp dir and asserts each decision.
 
 ## Prompts (`prompts-service.ts`, `prompts.ts`, `prompts/`)
 
@@ -1636,10 +1693,15 @@ src/
 
 tool/
 ├── check-glyphs.mjs    `prebuild` — blessed lies about emoji width; this fails the build on it
-└── check-gates.mjs     `npm run check:gates` — the deterministic halves of the three gates, against
-                        dist. Binds real sockets (that is the point: it caught a pooled-keep-alive
-                        socket making a live server look dead), so it is NOT in prebuild. Run it
-                        whenever you touch qa/, plan/ or tool-guard.ts.
+├── check-gates.mjs     `npm run check:gates` — the deterministic halves of the three gates, against
+│                       dist. Binds real sockets (that is the point: it caught a pooled-keep-alive
+│                       socket making a live server look dead), so it is NOT in prebuild. Run it
+│                       whenever you touch qa/, plan/ or tool-guard.ts.
+└── check-watch.mjs     `npm run check:watch` — what `ayin watch` writes into a repo, against a
+                        throwaway Unity-ish git repo in the temp dir: the hound's six deterministic
+                        facts (and the two cases where it must stay silent), its anti-fabrication
+                        contract, and the autostage allowlist. No model, no network. Run it
+                        whenever you touch watch.ts or assets/ayin-hound.mjs.
 ```
 
 ## What ayin deliberately does NOT have

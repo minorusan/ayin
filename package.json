@@ -1,6 +1,6 @@
 {
   "name": "ayin",
-  "version": "1.0.223",
+  "version": "1.0.224",
   "description": "A small, model-agnostic terminal coding agent — an agentic loop in your shell against a self-hosted LLM (Ollama or any OpenAI-compatible endpoint).",
   "type": "module",
   "main": "dist/index.js",
@@ -11,6 +11,7 @@
   "files": [
     "dist",
     "prompts",
+    "assets",
     "README.md",
     "SETUP.md",
     "LICENSE"
@@ -22,6 +23,7 @@
     "check:glyphs": "node tool/check-glyphs.mjs",
     "check:gates": "node tool/check-gates.mjs",
     "check:explore": "node tool/check-explore.mjs",
+    "check:watch": "node tool/check-watch.mjs",
     "prebuild": "node tool/check-glyphs.mjs",
     "check:prompts": "node tool/check-prompts.mjs",
     "audit:prompts": "node tool/dump-prompts.mjs",

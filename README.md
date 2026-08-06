@@ -395,18 +395,36 @@ fenced region of the agent files is touched — the rest of each file is yours �
 only when its bytes actually change.
 
 **Claude Code hound hook** — installed alongside the git hooks (self-healed the same way):
-`.claude/hooks/ayin-hound.sh`, plus a Stop-hook entry merged into `.claude/settings.json`
-(`AYIN_WATCH_HOUND=0` to skip installing it). At the end of a Claude Code turn, if there's a
-staged diff, it runs **ayin itself** — read-only (`AYIN_READONLY=1`, so it can only grep/read,
-never edit) — against that diff, and blocks the stop if ayin finds something: Claude reacts to
-ayin, not the other way round. The engine is ayin, not `claude -p` — no LAN address to hardcode,
-it just talks to whatever `AYIN_LLM_URL` this ayin install already uses. In a Unity repo the check is
-narrow: excessive comments, a missing/misused `CancellationToken`, single-responsibility
-violations — gated on at least one staged `.cs` file. Every repo also gets a "this staged diff is
-big and complete — commit it now" nudge, gated on the diff actually being large. The JSON merge
-only ever touches the one Stop-hook group that names `ayin-hound.sh` — every other setting, every
-other hook, is left exactly as it was; an existing `settings.json` that fails to parse is left
-alone rather than risked.
+`.claude/hooks/ayin-hound.mjs`, plus a Stop-hook entry merged into `.claude/settings.json`
+(`AYIN_WATCH_HOUND=0` to skip installing it). At the end of a Claude Code turn, it looks at what is
+staged — in two stages, and the order is the point.
+
+First it computes **facts with git alone, no model**: a staged file no commit on this branch ever
+touched (unrelated work swept into the index) · a `.meta` whose `guid:` line actually changed
+(every asset referencing the old guid is now unbound) · a `[SerializeField]` removed or renamed
+(its stored value drops out of every prefab and scene) · enum members inserted rather than appended
+(every serialized int now means a different member) · an interface that gained a member (every
+implementer must implement it) · an `.asmdef` reference dropped. These are true by construction —
+there is nothing in them to hallucinate, and they are exactly the blast radius a diff cannot show,
+because it lives in the files that did *not* change.
+
+Then it runs **ayin itself** — read-only (`AYIN_READONLY=1`: grep and read, never edit; no shell)
+on a small round budget — with one job: grep the repo and say which of those facts actually breaks
+something. The engine is ayin, not `claude -p` — no LAN address to hardcode, it just talks to
+whatever `AYIN_LLM_URL` this install already uses.
+
+The output contract is **enforced by the hook, not requested in the prompt**: a finding whose
+citation does not resolve to a real file in the repo is discarded, and a report that ran zero greps
+is downgraded to `UNVERIFIED` however confident it sounds. A reviewer that invents a filename or
+narrates a grep it never ran is worse than one that says nothing — it costs you a re-verification
+every time, and once believed it ships a bug with confidence. Blocking a stop is expensive, so only
+a verified, cited finding blocks; deterministic flags and unverified checks come back as
+non-blocking context with the exact commands to run. Nothing staged, or nothing mechanical in a
+small diff, and the hook says nothing at all and never spends a generation.
+
+The JSON merge only ever touches the one Stop-hook group that names `ayin-hound.mjs` (or the older
+`ayin-hound.sh` it replaces) — every other setting, every other hook, is left exactly as it was; an
+existing `settings.json` that fails to parse is left alone rather than risked.
 
 **Unity repos** (`Assets/` + `ProjectSettings/`) get **two files per commit**, in the same
 `reviews/<shortHash>/` folder: `CodeReview.md` (the LLM review) and `AssetDiff.md` — a
@@ -416,10 +434,19 @@ prefabs/scenes/assets. The review links to it and the reviewer is fed its conten
 truth. Tool path: `~/tools/unity_asset_diff.py` or `AYIN_UNITY_DIFF`. Non-Unity repos never
 spawn it and get only the review file.
 
-The 10-min autostage pass also treats Unity core assets specially: `.cs`, `.anim`, `.controller`,
-`.overrideController`, `.asset`, and `.prefab` are **always staged**, unconditionally — never left
-to the model's judgement, and staged even if the model's plan fails to parse. A renamed animator
-state or a prefab fix is real work, never debug scratch.
+In a Unity repo the 10-min autostage pass does **not** ask the model what to stage — an allowlist
+decides, and it is short on purpose. Three kinds go into the index and nothing else: **animator
+controllers and clips** (`.anim`, `.controller`, `.overrideController`); **custom ScriptableObject
+assets** (a `.asset` under `Assets/` whose `m_Script` guid resolves to a script in this project —
+not baked lighting data, not a package's asset, not anything under `ProjectSettings/`); and **`.cs`
+files that add no debug code** (`Debug.Log`, `print(`, `Console.Write*` in the added lines;
+`Debug.LogError`/`LogWarning` are real error handling and don't count, and a commented-out
+`// print(x)` is a smell for the report rather than a silent veto). Each goes in with its `.meta`
+sidecar — an asset committed without one is a broken Unity commit.
+
+**Prefabs and scenes are never auto-staged.** Opening a scene rewrites it, which made them the
+largest source of things appearing in your index that you did not put there. And ayin only ever
+unstages **its own** past staging, tracked in a persisted ledger: your `git add` is never reverted.
 
 ## Requirements
 

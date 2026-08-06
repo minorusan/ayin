@@ -266,82 +266,41 @@ async function selfHealHooks(): Promise<void> {
 
 // ── Claude Code hound hook (auto-installed alongside the git hooks) ──
 // A Stop hook written into the watched repo's own .claude/settings.json: at the end of a Claude
-// Code turn, if anything is staged, ayin itself reviews the staged diff — read-only, via
-// AYIN_READONLY=1, so it can only grep/read, never edit — and if it finds something, BLOCKS the
-// stop with the finding. Claude reacts to ayin, not the other way round. The engine is ayin itself,
-// not `claude -p`: no LAN address to hardcode, no separate config — it inherits whatever AYIN_LLM_URL
-// this ayin install already talks to. Unity repos (isUnityRepo) get a narrow, C#-quality-focused
-// check (excessive comments, missing/misused CancellationToken, single-responsibility violations,
-// gated on at least one staged .cs file); every repo additionally/instead gets a "this is a big,
-// complete, self-contained chunk — commit it now" nudge, gated on the staged diff actually being
-// big (a cheap deterministic pre-filter — no point asking the model about a 5-line diff).
-// AYIN_WATCH_HOUND=0 disables installing this (existing installs are left as they are, not removed).
+// Code turn, if anything is staged, ayin looks at the index. The script (`assets/ayin-hound.mjs`,
+// shipped with the package and copied in verbatim under a two-constant header) is deliberately
+// two-stage:
+//
+//   FACTS   six mechanical checks computed by git alone — no model. A staged file no commit on this
+//           branch ever touched · a .meta whose `guid:` line actually changed · a serialized field
+//           removed/renamed · enum members inserted rather than appended · an interface that gained
+//           a member · an asmdef reference dropped. Each is true by construction.
+//   VERIFY  ayin itself, read-only (AYIN_READONLY=1 → grep/read only, never edit), capped at a small
+//           round budget (AYIN_MAX_ROUNDS), asked ONLY to grep the repo and say which facts actually
+//           break something. Engine is ayin, not `claude -p` — no LAN address to hardcode, no
+//           separate config; it inherits whatever AYIN_LLM_URL this install already talks to.
+//
+// The contract is ENFORCED in the script, not requested in the prompt: a finding whose citation does
+// not resolve to a real path is dropped, and `greps_run: 0` forces UNVERIFIED. The previous hound
+// reported greps it never ran and reasoned about files that do not exist; that is now structurally
+// impossible. Blocking the stop costs a whole turn, so it is reserved for a verified, cited finding
+// — deterministic flags, unverified checks and the commit nudge ride out as non-blocking
+// `additionalContext`. AYIN_WATCH_HOUND=0 disables installing it (existing installs are left as-is).
 
-const HOUND_SCRIPT_NAME = 'ayin-hound.sh';
-const HOUND_MARKER = 'ayin-hound.sh'; // substring ayin looks for in settings.json to recognize its own entry
+const HOUND_SCRIPT_NAME = 'ayin-hound.mjs';
+const LEGACY_HOUND_SCRIPT = 'ayin-hound.sh'; // pre-1.0.224 bash hound — replaced, and its entry migrated
+const HOUND_MARKERS = [HOUND_SCRIPT_NAME, LEGACY_HOUND_SCRIPT]; // substrings identifying our own settings.json entry
 const HOUND_ENABLED = process.env.AYIN_WATCH_HOUND !== '0';
 
-function houndScript(promptText: string, unity: boolean): string {
-  const guard = unity
-    ? `git diff --cached --name-only | grep -qE '\\.cs$' || exit 0`
-    : `LINES=$(git diff --cached | wc -l); [ "$LINES" -lt 80 ] && exit 0`;
-  return `#!/usr/bin/env bash
-# ${HOUND_MARKER} — installed by \`ayin watch\`. Reinstalling overwrites this file.
-# Claude Code Stop hook: reviews STAGED changes with ayin itself (read-only) and blocks the stop
-# with any finding. Recursion-guarded, debounced per diff-hash, timeout-bounded.
-# Set AYIN_HOUND_SELFTEST=1 to test the plumbing with a stub finding (no model call).
-set -u
-[ -n "\${AYIN_HOUND:-}" ] && exit 0
-cd "\${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null || exit 0
-command -v git >/dev/null 2>&1 || exit 0
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
-command -v ayin >/dev/null 2>&1 || exit 0
-
-DIFF="$(git diff --cached 2>/dev/null)"
-[ -z "$DIFF" ] && exit 0
-${guard}
-
-hash_diff() {
-  if command -v sha1sum  >/dev/null 2>&1; then sha1sum
-  elif command -v shasum >/dev/null 2>&1; then shasum
-  else openssl sha1; fi
-}
-H="$(printf '%s' "$DIFF" | hash_diff 2>/dev/null | grep -oE '[0-9a-f]{40}' | head -1)"
-[ -z "$H" ] && H="len$(printf '%s' "$DIFF" | wc -c | tr -d ' ')"
-STAMP="\${TMPDIR:-/tmp}/ayin-hound.\${H:0:20}.lock"
-mkdir "$STAMP" 2>/dev/null || exit 0
-find "\${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'ayin-hound.*.lock' -mtime +1 -exec rm -rf {} + 2>/dev/null || true
-
-PROMPT_DIFF="$(printf '%s' "$DIFF" | head -c 24000)"
-[ "\${#DIFF}" -gt 24000 ] && PROMPT_DIFF="$PROMPT_DIFF
-[…diff truncated…]"
-
-INSTRUCTIONS=$(cat <<'AYIN_HOUND_PROMPT_EOF'
-${promptText.trim()}
-AYIN_HOUND_PROMPT_EOF
-)
-PROMPT="$INSTRUCTIONS
-
-DIFF:
-$PROMPT_DIFF"
-
-_timeout() {
-  local s="$1"; shift
-  if   command -v timeout  >/dev/null 2>&1; then timeout  "$s" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$s" "$@"
-  else perl -e 'my $s=shift; alarm $s; exec @ARGV or exit 127' "$s" "$@"; fi
-}
-if [ -n "\${AYIN_HOUND_SELFTEST:-}" ]; then
-  FINDINGS="stub: ayin-hound plumbing test — would call ayin here"
-else
-  FINDINGS="$(AYIN_HOUND=1 AYIN_READONLY=1 AYIN_ACQUIRE_LLM=1 _timeout 240 ayin -p "$PROMPT" 2>/dev/null || true)"
-fi
-[ -z "$FINDINGS" ] && exit 0
-printf '%s' "$FINDINGS" | grep -qiE '^VERDICT:[[:space:]]*CLEAR|^CLEAR[[:space:]]*$' && exit 0
-
-FINDINGS="$FINDINGS" node -e 'process.stdout.write(JSON.stringify({decision:"block",reason:"ayin-hound — reconsider before done:\\n\\n"+process.env.FINDINGS}))'
-exit 0
-`;
+/** The hound script for a repo: the shipped asset, prefixed with the two constants the installer
+ *  owns. The prompt text stays in the prompt store (§3) — it arrives here as a JSON string, never
+ *  as a literal in the asset. */
+function houndScript(promptText: string): string {
+  const body = readFileSync(packagePath('assets', 'ayin-hound.mjs'), 'utf-8');
+  return `#!/usr/bin/env node
+// GENERATED by \`ayin watch\` — reinstalling overwrites this file. Edit the prompt, not this script:
+// ~/.ayin-cli/prompts/watch/hound*.txt
+const AYIN_HOUND_INSTRUCTIONS = ${JSON.stringify(promptText)};
+${body}`;
 }
 
 interface ClaudeHookEntry { type: string; command: string; timeout?: number; statusMessage?: string }
@@ -351,9 +310,9 @@ interface ClaudeSettings { hooks?: { [event: string]: ClaudeHookGroup[] }; [key:
 function ourHoundEntry(): ClaudeHookEntry {
   return {
     type: 'command',
-    command: `bash "$CLAUDE_PROJECT_DIR/.claude/hooks/${HOUND_SCRIPT_NAME}"`,
-    timeout: 240,
-    statusMessage: 'ayin-hound: reviewing staged changes',
+    command: `node "$CLAUDE_PROJECT_DIR/.claude/hooks/${HOUND_SCRIPT_NAME}"`,
+    timeout: 300,
+    statusMessage: 'ayin-hound: checking staged changes',
   };
 }
 
@@ -372,7 +331,9 @@ function upsertHoundSettings(repo: string): boolean {
   }
   settings.hooks = settings.hooks || {};
   const stopGroups: ClaudeHookGroup[] = settings.hooks.Stop || [];
-  const others = stopGroups.filter(g => !g.hooks?.some(h => h.command?.includes(HOUND_MARKER)));
+  // Both markers, so the pre-1.0.224 `bash …/ayin-hound.sh` entry is REPLACED rather than left
+  // beside the new one — a repo that upgrades would otherwise run two hounds per stop.
+  const others = stopGroups.filter(g => !g.hooks?.some(h => HOUND_MARKERS.some(m => h.command?.includes(m))));
   settings.hooks.Stop = [...others, { hooks: [ourHoundEntry()] }];
   mkdirSync(dir, { recursive: true });
   return writeIfChanged(path, `${JSON.stringify(settings, null, 2)}\n`);
@@ -381,11 +342,13 @@ function upsertHoundSettings(repo: string): boolean {
 /** Write/refresh the hound script + settings.json entry for one repo. Idempotent: only writes when
  *  bytes actually change (Unity-ness is re-checked live, so a repo that grows an Assets/ folder
  *  later gets the Unity-scoped prompt on the next self-heal, no reinstall needed). */
-function ensureHoundHook(repo: string): boolean {
+export function ensureHoundHook(repo: string): boolean {
   const unity = isUnityRepo(repo);
-  const promptText = watchPrompts.get(unity ? 'houndUnity' : 'houndGeneral');
+  const promptText = watchPrompts.get(unity ? 'houndUnityChecks' : 'houndGeneralChecks', {
+    CONTRACT: watchPrompts.get('houndContract'),
+  });
   const scriptPath = join(repo, '.claude', 'hooks', HOUND_SCRIPT_NAME);
-  const desired = houndScript(promptText, unity);
+  const desired = houndScript(promptText);
   let wrote = false;
   if (!existsSync(scriptPath) || readFileSync(scriptPath, 'utf-8') !== desired) {
     mkdirSync(join(repo, '.claude', 'hooks'), { recursive: true });
@@ -393,6 +356,10 @@ function ensureHoundHook(repo: string): boolean {
     chmodSync(scriptPath, 0o755);
     wrote = true;
   }
+  // The bash hound it replaces: remove the file too, not just its settings.json entry, so a stale
+  // copy can't be re-wired by hand later.
+  const legacy = join(repo, '.claude', 'hooks', LEGACY_HOUND_SCRIPT);
+  if (existsSync(legacy)) { try { unlinkSync(legacy); wrote = true; } catch { /* read-only tree */ } }
   const settingsWrote = upsertHoundSettings(repo);
   return wrote || settingsWrote;
 }
@@ -778,12 +745,27 @@ const SECRET_RE = /(^|\/)(\.env(\.[^/]+)?|[^/]*\.(pem|key|p12|pfx|keystore)|id_r
 // git hooks, Unity ProjectSettings/ + UserSettings/, and editor/IDE settings (.vscode/.idea/.vs,
 // .csproj/.sln/.user/.vsconfig). Deterministic so it holds regardless of the model's judgement.
 const NEVER_STAGE_RE = /(^|\/)(ProjectSettings|UserSettings|Packages|\.vscode|\.idea|\.vs|hooks)(\/|$)|\.(csproj|sln|user|vsconfig|txt)$/i;
-// Unity core asset types (Unity repos only) — ALWAYS staged, never left to the model's judgement.
-// A renamed animator state or a prefab binding fix left unstaged is exactly the kind of change a
-// developer forgets to `git add` by hand; these are unambiguously "real work", never debug scratch,
-// so there is no judgement call to make. Also lets a Stop-hook skeptic that only inspects staged
-// diffs (`git diff --cached`) actually see Unity binding changes instead of missing them.
-const UNITY_ALWAYS_STAGE_RE = /\.(cs|anim|controller|overrideController|asset|prefab)$/i;
+// ── what ayin is allowed to stage in a Unity repo (ALLOWLIST, deterministic) ──
+// Three kinds, and nothing else:
+//   1. animator controllers and clips — .anim / .controller / .overrideController
+//   2. CUSTOM ScriptableObject assets — a .asset under Assets/ whose m_Script guid resolves to a
+//      .cs in this project. Excludes ProjectSettings, baked lighting data, package-owned assets and
+//      every other .asset that merely happens to be YAML.
+//   3. .cs files that add no debug code
+// Plus the `.meta` sidecar of anything staged above — a new asset committed without its .meta is a
+// broken commit in Unity, and the sidecar is part of the same change, not a separate judgement.
+//
+// Prefabs and scenes are NOT in the list. They are the single largest source of accidental Unity
+// churn (opening a scene rewrites it), and an accidentally-staged prefab is exactly the "it stages
+// shit" complaint this allowlist exists to answer. Stage those by hand, deliberately.
+const UNITY_ANIM_RE = /\.(anim|controller|overrideController)$/i;
+// Scratch prints. LogError/LogWarning/LogException are deliberate production error reporting and
+// are NOT debug code; Debug.Log and friends are what gets left behind.
+const DEBUG_CODE_RE = /\b(?:UnityEngine\.)?Debug\.Log(?:Format)?\s*\(|(?:^|[^.\w])print\s*\(|\bConsole\.(?:Write|WriteLine)\s*\(|\bSystem\.Diagnostics\.Debug\.(?:Write|WriteLine)\s*\(/;
+// A Unity MonoScript reference inside a .asset: `m_Script: {fileID: 11500000, guid: <32 hex>, …}`.
+// fileID 11500000 IS MonoScript — an .asset carrying one is a ScriptableObject instance.
+const MONO_SCRIPT_RE = /m_Script:\s*\{fileID:\s*11500000,\s*guid:\s*([0-9a-f]{32})/;
+
 function isStageable(path: string): boolean {
   const base = path.split('/').pop() || path;
   if (isAyinReviewPath(path)) return false;
@@ -796,7 +778,11 @@ function isStageable(path: string): boolean {
   return true;
 }
 
-interface WorktreeState { [repo: string]: { fingerprint: string; at: number } }
+/** `staged` is the LEDGER of paths ayin itself staged, per repo. It is the whole reason ayin can
+ *  clean up after itself without ever touching the developer's own `git add`: a path is only
+ *  unstaged if ayin put it there and it no longer qualifies. Persisted, so a power cut between
+ *  staging and the next pass doesn't turn ayin's work into the developer's. */
+interface WorktreeState { [repo: string]: { fingerprint: string; at: number; staged?: string[] } }
 function loadWorktreeState(): WorktreeState {
   try { return existsSync(WORKTREE_STATE_FILE) ? JSON.parse(readFileSync(WORKTREE_STATE_FILE, 'utf-8')) : {}; } catch { return {}; }
 }
@@ -854,6 +840,61 @@ function commitText(c: NonNullable<WorktreePlan['commit']>): string {
   return c.body ? `${head}\n\n${c.body}\n` : `${head}\n`;
 }
 
+// ── the Unity staging allowlist, evaluated per file ──────────────────
+
+/** The lines this file ADDS relative to HEAD — the whole file when it is untracked. What a change
+ *  removes can't introduce debug code, so only additions are inspected. */
+async function addedLines(repo: string, path: string, tracked: boolean): Promise<string[]> {
+  if (!tracked) {
+    // Bounded: an untracked file can be anything, including a multi-MB generated .cs. A file over
+    // the stage cap is never staged anyway, so reading past it buys nothing.
+    try {
+      if (statSync(join(repo, path)).size > MAX_STAGE_BYTES) return [];
+      return readFileSync(join(repo, path), 'utf-8').split('\n');
+    } catch { return []; }
+  }
+  const res = await git(repo, ['diff', 'HEAD', '--', path], 2 * 1024 * 1024);
+  return res.stdout.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).map(l => l.slice(1));
+}
+
+/** Does this change introduce live debug output? Line comments are stripped first: a commented-out
+ *  `// print(x)` is dead code for the reviewer to flag, not a reason to withhold the whole file from
+ *  the index forever — and "why won't ayin stage this file" with no visible cause is its own bug. */
+function addsDebugCode(lines: string[]): boolean {
+  return lines.some(l => DEBUG_CODE_RE.test(l.replace(/\/\/.*$/, '')));
+}
+
+/** Does the guid belong to a .cs in THIS project (rather than a package or Unity itself)? One
+ *  `git grep` per distinct guid, cached for the pass. */
+async function guidIsProjectScript(repo: string, guid: string, cache: Map<string, boolean>): Promise<boolean> {
+  const cached = cache.get(guid);
+  if (cached !== undefined) return cached;
+  const res = await git(repo, ['grep', '-l', '--untracked', '-F', '-e', `guid: ${guid}`, '--', 'Assets/*.cs.meta'], 200_000);
+  const hit = res.stdout.trim().length > 0;
+  cache.set(guid, hit);
+  return hit;
+}
+
+/** Why ayin may stage this path in a Unity repo, or null for "leave it alone". The allowlist is the
+ *  whole policy — there is no model judgement in this decision, by design. */
+export async function unityStageReason(
+  repo: string, path: string, tracked: boolean, guidCache: Map<string, boolean>,
+): Promise<string | null> {
+  if (UNITY_ANIM_RE.test(path)) return 'animator controller / clip';
+  if (/\.cs$/i.test(path)) {
+    return addsDebugCode(await addedLines(repo, path, tracked)) ? null : 'C# source, no debug code added';
+  }
+  if (/\.asset$/i.test(path)) {
+    if (!/^Assets\//.test(path)) return null; // ProjectSettings/, Packages/, anything outside the project
+    let text = '';
+    try { text = readFileSync(join(repo, path), 'utf-8').slice(0, 64 * 1024); } catch { return null; }
+    const guid = text.match(MONO_SCRIPT_RE)?.[1];
+    if (!guid) return null; // not a ScriptableObject instance (baked data, a built-in asset type, …)
+    return (await guidIsProjectScript(repo, guid, guidCache)) ? 'custom ScriptableObject asset' : null;
+  }
+  return null;
+}
+
 function buildWorktreePrompt(files: string[], status: string, diff: string, truncated: boolean): string {
   return watchPrompts.get('worktreeReview', {
     TRUNCATION_NOTE: truncated ? ` ${watchPrompts.get('worktreeReviewTruncated')}` : '',
@@ -863,18 +904,21 @@ function buildWorktreePrompt(files: string[], status: string, diff: string, trun
   });
 }
 
-function buildSmellReport(
-  plan: WorktreePlan | null, raw: string, applied: { staged: number; unstaged: number }, forced: string[] = [],
-): string {
+interface Applied { staged: Array<{ path: string; why: string }>; unstaged: string[] }
+
+function buildSmellReport(plan: WorktreePlan | null, raw: string, applied: Applied): string {
   const when = new Date().toISOString();
-  const forcedSet = new Set(forced);
-  const forcedLines = forced.map(f => `- \`${f}\` — always staged (Unity core asset)`);
+  const stagedSet = new Set(applied.staged.map(s => s.path));
+  const stagedLines = applied.staged.map(s => `- \`${s.path}\` — ${s.why}`).join('\n') || '- (none)';
+  const unstagedLines = applied.unstaged.map(p => `- \`${p}\` — ayin had staged it; it no longer qualifies`).join('\n');
   if (!plan) {
-    const stagedOnly = forcedLines.join('\n') || '- (none)';
-    return `# Ayin working-tree review — ${when}\n\n_(could not parse a staging plan from the model; only Unity core assets were auto-staged — raw output below)_\n\n## Staged (always)\n${stagedOnly}\n\n${raw.trim()}\n`;
+    return `# Ayin working-tree review — ${when}\n\n_(could not parse a staging plan from the model — staging is deterministic and ran anyway; raw output below)_\n\n## Staged\n${stagedLines}\n\n${raw.trim()}\n`;
   }
-  const staged = [...forcedLines, ...plan.files.filter(f => f.stage && !forcedSet.has(f.path)).map(f => `- \`${f.path}\`${f.reason ? ` — ${f.reason}` : ''}`)].join('\n') || '- (none)';
-  const skipped = plan.files.filter(f => !f.stage && !forcedSet.has(f.path)).map(f => `- \`${f.path}\`${f.reason ? ` — ${f.reason}` : ''}`).join('\n') || '- (none)';
+  const staged = stagedLines;
+  const skipped = [
+    unstagedLines,
+    plan.files.filter(f => !stagedSet.has(f.path)).map(f => `- \`${f.path}\`${f.reason ? ` — ${f.reason}` : ''}`).join('\n'),
+  ].filter(Boolean).join('\n') || '- (none)';
   const smells = (plan.smells || []).length
     ? plan.smells!.map(s => `### [${s.severity || '?'}] ${s.where || ''}\n- **Issue:** ${s.issue || ''}\n- **Fix:** ${s.fix || ''}`).join('\n\n')
     : 'None flagged.';
@@ -882,12 +926,12 @@ function buildSmellReport(
   const msg = plan.commit?.subject ? commitText(plan.commit) : '(none drafted)';
   return `# Ayin working-tree review — ${when}
 
-_Applied: staged ${applied.staged}, unstaged ${applied.unstaged}. **No commit, no push** — review in your git client and commit when ready._
+_Applied: staged ${applied.staged.length}, unstaged ${applied.unstaged.length}. **No commit, no push** — review in your git client and commit when ready._
 
-## Staged (meaningful)
+## Staged by ayin
 ${staged}
 
-## Left unstaged (debug / junk / unsure)
+## Left alone (yours to stage, or debug / junk / unsure)
 ${skipped}
 
 ## Proposed commit message
@@ -904,15 +948,29 @@ ${logging}
 `;
 }
 
-async function reviewWorktree(repo: string): Promise<void> {
+/** Stage one path plus its Unity `.meta` sidecar. A new asset committed without its .meta is a
+ *  broken Unity commit, and the sidecar is part of the same change — not a second judgement. */
+async function stageWithSidecar(repo: string, path: string): Promise<boolean> {
+  const abs = join(repo, path);
+  try {
+    if (!existsSync(abs) || statSync(abs).size > MAX_STAGE_BYTES) return false;
+    if (!(await git(repo, ['add', '--', path])).ok) return false;
+  } catch { return false; }
+  const meta = `${path}.meta`;
+  try { if (existsSync(join(repo, meta))) await git(repo, ['add', '--', meta]); } catch { /* sidecar is best effort */ }
+  return true;
+}
+
+async function reviewWorktree(repo: string, ledger: string[]): Promise<string[]> {
   // -uall (untracked-files=all): without it, git collapses an entirely-new, never-before-seen
   // directory to one line (`?? Assets/NewFeature/`) instead of listing the files inside it — so a
-  // brand-new Unity feature folder (script + prefab + anim all added together, a common workflow)
-  // would never individually match anything below, Unity always-stage included. Cheap: this repo's
-  // untracked set is small by the time it reaches a review.
+  // brand-new Unity feature folder (script + anim added together, a common workflow) would never
+  // individually match the allowlist. Cheap: this repo's untracked set is small by review time.
   const statusRes = await git(repo, ['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-uall']);
-  const files = statusRes.stdout.split('\n').filter(Boolean).map(l => l.slice(3)).filter(isStageable);
-  if (files.length === 0) return;
+  const rows = statusRes.stdout.split('\n').filter(Boolean).map(l => ({ xy: l.slice(0, 2), path: l.slice(3) }));
+  const untracked = new Set(rows.filter(r => r.xy === '??').map(r => r.path));
+  const files = rows.map(r => r.path).filter(isStageable);
+  if (files.length === 0) return [];
 
   let diff = (await git(repo, ['diff', 'HEAD', '--', '.', ...EXCLUDE_PATHSPEC], MAX_WORKTREE_DIFF + 4096)).stdout;
   const truncated = diff.length > MAX_WORKTREE_DIFF;
@@ -925,44 +983,53 @@ async function reviewWorktree(repo: string): Promise<void> {
   ]);
   const plan = parseWorktreePlan(raw);
 
-  // Unity core assets are staged unconditionally — regardless of the model's plan, or even if
-  // parsing the plan failed entirely. A renamed animator state or a prefab fix left unstaged is
-  // real work, never debug scratch, so there is no judgement call here. This also guarantees a
-  // Stop-hook skeptic that only inspects staged diffs (`git diff --cached`) actually sees Unity
-  // binding changes instead of missing whatever the model happened to leave unstaged.
-  const forced: string[] = [];
-  if (isUnityRepo(repo)) {
+  // ── staging ────────────────────────────────────────────────────────
+  // Unity repo → the ALLOWLIST decides, not the model: animator controllers/clips, custom
+  // ScriptableObject assets, and .cs that adds no debug code (plus .meta sidecars). The model's
+  // stage:true is ignored entirely here — a plan that wants a prefab staged does not get one.
+  // Non-Unity repo → the model still proposes, but the same .cs debug veto applies.
+  const applied: Applied = { staged: [], unstaged: [] };
+  const unity = isUnityRepo(repo);
+  const guidCache = new Map<string, boolean>();
+  const qualifies = new Map<string, string>(); // path → why, for everything ayin is allowed to stage
+
+  if (unity) {
     for (const f of files) {
-      if (!UNITY_ALWAYS_STAGE_RE.test(f)) continue;
-      const abs = join(repo, f);
-      try { if (existsSync(abs) && statSync(abs).size <= MAX_STAGE_BYTES && (await git(repo, ['add', '--', f])).ok) forced.push(f); } catch { /* skip */ }
+      const why = await unityStageReason(repo, f, !untracked.has(f), guidCache);
+      if (why) qualifies.set(f, why);
+    }
+  } else if (plan) {
+    for (const f of plan.files) {
+      if (!f.path || !f.stage || !isStageable(f.path) || !files.includes(f.path)) continue;
+      if (/\.cs$/i.test(f.path) && addsDebugCode(await addedLines(repo, f.path, !untracked.has(f.path)))) continue;
+      qualifies.set(f.path, f.reason || 'model: meaningful work');
     }
   }
-  const forcedSet = new Set(forced);
+  for (const [path, why] of qualifies) {
+    if (await stageWithSidecar(repo, path)) applied.staged.push({ path, why });
+  }
 
-  let staged = forced.length, unstaged = 0;
-  if (plan) {
-    for (const f of plan.files) {
-      if (!f.path || !isStageable(f.path) || forcedSet.has(f.path)) continue;
-      const abs = join(repo, f.path);
-      if (f.stage) {
-        try { if (existsSync(abs) && statSync(abs).size <= MAX_STAGE_BYTES && (await git(repo, ['add', '--', f.path])).ok) staged++; } catch { /* skip */ }
-      } else {
-        await git(repo, ['reset', '-q', 'HEAD', '--', f.path]); // unstage if staged; no-op otherwise
-        unstaged++;
-      }
-    }
-    if (plan.commit?.subject) {
-      const gd = await absGitDir(repo);
-      if (gd) { try { writeFileSync(join(gd, 'COMMIT_EDITMSG'), commitText(plan.commit)); } catch { /* skip */ } }
-    }
+  // Clean up after OURSELVES only. A path is unstaged solely when ayin staged it on an earlier pass
+  // and it no longer qualifies (a .cs that just grew a Debug.Log, an asset that stopped being a
+  // custom ScriptableObject). The developer's own `git add` is never touched — unstaging deliberate
+  // work is a worse failure than leaving junk in the index.
+  for (const path of ledger) {
+    if (qualifies.has(path)) continue;
+    if (!(await git(repo, ['diff', '--cached', '--name-only', '--', path])).stdout.trim()) continue;
+    await git(repo, ['reset', '-q', 'HEAD', '--', path]);
+    applied.unstaged.push(path);
+  }
+
+  if (plan?.commit?.subject) {
+    const gd = await absGitDir(repo);
+    if (gd) { try { writeFileSync(join(gd, 'COMMIT_EDITMSG'), commitText(plan.commit)); } catch { /* skip */ } }
   }
 
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const reportPath = join(repo, `AYIN-REPORT-SMELLS-${ts}.md`);
-  writeFileSync(reportPath, buildSmellReport(plan, raw, { staged, unstaged }, forced));
-  out(`  → ${reportPath} (staged ${staged}, unstaged ${unstaged}) — NO commit`);
-  log('INFO', 'worktree_reviewed', { repo, staged: String(staged), unstaged: String(unstaged), parsed: String(!!plan) });
+  writeFileSync(reportPath, buildSmellReport(plan, raw, applied));
+  out(`  → ${reportPath} (staged ${applied.staged.length}, unstaged ${applied.unstaged.length}) — NO commit`);
+  log('INFO', 'worktree_reviewed', { repo, staged: String(applied.staged.length), unstaged: String(applied.unstaged.length), parsed: String(!!plan) });
   upsertAgentReports(repo);
   const high = (plan?.smells || []).filter(s => (s.severity || '').toLowerCase() === 'high');
   if (high.length) {
@@ -972,6 +1039,7 @@ async function reviewWorktree(repo: string): Promise<void> {
       `${first.where ? first.where + ': ' : ''}${first.issue || 'high-severity finding'} — see ${reportPath.split('/').pop()}`,
     );
   }
+  return applied.staged.map(s => s.path);
 }
 
 /** The 10-min pass over all watched repos whose working tree changed since last check. Takes the
@@ -995,10 +1063,13 @@ async function runWorktreePass(): Promise<void> {
   await refreshActiveModel().catch(() => {});
   try {
     for (const repo of changed) {
-      try { await reviewWorktree(repo); }
+      // The ledger persists across passes AND across a power cut: what ayin staged stays ayin's to
+      // clean up, and a crash between staging and the next pass never re-attributes it to the dev.
+      let ledger = state[repo]?.staged ?? [];
+      try { ledger = await reviewWorktree(repo, ledger); }
       catch (err) { log('WARN', 'worktree_review_failed', { repo, error: (err instanceof Error ? err.message : String(err)).slice(0, 200) }); }
       // Recompute AFTER staging (staging flips porcelain XY codes) so we don't re-trigger on our own work.
-      state[repo] = { fingerprint: await worktreeFingerprint(repo), at: Date.now() };
+      state[repo] = { fingerprint: await worktreeFingerprint(repo), at: Date.now(), staged: ledger };
       saveWorktreeState(state);
     }
   } finally {

@@ -1,0 +1,24 @@
+Each FACT below was computed by git and is true. Grep the repo to find whether it breaks anything at
+runtime, then report only what you confirmed.
+
+Each fact carries a `run:` line — the exact tool call that answers it. Make that call verbatim, then
+read its output. Your tools are `grep`, `read_file`, `find_files`; `bash` is DENIED and every call
+to it is a wasted round.
+
+Budget: 8 tool calls. Spend them.
+
+NEVER report a grep you did not execute. No "simulated", no "assumed", no reasoning about a file you
+did not open. A citation MUST be a path that exists in this repo; anything else is discarded before
+anyone reads it.
+
+Rank by what silently breaks at runtime. The compiler finds compile errors; serialized-data drift
+and accidentally-staged files are what nobody catches until QA.
+
+Output exactly this, nothing else:
+
+VERDICT: CLEAR | ISSUES | UNVERIFIED
+greps_run: <how many greps/reads you actually ran>
+<file>:<line> — <what breaks> — <the grep that confirmed it>
+
+At most 3 finding lines, omitted entirely when CLEAR. CLEAR is the default. ISSUES requires a
+finding line citing a real file. Could not run tools → UNVERIFIED and the exact commands to run.

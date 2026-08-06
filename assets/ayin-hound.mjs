@@ -1,0 +1,575 @@
+/**
+ * ayin-hound — Claude Code `Stop` hook, generated into a watched repo by `ayin watch` at
+ * `.claude/hooks/ayin-hound.mjs`. One constant is prepended at install time:
+ *
+ *   AYIN_HOUND_INSTRUCTIONS   the reviewer prompt (owned by the ayin prompt store, never inlined
+ *                             here), Unity-flavoured or general depending on the repo
+ *
+ * WHY THIS SHAPE. The previous hound read the staged diff, called a model, and reported whatever the
+ * model said — including greps it never ran and files that do not exist. Blast radius lives in what
+ * is ABSENT from a diff (callers, implementers, prefab bindings), so a diff-only reviewer either
+ * stays silent or invents. This version inverts the roles:
+ *
+ *   1. FACTS are computed here, by git, with no model at all. Six mechanical checks whose answers
+ *      are true or the tool is broken — nothing to hallucinate.
+ *   2. The MODEL's only job is to VERIFY those facts against the repo with greps and say what
+ *      actually breaks. It is capped at a small round budget so it spends, not deliberates.
+ *   3. The CONTRACT is enforced here, not requested politely: a finding whose citation does not
+ *      resolve to a real file is dropped, and `greps_run: 0` forces UNVERIFIED. Fabrication cannot
+ *      reach the user.
+ *
+ * Cost discipline: blocking a stop is expensive (it costs a whole extra turn), so it is reserved for
+ * a verified, cited finding. Everything else — deterministic flags, unverified checks, the commit
+ * nudge — rides out as non-blocking `additionalContext`, which Claude reads without being stopped.
+ */
+
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
+
+const REPO = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+const MAX_DIFF_CHARS = 24_000;
+const MAX_FACTS = 12;
+const MAX_FINDINGS = 3;
+const BIG_DIFF_LINES = 80;    // below this, a facts-free diff is not worth a model call
+const MODEL_TIMEOUT_MS = 240_000;
+const ROUND_BUDGET = '10';    // AYIN_MAX_ROUNDS — force spending on greps, not deliberating
+
+// ── git plumbing ─────────────────────────────────────────────────────
+
+/** Run git in the repo. Never throws: a failed command answers '' — every caller treats an
+ *  unanswerable question as "no fact", which is the only safe default for a hook. */
+function git(...args) {
+  try {
+    return execFileSync('git', ['-C', REPO, ...args], {
+      encoding: 'utf-8', maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch { return ''; }
+}
+
+const hasHead = () => git('rev-parse', '--verify', 'HEAD').trim() !== '';
+// A big staged batch costs one `git show` per (revision, file) per check — three checks read the
+// same two blobs. Caching turns 6 spawns per .cs into 2; the cap keeps a 500-file batch from
+// spending a minute of a hook's budget on plumbing. Skipped files are reported as a note, never
+// silently dropped: a bounded scan that LOOKS exhaustive is how a missed fact becomes a shipped bug.
+const MAX_CS_SCANNED = 60;
+const blobCache = new Map();
+/** Where a reference search should start. Unity's `Library/` is gigabytes of generated cache that
+ *  git ignores and `grep -r` does not — scoping to `Assets` is the difference between a two-second
+ *  grep and a hung hook. */
+const SEARCH_ROOT = existsSync(join(REPO, 'Assets')) ? 'Assets' : '.';
+/** The exact ayin tool call that answers a fact. The hound's agent is READ-ONLY: it has grep,
+ *  read_file and find_files, and `bash` is denied — so handing it a shell command (`git grep …`)
+ *  spends its whole round budget on refused calls. Give it the tool and its parameters, verbatim. */
+const grepCall = (pattern, include) =>
+  `grep pattern="${pattern}" path="${SEARCH_ROOT}"${include ? ` include="${include}"` : ''}`;
+/** File content at a revision (`HEAD`, or `''` for the index via `:path`), or null if absent. */
+function blob(rev, path) {
+  const spec = rev ? `${rev}:${path}` : `:${path}`;
+  if (blobCache.has(spec)) return blobCache.get(spec);
+  const text = git('show', spec);
+  const value = text === '' ? null : text;
+  blobCache.set(spec, value);
+  return value;
+}
+
+/** The staged C# files the per-file checks will read, bounded. */
+function csTargets(staged, notes, skipStatuses = 'AD') {
+  const all = staged.filter(f => f.path.endsWith('.cs') && !skipStatuses.includes(f.status));
+  if (all.length > MAX_CS_SCANNED) notes.push(`${all.length - MAX_CS_SCANNED} of ${all.length} staged .cs files not scanned (cap ${MAX_CS_SCANNED})`);
+  return all.slice(0, MAX_CS_SCANNED);
+}
+
+/** Staged files as `{ path, status }`, renames resolved to their new path. */
+function stagedFiles() {
+  const raw = git('diff', '--cached', '--name-status', '-M', '-z');
+  const parts = raw.split('\0').filter(Boolean);
+  const files = [];
+  for (let i = 0; i < parts.length; i++) {
+    const status = parts[i][0];
+    if (status === 'R' || status === 'C') { files.push({ path: parts[i + 2], status }); i += 2; }
+    else { files.push({ path: parts[i + 1], status }); i += 1; }
+  }
+  return files.filter(f => f.path);
+}
+
+// ── comment / brace helpers (C#) ─────────────────────────────────────
+
+/** Strip `//` and `/* *​/` comments so a member scan cannot trip over commented-out code. String
+ *  literals are not tracked — a `//` inside a string is rare in a type declaration and the worst
+ *  case is one extra grep suggestion. */
+function stripComments(text) {
+  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+
+/** The balanced-brace body starting at the first `{` at or after `from`, or null. */
+function braceBody(text, from) {
+  const open = text.indexOf('{', from);
+  if (open === -1) return null;
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}' && --depth === 0) return text.slice(open + 1, i);
+  }
+  return null;
+}
+
+// ── check 1: staged files this branch never touched ──────────────────
+// The one heuristic that needs no judgement and catches the whole class of "unrelated work got
+// swept into the index" — a Unity-rewritten .meta, a manifest someone else edited, a stray asset.
+// Restricted to modified/deleted/renamed files: a newly ADDED file is almost always this session's
+// own work and would flood the report.
+
+function baseRef() {
+  const symbolic = git('symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD').trim();
+  const candidates = [
+    symbolic.replace(/^refs\/remotes\//, ''),
+    'origin/main', 'origin/master', 'main', 'master', 'develop',
+  ].filter(Boolean);
+  const head = git('rev-parse', 'HEAD').trim();
+  for (const ref of candidates) {
+    const sha = git('rev-parse', '--verify', `${ref}^{commit}`).trim();
+    if (sha && sha !== head) return ref;
+  }
+  return null;
+}
+
+function foreignStagedFacts(staged, notes) {
+  const base = baseRef();
+  if (!base) { notes.push('no base branch found (origin/HEAD, main, master, develop) — provenance check skipped'); return []; }
+  const mergeBase = git('merge-base', 'HEAD', base).trim();
+  if (!mergeBase) { notes.push(`no merge-base with ${base} — provenance check skipped`); return []; }
+  const own = new Set(git('log', '--format=', '--name-only', `${mergeBase}..HEAD`).split('\n').map(s => s.trim()).filter(Boolean));
+  if (own.size === 0) { notes.push(`branch has no commits of its own beyond ${base} — provenance check skipped`); return []; }
+  const candidates = staged.filter(f => 'MDR'.includes(f.status));
+  const foreign = candidates.filter(f => !own.has(f.path));
+  // Every single staged file being "foreign" means the branch simply has not committed in this area
+  // yet — the check has no signal to give and would fire on the first commit of every branch. It
+  // earns its keep only when a few outliers sit among files this branch demonstrably owns.
+  if (!foreign.length || foreign.length === candidates.length) {
+    if (foreign.length) notes.push(`all ${foreign.length} modified staged file(s) are new to this branch — provenance check has no outlier to point at`);
+    return [];
+  }
+  return foreign
+    .slice(0, 5)
+    .map(f => ({
+      kind: 'staged-foreign',
+      path: f.path,
+      detail: `staged (${f.status}) but no commit on this branch since ${base} ever touched it — unrelated work may have been staged by accident`,
+      tool: `read_file path="${f.path}"`,
+      verify: `git log --oneline ${mergeBase}..HEAD -- ${f.path}`,
+    }));
+}
+
+// ── check 2: a .meta whose guid changed ──────────────────────────────
+// Every reference to an asset is by GUID. A rewritten .meta silently unbinds every prefab, scene
+// and asset that pointed at it. Triggers ONLY on a changed `guid:` line — Unity rewrites .meta
+// files constantly, and "any .meta touched" fires on every single batch.
+
+function metaGuidFacts(staged) {
+  const facts = [];
+  for (const f of staged) {
+    if (!f.path.endsWith('.meta')) continue;
+    const patch = git('diff', '--cached', '-U0', '--', f.path);
+    const before = patch.match(/^-guid:\s*([0-9a-f]{32})/m);
+    const after = patch.match(/^\+guid:\s*([0-9a-f]{32})/m);
+    if (!before || !after || before[1] === after[1]) continue;
+    facts.push({
+      kind: 'meta-guid-changed',
+      path: f.path,
+      detail: `guid changed ${before[1]} → ${after[1]} — every asset referencing the old guid is now unbound`,
+      tool: grepCall(before[1]),
+      verify: `git grep -l ${before[1]} -- '*.prefab' '*.unity' '*.asset' '*.mat' '*.controller'`,
+    });
+  }
+  return facts;
+}
+
+// ── check 3: a serialized field disappeared ──────────────────────────
+// A renamed or removed `[SerializeField]`/public field drops its value out of every prefab, scene
+// and asset that stored it. The compiler is perfectly happy; QA finds it.
+
+function serializedFields(text) {
+  const names = new Set();
+  const lines = stripComments(text).split('\n');
+  let attributed = false;
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) continue;
+    const hasSerialize = /\[\s*SerializeField/.test(t);
+    const decl = t.match(/^(?:\[[^\]]*\]\s*)*(?:(public|protected internal|protected|internal|private)\s+)?(?:(static|const)\s+)?(?:readonly\s+)?[\w.<>\[\],?]+\s+([A-Za-z_]\w*)\s*(?:=[^;]*)?;$/);
+    if (decl && !decl[2] && (hasSerialize || attributed || decl[1] === 'public')) names.add(decl[3]);
+    attributed = hasSerialize && !decl;
+  }
+  return names;
+}
+
+function serializedFieldFacts(staged, notes) {
+  const facts = [];
+  for (const f of csTargets(staged, notes, 'A')) {
+    const before = blob('HEAD', f.path);
+    const after = f.status === 'D' ? '' : blob('', f.path);
+    if (before == null || after == null) continue;
+    const kept = serializedFields(after); // parsed ONCE, not once per candidate name
+    const gone = [...serializedFields(before)].filter(n => !kept.has(n));
+    for (const name of gone.slice(0, 4)) {
+      facts.push({
+        kind: 'serialized-field-removed',
+        path: f.path,
+        detail: `serialized field \`${name}\` removed or renamed — its stored value is dropped from every prefab/scene/asset holding it`,
+        tool: grepCall(`${name}:`),
+        verify: `git grep -n ' ${name}:' -- '*.prefab' '*.unity' '*.asset'`,
+      });
+    }
+  }
+  return facts;
+}
+
+// ── check 4: enum ordinals shifted ───────────────────────────────────
+// Unity serializes an enum as its int. Appending a member is safe; inserting, removing or
+// reordering one silently re-points every serialized value in every prefab and scene. Invisible,
+// brutal, and purely mechanical to detect: the old member list must be a PREFIX of the new one.
+
+function enums(text) {
+  const found = new Map();
+  const clean = stripComments(text);
+  const re = /\benum\s+([A-Za-z_]\w*)/g;
+  let m;
+  while ((m = re.exec(clean))) {
+    const body = braceBody(clean, m.index);
+    if (body == null) continue;
+    const members = [];
+    for (const raw of body.split(',')) {
+      const t = raw.replace(/\[[^\]]*\]/g, '').trim();
+      if (!t) continue;
+      const mm = t.match(/^([A-Za-z_]\w*)\s*(?:=\s*(.+))?$/s);
+      if (mm) members.push({ name: mm[1], value: mm[2] ? mm[2].trim() : null });
+    }
+    if (members.length) found.set(m[1], members);
+  }
+  return found;
+}
+
+function enumFacts(staged, notes) {
+  const facts = [];
+  for (const f of csTargets(staged, notes)) {
+    const before = blob('HEAD', f.path);
+    const after = blob('', f.path);
+    if (before == null || after == null) continue;
+    const oldEnums = enums(before);
+    const newEnums = enums(after);
+    for (const [name, oldMembers] of oldEnums) {
+      const newMembers = newEnums.get(name);
+      if (!newMembers) continue;
+      // All members carry an explicit value in both revisions → ordinals are pinned, so only a
+      // changed or dropped value can shift serialized data.
+      const pinned = oldMembers.every(x => x.value) && newMembers.every(x => x.value);
+      let detail = null;
+      if (pinned) {
+        const after_ = new Map(newMembers.map(x => [x.name, x.value]));
+        const broken = oldMembers.filter(x => after_.has(x.name) && after_.get(x.name) !== x.value);
+        const dropped = oldMembers.filter(x => !after_.has(x.name));
+        if (broken.length) detail = `explicit value of \`${broken[0].name}\` changed (${broken[0].value} → ${after_.get(broken[0].name)})`;
+        else if (dropped.length) detail = `member \`${dropped[0].name}\` removed`;
+      } else {
+        const oldNames = oldMembers.map(x => x.name);
+        const newNames = newMembers.map(x => x.name);
+        const isPrefix = oldNames.every((n, i) => newNames[i] === n);
+        if (!isPrefix) {
+          const at = oldNames.findIndex((n, i) => newNames[i] !== n);
+          detail = `member order changed at index ${at} (\`${oldNames[at]}\` → \`${newNames[at] ?? '(gone)'}\`) — not an append`;
+        }
+      }
+      if (!detail) continue;
+      facts.push({
+        kind: 'enum-ordinal-shift',
+        path: f.path,
+        detail: `enum \`${name}\`: ${detail}. Every serialized int for this enum now means something else.`,
+        tool: grepCall(name, '*.cs'),
+        verify: `git grep -n '${name}' -- '*.cs'`,
+      });
+    }
+  }
+  return facts;
+}
+
+// ── check 5: an interface gained a member ────────────────────────────
+// Every implementer must now implement it. Pure mechanics — and exactly the kind of blast radius a
+// diff cannot show, because the implementers are the files that did NOT change.
+
+function interfaceMembers(text) {
+  const found = new Map();
+  const clean = stripComments(text);
+  const re = /\binterface\s+(I[A-Za-z_]\w*)/g;
+  let m;
+  while ((m = re.exec(clean))) {
+    const body = braceBody(clean, m.index);
+    if (body == null) continue;
+    const members = new Set();
+    for (const line of body.split(/;|\n/)) {
+      const t = line.replace(/\{[^}]*\}/g, '').replace(/\s+/g, ' ').trim();
+      if (t && /[A-Za-z_]\w*\s*[({]?/.test(t) && t.length < 200) members.add(t);
+    }
+    found.set(m[1], members);
+  }
+  return found;
+}
+
+function interfaceFacts(staged, notes) {
+  const facts = [];
+  for (const f of csTargets(staged, notes)) {
+    const before = blob('HEAD', f.path);
+    const after = blob('', f.path);
+    if (before == null || after == null) continue;
+    const oldIfaces = interfaceMembers(before);
+    for (const [name, newMembers] of interfaceMembers(after)) {
+      const oldMembers = oldIfaces.get(name);
+      if (!oldMembers) continue;
+      const added = [...newMembers].filter(s => !oldMembers.has(s));
+      if (!added.length) continue;
+      facts.push({
+        kind: 'interface-member-added',
+        path: f.path,
+        detail: `interface \`${name}\` gained \`${added[0]}\`${added.length > 1 ? ` (+${added.length - 1} more)` : ''} — every implementer must implement it`,
+        tool: grepCall(name, '*.cs'),
+        verify: `git grep -ln '${name}' -- '*.cs'`,
+      });
+    }
+  }
+  return facts;
+}
+
+// ── check 6: an asmdef reference was removed ─────────────────────────
+// The assembly's scripts lose every type from the dropped reference.
+
+function asmdefFacts(staged) {
+  const facts = [];
+  for (const f of staged) {
+    if (!f.path.endsWith('.asmdef') || f.status !== 'M') continue;
+    let before, after;
+    try {
+      before = JSON.parse(blob('HEAD', f.path) ?? '{}');
+      after = JSON.parse(blob('', f.path) ?? '{}');
+    } catch { continue; }
+    const removed = (before.references || []).filter(r => !(after.references || []).includes(r));
+    if (!removed.length) continue;
+    facts.push({
+      kind: 'asmdef-reference-removed',
+      path: f.path,
+      detail: `assembly reference(s) removed: ${removed.join(', ')} — scripts in this assembly lose every type those define`,
+      tool: `find_files path="${f.path.replace(/\/?[^/]+$/, '') || '.'}" pattern="*.cs"`,
+      verify: `git grep -ln 'using ' -- '${f.path.replace(/[^/]+$/, '')}*.cs'`,
+    });
+  }
+  return facts;
+}
+
+// ── facts + rendering ────────────────────────────────────────────────
+
+function gatherFacts(staged) {
+  const notes = [];
+  const facts = [
+    ...foreignStagedFacts(staged, notes),
+    ...metaGuidFacts(staged),
+    ...serializedFieldFacts(staged, notes),
+    ...enumFacts(staged, notes),
+    ...interfaceFacts(staged, notes),
+    ...asmdefFacts(staged),
+  ];
+  return { facts: facts.slice(0, MAX_FACTS), truncated: facts.length > MAX_FACTS, notes: [...new Set(notes)] };
+}
+
+/** `for: 'agent'` renders the ayin tool call to make; `for: 'human'` renders the shell command,
+ *  which is what a person reading an UNVERIFIED report actually wants to paste. */
+function renderFacts(facts, notes, who = 'agent') {
+  const lines = facts.map((f, i) => `${i + 1}. [${f.kind}] ${f.path} — ${f.detail}\n   ${
+    who === 'agent' ? `run: ${f.tool}` : `verify with: ${f.verify}`}`);
+  const noteLines = notes.length ? `\n(skipped: ${notes.join('; ')})` : '';
+  const head = who === 'agent'
+    ? 'FACTS — computed by git, not by you. Each is TRUE. Your job is to find out whether it BREAKS anything.'
+    : 'FACTS — computed by git. Each is TRUE; none was verified against the repo.';
+  return `${head}\n${lines.join('\n')}${noteLines}`;
+}
+
+// ── contract enforcement ─────────────────────────────────────────────
+
+/** A finding survives only if it cites a path that EXISTS in this repo. This is what makes
+ *  fabrication structurally impossible: an invented `DebugLogger.cs` fails the check and is
+ *  dropped before anyone reads it. */
+function citedPath(line) {
+  for (const token of line.match(/[\w./\\-]+\.[A-Za-z][\w]{0,11}(?::\d+)?/g) || []) {
+    const path = token.split(':')[0].replace(/^\.\//, '');
+    if (existsSync(join(REPO, path))) return path;
+  }
+  return null;
+}
+
+function parseModelOutput(raw) {
+  const grepsMatch = raw.match(/greps?_run\s*:\s*(\d+)/i);
+  const grepsRun = grepsMatch ? parseInt(grepsMatch[1], 10) : 0;
+  const verdictMatches = raw.match(/VERDICT\s*:\s*(CLEAR|ISSUES|UNVERIFIED)/gi) || [];
+  const last = verdictMatches[verdictMatches.length - 1];
+  let verdict = last ? last.split(':')[1].trim().toUpperCase() : 'UNVERIFIED';
+
+  const findings = [];
+  const dropped = [];
+  for (const line of raw.split('\n')) {
+    const t = line.trim().replace(/^[-*\d.)\s]+/, '');
+    if (!t || /^VERDICT\s*:/i.test(t) || /^greps?_run\s*:/i.test(t) || /^findings?\b/i.test(t)) continue;
+    if (!/\s[—-]\s/.test(t)) continue;            // the contract's `<file>:<line> — <what breaks>` shape
+    if (citedPath(t)) findings.push(t); else dropped.push(t);
+  }
+
+  // The two rules that make confident storytelling worthless: no greps → nothing was checked, and
+  // an ISSUES verdict with no surviving citation is an opinion, not a finding.
+  if (grepsRun === 0) verdict = 'UNVERIFIED';
+  if (verdict === 'ISSUES' && findings.length === 0) verdict = 'UNVERIFIED';
+  return { verdict, grepsRun, findings: findings.slice(0, MAX_FINDINGS), dropped };
+}
+
+// ── output ───────────────────────────────────────────────────────────
+
+function emitBlock(reason) {
+  process.stdout.write(JSON.stringify({ decision: 'block', reason }));
+  process.exit(0);
+}
+
+function emitContext(context, systemMessage) {
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: { hookEventName: 'Stop', additionalContext: context },
+    systemMessage,
+  }));
+  process.exit(0);
+}
+
+// ── main ─────────────────────────────────────────────────────────────
+
+const argv = process.argv.slice(2);
+const factsOnly = argv.includes('--facts');   // debugging: print the deterministic facts, no model
+const dryRun = argv.includes('--dry');        // debugging: print what would be emitted, no model
+
+if (process.env.AYIN_HOUND && !factsOnly && !dryRun) process.exit(0); // recursion guard
+
+// Claude Code pipes the hook payload on stdin. `stop_hook_active` is true when this stop is ALREADY
+// the continuation of a previous block — blocking again is how a hook loops forever.
+// Claude Code pipes the payload on stdin. Reading fd 0 when it is a TTY blocks forever, so a manual
+// `--facts` run must never reach it.
+let payload = {};
+if (!factsOnly && !dryRun && !process.stdin.isTTY) {
+  try { payload = JSON.parse(readFileSync(0, 'utf-8')); } catch { /* no payload — proceed */ }
+}
+if (payload.stop_hook_active) process.exit(0);
+
+if (!existsSync(REPO) || git('rev-parse', '--is-inside-work-tree').trim() !== 'true') process.exit(0);
+if (!hasHead()) process.exit(0);
+
+let diff = git('diff', '--cached');
+if (!diff.trim()) process.exit(0);
+
+const staged = stagedFiles();
+const { facts, truncated, notes } = gatherFacts(staged);
+
+if (factsOnly) {
+  process.stdout.write(JSON.stringify({ staged, facts, truncated, notes }, null, 2) + '\n');
+  process.exit(0);
+}
+
+const diffLines = diff.split('\n').length;
+// Nothing mechanical to chase and nothing substantial staged → say nothing. A hound that barks
+// every batch is a hound nobody hears.
+if (facts.length === 0 && diffLines < BIG_DIFF_LINES) process.exit(0);
+
+// Debounce per staged-diff content: the same index reviewed twice costs a model call and says the
+// same thing. An atomic mkdir is the lock; stale locks are swept after a day.
+if (!dryRun) {
+  const key = createHash('sha1').update(diff).digest('hex').slice(0, 20);
+  const lock = join(tmpdir(), `ayin-hound.${key}.lock`);
+  try { mkdirSync(lock); } catch { process.exit(0); }
+  try {
+    for (const name of readdirSync(tmpdir())) {
+      if (!/^ayin-hound\..*\.lock$/.test(name)) continue;
+      const p = join(tmpdir(), name);
+      if (Date.now() - statSync(p).mtimeMs > 86_400_000) rmSync(p, { recursive: true, force: true });
+    }
+  } catch { /* sweeping is best effort */ }
+}
+
+if (diff.length > MAX_DIFF_CHARS) diff = diff.slice(0, MAX_DIFF_CHARS) + '\n[…diff truncated…]';
+
+const factsBlock = facts.length
+  ? renderFacts(facts, notes)
+  : 'FACTS: none — the mechanical checks found nothing. Judge only whether this staged diff is one complete idea worth committing now.';
+const prompt = `${AYIN_HOUND_INSTRUCTIONS.trim()}\n\n${factsBlock}\n\nSTAGED DIFF:\n${diff}`;
+
+const factsContext = () =>
+  `ayin-hound could not verify these mechanically-detected facts — run the commands yourself:\n\n${renderFacts(facts, notes, 'human')}`;
+
+if (dryRun) {
+  process.stdout.write(`${prompt}\n`);
+  process.exit(0);
+}
+
+let raw = '';
+if (process.env.AYIN_HOUND_SELFTEST) {
+  raw = `greps_run: 1\n${staged[0]?.path ?? 'README.md'}:1 — stub finding — selftest\nVERDICT: ISSUES`;
+} else {
+  const res = spawnSync('ayin', ['-p', prompt], {
+    cwd: REPO,
+    encoding: 'utf-8',
+    timeout: MODEL_TIMEOUT_MS,
+    maxBuffer: 8 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: {
+      ...process.env,
+      AYIN_HOUND: '1',          // recursion guard for any nested Stop hook
+      AYIN_READONLY: '1',       // grep/read only — the hound nudges, it never edits
+      AYIN_ACQUIRE_LLM: '1',    // one door: take the llm authority rather than side-dooring the GPU
+      AYIN_MAX_ROUNDS: ROUND_BUDGET,
+    },
+  });
+  raw = res.stdout || '';
+}
+
+// No model (ayin absent, offline, timed out) does NOT mean no signal: the facts were computed by
+// git and are still true. Hand them over with the commands a human should run.
+if (!raw.trim()) {
+  if (!facts.length) process.exit(0);
+  emitContext(factsContext(), `ayin-hound: ${facts.length} unverified flag(s) — model unavailable`);
+}
+
+const { verdict, grepsRun, findings, dropped } = parseModelOutput(raw);
+
+if (verdict === 'ISSUES') {
+  const body = findings.map(f => `- ${f}`).join('\n');
+  const extra = facts.length ? `\n\nMechanical facts behind this (git-computed):\n${renderFacts(facts, notes, 'human')}` : '';
+  emitBlock(`ayin-hound — ${findings.length} verified finding(s) after ${grepsRun} grep(s):\n\n${body}${extra}`);
+}
+
+if (verdict === 'UNVERIFIED') {
+  const why = grepsRun === 0
+    ? 'the reviewer ran no greps, so nothing it said was checked'
+    : `${dropped.length} claim(s) cited files that do not exist and were dropped`;
+  if (!facts.length) process.exit(0); // nothing verified AND nothing mechanical — stay silent
+  emitContext(`${factsContext()}\n\n(ayin-hound verdict: UNVERIFIED — ${why}.)`,
+    `ayin-hound: UNVERIFIED — ${facts.length} mechanical flag(s) left unchecked`);
+}
+
+// CLEAR. The facts-free path had one job: judge commit-worthiness. A nudge never blocks.
+if (!facts.length) {
+  const nudge = raw.split('\n').map(s => s.trim()).find(s => /^commit-suggestion\s*:/i.test(s));
+  if (nudge) emitContext(`ayin-hound: this staged diff looks like one complete idea — ${nudge}`, 'ayin-hound: commit-worthy');
+  process.exit(0);
+}
+
+// Deterministic facts still ride out as context — a grep can refute "this GUID is referenced", it
+// cannot refute "this file is not part of your branch's work".
+const foreign = facts.filter(f => f.kind === 'staged-foreign');
+if (foreign.length) {
+  emitContext(
+    `ayin-hound: ${foreign.length} staged file(s) that no commit on this branch ever touched — check they belong in your commit:\n` +
+    foreign.map(f => `- ${f.path} (${f.detail})`).join('\n'),
+    `ayin-hound: ${foreign.length} possibly-unrelated staged file(s)`);
+}
+process.exit(0);

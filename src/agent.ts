@@ -115,7 +115,15 @@ function detectProjectExpertise(cwd: string): string {
 }
 
 function getWindowSize(): number { return getConfig('windowSize', 12); }
-function getMaxRounds(): number { return HEADLESS ? 1000 : getConfig('maxToolRounds', 15); }
+/** Headless runs a long leash (1000) because a `-p` task is expected to finish the job. A caller
+ *  that wants a SHORT, forced-spend run — the hound, which must grep a handful of facts and answer,
+ *  not deliberate — sets AYIN_MAX_ROUNDS. Ignored when unparseable or <1, so a typo can't wedge the
+ *  loop at zero rounds. */
+function getMaxRounds(): number {
+  const capped = parseInt(process.env.AYIN_MAX_ROUNDS || '', 10);
+  if (Number.isFinite(capped) && capped >= 1) return capped;
+  return HEADLESS ? 1000 : getConfig('maxToolRounds', 15);
+}
 
 let exploreCallCount = 0;
 const MAX_EXPLORE_CALLS = 5;
