@@ -1,0 +1,9 @@
+Embedded-specific recommendations for this sketch. Apply them as soft guidance — raise one only when it is clearly ignored, never invent work the user did not ask for.
+
+Pin numbers should be named constants (`const int LED_PIN = 13;`), not magic numbers scattered through the file.
+
+A `delay()` inside `loop()` should be there because the described behaviour is genuinely meant to block, not as a stand-in for timing that belongs in `millis()` so the loop stays responsive to a button.
+
+`Serial.begin(...)`'s baud rate should match whatever the code comments, the README, or a paired monitor config expect — a mismatch garbles output with no compile error to catch it.
+
+`random()` without a `randomSeed(analogRead(<unconnected analog pin>))` in `setup()` returns the SAME sequence on every power-up. A reaction timer, a dice roll or a game whose "random" delays repeat identically each run is defective in a way that compiles, reviews and demos fine — and that a player notices immediately.

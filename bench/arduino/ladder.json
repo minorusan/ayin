@@ -1,0 +1,37 @@
+{
+  "$comment": [
+    "The project ladders, in ascending complexity — shared by arduino-legit.mjs and",
+    "arduino-wiring-audit.mjs. DATA, not code, so importing one tool does not execute the other's",
+    "top-level guard. That is exactly what happened: the audit tool imported the legit tool for this",
+    "list and inherited its refuse-to-grade-while-a-run-is-in-flight check, which killed the audit.",
+    "A module whose mere loading has side effects cannot be composed.",
+    "",
+    "`ladder` is the set the tools grade by default. Pass `--ladder 2` to grade the second set, or name",
+    "project ids explicitly. Each id matches a project in projects.json.",
+    "",
+    "LADDER 2 EXISTS BECAUSE REPEATING LADDER 1 WOULD MEASURE SAMPLING NOISE, NOT SKILL. Ladder 1 covers",
+    "digital I/O, PWM, analog-in, non-blocking timing, ultrasonic and I2C. Every ladder-2 project is",
+    "chosen for a trap with no analogue in ladder 1 — interrupts and `volatile`, float maths with no FPU,",
+    "a load a pin physically cannot drive, quadrature decoding where the ORDER of two edges carries the",
+    "information, multiplexed refresh where delay() is visible as flicker, a library whose API changed",
+    "between major versions, and a second UART with TX/RX crossing over."
+  ],
+  "ladder": [
+    { "id": "blink",           "tests": "trivial: one pin, no external part" },
+    { "id": "rgb-cycle",       "tests": "PWM x3, per-channel resistors, debounced toggle, non-blocking" },
+    { "id": "traffic-light",   "tests": "a real state machine with a latched request" },
+    { "id": "night-light",     "tests": "analog in, voltage divider, 0-1023 to 0-255" },
+    { "id": "reaction-timer",  "tests": "micros() timing, randomSeed, early-press detection" },
+    { "id": "parking-sensor",  "tests": "pulseIn with a timeout, the /2 in the formula, tone(), non-blocking beeps" },
+    { "id": "climate-display", "tests": "two third-party libraries, fixed I2C pins, NaN handling" }
+  ],
+  "ladder2": [
+    { "id": "pir-alarm",         "tests": "attachInterrupt on pins 2/3 only, volatile across the ISR boundary, no delay() in an ISR, a RESETTABLE timer" },
+    { "id": "thermostat",        "tests": "resistance to Celsius via Steinhart-Hart (map() is simply wrong), hysteresis as two thresholds, active-LOW relay" },
+    { "id": "motor-transistor",  "tests": "a load a 20 mA pin cannot drive, base resistor, flyback diode, shared ground, PWM through a transistor" },
+    { "id": "encoder-menu",      "tests": "quadrature decoding (order, not level), interrupt-driven CLK, OLED at 0x3C not 0x27, redraw only on change" },
+    { "id": "seven-seg-counter", "tests": "multiplexing and persistence of vision, per-segment resistors, two independent timers, neither a delay()" },
+    { "id": "ir-remote-lamp",    "tests": "codes that CANNOT be hardcoded (a learning path is the design), IRremote v2-vs-v3 API, timer conflict with analogWrite" },
+    { "id": "bluetooth-logger",  "tests": "SoftwareSerial because the one hardware UART is USB, TX/RX crossing, 3.3V logic on RX, 9600 vs 38400 AT mode" }
+  ]
+}

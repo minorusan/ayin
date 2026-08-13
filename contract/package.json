@@ -1,0 +1,20 @@
+{
+  "name": "@ayin/contract",
+  "version": "0.1.0",
+  "description": "The interfaces between ayin and its tools and model providers. Types only — no runtime, no dependencies.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": ["dist", "src", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

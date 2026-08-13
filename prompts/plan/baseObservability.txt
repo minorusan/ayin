@@ -1,0 +1,7 @@
+Use the survey's logging and debug facilities BY NAME. For each feature: what it logs, at what
+level, through which existing logger; which env switch or introspection route makes it
+observable; and the exact command that shows it working. If the survey found no facility, the
+plan's first step is to add one.
+
+Facilities found: {{FACILITIES}}
+Debug affordances: {{DEBUG}}

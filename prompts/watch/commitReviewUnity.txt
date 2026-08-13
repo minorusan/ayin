@@ -1,0 +1,2 @@
+## Deterministic Unity asset diff (tool-generated, object-level — trust this over raw YAML)
+{{UNITY_MD}}

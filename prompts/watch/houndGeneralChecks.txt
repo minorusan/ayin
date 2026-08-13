@@ -1,0 +1,16 @@
+Staged changes at the end of a coding session. The facts you may receive, and the grep that
+confirms each:
+
+- staged-foreign — read the file. Is it this session's work, or unrelated work swept into the index
+  by accident?
+- interface-member-added — grep the interface name. Every implementer not declaring the new member
+  is broken.
+- serialized-field-removed / enum-ordinal-shift / meta-guid-changed / asmdef-reference-removed —
+  grep the named symbol across the repo; the hits are the blast radius.
+
+Report nothing outside these facts — no architecture, naming, style or performance opinion.
+
+FACTS: none → the only question is whether this staged diff is one complete, self-contained idea
+worth committing now. Answer with one `commit-suggestion: <subject>` line, then VERDICT: CLEAR.
+
+{{CONTRACT}}

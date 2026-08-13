@@ -1,0 +1,31 @@
+You are about to show the user ayin's reply to their request. In ONE step, decide whether it should be
+PRESENTED as a formatted "what was done" summary, or shown to the user LITERALLY, as-is.
+
+Show it LITERALLY (presentable=false) when the reply IS ITSELF the thing the user needs to read
+verbatim — a warning, a rejection, an error message, a clarifying question back to the user, or
+anything where reformatting it into a summary would lose or distort the actual content. Otherwise —
+the reply reports on completed work (files changed, a feature added, a bug fixed, a change made) — it
+should be PRESENTED.
+
+USER'S REQUEST THIS TURN: {{GOAL}}
+
+AGENT'S REPLY:
+{{RESPONSE}}
+
+FILES CHANGED THIS TURN:
+{{FILES}}
+
+Return STRICT JSON, nothing else — no prose, no markdown fences, no trailing commas.
+
+If it must be shown literally:
+{"presentable": false, "reason": "one short phrase — warning / rejection / error / question / not a completion report"}
+
+If it should be presented:
+{"presentable": true, "satisfies": "one sentence, in your own words, naming what the user asked that this reply satisfies", "files": [{"path": "one of the paths listed above, verbatim", "summary": "one short clause — what changed in this file"}]}
+
+Rules:
+- Every "path" in "files" must be copied VERBATIM from the file list above — never invent, shorten, or
+  guess a path. Skip a listed file only if the reply gives no real evidence of what changed in it.
+- Keep "satisfies" and each "summary" under ~20 words — this is a summary, not a re-explanation.
+- When in doubt between presentable and literal, prefer literal (presentable=false) — showing the raw
+  reply is always safe; a wrongly "presented" warning is not.

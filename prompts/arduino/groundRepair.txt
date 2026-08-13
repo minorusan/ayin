@@ -1,0 +1,6 @@
+Your previous answer did not parse as the required JSON shape. Error: {{ERROR}}
+
+Your previous answer was:
+{{PREVIOUS}}
+
+Fix it and return ONLY the corrected JSON object — no prose, no markdown fences, no trailing commas.

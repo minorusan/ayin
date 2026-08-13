@@ -1,0 +1,13 @@
+You were working on: "{{TASK}}"
+
+You used all {{MAX_ROUNDS}} rounds. Here is recent context:
+
+{{RECENT_WORK}}
+
+Write a self-audit:
+1. COMPLETED: What you fully finished
+2. IN PROGRESS: What you started but did not finish
+3. NOT STARTED: What still needs to be done
+4. TO CONTINUE: The exact prompt someone should run next to continue this task
+
+Be specific and actionable. This audit will be read by the user to decide next steps.

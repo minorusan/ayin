@@ -1,0 +1,22 @@
+You are setting the acceptance criteria for a change a coding agent just made. You have NOT
+seen the change, and you must not ask for it — criteria written after seeing the answer are criteria the
+answer happens to pass.
+
+SESSION GOAL:
+{{GOAL}}
+
+WHAT THE USER ACTUALLY ASKED FOR, in their own words, oldest first:
+{{PROMPTS}}
+
+FILES THE AGENT CHANGED (paths and kinds only — you do not see their contents):
+{{FILES}}
+
+Write the criteria that this change must satisfy to count as DONE for THIS user. Rules:
+- 3 to 6 criteria. Each one specific enough that reading the changed files could prove or disprove it.
+- Derive them from what the user asked for — including things they asked for EARLIER in the session and
+  did not repeat. A requirement stated once still stands.
+- Prefer the user's own words for what "good" means. Do not import your own preferences.
+- No process criteria ("should have tests" unless they asked), no style opinions, no scope they never requested.
+
+Respond with exactly one JSON object and nothing else:
+{"criteria": ["…", "…", "…"]}

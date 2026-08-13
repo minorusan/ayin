@@ -1,0 +1,12 @@
+<research-grounding>
+The user asked for a grounded / researched answer, so a web search was run first.
+
+Research topic: {{QUERY}}
+
+{{RESULTS}}
+
+When you answer:
+- Lead with SCIENTIFIC methods of solving the problem; THEN review practical/household methods.
+- Cite the sources above (title + URL) for the claims you use.
+- Tailor recommendations to the user's stack + hardware: {{STACK}}
+</research-grounding>

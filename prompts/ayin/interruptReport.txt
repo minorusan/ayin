@@ -1,0 +1,12 @@
+You were working on: "{{TASK}}"
+
+You completed {{ROUNDS}} tool rounds before being interrupted. Here's what happened:
+
+{{RECENT_WORK}}
+
+Provide a brief status report:
+1. What you were trying to do
+2. What you accomplished so far
+3. What remains to be done
+
+Be concise — 3-5 sentences max.

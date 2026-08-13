@@ -1,0 +1,23 @@
+Decide whether the request below needs a written plan before implementation starts.
+
+It NEEDS a plan when it spans several features or subsystems, mixes UI with backend work, introduces a
+new surface (a webview, a service, a data store), or contains several independently-shippable asks.
+
+It does NOT need a plan when it is one change described at length — a detailed bug report, a long
+explanation of a single feature, a paste of logs with one question, or a request to review something.
+
+REQUEST:
+{{REQUEST}}
+
+Also list every THIRD-PARTY API or external service the work would have to talk to — anything not
+running on the user's own machine: a vendor REST API, a SaaS product, an OAuth provider, a payment or
+messaging or maps or model provider. Name the service, not the library ("Stripe", not "stripe-node").
+List them even when the request only implies them, and leave the list empty when the work is purely
+local. This list is mandatory input to a fresh documentation lookup, so a missed API means the plan
+gets written from stale memory.
+
+Respond with exactly one JSON object and nothing else:
+{"complex": true|false,
+ "features": ["one line per independently-shippable piece of work"],
+ "apis": ["third-party service names, [] if none"],
+ "reason": "one sentence"}

@@ -1,0 +1,22 @@
+Project root: {{ROOT}}
+Type: Arduino sketch project
+Detected from: {{DETECTED_FROM}}
+Target board (FQBN): {{FQBN}} (from {{FQBN_SOURCE}}) → board family "{{BOARD}}"
+PWM-capable pins on this board: {{PWM_PINS}}
+
+SKETCHES:
+{{SKETCHES}}
+{{VIOLATIONS}}
+
+THIRD-PARTY LIBRARIES INCLUDED: {{LIBRARIES}}
+README: {{README_STATE}}
+{{ROOT_ENTRIES}}
+
+VERIFICATION COMMANDS (this is what "it works" means without hardware attached):
+  - arduino-cli compile --fqbn {{FQBN}} <sketch-folder>
+  - arduino-cli upload -p <port> --fqbn {{FQBN}} <sketch-folder>   (only with a board attached)
+  - arduino-cli monitor -p <port>                                  (reads Serial output)
+
+THERE IS NO WEBVIEW, NO HTTP SERVER, NO BUNDLER AND NO LOGGER MODULE IN THIS PROJECT, and none
+of those is a gap to close — this is firmware. Do not plan work to add them. The equivalents
+are Serial Monitor, the built-in LED, and the wiring diagram; see the observability section.

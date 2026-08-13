@@ -1,0 +1,7 @@
+{
+  "id": "arduino",
+  "kind": "plan",
+  "projectTypes": ["arduino"],
+  "priority": 100,
+  "description": "Arduino planning — sketch/folder naming, the shipped component catalog as mandatory grounding, Serial Monitor instead of a logger module, and a stated deliverable set (sketch + README + wiring diagram)."
+}

@@ -1,0 +1,7 @@
+{
+  "id": "arduino",
+  "kind": "present",
+  "projectTypes": ["arduino"],
+  "priority": 100,
+  "description": "Arduino presentation — regenerates the wiring diagram for the sketches this turn touched, names the resulting .puml/.svg paths, and calls out any required deliverable (sketch, README, diagram) still missing."
+}

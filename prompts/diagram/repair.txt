@@ -1,0 +1,5 @@
+Your previous attempt FAILED validation with:
+{{ERROR}}
+
+Here it is — fix exactly that and return the corrected full source:
+{{SOURCE}}

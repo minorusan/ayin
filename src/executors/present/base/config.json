@@ -1,0 +1,7 @@
+{
+  "id": "base",
+  "kind": "present",
+  "projectTypes": ["*"],
+  "priority": 0,
+  "description": "Generic presentation — the goal, what the reply satisfies, and the changed-file list. Serves every project type no specific handler claims."
+}

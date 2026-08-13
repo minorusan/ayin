@@ -1,0 +1,1 @@
+<system>Deliverable written to {{TARGET}}. You are done. Reply with a final one-line confirmation and STOP — do not re-write the same file.</system>

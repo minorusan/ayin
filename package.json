@@ -1,0 +1,44 @@
+{
+  "name": "ayin",
+  "version": "1.0.249",
+  "license": "MIT",
+  "description": "A small, model-agnostic terminal coding agent — an agentic loop in your shell against a self-hosted LLM (Ollama or any OpenAI-compatible endpoint).",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "ayin": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "prompts",
+    "assets",
+    "README.md",
+    "SETUP.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "node tool/copy-executor-configs.mjs && tsc --watch",
+    "prepublishOnly": "node tool/check-registry.mjs",
+    "check:glyphs": "node tool/check-glyphs.mjs",
+    "check:gates": "node tool/check-gates.mjs",
+    "check:explore": "node tool/check-explore.mjs",
+    "check:watch": "node tool/check-watch.mjs",
+    "prebuild": "node tool/check-glyphs.mjs",
+    "check:prompts": "node tool/check-prompts.mjs",
+    "audit:prompts": "node tool/dump-prompts.mjs",
+    "bench:arduino": "node tool/arduino-bench.mjs",
+    "postbuild": "node tool/copy-executor-configs.mjs && node tool/check-prompts.mjs && node tool/check-orphans.mjs",
+    "release": "npm publish --registry ${AYIN_REGISTRY:?set AYIN_REGISTRY to your private registry}"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "sharp": "^0.33.5",
+    "undici": "^6.20.0"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.3"
+  }
+}

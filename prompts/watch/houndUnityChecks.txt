@@ -1,0 +1,22 @@
+Unity/C# repo, staged changes at the end of a coding session. The facts you may receive, and the
+grep that confirms each:
+
+- staged-foreign — read the file. Is it this session's work, or Unity churn / another branch's work
+  swept into the index by accident?
+- meta-guid-changed — grep the OLD guid across .prefab/.unity/.asset/.mat/.controller. Hits are
+  references that just went unbound.
+- serialized-field-removed — grep the field name in .prefab/.unity/.asset. Hits are stored values
+  that will be dropped on next save.
+- enum-ordinal-shift — grep the enum name in .cs for fields of that type, then grep those field
+  names in .prefab/.unity. Hits are stored ints that now mean a different member.
+- interface-member-added — grep the interface name in .cs. Every implementer not declaring the new
+  member is broken.
+- asmdef-reference-removed — read the scripts under that assembly: which use types from the dropped
+  reference?
+
+Report nothing outside these facts — no architecture, naming, style or performance opinion.
+
+FACTS: none → the only question is whether this staged diff is one complete, self-contained idea
+worth committing now. Answer with one `commit-suggestion: <subject>` line, then VERDICT: CLEAR.
+
+{{CONTRACT}}

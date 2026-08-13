@@ -1,0 +1,94 @@
+Write the implementation plan for the request below. It is saved as markdown and handed to the agent
+that does the work: executable, concrete, honest about what is not yet known.
+
+SESSION GOAL:
+{{GOAL}}
+
+THE REQUEST:
+{{REQUEST}}
+
+EVERY PROMPT THIS SESSION, oldest first (earlier requirements still count):
+{{PROMPTS}}
+
+FEATURES IDENTIFIED:
+{{FEATURES}}
+
+PROJECT SURVEY (measured, not guessed):
+{{SURVEY}}
+
+EXPLORATION FINDINGS (what already exists in the code):
+{{FINDINGS}}
+
+THIRD-PARTY APIS INVOLVED: {{APIS}}
+
+FRESH WEB RESEARCH ON THOSE APIS (fetched just now):
+{{API_RESEARCH}}
+
+DOMAIN REFERENCE FOR THIS PROJECT TYPE (shipped reference material):
+{{DOMAIN_REFERENCE}}
+
+REQUIRED DELIVERABLES — checked as files on disk, not as claims:
+{{DELIVERABLES}}
+
+HOW WORK IN THIS PROJECT TYPE IS OBSERVED:
+{{OBSERVABILITY}}
+
+Produce markdown with exactly these sections, in this order.
+
+## Reasoning
+Why this is more than one piece of work, and the order the pieces must land in. Name the coupling that
+forces that order.
+
+## Context — what already exists
+What the exploration found: real files, real functions, what they currently assume. Cite paths.
+
+## Dependencies
+What must be present before the work starts, and whether any of it has to be added. For a new webview:
+what serves it, what builds it, what interface it binds on, how another machine on the network reaches it.
+
+## Third-party API research
+Omit this section entirely when no API is involved; otherwise it is required. Write it from the fresh
+research above and nothing else. Per API: current base URL, current auth scheme and how the credential
+is obtained and stored, the exact endpoints and fields this work needs, version and any deprecation
+date, rate limits, and the error responses the code must handle. Cite a source URL per claim. If the
+research failed, step one of this plan is reading the vendor's current documentation, and this section
+says that instead of listing endpoints.
+
+## Domain reference
+Omit this section entirely when the domain reference above is the "(no domain reference…)" line;
+otherwise it is required. Name every real-world thing this plan involves — components, boards, parts —
+and match each against the reference, in its wording. For anything the reference lacks, say so and make
+looking it up an early step.
+
+## Deliverables
+A markdown table: | Deliverable | Path | Produced by which step |
+One row per required deliverable above, plus any this request adds. Concrete paths, not descriptions.
+A deliverable with no step is an incomplete plan, and this table is where that shows.
+
+## Gaps and open questions
+What is genuinely unknown or undecided, and for each: the command to run, the file to read, or the
+decision only the user can make.
+
+## Files to change
+A markdown table: | File | Current responsibility | Change |
+One row per file, concrete paths from the exploration. Note where a change would break single
+responsibility, and what to split out instead.
+
+## Steps
+Numbered, ordered, each independently verifiable. Say what proves each one worked.
+
+## Observability
+Write this from the observability block above and nothing else. Do not propose a facility it does not
+name, and do not import the conventions of a different kind of project. Per feature: what it emits,
+through what, and the exact command that shows it working.
+
+## Risks
+What breaks at scale, under interruption, under concurrency, or when a dependency is slow or down.
+Include the blast radius: what else calls the code being changed.
+
+Rules:
+- Never fill a gap from memory. An unnamed assumption is the failure this plan exists to prevent — say
+  "unverified" and make resolving it a step.
+- Every claim traceable to the survey, the findings, or the research above.
+- Use the format's range: headings, tables, fenced code with a language tag, lists.
+- No filler, no restating the request.

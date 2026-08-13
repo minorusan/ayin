@@ -1,0 +1,1 @@
+{{TOOL}} is unavailable in read-only mode. Investigate using only read_file, grep, and find_files — do not write files or run shell/bash. Then report your findings.

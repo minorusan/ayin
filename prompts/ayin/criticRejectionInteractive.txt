@@ -1,0 +1,4 @@
+Your answer has issues:
+{{CRITIQUE}}
+
+Explain to the user what you tried, why the critic rejected it, and what directions you could take next.

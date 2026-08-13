@@ -1,0 +1,3 @@
+[submodule "naamah"]
+	path = naamah
+	url = https://github.com/minorusan/naamah-uml.git

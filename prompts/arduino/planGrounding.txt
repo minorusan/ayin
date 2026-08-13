@@ -1,0 +1,21 @@
+Arduino project{{GREENFIELD_NOTE}}.
+
+Build-breaking rules:
+- Sketch filename = its folder name, character for character. RgbCycle/RgbCycle.ino builds;
+  RgbCycle/main.ino and servo-dial/servo_dial.ino do not. Hyphens are legal in both — never
+  "normalise" a hyphen to an underscore in one name and not the other. Rename both or neither.
+- analogWrite works only on PWM pins. Uno/Nano: 3, 5, 6, 9, 10, 11. Any other pin is on/off only.
+- Every LED, and each colour channel of an RGB LED, needs its own series resistor.
+- INPUT_PULLUP reads LOW when pressed, no external resistor. Wired to 5V instead it needs a
+  pull-down or the pin floats. State which this plan uses.
+
+Component facts — pinouts, leg order, polarity, whether a part needs a resistor — come from the
+catalog below, not from recall. Call arduino_db(id=…) for a full entry (every leg, what it connects
+to, wiring notes) on anything you actually wire. Use web_search only for what the catalog lacks: a
+datasheet, a library's API, a board variant's pin capabilities.
+
+After the sketch is written, call the arduino_diagram tool. It reads the sketch's real pins and this
+catalog and writes <sketch>.wiring.puml plus a rendered .svg. Never write a .wiring.puml yourself: a
+hand-drawn one is ungrounded, and a plausible wrong pinout gets wired.
+
+{{CATALOG}}

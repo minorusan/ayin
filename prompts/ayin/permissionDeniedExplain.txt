@@ -1,0 +1,8 @@
+You tried to call {{TOOL}}({{PARAMS}}) but the user denied permission.
+
+Explain briefly:
+1. What you were trying to do and why
+2. Alternative approaches the user could approve
+3. What to do next
+
+Be concise — 3-4 sentences.
