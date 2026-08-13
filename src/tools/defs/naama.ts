@@ -1,4 +1,6 @@
+import { resolve } from 'node:path';
 import type { Tool } from '../base.js';
+import { entangledTo } from '../../entangle/index.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { entangle } from '../../entangle/index.js';
@@ -34,6 +36,19 @@ export const tool: Tool = {
     async execute(params) {
       const op = (params.op ?? 'add').trim().toLowerCase();
       if (!params.path) return 'Error: path required';
+      // THE ENTANGLED DESIGN IS NOT YOURS TO EDIT — and this is the second door to that, found the hard
+      // way. `write_file` and `str_replace` were already refused on it, but `naama` IS the design
+      // authoring tool, so pointing it at the bound design amended the contract from inside. Measured: a
+      // model stopped for naming an undeclared type responded by adding that type to the design, which
+      // would have made the gate certify the drift it exists to prevent.
+      //
+      // Reading it is fine. Authoring a DIFFERENT design is fine. Changing the one being enforced is the
+      // operator's decision, exactly as releasing the binding is.
+      if ((op === 'add' || op === 'drop') && entangledTo() && resolve(params.path) === entangledTo()) {
+        return 'Refused: that design is entangled, so it is the contract being enforced and not a file to '
+          + 'edit. If the design and your work have diverged, that IS the gap to report — state it, give '
+          + 'the options, and let the operator amend it. Authoring any other design is unaffected.';
+      }
       const doc = existsSync(params.path) ? loadNaama(params.path) : emptyNaamaDoc('');
       if (op === 'show') return renderNaama(doc);
       if (op === 'render') {

@@ -53,12 +53,29 @@ const seen = new Set<string>();
  */
 let stopPending = false;
 
+/**
+ * The type `op=next` last handed out, and the ones a stop has PARKED.
+ *
+ * Measured, and it is a flaw in the oracle rather than in any model: `op=next` returned the first
+ * unimplemented type every time, so a type that CANNOT be implemented — the trial's interface, which
+ * needs a type the design does not declare — was handed out 65 times in one run while nothing was
+ * written. Both models deadlocked on it; the faster one merely burned fewer rounds.
+ *
+ * A person parks the blocker and carries on with the other eight. So does this: a stop marks what was
+ * offered, and the next call skips it. The parked ones are reported at the end, which is the operator's
+ * decision they were always waiting for.
+ */
+let offered = '';
+const blocked = new Set<string>();
+
 export function entangle(path: string, workingIn = ''): { types: number; edges: number; source: string; scope: string } {
   const abs = resolve(path);
   design = loadDesign(abs);
   designPath = abs;
   scope = workingIn.trim();
   stopPending = false;
+  offered = '';
+  blocked.clear();
   seen.clear();
   return { types: design.types.size, edges: design.edges.length, source: abs, scope };
 }
@@ -94,7 +111,12 @@ export function gateWrite(file: string, source: string): string | null {
   const lang = languageFor(abs);
   if (!lang) return null;
   const violations: Violation[] = checkFile(design, lang, abs, source);
-  if (violations.length) { stopPending = true; return renderStop(violations, designPath); }
+  if (violations.length) {
+    stopPending = true;
+    // Park whatever this attempt was for, so the loop advances instead of being handed the same wall.
+    if (offered) blocked.add(offered);
+    return renderStop(violations, designPath);
+  }
   // Only a write that LANDS counts toward adoption. Recording a blocked file's types would report them as
   // implemented when the file was never written — the completion criterion would then be satisfied by
   // rejected work, which is worse than having no criterion at all. Caught by the adoption gate.
@@ -117,12 +139,20 @@ export function nextBrief(): string | null {
   if (!design) return null;
   const gaps = gateAdoption();
   if (gaps.length === 0) return null;
-  const t = design.types.get(gaps[0].subject);
+  const open = gaps.filter((g) => !blocked.has(g.subject));
+  if (open.length === 0) {
+    return `Every remaining type is BLOCKED pending your operator's decision: `
+      + `${gaps.map((g) => g.subject).join(', ')}. Do not try them again — report the gaps and the options `
+      + `you see for each, and stop. Nothing here can be implemented as the design currently stands.`;
+  }
+  const t = design.types.get(open[0].subject);
   if (!t) return null;
+  offered = t.name;
 
   const lines = [
     `NEXT: ${t.kind} ${t.name}${t.domain ? `  in ${t.domain}` : ''}`,
-    `${gaps.length - 1} designed type(s) remain after this one.`,
+    `${open.length - 1} designed type(s) remain after this one`
+      + `${blocked.size ? `, and ${blocked.size} parked awaiting the operator (${[...blocked].join(', ')})` : ''}.`,
     '',
     'Its designed surface — implement exactly these members, nothing more:',
   ];
@@ -156,6 +186,11 @@ export function stopAwaitingOperator(): boolean {
 /** The operator has seen it (a new user turn, or a fresh binding). */
 export function clearStop(): void {
   stopPending = false;
+}
+
+/** Types a stop has parked, for the end-of-task report. */
+export function blockedTypes(): string[] {
+  return [...blocked];
 }
 
 export function entangledScope(): string {

@@ -396,6 +396,22 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
     'what remains is scoped to the domain being worked in');
   ent.entangle(join(root, 'design.puml'));
 
+  // THE SECOND DOOR TO THE DESIGN. `write_file` and `str_replace` were refused on the entangled file from
+  // the start — but `naama` IS the authoring tool, and pointing it at the bound design amends the contract
+  // from inside. Measured in a live run: stopped for naming an undeclared type, the model added that type
+  // to the design, which would have made the gate certify the drift it exists to prevent. The weaker of
+  // the two models found this; the stronger one never tried it.
+  const naamaSrc = readFileSync(join(DIST, '..', 'src', 'tools', 'defs', 'naama.ts'), 'utf-8');
+  ok(/entangledTo\(\)/.test(naamaSrc) && /Refused: that design is entangled/.test(naamaSrc),
+    'naama refuses to author the design currently being enforced');
+  ok(/op === 'add' \|\| op === 'drop'/.test(naamaSrc),
+    'only the WRITING ops are refused — reading it, and authoring any other design, still work');
+
+  // A BLOCKED TYPE IS PARKED, NOT RE-OFFERED. `op=next` returned the first unimplemented type every time,
+  // so one un-implementable type became an infinite wall: handed out 65 times in a single run while
+  // nothing was written. A person parks the blocker and carries on with the rest.
+  ok(typeof ent.blockedTypes === 'function', 'parked types are reportable at the end of a task');
+
   // the design file is the agent's blind spot on purpose
   const self = ent.gateWrite(join(root, 'design.puml'), '@startuml\n@enduml\n');
   ok(self !== null, 'the design file is READ-ONLY while entangled — else the model legalises its own drift');
