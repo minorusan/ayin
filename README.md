@@ -50,9 +50,22 @@ on an OpenAI key and you need no GPU at all.
 From nothing to a running agent. Pick the model you have: an **OpenAI key**, or a **local GPU**.
 
 ```bash
-git clone --recursive <this-repo> ayin && cd ayin
+git clone --recursive https://github.com/minorusan/ayin.git && cd ayin
+./install.sh
+```
+
+`install.sh` does the whole thing and verifies its own result: prerequisites (Node 18+), submodule,
+**unregisters any existing `ayin`** so two of them cannot fight over PATH, pulls the latest, installs,
+builds, and points the global `ayin` command at this checkout. Safe to re-run. `--no-link` builds without
+touching the global command; a root-owned `ayin` that npm does not manage is **reported, not deleted**
+(`--replace-system-bin` if you do mean it).
+
+By hand, if you prefer:
+
+```bash
 npm install                       # 4 deps: blessed, openai, sharp, undici
 npm run build
+npm link                          # puts `ayin` on PATH
 ```
 
 **On first launch ayin asks.** It will not open the TUI with no model configured — a fresh clone that

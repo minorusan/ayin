@@ -12,8 +12,10 @@
  * which gates and only then `await import()`s the app. Every existing invocation path (`ayin`, the bin
  * symlink, `node dist/index.js`, the vendored launcher) goes through it without changing.
  *
- * IT IS FREE WHEN CONFIGURED. The happy path reads two config keys and returns; no probe, no network, no
- * measurable delay on every launch.
+ * CONFIGURED IS NOT REACHABLE. The gate acts on whether a model ANSWERS, so a configured URL is probed
+ * (bounded, a few ms on a LAN) — an `AYIN_LLM_URL` in a shell profile passed a presence check on a laptop
+ * that was not on that network, which put the original failure back one step. A stored OpenAI key is
+ * taken at face value: `/openai` verified it when it was written.
  *
  * NON-INTERACTIVE NEVER PROMPTS. A `-p` run, a `watch` daemon or a CI job has nobody to answer, so an
  * unconfigured one exits with the same instructions instead of blocking forever on a read that will never
@@ -22,6 +24,9 @@
  */
 
 import { createInterface } from 'node:readline/promises';
+import { existsSync, readdirSync, statSync, type Dirent } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getConfigString, setConfigValue } from './prompts.js';
 import { readOpenAiKey, writeOpenAiCredentials } from './tools/credentials/openai.js';
 
@@ -30,6 +35,48 @@ const OLLAMA_DEFAULT = 'http://127.0.0.1:11434';
 
 /** Commands that work with no model at all. */
 const NO_MODEL_NEEDED = new Set(['version', '--version', '-v', 'update', 'help', '--help', '-h']);
+
+/**
+ * IS THE RUNNING BUILD OLDER THAN THE SOURCE? Say so, loudly, before anything else.
+ *
+ * `git pull` without `npm run build` leaves a checkout whose source is new and whose `dist/` is not — and
+ * every signal an operator would check says the new version is running: `ayin version` reads
+ * package.json, git log shows the new commit, the files on disk are right. Measured twice in one session:
+ * a fix was reported as "nothing changed", and both of us believed the version number over the build.
+ *
+ * A warning rather than a refusal. Running a deliberately older `dist/` is legitimate (bisecting, a
+ * broken build you are mid-way through fixing), and a gate that will not let you start your editor
+ * because of a timestamp is worse than the confusion it prevents. But it is impossible to miss.
+ */
+function staleBuildWarning(): string {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+  if (!existsSync(join(root, '.git'))) return ''; // a packaged install has no source to be behind
+  const newest = (dir: string, ext: string): number => {
+    let latest = 0;
+    const walk = (d: string): void => {
+      let entries: Dirent[];
+      try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+        const p = join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith(ext)) {
+          try { latest = Math.max(latest, statSync(p).mtimeMs); } catch { /* raced */ }
+        }
+      }
+    };
+    walk(dir);
+    return latest;
+  };
+  const src = newest(join(root, 'src'), '.ts');
+  const dist = newest(join(root, 'dist'), '.js');
+  if (!src || !dist || src <= dist) return '';
+  const secs = Math.round((src - dist) / 1000);
+  const age = secs < 90 ? `${secs}s` : secs < 5400 ? `${Math.round(secs / 60)} min` : `${Math.round(secs / 3600)} h`;
+  return `\n  ⚠ Your build is STALE: src/ is ${age} newer than dist/.\n`
+    + `    ayin is running the OLD compiled code — \`ayin version\` reads package.json, not the build.\n`
+    + `    Fix: npm run build   (or: ayin update)\n`;
+}
 
 /** True when ayin has been TOLD where a model is. Says nothing about whether one answers. */
 export function hasModelConfigured(): boolean {
@@ -260,6 +307,11 @@ async function setupLoop(state: ModelState): Promise<boolean> {
  */
 export async function preflight(): Promise<void> {
   try {
+    // Before any decision about models: if the compiled build is older than the source, everything else
+    // the operator is about to read may be describing code that is not running.
+    const stale = staleBuildWarning();
+    if (stale) process.stderr.write(stale);
+
     if (NO_MODEL_NEEDED.has(process.argv[2] ?? '')) return;
 
     const state = await checkModel();
