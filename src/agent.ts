@@ -420,7 +420,31 @@ export function restoreConversation(turns: Array<{ role: string; content: string
  * newline meant the same thing; anything else before it is not the marker.
  */
 /** Refusals of an unmarked, tool-less turn before it is accepted anyway. Three clears the reflex. */
-const MAX_CONTINUE_NUDGES = 3;
+const MAX_CONTINUE_NUDGES = 1;
+
+/**
+ * SOME MODELS DO NOT SPEAK THIS PROTOCOL, and punishing them for it costs more than it saves.
+ *
+ * The `$` convention is enforced because a model once returned a to-do list as an answer and six files
+ * went unwritten. But it assumes the model follows the convention at all, and gemma — the model the
+ * convention was written for, reached through the resource provider — sometimes does not. Read from a real
+ * session log: one `llm_call`, one `continue_nudge`, one more `llm_call` whose reply ARGUED with the
+ * harness ("since you have signaled that I should continue... I will perform a scan of the current working
+ * directory") and then did exactly that. One nudge was enough to produce busywork.
+ *
+ * So the nudge is now spent ONCE per turn, and once a session has proven the model never marks its
+ * replies, it stops entirely: two unmarked finals with no marker ever produced is evidence about the
+ * MODEL, not about this turn. A protocol one side does not implement is not a protocol, and the harness
+ * stops pretending otherwise instead of burning rounds on it.
+ */
+let markerEverSeen = false;
+let unmarkedFinals = 0;
+const GIVE_UP_ON_MARKER_AFTER = 2;
+
+/** Whether the marker convention is worth enforcing on this session's model. */
+function markerWorthEnforcing(): boolean {
+  return markerEverSeen || unmarkedFinals < GIVE_UP_ON_MARKER_AFTER;
+}
 
 /**
  * CONSECUTIVE nudges without progress, not nudges in total.
@@ -899,15 +923,25 @@ export async function runAgent(userInput: string): Promise<void> {
       // reaction re-states the rule, so drifting out of the convention is self-correcting. The default is
       // also the safe one: forgetting the marker costs one round, while the failure it replaces cost six
       // unwritten files.
-      if (!hasFinalMarker(response) && !stopAwaitingOperator() && continueNudges < MAX_CONTINUE_NUDGES) {
+      if (hasFinalMarker(response)) markerEverSeen = true;
+      else unmarkedFinals++;
+      if (!hasFinalMarker(response) && markerWorthEnforcing() && !stopAwaitingOperator()
+          && continueNudges < MAX_CONTINUE_NUDGES) {
         continueNudges++;
-        log('INFO', 'continue_nudge', { nudge: String(continueNudges), round: String(round) });
+        log('INFO', 'continue_nudge', {
+          nudge: String(continueNudges), round: String(round), unmarkedFinals: String(unmarkedFinals),
+        });
         pushToWindow('assistant', response);
         pushMessage('assistant', response);
+        // TWO BRANCHES, COMPLETION FIRST. The old wording opened with "Carry on: take the next concrete
+        // step now" and mentioned the marker last — and the model obeyed the imperative it was given:
+        // finished, told it was mid-work, and offered no legal way to say so, it fabricated a directory
+        // scan. Position is load-bearing in a prompt (the middle gets skimmed), so the way OUT goes first.
         pushToWindow('user',
-          `That reply has no tool call and does not start with $, so it is mid-work, not an answer. `
-          + `Carry on: take the next concrete step now. When you are genuinely finished and need nothing `
-          + `further, start that reply with $ as its first character.`);
+          `Your reply carried no tool call and no $ marker, so the harness cannot tell whether you are done.\n`
+          + `IF YOU ARE FINISHED: reply with $ followed by your answer. Nothing else is required — do not `
+          + `invent further work to justify another turn.\n`
+          + `IF YOU ARE NOT FINISHED: take the next concrete step now, rather than describing it.`);
         continue;
       }
       const response_ = stripFinalMarker(response);

@@ -668,8 +668,12 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
   const agSrc = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
   ok(/stopAwaitingOperator\(\) \? \[\] : gateAdoption\(\)/.test(agSrc),
     'the adoption nudge yields to a pending stop');
-  ok(/!hasFinalMarker\(response\) && !stopAwaitingOperator\(\)/.test(agSrc),
+  ok(/!hasFinalMarker\(response\) && markerWorthEnforcing\(\) && !stopAwaitingOperator\(\)/.test(agSrc),
     'so does the $ marker nudge — a stop is a legitimate end of turn');
+  // The nudge must offer a way to SAY you are finished, first. Without it, a model that is done has only
+  // one sanctioned action — do more work — and it invents some. Measured from a real session log.
+  ok(/IF YOU ARE FINISHED/.test(agSrc) && agSrc.indexOf('IF YOU ARE FINISHED') < agSrc.indexOf('IF YOU ARE NOT FINISHED'),
+    'and the nudge leads with the completion branch, not with "carry on"');
 
   ent.disentangle();
   ok(ent.gateWrite(join(cs, 'P.cs'), 'namespace Widgets.Core { public interface IAnything {} }') === null,
