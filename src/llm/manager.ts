@@ -67,7 +67,17 @@ export function setAdapter(name: string): boolean {
   if (!found) return false;
   adapterOverride = found.id;
   cachedDialect = found;
-  log('INFO', 'adapter_override', { adapter: found.id, model: cachedModelId || '(unknown)' });
+  // Not an error — blindfolding ayin deliberately is the operator's to do. But an accident looks
+  // identical to an intention, so the disagreement is stated once, here, rather than discovered later
+  // as a model that stopped calling tools.
+  const natural = DIALECTS.find((d) => d.matches(cachedModelId));
+  const disagrees = cachedModelId !== '' && natural !== undefined && natural.id !== found.id;
+  log(disagrees ? 'WARN' : 'INFO', 'adapter_override', {
+    adapter: found.id,
+    model: cachedModelId || '(unknown)',
+    ...(disagrees ? { wouldHaveMatched: natural.id } : {}),
+  });
+  mismatchWarned.clear();
   return true;
 }
 
@@ -135,7 +145,47 @@ export function toolCallInstructions(): string {
 /** Who declares tools right now. Sync, because the system prompt is assembled synchronously. */
 let cachedToolMode: 'native' | 'prompt' = 'prompt';
 export function toolMode(): 'native' | 'prompt' { return cachedToolMode; }
-export function parseToolCalls(raw: string): ParseAllResult { return activeDialect().parse(raw); }
+/** Adapter pairs already reported this session, so a mismatch is named once and not on every round. */
+const mismatchWarned = new Set<string>();
+
+/**
+ * Parse, and SAY SO when the reply is in another adapter's format.
+ *
+ * The failure this catches is silent by construction: an adapter that cannot parse a reply finds zero
+ * tool calls, and zero tool calls is indistinguishable from a model that chose to answer in prose. The
+ * loop then treats a tool-calling turn as a final answer, and the operator sees a model that "ignored its
+ * tools" — the diagnosis costs an hour and the cause is one setting.
+ *
+ * So when the active adapter finds nothing, every OTHER adapter is offered the same text. If one of them
+ * would have parsed it, that is not a model problem and it is not ambiguous: it is named, with the fix.
+ * Only runs on the failure path, so a working session pays nothing.
+ */
+export function parseToolCalls(raw: string): ParseAllResult {
+  const active = activeDialect();
+  const result = active.parse(raw);
+  if (result.toolCalls.length > 0 || raw.trim().length < 20) return result;
+
+  for (const other of DIALECTS) {
+    if (other.id === active.id) continue;
+    let wouldParse = 0;
+    try { wouldParse = other.parse(raw).toolCalls.length; } catch { continue; }
+    if (wouldParse === 0) continue;
+    const pair = `${active.id}<-${other.id}`;
+    if (mismatchWarned.has(pair)) break;
+    mismatchWarned.add(pair);
+    log('WARN', 'adapter_format_mismatch', {
+      active: active.id,
+      looksLike: other.id,
+      calls: String(wouldParse),
+      model: cachedModelId || '(unknown)',
+      forced: String(adapterOverride !== ''),
+      hint: `the reply carries ${other.id}-shaped tool calls that the ${active.id} adapter cannot read — `
+        + `/model ${other.id}, or /model auto to match on the served model`,
+    });
+    break;
+  }
+  return result;
+}
 export function renderToolCall(call: ParsedToolCall): string { return activeDialect().renderToolCall(call); }
 export function renderToolResult(body: string): string { return activeDialect().renderToolResult(body); }
 
