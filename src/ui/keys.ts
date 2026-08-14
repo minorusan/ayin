@@ -11,6 +11,7 @@
 import type blessed from 'blessed';
 import { HEADLESS } from './headless.js';
 import { screen } from './screen.js';
+import { getConfigString } from '../prompts.js';
 import type { ChatLog } from './widgets/chat.js';
 import type { InputBar } from './widgets/input.js';
 
@@ -53,14 +54,27 @@ const WHEEL_LINES = 3;
 /**
  * Wheel scrolling — the ONLY mouse handling in ayin.
  *
- * See the amended copy-paste contract in `screen.ts`: tracking is enabled, but nothing is clickable
- * or draggable and only `wheelup`/`wheeldown` are consumed, so a click behaves exactly as your
- * terminal would behave without ayin. **Shift+drag still selects text natively** in every terminal
- * that implements the standard bypass, which is how copy-paste survives. `AYIN_MOUSE=0` restores the
- * old keyboard-only behaviour for a terminal where it does not.
+ * OPT-IN. See the copy-paste contract in `screen.ts`: the terminal's native selection wins by default,
+ * so tracking is off unless `AYIN_MOUSE=1` / `/set mouse on`. When it IS on, nothing is clickable or
+ * draggable and only `wheelup`/`wheeldown` are consumed, so a click behaves exactly as your terminal
+ * would without ayin, and Shift+drag selects natively in terminals that implement the bypass.
  */
 function installMouseRouter(chat: ChatLog, input: InputBar): void {
-  if (process.env.AYIN_MOUSE === '0') return;
+  /**
+   * OFF BY DEFAULT, and that is a reversal.
+   *
+   * Wheel scrolling was made the default on the theory that Shift+drag is a universal bypass, so nothing
+   * was really lost. It is not universal enough: an operator on macOS reported, plainly, that they could
+   * not select anything in ayin's terminal — and selecting transcript text is not a nicety, it is how you
+   * get a stack trace out of the tool and into a bug report or a chat.
+   *
+   * So the older rule stands after all: the terminal's own selection wins, because losing it costs more
+   * than a wheel gains. `AYIN_MOUSE=1` (or `/set mouse on`) opts in for anyone who prefers the trade —
+   * and PgUp/PgDn and Shift+↑/↓ scroll without any of this.
+   */
+  const wanted = (process.env.AYIN_MOUSE ?? getConfigString('mouse') ?? '').trim().toLowerCase();
+  const on = wanted === '1' || wanted === 'on' || wanted === 'true';
+  if (!on) return;
   try {
     // NARROW ON PURPOSE. `enableMouse()` turns on 1000 + 1002 (cell motion) + 1003 (ALL motion), so
     // every pixel of mouse movement becomes an event blessed has to parse and dispatch — for a feature

@@ -1,21 +1,18 @@
 /**
  * Screen — the one blessed screen (noop in headless).
  *
- * COPY-PASTE CONTRACT, as amended. The old rule was absolute: **never** enable mouse tracking,
- * because it hijacks the terminal's native text selection and copying transcript text matters more
- * than scrolling with a wheel. The rule was right about the tradeoff and wrong that the tradeoff is
- * total — every terminal worth using (xterm, gnome-terminal, kitty, iTerm2, Windows Terminal, tmux)
- * lets **Shift+drag** bypass an application's mouse reporting and select natively. So the wheel is
- * now enabled, in exactly one place (`keys.ts#installMouseRouter`), under two conditions that keep
- * the spirit of the contract:
+ * COPY-PASTE CONTRACT: the terminal's own text selection wins. Mouse tracking is OFF by default.
  *
- *   1. WHEEL EVENTS ONLY. Nothing here is clickable, focusable or draggable; no widget sets
- *      `mouse: true`. A click still does whatever your terminal would do with it.
- *   2. IT IS SWITCHABLE. `AYIN_MOUSE=0` restores the keyboard-only behaviour exactly, for a terminal
- *      where Shift+drag does not work.
+ * This has been decided twice. The original rule was absolute — never enable tracking, because it
+ * hijacks native selection and copying transcript text matters more than a scroll wheel. It was then
+ * amended on the theory that Shift+drag is a universal bypass, so the wheel could be had for free. It
+ * is not universal enough: an operator on macOS could not select anything in ayin at all, and getting a
+ * stack trace out of the tool matters more than scrolling with a wheel. The original rule stands.
  *
- * Keyboard scrolling stays (PgUp/PgDn, Shift+↑/↓) — the wheel is an addition, not a replacement, and
- * plain ↑/↓ remain prompt history.
+ *   · Default: no tracking. Select and copy exactly as in any other program.
+ *   · `AYIN_MOUSE=1`, or `/set mouse on`, enables WHEEL EVENTS ONLY (`keys.ts#installMouseRouter`).
+ *     Nothing is clickable, focusable or draggable; no widget sets `mouse: true`.
+ *   · Keyboard scrolling always works: PgUp/PgDn, Shift+↑/↓. Plain ↑/↓ stay prompt history.
  */
 
 import blessed from 'blessed';

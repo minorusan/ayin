@@ -711,7 +711,13 @@ from inside the TUI with `/set`:
 /set ollama-model qwen3-coder:30b      # which model it asks for
 /set llm-url http://localhost:9100     # …or the HTTP endpoint, for the contract providers
 /openai sk-…                           # the OpenAI key (verified, then saved to ~/.ayin-cli/openai.env)
+/set mouse on                          # wheel scrolling, at the cost of native text selection
 ```
+
+**Selecting and copying text works normally**, because ayin does not enable mouse tracking — which is
+what hijacks a terminal's own selection. Scroll with **PgUp/PgDn** or **Shift+↑/↓**. If you would rather
+have the wheel, `/set mouse on` (or `AYIN_MOUSE=1`) turns on wheel events only; nothing becomes
+clickable, and Shift+drag then selects in terminals that implement the bypass.
 
 See [`SETUP.md`](SETUP.md) for the full list of tunables.
 

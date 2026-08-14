@@ -133,6 +133,8 @@ export const KNOWN_CONFIG_KEYS = [
   // Written by the first-run gate: the timestamp AND what was chosen. Its presence is what makes
   // onboarding happen exactly once — see preflight.ts.
   'onboardedAt',
+  // 'on' enables wheel scrolling, at the cost of the terminal's native text selection — off by default.
+  'mouse',
 ];
 
 export function getConfigString(key: string): string | undefined {

@@ -182,6 +182,29 @@ ok(!/<tool_call>/.test(instr),
 ok(!/cheapest tool|identical call|prefer str_replace/i.test(instr),
   'rules the harness enforces mechanically are not restated in every prompt');
 
+// THE TERMINAL'S TEXT SELECTION WINS. Mouse tracking hijacks it, and getting a stack trace out of the
+// tool matters more than a scroll wheel. Decided twice: the rule was relaxed on the theory that Shift+drag
+// is a universal bypass, then restored when an operator on macOS could not select anything at all.
+console.log('\nmouse tracking is opt-in, so copy-paste keeps working');
+{
+  const keys = readFileSync(join(DIST, '..', 'src', 'ui', 'keys.ts'), 'utf-8');
+  ok(/const on = wanted === '1' \|\| wanted === 'on' \|\| wanted === 'true';\s*\n\s*if \(!on\) return;/.test(keys),
+    'the wheel router returns unless mouse is explicitly turned ON');
+  ok(/AYIN_MOUSE \?\? getConfigString\('mouse'\)/.test(keys),
+    'and it can be enabled per-shell or persisted, one place either way');
+  // The narrow modes matter as much as the default: 1002/1003 grab motion, which fights selection hardest
+  // even in terminals where the Shift bypass works.
+  const keysCode = keys.split('\n').filter((l) => {
+    const t = l.trim();
+    return t && !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('/*');
+  }).join('\n');
+  ok(/vt200Mouse: true, sgrMouse: true/.test(keysCode) && !/1002|1003/.test(keysCode),
+    'when on, it asks for wheel modes only — never cell or all-motion tracking');
+  const scr = readFileSync(join(DIST, '..', 'src', 'ui', 'screen.ts'), 'utf-8');
+  ok(/Mouse tracking is OFF by default/.test(scr),
+    'and the contract in screen.ts says so, since this is the file people read first');
+}
+
 // NO MODEL, NO TUI. A fresh clone used to open the full TUI, take a prompt, and fail on the first
 // generation with a connection error — which reads as "ayin is broken" rather than "ayin needs telling
 // where its model is". The gate can only work from a SEPARATE entry point: ui/screen.ts builds the
@@ -1324,12 +1347,14 @@ console.log('\nmouse modes');
   const { execFileSync } = await import('node:child_process');
   let out = Buffer.alloc(0);
   try {
+    // AYIN_MOUSE=1 because tracking is OPT-IN now: the default emits no modes at all, so probing
+    // without it would assert nothing. What must hold is the shape of what gets enabled when it is.
     out = execFileSync(process.execPath, ['-e', `import(${JSON.stringify(`file://${join(DIST, 'ui/index.js')}`)}).then(() => process.exit(0))`],
-      { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+      { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, AYIN_MOUSE: '1' } });
   } catch (e) { out = e?.stdout ?? Buffer.alloc(0); }
   const modes = [...new Set([...out.toString('latin1').matchAll(/\x1b\[\?(1\d{3})[hl]/g)].map((m) => m[1]))];
-  ok(modes.includes('1000'), 'button tracking (1000) is on — this is where wheel events arrive', modes.join(','));
-  ok(modes.includes('1006'), 'SGR encoding (1006) is on — correct past column 223');
+  ok(modes.includes('1000'), 'WHEN ENABLED: button tracking (1000) is on — where wheel events arrive', modes.join(','));
+  ok(modes.includes('1006'), 'WHEN ENABLED: SGR encoding (1006) is on — correct past column 223');
   ok(!modes.includes('1002') && !modes.includes('1003'), 'motion tracking (1002/1003) stays OFF — no event flood, minimal selection interference');
 }
 
