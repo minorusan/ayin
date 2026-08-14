@@ -212,6 +212,9 @@ export function showDialog(
       resolve(result);
     }
 
+    // Set just before subscribing; consulted by onKey so a queued Enter cannot confirm instantly.
+    let guardConfirm: () => boolean = () => false;
+
     function onKey(ch: string | undefined, key: blessed.Widgets.Events.IKeyEventArg): void {
       if (key.full === 'up' || key.full === 'k') {
         selected = (selected - 1 + options.length) % options.length;
@@ -224,6 +227,7 @@ export function showDialog(
         return;
       }
       if (key.full === 'return' || key.full === 'enter') {
+        if (guardConfirm()) return; // the keystroke that opened this dialog — not an answer to it
         cleanup(selected);
         return;
       }
@@ -241,8 +245,32 @@ export function showDialog(
       }
     }
 
+    /**
+     * THE KEYSTROKE THAT OPENED THE DIALOG MUST NOT ALSO ANSWER IT.
+     *
+     * A dialog opened from a slash command is created inside the input widget's submit handler, and the
+     * Enter that submitted the line is delivered to the SCREEN immediately afterwards. Subscribe
+     * synchronously and that Enter lands on `onKey`, which confirms the pre-selected row and destroys the
+     * box before a single frame is painted: the operator sees no popup at all and gets whatever row 0
+     * happened to be. Reported as "`/model` does nothing and then lies about the provider".
+     *
+     * Older callers escaped it by accident — they awaited network calls (a catalogue fetch) before
+     * opening, which drained the pending key event first. Anything synchronous hit it every time, which
+     * is why this belongs here rather than in each caller.
+     *
+     * Two layers, because either alone is thin: subscribe on the next macrotask so the pending keypress is
+     * delivered first, and ignore a confirm for a moment after opening in case one is queued behind it.
+     * Navigation and Escape stay live immediately — only ACCEPTING is deferred.
+     */
+    const openedAt = Date.now();
+    const CONFIRM_GRACE_MS = 150;
+    guardConfirm = () => Date.now() - openedAt < CONFIRM_GRACE_MS;
+
     blurInput(); // the popup owns the keyboard while it is up
-    screen.on('keypress', onKey);
-    render();
+    render();    // paint FIRST, so the box is on screen before any key can dismiss it
+    setTimeout(() => {
+      if (resolved) return;
+      screen.on('keypress', onKey);
+    }, 0);
   });
 }

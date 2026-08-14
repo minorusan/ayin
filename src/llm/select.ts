@@ -155,6 +155,20 @@ function start(): Promise<LlmProvider> {
     .finally(() => { inFlight = null; });
 }
 
+/**
+ * Throw away the cached resolution so the next call re-decides.
+ *
+ * Needed because the resolution depends on CONFIG, and config changes at runtime — `/set llm-provider`,
+ * `/set llm-url`, or clearing an override. Without this, `llmProvider()` keeps handing back the provider
+ * it picked at boot, which is how `/model local` could report success while OpenAI carried on answering.
+ */
+export function resetProviderResolution(): void {
+  current = null;
+  provisional = false;
+  inFlight = null;
+  lastProbeAt = 0;
+}
+
 /** Resolve the provider once at boot, so the first UI paint already knows what exists. */
 export async function initLlmProvider(): Promise<LlmProvider> {
   return llmProvider();

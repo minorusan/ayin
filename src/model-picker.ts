@@ -34,7 +34,7 @@
 import { addMessage, setAgentStatus } from './ui.js';
 import { showDialog, type DialogOption } from './dialog.js';
 import { acquireLlm, type LlmHold } from './llm/authority.js';
-import { llmProvider, llmProviderName, setProviderOverride, providerOverrideName } from './llm/select.js';
+import { llmProvider, llmProviderName, setProviderOverride, providerOverrideName, resetProviderResolution } from './llm/select.js';
 import { openAiKey, openAiModel } from './llm/providers/openai.js';
 import { noKeyMessage } from './tools/credentials/openai.js';
 import { setRequestAuthority } from './connection.js';
@@ -393,13 +393,37 @@ async function handleProviderChoice(want: string): Promise<boolean> {
   }
 
   if (want === 'local') {
-    if (!providerOverrideName()) {
-      addMessage('system', 'Already on the local provider.');
+    /**
+     * "AM I ON OPENAI?" IS NOT THE SAME QUESTION AS "DID I ASK FOR OPENAI?" — and conflating them made
+     * this command lie.
+     *
+     * It used to answer from `providerOverrideName()`, which only `/model openai` sets. But OpenAI is
+     * ALSO where resolution lands when nothing local is configured (select.ts, the fresh-clone default),
+     * and that sets no override. So on a machine with no local endpoint, `/model` reported "already on
+     * the local provider" while the status bar showed gpt-5.5 and every token was billed. Reported by the
+     * operator, who could see both lines at once.
+     *
+     * So: ask what is actually RESOLVED, and after clearing the override, ask again — because clearing an
+     * override cannot conjure a local model that was never configured.
+     */
+    const before = (await llmProvider()).name;
+    if (before !== 'openai') {
+      addMessage('system', `Already on the local provider (${before}${activeModelId() ? ` · ${activeModelId()}` : ''}).`);
       return true;
     }
     setProviderOverride(null);
+    resetProviderResolution(); // config may have changed; re-decide instead of reusing the boot answer
+    const after = (await llmProvider()).name;
     await refreshActiveModel();
-    addMessage('system', `Back on the local provider (${activeModelId() || 'resolving…'}).`);
+    if (after === 'openai') {
+      addMessage('system',
+        'No local model is configured, so OpenAI is still what answers — clearing the choice cannot '
+        + 'invent one.\nPoint ayin at a local model, then run /model local again:\n'
+        + '  /set llm-provider ollama            (a local Ollama)\n'
+        + '  /set llm-url http://host:9100       (an endpoint serving the HTTP contract)');
+      return true;
+    }
+    addMessage('system', `Now on the local provider (${after}${activeModelId() ? ` · ${activeModelId()}` : ''}).`);
     return true;
   }
   return false;
@@ -417,17 +441,23 @@ async function handleProviderChoice(want: string): Promise<boolean> {
  * would make an adapter look like something that changes the model.
  */
 async function showProviderPicker(): Promise<void> {
-  const onOpenAi = providerOverrideName() === 'openai';
+  // The RESOLVED provider, which is the only honest answer to "what answers me right now" — an override
+  // is one of several ways to arrive at OpenAI, and the default is another.
+  const active = (await llmProvider()).name;
+  const onOpenAi = active === 'openai';
   const key = openAiKey();
   const cur = activeAdapter();
-  const localName = llmProviderName() || 'resolving…';
+  const localName = onOpenAi ? (llmProviderName() === 'openai' ? '' : llmProviderName()) : llmProviderName();
   const localModel = activeModelId();
 
   const options: DialogOption[] = [
     {
       label: 'Local',
-      note: onOpenAi ? localName : `${localName} · active`,
-      sub: localModel ? `serving ${localModel}` : 'a model you host — nothing leaves this machine',
+      note: onOpenAi ? (localName || 'not configured') : `${localName} · active`,
+      sub: onOpenAi
+        ? (localName ? 'a model you host — nothing leaves this machine'
+          : 'nothing local configured yet — /set llm-provider ollama, or /set llm-url http://host:9100')
+        : (localModel ? `serving ${localModel}` : 'a model you host — nothing leaves this machine'),
     },
     {
       label: 'OpenAI',

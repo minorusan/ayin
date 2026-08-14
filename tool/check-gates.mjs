@@ -205,6 +205,40 @@ console.log('\nmouse tracking is opt-in, so copy-paste keeps working');
     'and the contract in screen.ts says so, since this is the file people read first');
 }
 
+// A DIALOG IS NOT ANSWERED BY THE KEYSTROKE THAT OPENED IT.
+// Opened from a slash command, the dialog is constructed inside the input's submit handler, and the Enter
+// that submitted the line reaches the screen straight after. Subscribing synchronously let that Enter
+// confirm the pre-selected row and destroy the box before a frame was painted — the operator saw NO popup
+// and got row 0's action. Older callers escaped it only by awaiting a network fetch first.
+console.log('\ndialogs survive the keystroke that opened them');
+{
+  const dlg = readFileSync(join(DIST, '..', 'src', 'dialog.ts'), 'utf-8');
+  const paintAt = dlg.indexOf('render();    // paint FIRST');
+  const subAt = dlg.indexOf("screen.on('keypress', onKey)");
+  ok(paintAt > 0 && subAt > paintAt, 'the box is painted BEFORE any key listener exists');
+  ok(/setTimeout\(\(\) => \{[\s\S]{0,120}screen\.on\('keypress', onKey\);/.test(dlg),
+    'and the listener is registered on the next macrotask, after the pending keypress is delivered');
+  ok(/if \(guardConfirm\(\)\) return;/.test(dlg),
+    'a confirm arriving within the grace window is ignored, in case one was queued behind it');
+  ok(/key\.full === 'escape'[\s\S]{0,80}cleanup\(-1\)/.test(dlg),
+    'Escape stays live immediately — only ACCEPTING is deferred, never dismissing');
+}
+
+// `/model` MUST REPORT WHAT ACTUALLY ANSWERS. It read `providerOverrideName()`, which only `/model openai`
+// sets — but OpenAI is also where resolution lands when nothing local is configured, with no override at
+// all. So on such a machine it said "already on the local provider" while the status bar showed gpt-5.5.
+{
+  const mp = readFileSync(join(DIST, '..', 'src', 'model-picker.ts'), 'utf-8');
+  ok(/const active = \(await llmProvider\(\)\)\.name;/.test(mp),
+    'the picker reads the RESOLVED provider, not the override flag');
+  ok(/const before = \(await llmProvider\(\)\)\.name;[\s\S]{0,200}before !== 'openai'/.test(mp),
+    "and `/model local` decides from the resolved provider too");
+  ok(/resetProviderResolution\(\)/.test(mp),
+    'clearing the override re-resolves, so the answer reflects config rather than the boot decision');
+  ok(/No local model is configured/.test(mp),
+    'and when nothing local exists it says so instead of claiming success');
+}
+
 // NO MODEL, NO TUI. A fresh clone used to open the full TUI, take a prompt, and fail on the first
 // generation with a connection error — which reads as "ayin is broken" rather than "ayin needs telling
 // where its model is". The gate can only work from a SEPARATE entry point: ui/screen.ts builds the
