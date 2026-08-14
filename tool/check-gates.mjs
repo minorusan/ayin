@@ -824,8 +824,19 @@ console.log('\ntools are discovered, and a private set needs no fork');
       'and from an /organizations/<slug>/ path');
     eq(sx('https://us.sentry.io/issues/ sntryu_0123456789abcdefghijklmnopqrst').org, '',
       "Sentry's regional hosts are not mistaken for an org slug");
-    eq(sx('token only: sntryu_0123456789abcdefghijklmnopqrst').org, '',
-      'no org is invented when the paste has none — it merges from the stored file instead');
+    // The natural input is `/sentry-auth <token> <slug>`, and refusing an unlabelled word rejected exactly
+    // that — measured on a real paste. Safe to read optimistically because the caller VERIFIES before it
+    // writes: a wrong org costs one failed request and changes nothing.
+    eq(sx('sntryu_0123456789abcdefghijklmnopqrst play-perfect').org, 'play-perfect',
+      'a bare word after the token is read as the org slug');
+    eq(sx('sntryu_0123456789abcdefghijklmnopqrst Play Perfect play-perfect').org, 'play-perfect',
+      'and a hyphenated candidate wins over a display name pasted beside it');
+    // A project is OPTIONAL and NARROWS every query: guessed wrong, verification still passes while the
+    // connector silently reports nothing. It needs a label.
+    eq(sx('sntryu_0123456789abcdefghijklmnopqrst play-perfect play-perfect').project, '',
+      'a project is never guessed from a bare word — only a label or a URL sets it');
+    eq(sx('sntryu_0123456789abcdefghijklmnopqrst org: acme project: backend').project, 'backend',
+      'a labelled project is still read');
     ok(/[0-9a-f]{64}/.source && sx(`legacy ${'a'.repeat(64)}`).token === 'a'.repeat(64),
       'a legacy 64-hex Sentry token is still recognised');
     ok(daysUntilExpiry({ expires: '2020-01-01' }) < 0, 'a lapsed expiry reads negative, so the warning can fire');

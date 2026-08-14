@@ -31,8 +31,8 @@ const TOKEN_RE = /\b(?:sntry[usi]_[A-Za-z0-9]{20,}|[0-9a-f]{64})\b/;
 /**
  * The ordinary paste, without a model.
  *
- * The org is found from a URL when one is present, then from a `org:`/`organization:` label. Nothing
- * else is guessed: a bare word in a paste is far more likely to be a project, a person or a note.
+ * The org is read from a URL, then a `org:` label, then a BARE WORD — see the note at the leftovers pass
+ * for why guessing is safe for the org and refused for the project.
  */
 export function extractDeterministic(text: string): Extracted {
   const out: Extracted = { ...EMPTY };
@@ -53,6 +53,42 @@ export function extractDeterministic(text: string): Extracted {
   const project = /\bproject\b\s*[:=]?\s*([a-z0-9-]+)/i.exec(text)
     ?? /sentry\.io\/organizations\/[a-z0-9-]+\/(?:issues\/)?\?project=([a-z0-9-]+)/i.exec(text);
   out.project = (project?.[1] ?? '').toLowerCase();
+
+  /**
+   * BARE WORDS. `/sentry-auth <token> play-perfect` is how a person actually types this, and refusing to
+   * read it — on the reasoning that an unlabelled word could be a project or a note — meant the natural
+   * input was rejected with an instruction to add a label. Measured on a real paste.
+   *
+   * Guessing is safe HERE and would not be elsewhere, for one specific reason: the caller verifies the
+   * candidate against Sentry before writing anything. A wrong guess produces "verification failed" and
+   * changes no state, so the cost of reading a word optimistically is one failed request; the cost of
+   * refusing it is a person who cannot configure the tool from its own usage line.
+   *
+   * ONLY THE ORG is taken from a bare word. The org is REQUIRED and verified, so a wrong guess costs one
+   * failed request and changes nothing. A project is OPTIONAL and *narrows* every query — guess it wrong
+   * and verification still passes while the connector quietly reports an empty sprint of errors, which is
+   * the worst kind of wrong. A project therefore needs a label (`project: x`) or a URL parameter.
+   *
+   * A hyphenated candidate wins: `<token> Play Perfect play-perfect` pastes a display name beside a slug,
+   * and slugs are the hyphenated ones.
+   */
+  const leftovers = text
+    .replace(TOKEN_RE, ' ')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/\b[\w.+-]+@\S+\b/g, ' ')
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ')
+    .split(/[\s,;]+/)
+    .map((w) => w.trim().toLowerCase())
+    .filter((w) => /^[a-z0-9][a-z0-9-]{1,60}$/.test(w))
+    // The label words themselves, and Sentry's own vocabulary, are never the slug.
+    .filter((w) => !['org', 'organization', 'organisation', 'project', 'token', 'key', 'pat', 'secret',
+      'slug', 'sentry', 'expires', 'expiry', 'and', 'the', 'my', 'is'].includes(w))
+    // Anything already identified is not a leftover.
+    .filter((w) => w !== out.org && w !== out.project);
+
+  if (!out.org && leftovers.length) {
+    out.org = (leftovers.find((w) => w.includes('-')) ?? leftovers[0]) as string;
+  }
 
   return out;
 }
