@@ -43,6 +43,26 @@ The endpoint is resolved by `llmBaseUrl()` in priority order: **`AYIN_LLM_URL`**
 Transport details: retries on transient errors, a long timeout (coder models can think for minutes),
 and image attach for vision turns. See [`SETUP.md`](../SETUP.md) for the ways to stand up an endpoint.
 
+### Preflight — no model, no TUI (`src/preflight.ts`, `src/index.ts`)
+
+`dist/index.js` is a GATE, not the app. It runs one check and only then `await import('./app.js')`.
+
+The split is structural, not stylistic: `ui/screen.ts` builds the blessed screen at **module scope**, and
+ESM evaluates every static import before any statement in the importing module — so a check written
+inside the app cannot run before the terminal is taken, however early in the file it appears. A dynamic
+import is the only ordering that holds. Keep `index.ts` free of features: code there runs with no log
+sink and no UI, able to talk to the operator only through stdout.
+
+- **Configured is free**: two config reads, no probe, no launch delay. The gate is invisible in normal use.
+- **Unconfigured + interactive**: a plain-terminal menu (readline, before blessed exists). A local Ollama
+  is *detected and offered* rather than asked for; every option is **verified** before it is stored
+  (`/api/tags` for Ollama, `/api/status` for an endpoint, `models.list` for OpenAI), because storing an
+  unreachable URL only moves the original failure one step later. Invalid input re-asks rather than
+  failing — the loop exits when ayin works, or when the operator quits.
+- **Unconfigured + non-interactive** (`-p`, `watch`, `explain`, no TTY): exits 1 with the same
+  instructions. Blocking a CI job on a prompt nobody will answer is worse than failing it.
+- **`version` / `update` / `--help`** bypass the gate entirely.
+
 ### OpenAI — the default a fresh clone can actually run
 
 **Ayin never escalates to OpenAI on its own.** The older idea — notice the local endpoint is

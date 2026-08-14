@@ -182,6 +182,41 @@ ok(!/<tool_call>/.test(instr),
 ok(!/cheapest tool|identical call|prefer str_replace/i.test(instr),
   'rules the harness enforces mechanically are not restated in every prompt');
 
+// NO MODEL, NO TUI. A fresh clone used to open the full TUI, take a prompt, and fail on the first
+// generation with a connection error — which reads as "ayin is broken" rather than "ayin needs telling
+// where its model is". The gate can only work from a SEPARATE entry point: ui/screen.ts builds the
+// blessed screen at module scope, and ESM evaluates static imports before any statement in the importer,
+// so a check inside the app can never run first however early it is written.
+console.log('\nayin refuses to start without a model');
+{
+  const entry = readFileSync(join(DIST, '..', 'src', 'index.ts'), 'utf-8');
+  ok(/await preflight\(\);/.test(entry), 'the entry point awaits the preflight gate');
+  ok(/await import\('\.\/app\.js'\)/.test(entry),
+    'and reaches the app only by DYNAMIC import — a static one would initialise blessed first');
+  ok(entry.indexOf('await preflight()') < entry.indexOf("await import('./app.js')"),
+    'in that order');
+  const staticUi = /^import[^;]*from '\.\/(ui|app)\.js'/m.test(entry);
+  ok(!staticUi, 'the entry point never statically imports the UI or the app');
+
+  const pf = readFileSync(join(DIST, '..', 'src', 'preflight.ts'), 'utf-8');
+  const pfCode = pf.split('\n').filter((l) => {
+    const t = l.trim();
+    return t && !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('/*');
+  }).join('\n');
+  ok(!/from '\.\/ui/.test(pfCode) && !/blessed/.test(pfCode),
+    'the gate itself pulls in no UI — it runs on a plain terminal, before blessed exists');
+  const flight = await import(`file://${join(DIST, 'preflight.js')}`);
+  ok(typeof flight.hasModelConfigured === 'function', 'the check is exported and testable');
+  // Free when configured: the happy path must not probe the network on every launch.
+  ok(!/await probe/.test(pf.slice(pf.indexOf('export function hasModelConfigured'), pf.indexOf('function out('))),
+    'the configured path reads config only — no probe, no launch delay');
+  // A command that needs no model must not be held hostage by the gate.
+  ok(/NO_MODEL_NEEDED[\s\S]{0,200}'version'/.test(pf) && /'update'/.test(pf),
+    'version and update bypass the gate — refusing to print a version over a missing key would be absurd');
+  ok(/nonInteractive\(\)[\s\S]{0,200}process\.exit\(1\)/.test(pf),
+    'a -p run or a daemon EXITS with instructions instead of blocking on a prompt nobody will answer');
+}
+
 // THE FINISHED-REPLY MARKER IS ACCEPTED AT EITHER END.
 // The contract says a finished reply starts with `$`; gemma4 routinely appends it instead. Read strictly,
 // that is an unmarked reply, so the loop nudged a model that had just said it was done — a wasted round
@@ -506,7 +541,7 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
     'the entangle tool cannot unbind — releasing a design is the operator\'s, not a step in the work');
   ok(/Refused: you cannot unbind/.test(entangleBranch),
     'asking to unbind is refused with the reason, and points at reporting the gap instead');
-  const idxSrc = readFileSync(join(DIST, '..', 'src', 'index.ts'), 'utf-8');
+  const idxSrc = readFileSync(join(DIST, '..', 'src', 'app.ts'), 'utf-8');
   ok(/case '\/disentangle'/.test(idxSrc), 'the operator has the release, as a session command');
 
   const gaps = ent.gateAdoption();
@@ -656,7 +691,7 @@ console.log('\ntools are discovered, and a private set needs no fork');
     ok(!maskSecret(secret).includes('MNOPQRSTUVWXYZ') && maskSecret(secret).length < secret.length,
       'a masked secret cannot be reassembled from what is displayed', maskSecret(secret));
     ok(maskSecret('short').length <= 3, 'a secret too short to mask safely is hidden entirely');
-    const idx = readFileSync(join(DIST, '..', 'src', 'index.ts'), 'utf-8');
+    const idx = readFileSync(join(DIST, '..', 'src', 'app.ts'), 'utf-8');
     ok(/if \(tool\.slash\.secret\) forgetEntry\(text, cmd\)/.test(idx),
       'and the dispatcher rewrites its history entry to the bare command');
     ok(/if \(!tool\.slash\.secret\) recordSlashTurn\(/.test(idx),
@@ -940,7 +975,7 @@ for (const line of execFileSync('grep', ['-rh', "getConfig\\(String\\|Number\\)(
 const unlisted = [...readKeys].filter((k) => !declared.has(k));
 ok(readKeys.size > 0, 'the scan found config reads at all (a silent zero would pass everything)', `${readKeys.size} key(s)`);
 ok(unlisted.length === 0, 'every config key the code reads is in KNOWN_CONFIG_KEYS', unlisted.join(', '));
-const idxSrc = readFileSync(join(srcDir, 'index.ts'), 'utf-8');
+const idxSrc = readFileSync(join(srcDir, 'app.ts'), 'utf-8');
 ok(/replace\(\/-\(\[a-z\]\)\/g/.test(idxSrc),
   '/set converts kebab-case to camelCase generally, not via a map that forgets new keys');
 

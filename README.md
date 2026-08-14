@@ -55,12 +55,29 @@ npm install                       # 4 deps: blessed, openai, sharp, undici
 npm run build
 ```
 
-**With an OpenAI key** — no GPU, no download; OpenAI is the default when nothing else is configured:
+**On first launch ayin asks.** It will not open the TUI with no model configured — a fresh clone that
+started up and then failed on the first prompt looked broken rather than unconfigured. It detects a local
+Ollama if you have one, offers OpenAI otherwise, **verifies whatever you give it**, saves it, and starts:
+
+```
+  ayin — first run
+  Found an Ollama on this machine (http://127.0.0.1:11434, 10 model(s)).
+
+  1) Use that local Ollama                 [recommended — nothing leaves this machine]
+  2) OpenAI API key                        [hosted; needs no GPU]
+  3) An endpoint serving ayin's HTTP contract
+  q) Quit
+```
+
+Already know what you want? Skip the questions by configuring it up front:
 
 ```bash
-node dist/index.js
+node dist/index.js                # asks, if nothing is configured yet
 /openai sk-…                      # verified with OpenAI, then saved to ~/.ayin-cli/openai.env (0600)
 ```
+
+`ayin version` and `ayin update` work regardless. A `-p` run or the `watch` daemon never prompts — with
+nothing configured they exit with the same instructions, because there is nobody there to answer.
 
 **With a local model** — nothing leaves your machine, and no account anywhere:
 
