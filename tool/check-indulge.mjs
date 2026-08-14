@@ -435,6 +435,72 @@ ok(rep2.stale === 1 && readFileSync(rep2.path, 'utf-8').includes('STALE'),
   'the report marks stale chunks instead of presenting them as current', JSON.stringify(rep2));
 repStore.endRun('r1');
 
+// ── staleness: the corpus assists an agent that EDITS CODE ──────────────────────
+// A chunk that went stale during the session is the dangerous case — it is a confident claim with a
+// citation attached, and the citation makes it MORE believable. Chunks are never silently dropped
+// (a chunk written on dev is usually still broadly true) and never silently trusted either.
+
+const ST = await import(join(ROOT, 'dist/indulge/staleness.js'));
+const AN2 = await import(join(ROOT, 'dist/indulge/answer.js'));
+
+const G2 = join(TMP, 'stale-repo');
+mkdirSync(join(G2, 'src'), { recursive: true });
+const gsh = (cmd) => execFileSync('bash', ['-c', cmd], { cwd: G2, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+writeFileSync(join(G2, 'src/a.ts'), 'one\ntwo\nthree\nfour\n');
+gsh('git init -q . && git config user.email t@t && git config user.name t && git add -A && git commit -qm first && git branch -M dev');
+
+const prov = AN2.repoProvenance(G2);
+ok(prov.branch === 'dev' && /^[0-9a-f]{40}$/.test(prov.commit), 'provenance records the branch NAME and the exact commit', JSON.stringify(prov));
+
+const mkChunk = () => ({
+  chunkId: 'c', questionId: 'q', repoKey: 'k', repoPath: G2, domain: 'd', question: 'what?', answer: 'a',
+  files: ['src/a.ts'],
+  citations: [{ path: 'src/a.ts', startLine: 2, endLine: 3, sha: S.blobSha(readFileSync(join(G2, 'src/a.ts'))) }],
+  entity: null, category: 'functionality', model: 'm', createdAt: '2026-08-14T10:00:00Z', sourceSha: 'x',
+  branch: prov.branch, commit: prov.commit,
+});
+const base = mkChunk();
+
+const fresh = ST.assessChunk(G2, base);
+ok(fresh.state === 'fresh' && !/STALE/.test(fresh.label), 'unchanged cited files are fresh', fresh.label);
+ok(fresh.label.includes('on dev'), 'the label leads with the BRANCH — a sha means nothing to an agent', fresh.label);
+ok(!fresh.label.includes(prov.commit), 'the sha stays out of the agent-facing line', fresh.label);
+
+writeFileSync(join(G2, 'src/a.ts'), 'one\nTWO CHANGED\nthree\nfour\nfive\n');
+const dirty = ST.assessChunk(G2, base);
+ok(dirty.state === 'stale' && dirty.uncommitted === true, 'an uncommitted edit — the agent\'s own, usually — is stale', dirty.label);
+ok(/uncommitted changes/.test(dirty.label), 'and is named as uncommitted rather than as a branch difference', dirty.label);
+ok(/\+2/.test(dirty.label), 'the label carries the size of the change so the model can calibrate', dirty.label);
+
+gsh('git add -A && git commit -qm second && git checkout -q -b feat/x');
+writeFileSync(join(G2, 'src/a.ts'), 'one\nTWO\nthree\nfour\nfive\nsix\nseven\n');
+gsh('git add -A && git commit -qm third');
+const onFeature = ST.assessChunk(G2, base);
+ok(onFeature.state === 'stale' && onFeature.label.includes('on dev'),
+  'a chunk written on dev, read from a feature branch, says so', onFeature.label);
+ok(onFeature.changed.includes('src/a.ts'), 'the label names WHICH file moved, though the whole chunk is stale');
+
+// Chunk-level, not per-citation: one moved file marks the whole chunk, because chunks are built
+// around interconnected things and the claim is about how they fit together.
+const twoFiles = { ...base, citations: [
+  { path: 'src/a.ts', startLine: 1, endLine: 2, sha: 'deadbeef' },
+  { path: 'src/a.ts', startLine: 3, endLine: 4, sha: S.blobSha(readFileSync(join(G2, 'src/a.ts'))) },
+] };
+ok(ST.assessChunk(G2, twoFiles).state === 'stale', 'one stale citation makes the whole chunk stale');
+
+gsh('git checkout -q dev && git checkout -q -b other && git commit -q --allow-empty -m other');
+const otherSha = gsh('git rev-parse HEAD');
+gsh('git checkout -q dev');
+const divergent = ST.assessChunk(G2, { ...mkChunk(), branch: 'other', commit: otherSha });
+ok(divergent.state === 'divergent' && /not in your current history/.test(divergent.label),
+  'a chunk from a branch you are not standing on is DIVERGENT, not merely stale', divergent.label);
+
+rmSync(join(G2, 'src/a.ts'));
+ok(ST.assessChunk(G2, base).state === 'missing', 'a cited file that no longer exists is its own state');
+
+const noProv = ST.assessChunk(G2, { ...base, branch: undefined, commit: undefined });
+ok(/branch unknown/.test(noProv.label), 'a chunk predating provenance says so instead of claiming a branch', noProv.label);
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);

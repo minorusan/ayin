@@ -541,6 +541,22 @@ later, not bundled into every call.
 A missing README or unconfigured Jira never blocks the report — the gaps are stated honestly
 ("no original intent could be recovered") rather than papered over.
 
+## `!` — your shell, inside the chatbox
+
+Anything typed after `!` runs in your shell **verbatim**, and the model never sees it:
+
+```
+!git status -sb
+!npm run build 2>&1 | tail -20
+```
+
+The output comes back **bold**, so a passthrough never reads as the agent talking. Esc cancels a
+running command; a hung one times out on its own; a flood of output is cut and says so.
+
+This exists because without it, `!git status -sb` was just an ordinary prompt — the model read it,
+decided what you meant, and called its bash tool with its own rewrite. A passthrough has one job, and
+any cleverness in it is a bug.
+
 ## `ayin indulge` — prepare a repo overnight
 
 You know in the evening that tomorrow is a rendering day. Start this, close the laptop, and by

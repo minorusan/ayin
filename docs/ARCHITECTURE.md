@@ -428,6 +428,38 @@ deadline to announce and `[Round 3/Infinity]` is nonsense a model will reason ab
 places that did arithmetic on the budget degrade correctly: the headless CTA reminder now fires until
 the deliverable exists, and the QA fix-runway rewind becomes a no-op because the runway is unlimited.
 
+**Always-gated git operations (`permissions.ts#dangerousShellOp`).** `git push`, `git pull` and
+`git checkout` are confirmed **every single time**, ahead of every other rule. No whitelist entry, no
+`--dangerously-skip-permissions`, and no headless run can wave them through; with no human present
+(headless) they are **denied**, because the only safe answer to "may I push?" with nobody watching is
+no. The dialog for them deliberately offers only *Allow once* and *Deny* — no "allow all", no prefix
+option, since those are what caused the incident.
+
+It exists because the agent pushed to a remote unasked. Three reasonable things combined to allow it:
+headless auto-approved every tool call; "Allow all bash" whitelists the *whole tool* for the session;
+and the prefix option offers `git` as a one-word prefix, so approving one `git status` silently
+approved every later `git push`. Matching is per shell segment, so `cd /repo && git push` is caught
+while `git log | grep checkout` is not. It over-triggers by design — a needless confirmation costs a
+keystroke, a missed one cost the incident.
+
+**`!<command>` — shell passthrough (`bang.ts`).** Handled in the input path *before* the slash block,
+because it is a passthrough rather than a command: everything after the `!` is the operator's,
+verbatim. Nothing is added to the conversation window and no round is spent, so the model never sees
+it — which is the entire point. It was added after the operator found that `!git status -sb` behaved
+as an ordinary prompt: the model read the line, decided what was meant, and called the bash tool with
+its own rewrite, so it looked as though only the first word survived.
+
+Rendered through `formatShellForChat` on the `tool` role (the one role whose content is not escaped,
+so blessed tags survive) and set in **bold** — the operator asked for a visible difference, and bold
+is the one emphasis blessed actually has. Command output is escaped *before* the bold tags go on, or
+a command printing `{bold}` would corrupt the panel.
+
+Three obligations, since a passthrough that hangs the UI is worse than none: a 10-minute timeout, a
+200k-character output cap, and Esc → `cancelBang()` (SIGTERM to the process group, SIGKILL after 2s).
+`bangRunning()` is what lets the global key handler give a running command the interrupt before the
+agent gets it. All three announce themselves — a clipped `git log` that looks complete is how you act
+on the wrong commit. Gated by `npm run check:bang`.
+
 **Operator modes (`modes.ts`).** Two persistent toggles, stored in `prompts.json` so they survive a
 restart, injected as prompt text into the system message's stable prefix (they change only when a
 command is typed, so a toggle costs one KV-cache invalidation, not one per round).

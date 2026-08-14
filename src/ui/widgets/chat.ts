@@ -350,8 +350,8 @@ export function escapeBlessedTags(text: string): string {
  * loses its braces entirely, which is worse than the markup.
  */
 export function stripBlessedTags(text: string): string {
-  const OPEN = ' AYIN_OPEN ';
-  const CLOSE = ' AYIN_CLOSE ';
+  const OPEN = '\u0000AYIN_OPEN\u0000';
+  const CLOSE = '\u0000AYIN_CLOSE\u0000';
   return text
     .replace(/\{open\}/g, OPEN)
     .replace(/\{close\}/g, CLOSE)
@@ -366,6 +366,39 @@ export function stripBlessedTags(text: string): string {
  *  (Unicode has no italic digit block). Small 'h' is the one hole in the block — it lives at
  *  U+210E (ℎ, PLANCK CONSTANT) rather than the contiguous slot. Non-letters pass through, so
  *  the result is still safe to feed through escapeBlessedTags afterwards. */
+/**
+ * A `!<command>` passthrough, rendered so it cannot be mistaken for the agent talking.
+ *
+ * Everything here is BOLD on purpose: the operator asked for a visible difference, and the whole
+ * point of the feature is that no model was involved — the output is the machine's own words, not
+ * something an agent decided to tell you. Bold is the cheapest signal that carries across every
+ * terminal (blessed has no italic bit, and colour alone is what every other card already uses).
+ *
+ * Output is escaped BEFORE the bold tags go on: a command that prints `{bold}` or a JSON blob full
+ * of braces would otherwise be interpreted as markup and corrupt the panel.
+ */
+export function formatShellForChat(
+  command: string,
+  output: string,
+  meta: { exitCode: number | null; ms: number; timedOut: boolean; cancelled: boolean },
+): string {
+  const lines: string[] = [];
+  lines.push(`{${theme.tool}-fg}${'$'}{/} {bold}{${theme.text}-fg}${escapeBlessedTags(command)}{/${theme.text}-fg}{/bold}`);
+  if (output) {
+    for (const line of output.split('\n')) {
+      lines.push(`{bold}{${theme.text}-fg}${escapeBlessedTags(line)}{/${theme.text}-fg}{/bold}`);
+    }
+  }
+  const secs = (meta.ms / 1000).toFixed(1);
+  const ok = meta.exitCode === 0 && !meta.timedOut && !meta.cancelled;
+  const why = meta.cancelled ? 'cancelled' : meta.timedOut ? 'timed out' : `exit ${meta.exitCode ?? '?'}`;
+  const colour = ok ? theme.ok : theme.err;
+  const mark = ok ? '\u2713' : '\u2717';
+  const tail = ok ? `${secs}s` : `${secs}s \u00b7 ${why}`;
+  lines.push(`{${colour}-fg}${mark}{/} {${theme.muted}-fg}${tail}${output ? '' : ' \u00b7 no output'}{/}`);
+  return lines.join('\n');
+}
+
 export function toItalic(text: string): string {
   let out = '';
   for (const ch of text) {

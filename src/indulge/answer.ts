@@ -111,6 +111,21 @@ export function stripCitations(text: string): string {
   return text.replace(/^\s*CITE:\s*.+$/gim, '').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+/**
+ * Where the repo is right now: the branch name and the exact commit.
+ *
+ * Both are recorded on every chunk. A detached HEAD has no branch name, so it reports the tag if
+ * there is one and `(detached)` otherwise — never an empty string that reads as "no provenance".
+ */
+export function repoProvenance(repoPath: string): { branch: string; commit: string } {
+  const commit = git(repoPath, ['rev-parse', 'HEAD']);
+  let branch = git(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (!branch || branch === 'HEAD') {
+    branch = git(repoPath, ['describe', '--tags', '--exact-match']) || '(detached)';
+  }
+  return { branch, commit };
+}
+
 /** The file with 1-based line numbers, clipped — the numbers are what a CITE line must refer to. */
 function readSource(repoPath: string, file: string): string {
   let text: string;
@@ -198,6 +213,10 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
     attempted: 0, answered: 0, failed: 0, skipped: 0, stopped: false, rejectedCitations: 0,
   };
 
+  // Read once per run, not per chunk: the tree does not move under a single run, and it is two
+  // subprocesses per call.
+  const provenance = repoProvenance(repoPath);
+
   const pending = store.pendingQuestions();
   const queue = opts.limit ? pending.slice(0, opts.limit) : pending;
   onStatus?.(`${pending.length} question(s) pending${opts.limit ? `, answering ${queue.length} this run` : ''}`);
@@ -250,6 +269,8 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
       // first talks to the provider, so capturing it up front recorded `unknown` in every chunk of a
       // freshly started process. A corpus field that says which model wrote a chunk has to be true.
       model: activeModelId() || 'unknown',
+      branch: provenance.branch || undefined,
+      commit: provenance.commit || undefined,
       createdAt: new Date().toISOString(),
       sourceSha,
     };

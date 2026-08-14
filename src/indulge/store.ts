@@ -112,6 +112,17 @@ export interface Chunk {
   createdAt: string;
   /** git blob sha of `entity.file` when answered — the invalidation key for a re-run. */
   sourceSha: string;
+  /**
+   * Where this was learned. BOTH, on purpose:
+   *
+   * `commit` is the machinery — it is what a diff can be taken against, and what says whether the
+   * chunk is in your current history. `branch` is the MEANING: "this was written on dev" tells an
+   * agent something a sha never will, and resolving a sha to a branch name is a tool call spent
+   * learning nothing. Optional, so corpora built before this shipped keep working — they simply
+   * report their provenance as unknown.
+   */
+  branch?: string;
+  commit?: string;
 }
 
 export interface RunRecord {
@@ -447,7 +458,7 @@ export class IndulgeStore {
     const byKey = new Map<string, FileRecord>();
     for (const row of readJsonl(this.filesFile)) {
       if (typeof row.path !== 'string' || typeof row.domain !== 'string') continue;
-      byKey.set(`${row.domain} ${row.path}`, row as unknown as FileRecord);
+      byKey.set(`${row.domain}\u0000${row.path}`, row as unknown as FileRecord);
     }
     return [...byKey.values()];
   }

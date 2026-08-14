@@ -38,6 +38,35 @@ const whitelist: WhitelistEntry[] = [
   { tool: 'web_search' },
 ];
 
+/**
+ * Operations that are confirmed EVERY time, whatever the whitelist says.
+ *
+ * Added after the agent pushed to a remote without being asked. Three separate holes let it:
+ * `HEADLESS` auto-approved every tool call; "Allow all bash" whitelists the *whole tool* for the
+ * session; and the prefix option offers `git` as a one-word prefix, so approving a single
+ * `git status` silently approves every `git push` after it. Each is reasonable on its own and
+ * together they mean one careless Enter authorises rewriting a remote.
+ *
+ * These are the operations whose blast radius leaves the machine or discards work that was never
+ * committed — a push is public and cannot be un-published, a pull and a checkout can both destroy
+ * uncommitted changes. They are never whitelisted, never prefix-matched, and never auto-approved.
+ *
+ * Over-triggering is deliberate: a needless confirmation costs one keystroke, a missed one cost the
+ * incident this exists to prevent.
+ */
+const ALWAYS_CONFIRM_GIT = /(^|\s)(push|pull|checkout)(\s|$)/;
+
+/** The dangerous git operation in this command, or null. Checks each shell segment separately so
+ *  `git log | grep checkout` is not mistaken for a checkout. */
+export function dangerousShellOp(command: string): string | null {
+  for (const segment of command.split(/&&|\|\||;|\||\n/)) {
+    if (!/(^|\s)git(\s|$)/.test(segment)) continue;
+    const m = segment.match(ALWAYS_CONFIRM_GIT);
+    if (m) return `git ${m[2]}`;
+  }
+  return null;
+}
+
 export function isWhitelisted(tool: string, params: Record<string, string>): boolean {
   for (const entry of whitelist) {
     if (entry.tool !== tool) continue;
@@ -82,6 +111,36 @@ export async function checkPermission(
   params: Record<string, string>,
   reason?: string,
 ): Promise<PermissionResult> {
+  const primaryValue = getPrimaryParam(tool, params);
+
+  // FIRST, before every other rule — a whitelist, a skip flag or headless mode must not be able to
+  // wave these through. This is the one check that no configuration can turn off.
+  const danger = dangerousShellOp(primaryValue);
+  if (danger) {
+    // Nobody is watching a headless run, and there is no popup to show. The only safe answer to
+    // "may I push?" with no human present is no.
+    if (HEADLESS || SKIP_PERMISSIONS || READONLY) {
+      log('WARN', 'permission_dangerous_denied_unattended', { tool, op: danger, param: primaryValue.slice(0, 200) });
+      return 'deny';
+    }
+    const choice = await showDialog(
+      `Allow ${danger}?`,
+      // Deliberately NO "allow all" and no prefix option: those are exactly what let one approval
+      // authorise every later push. This asks every single time, by design.
+      [{ label: 'Allow once', key: 'y' }, { label: 'Deny (stop agent)', key: 'n', danger: true }],
+      {
+        target: primaryValue,
+        subtitle: 'always confirmed — this cannot be whitelisted',
+        body: reason || undefined,
+        footer: '↑↓ select · Enter confirm · Esc = deny',
+      },
+    );
+    const allowed = choice === 0;
+    log(allowed ? 'INFO' : 'WARN', allowed ? 'permission_dangerous_allowed' : 'permission_dangerous_denied',
+      { tool, op: danger, param: primaryValue.slice(0, 200) });
+    return allowed ? 'allow' : 'deny';
+  }
+
   if (READONLY) {
     const ok = isWhitelisted(tool, params);
     log('INFO', ok ? 'permission_readonly_allow' : 'permission_readonly_deny', { tool });
@@ -92,8 +151,6 @@ export async function checkPermission(
     return 'allow';
   }
   if (isWhitelisted(tool, params)) return 'allow';
-
-  const primaryValue = getPrimaryParam(tool, params);
 
   // Build prefix options for "allow all starting with..."
   const prefixParts = primaryValue.split(/\s+/);

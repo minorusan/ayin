@@ -20,7 +20,7 @@ ensureToolRuntime();
 import {
   screen, addMessage, setStatus, setAgentStatus, clearChat,
   onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
-  showAlert, setStickyAlert, clearStickyAlert, registerCommand,
+  showAlert, setStickyAlert, clearStickyAlert, registerCommand, formatShellForChat,
 } from './ui.js';
 import { isTranscribing, startTranscript, stopTranscript, transcriptPath, transcriptSize, flush as flushTranscript } from './transcript.js';
 import { executeWipe, humanBytes, planWipe, wipeOverview, type WipeScope } from './wipe.js';
@@ -46,6 +46,7 @@ import { getSessionArtifacts, readArtifact } from './artifacts.js';
 import { renderMarkdown } from './markdown.js';
 import { HEADLESS } from './ui.js';
 import { loadRules } from './rules.js';
+import { runBang, cancelBang, bangRunning } from './bang.js';
 import { setConfigValue, resetPromptsToDefaults, promptDriftWarnings, KNOWN_CONFIG_KEYS } from './prompts.js';
 import { isLogCoverage, isVerbose, setLogCoverage, setVerbose } from './modes.js';
 import { getGoal, setGoal, clearGoal, refreshGoal } from './goal.js';
@@ -216,6 +217,9 @@ if (!HEADLESS) {
     if (key === 'escape') {
       if (artifactsOverlay) { closeArtifactsOverlay(); return; }
       if (summaryOverlay) { closeSummaryOverlay(); return; }
+      // A `!` command owns the foreground while it runs, so it gets the interrupt first — otherwise
+      // `!npm run build` would be uncancellable and the UI would sit there until the timeout.
+      if (bangRunning()) { cancelBang(); return; }
       if (busy) { interruptAgent(); return; }
     }
     if (key === 'C-o') {
@@ -402,6 +406,21 @@ onInput(async (text: string) => {
 
   pushEntry(text);
   addMessage('user', text);
+
+  // `!<command>` — straight to the shell, no model, no round. Placed before the slash block because
+  // it is a passthrough rather than a command: everything after the `!` is the operator's, verbatim.
+  if (text.startsWith('!')) {
+    const command = text.slice(1).trim();
+    if (!command) {
+      addMessage('system', 'Nothing after the `!`. `!<command>` runs it in your shell; the model never sees it.');
+      return;
+    }
+    setAgentStatus('Running...');
+    const r = await runBang(command);
+    setAgentStatus('');
+    addMessage('tool', formatShellForChat(command, r.output, r));
+    return;
+  }
 
   // Slash commands
   if (text.startsWith('/')) {
@@ -809,6 +828,7 @@ onInput(async (text: string) => {
         addMessage('system', '/model — popup: pick from the models the backend has installed (Enter reloads the GPU with it)');
         addMessage('system', '/model <name|qwen|gemma> — switch straight away; a non-shared model stays booked until you /quit');
         addMessage('system', '/lock — hold the model for this session (self-releases 10 min after you stop responding) · /unlock');
+        addMessage('system', '!<command> — runs it in your shell verbatim and shows the output in bold; the model never sees it (Esc cancels)');
         addMessage('system', '/verbose — full explanations; without it, answers are as short as the question allows · /verbose off');
         addMessage('system', '/logcover — heavy log coverage on every feature built while it is on · /logcover off');
         addMessage('system', '/summary — show session summary (Esc to close)');
