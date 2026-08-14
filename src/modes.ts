@@ -27,6 +27,21 @@ export function setVerbose(on: boolean): void {
   setConfigValue('verbose', on ? 1 : 0);
 }
 
+/**
+ * Corpus injection — ON by default, `/corpus off` disables it.
+ *
+ * On by default because a corpus nobody consults was a night of GPU spent for nothing. Switchable
+ * because "does retrieval actually help?" is answered by running the same task with it off, not by
+ * intuition — and every injected token costs attention that the rest of the prompt needed.
+ */
+export function isCorpusInjection(): boolean {
+  return getConfigIfSet('corpusInject') !== 0;
+}
+
+export function setCorpusInjection(on: boolean): void {
+  setConfigValue('corpusInject', on ? 1 : 0);
+}
+
 /** Off by default — heavy instrumentation is a choice for feature work, not a standing tax. */
 export function isLogCoverage(): boolean {
   return getConfigIfSet('logCoverage') === 1;

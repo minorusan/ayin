@@ -1852,6 +1852,32 @@ Spot-checked by hand — a claim about recursive descent cited `extract.mjs:43-4
 exactly `else yield* groups(inner);`, and a git answer pointed at `115-121`, the comment that does
 explain the heuristic.
 
+#### Retrieval — how the corpus reaches the agent
+
+Two halves, deliberately asymmetric.
+
+**Push — `read_file`.** Reading a file appends what the corpus already answered *about that file*.
+It is an exact path lookup (`entity.file`, `files[]`, every citation), **not** a similarity search:
+no embedding, no threshold to tune, and it cannot surface a plausible-but-unrelated chunk, which is
+the failure mode every score eventually produces. Capped at 2 chunks — every injected token costs a
+slice of the attention available to every other token, including the hard constraints. It lands in
+the tool RESULT, so it inherits the window's observation masking (it compresses to a stub on its own
+after a few messages) and never churns the KV-cached prefix.
+
+**Pull — `corpus_search`.** Everything else, on demand, so an open-ended lookup costs attention only
+when the agent asks. Lexical for now (question text ×3, path ×2, answer ×1); semantic search is
+Phase 2, and faking it today would return confident nonsense for anything not sharing words with the
+query.
+
+Both label staleness through `assessChunk` — a pulled chunk is exactly as dangerous as a pushed one —
+and both end with a line stating these are notes from an earlier pass, not the code. `/corpus off`
+disables injection (search still works), because *"does retrieval help?"* is answered by running the
+same task with it off, not by intuition.
+
+Not injected: **grep** (many hits per call, in tight loops, weak per-hit relevance) and **explore**
+(its whole value is that it goes and checks — feeding it pre-baked conclusions is the one place a
+stale chunk does the most damage; it can call `corpus_search` itself instead).
+
 **Phase 2** embeds the chunks into a local vector space per repo. **Phase 3** injects retrieved
 chunks at named prompt sites. Neither is designed yet — Phase 1's chunks get read and judged by hand
 first, because a RAG is worth exactly what its chunks are worth.

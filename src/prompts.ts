@@ -148,7 +148,7 @@ export const KNOWN_CONFIG_KEYS = [
   // 'on' enables wheel scrolling, at the cost of the terminal's native text selection — off by default.
   'mouse',
   // Operator modes (modes.ts), written by /verbose and /logcover as 1/0.
-  'verbose', 'logCoverage',
+  'verbose', 'logCoverage', 'corpusInject',
   // Only honoured when the operator sets it — the round budget is otherwise unlimited (agent.ts).
   'maxToolRounds',
 ];

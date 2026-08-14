@@ -501,6 +501,54 @@ ok(ST.assessChunk(G2, base).state === 'missing', 'a cited file that no longer ex
 const noProv = ST.assessChunk(G2, { ...base, branch: undefined, commit: undefined });
 ok(/branch unknown/.test(noProv.label), 'a chunk predating provenance says so instead of claiming a branch', noProv.label);
 
+// ── retrieval: the corpus finally pays back ─────────────────────────────────────
+// `read_file` PUSHES what is known about the file just read (an exact path lookup — no embedding, no
+// threshold, so it cannot surface a plausible-but-unrelated chunk). `corpus_search` is the PULL half.
+// Both label staleness, because a retrieved chunk is exactly as dangerous as an injected one.
+
+const INJ = await import(join(ROOT, 'dist/indulge/inject.js'));
+const MODES = await import(join(ROOT, 'dist/modes.js'));
+
+const IR = join(TMP, 'inject-repo');
+mkdirSync(join(IR, 'src'), { recursive: true });
+const rsrc = 'alpha\nbeta\ngamma\n';
+writeFileSync(join(IR, 'src/x.ts'), rsrc);
+const istore = S.openStore(IR);
+istore.beginRun({ runId: 'i1', domains: ['d'], headSha: 'h' });
+const iq = S.questionId('what is beta?', 'src/x.ts', null);
+istore.addQuestion({ id: iq, file: 'src/x.ts', entity: null, category: 'functionality', text: 'what is beta?' });
+istore.saveChunk({
+  chunkId: S.chunkId(istore.key, 'src/x.ts', null, 'functionality', iq), questionId: iq, repoKey: istore.key,
+  repoPath: IR, domain: 'd', question: 'what is beta?', answer: 'Beta is the second line and nothing depends on it.',
+  files: ['src/x.ts'], citations: [{ path: 'src/x.ts', startLine: 2, endLine: 2, sha: S.blobSha(rsrc) }],
+  entity: null, category: 'functionality', model: 'm', createdAt: '2026-08-14T10:00:00Z', sourceSha: S.blobSha(rsrc),
+  branch: 'dev', commit: 'abc123',
+});
+istore.endRun('i1');
+
+const block = INJ.corpusBlockFor(IR, 'src/x.ts');
+ok(block && /what is beta/.test(block), 'reading a file surfaces what the corpus answered about it');
+ok(block.includes('on dev'), 'the injected chunk carries its provenance label', (block.match(/\[corpus[^\]]*\]/) || [''])[0]);
+ok(/src\/x.ts:2-2/.test(block), 'the citation is shown so the agent can go and check');
+ok(/not the code/.test(block), 'the block says plainly that these are notes, not the source');
+ok(INJ.corpusBlockFor(IR, 'src/never-mentioned.ts') === null, 'a file with no chunks injects nothing');
+
+writeFileSync(join(IR, 'src/x.ts'), 'alpha\nBETA CHANGED\ngamma\n');
+ok(/STALE/.test(INJ.corpusBlockFor(IR, 'src/x.ts')), 'editing the file flips the injected label to STALE');
+writeFileSync(join(IR, 'src/x.ts'), rsrc);
+
+MODES.setCorpusInjection(false);
+ok(INJ.corpusBlockFor(IR, 'src/x.ts') === null, '/corpus off injects nothing — the switch is what makes "does it help?" measurable');
+MODES.setCorpusInjection(true);
+ok(INJ.corpusBlockFor(IR, 'src/x.ts') !== null, '/corpus on restores it');
+
+ok(/what is beta/.test(INJ.corpusSearch(IR, 'beta', 3)), 'corpus_search finds a chunk by keyword');
+ok(/Nothing in the corpus matches/.test(INJ.corpusSearch(IR, 'quantum blockchain', 3)),
+  'a query that matches nothing says so instead of returning the nearest thing');
+ok(/ayin indulge/.test(INJ.corpusSearch(join(TMP, 'no-corpus-repo'), 'anything')),
+  'searching a repo with no corpus names the command that would build one');
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
+

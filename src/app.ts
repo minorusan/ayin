@@ -48,7 +48,7 @@ import { HEADLESS } from './ui.js';
 import { loadRules } from './rules.js';
 import { runBang, cancelBang, bangRunning } from './bang.js';
 import { setConfigValue, resetPromptsToDefaults, promptDriftWarnings, KNOWN_CONFIG_KEYS } from './prompts.js';
-import { isLogCoverage, isVerbose, setLogCoverage, setVerbose } from './modes.js';
+import { isCorpusInjection, isLogCoverage, isVerbose, setCorpusInjection, setLogCoverage, setVerbose } from './modes.js';
 import { getGoal, setGoal, clearGoal, refreshGoal } from './goal.js';
 import { runArduinoDiagram, formatArduinoDiagramOutcome } from './tools/arduino-diagram.js';
 import { runExplain, formatExplainOutcome as formatExplainReportOutcome } from './explain/index.js';
@@ -548,6 +548,15 @@ onInput(async (text: string) => {
           : 'Verbose OFF — shortest answer that fully answers (the default).');
         return;
       }
+      case '/corpus': {
+        const arg = text.slice('/corpus'.length).trim().toLowerCase();
+        const on = arg === '' ? !isCorpusInjection() : arg !== 'off' && arg !== '0';
+        setCorpusInjection(on);
+        addMessage('system', on
+          ? 'Corpus injection ON — reading a file also shows what `ayin indulge` already answered about it.'
+          : 'Corpus injection OFF — nothing from the corpus is added to tool results (corpus_search still works).');
+        return;
+      }
       case '/logcover': {
         const arg = text.slice('/logcover'.length).trim().toLowerCase();
         const on = arg === '' ? !isLogCoverage() : arg !== 'off' && arg !== '0';
@@ -830,6 +839,7 @@ onInput(async (text: string) => {
         addMessage('system', '/lock — hold the model for this session (self-releases 10 min after you stop responding) · /unlock');
         addMessage('system', '!<command> — runs it in your shell verbatim and shows the output in bold; the model never sees it (Esc cancels)');
         addMessage('system', '/verbose — full explanations; without it, answers are as short as the question allows · /verbose off');
+        addMessage('system', '/corpus — what indulge already answered is shown when a file is read (default ON) · /corpus off');
         addMessage('system', '/logcover — heavy log coverage on every feature built while it is on · /logcover off');
         addMessage('system', '/summary — show session summary (Esc to close)');
         addMessage('system', '/resume — list this directory\'s sessions (newest first) · /resume all for every directory');

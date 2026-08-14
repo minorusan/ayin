@@ -588,8 +588,11 @@ current step and stops cleanly. Nothing is written into your repo — the corpus
 `~/.ayin-cli/rag/<repo-key>/`, because chunks quote your code and one stray `git add -A` would
 publish them.
 
-*Today the corpus is a deliverable you read. Retrieval — ayin consulting it while it works — is the
-next phase.*
+**ayin then uses it while it works.** Reading a file shows what was already answered about that file,
+with its citations and how old it is; `corpus_search` finds the rest on demand. Anything whose cited
+code has changed since is labelled — `[corpus · STALE] answered 2026-08-14 on dev · src/Match.cs
++12 −3 since` — because a stale note presented as current is worse than no note at all. `/corpus off`
+turns injection off.
 
 ## Repo watcher — automatic post-commit code review
 

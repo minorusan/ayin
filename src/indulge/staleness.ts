@@ -71,9 +71,17 @@ function hasUncommittedChange(repoPath: string, file: string): boolean {
   return git(repoPath, ['status', '--porcelain', '--', file]).trim().length > 0;
 }
 
-/** Is the chunk's commit part of the history you are standing on? */
+/**
+ * Is the chunk's commit part of the history you are standing on?
+ *
+ * `null` means CANNOT TELL — no commit recorded, not a git repo, or a commit this clone has never
+ * seen. That is a third answer, not a synonym for "no": `merge-base` also fails when the object is
+ * simply absent, and reporting DIVERGENT on that basis tells the agent a branch is unrelated when
+ * the truth is that nothing was checked. Verified here first, so the claim is only made on evidence.
+ */
 function isAncestor(repoPath: string, commit: string): boolean | null {
   if (!commit) return null;
+  if (!git(repoPath, ['rev-parse', '--verify', `${commit}^{commit}`])) return null; // unknown object
   try {
     execFileSync('git', ['-C', repoPath, 'merge-base', '--is-ancestor', commit, 'HEAD'],
       { stdio: 'ignore', timeout: 10000 });

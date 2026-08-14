@@ -1,8 +1,9 @@
 import type { Tool } from '../base.js';
 import { READ_MAX_LINES, resolveAgainstCwd, suggestSimilarPaths } from '../lib.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { basename, extname, join } from 'node:path';
+import { basename, extname, join, relative, sep } from 'node:path';
 import { addPendingImage, isImagePath, preprocessImage } from '../../image.js';
+import { corpusBlockFor } from '../../indulge/inject.js';
 
 export const tool: Tool = {
     name: 'read_file',
@@ -59,6 +60,16 @@ export const tool: Tool = {
       const footer = more
         ? `\n(${lines.length - lastShown} more lines — continue with offset=${lastShown + 1}${askedLimit && askedLimit > READ_MAX_LINES ? `; limit is capped at ${READ_MAX_LINES} lines per call` : ''})`
         : '';
-      return `${header}${numbered}${footer}`;
+      // What the corpus already knows about THIS file. An exact path lookup, not a similarity
+      // search, so it cannot surface a plausible-but-unrelated chunk. Never fatal: a corpus that
+      // fails to load must not break the read that was actually asked for.
+      // Chunks are keyed by REPO-RELATIVE path; this tool takes an absolute one, so the lookup has
+      // to be translated or it silently never matches.
+      let corpus = '';
+      try {
+        const rel = relative(process.cwd(), resolved).split(sep).join('/');
+        if (rel && !rel.startsWith('..')) corpus = corpusBlockFor(process.cwd(), rel) ?? '';
+      } catch { corpus = ''; }
+      return `${header}${numbered}${footer}${corpus}`;
     },
   };
