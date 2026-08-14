@@ -1,0 +1,7 @@
+Find the source files that implement "{{DOMAIN}}" in this repository.
+
+List every file you find as a repo-relative path, one per line, under a final line reading FILES:
+Name only paths you have seen in command output. A path you did not read in output is a guess, and a
+guess here is worse than a short list.
+
+If nothing in this repository relates to "{{DOMAIN}}", say so and write FILES: with nothing after it.

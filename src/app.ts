@@ -47,6 +47,7 @@ import { renderMarkdown } from './markdown.js';
 import { HEADLESS } from './ui.js';
 import { loadRules } from './rules.js';
 import { setConfigValue, resetPromptsToDefaults, promptDriftWarnings, KNOWN_CONFIG_KEYS } from './prompts.js';
+import { isLogCoverage, isVerbose, setLogCoverage, setVerbose } from './modes.js';
 import { getGoal, setGoal, clearGoal, refreshGoal } from './goal.js';
 import { runArduinoDiagram, formatArduinoDiagramOutcome } from './tools/arduino-diagram.js';
 import { runExplain, formatExplainOutcome as formatExplainReportOutcome } from './explain/index.js';
@@ -517,6 +518,26 @@ onInput(async (text: string) => {
         await unlockSession();
         addMessage('system', 'Unlocked — the backend may reclaim the model.');
         return;
+      case '/verbose': {
+        // Brevity is the default, so this command turns it OFF. Named for what the operator wants
+        // ("be verbose"), not for the flag it clears.
+        const arg = text.slice('/verbose'.length).trim().toLowerCase();
+        const on = arg === '' ? !isVerbose() : arg !== 'off' && arg !== '0';
+        setVerbose(on);
+        addMessage('system', on
+          ? 'Verbose ON — full explanations. Takes effect on your next message.'
+          : 'Verbose OFF — shortest answer that fully answers (the default).');
+        return;
+      }
+      case '/logcover': {
+        const arg = text.slice('/logcover'.length).trim().toLowerCase();
+        const on = arg === '' ? !isLogCoverage() : arg !== 'off' && arg !== '0';
+        setLogCoverage(on);
+        addMessage('system', on
+          ? 'Log coverage ON — features get heavy instrumentation while it lasts.'
+          : 'Log coverage OFF — normal logging.');
+        return;
+      }
       case '/clear':
         clearChat();
         return;
@@ -788,6 +809,8 @@ onInput(async (text: string) => {
         addMessage('system', '/model — popup: pick from the models the backend has installed (Enter reloads the GPU with it)');
         addMessage('system', '/model <name|qwen|gemma> — switch straight away; a non-shared model stays booked until you /quit');
         addMessage('system', '/lock — hold the model for this session (self-releases 10 min after you stop responding) · /unlock');
+        addMessage('system', '/verbose — full explanations; without it, answers are as short as the question allows · /verbose off');
+        addMessage('system', '/logcover — heavy log coverage on every feature built while it is on · /logcover off');
         addMessage('system', '/summary — show session summary (Esc to close)');
         addMessage('system', '/resume — list this directory\'s sessions (newest first) · /resume all for every directory');
         addMessage('system', '/resume <n>|<id> — restore one by list number or id prefix; new turns append to its record');

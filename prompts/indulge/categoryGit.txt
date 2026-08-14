@@ -1,0 +1,2 @@
+Ask about authorship, age and churn: who last changed this, when, how often it changes, and which
+commits or tickets explain why it looks the way it does.

@@ -1,0 +1,2 @@
+Ask about wiring: who constructs this, who calls it, what subscribes to its events, and the order
+those happen in.

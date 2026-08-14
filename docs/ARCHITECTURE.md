@@ -404,12 +404,38 @@ calls to the answer, 9 to the faulty line**, with three judge verdicts all readi
 (Note `exploreCallCount` is only counted and printed — the `MAX_EXPLORE_CALLS` constant beside it was
 never enforced and has been removed rather than left to imply a limit that did not exist.)
 
-**Round budget (`getMaxRounds`).** Interactive uses `config.maxToolRounds` (15); headless gets a
-long leash (1000) because a `-p` task is expected to finish the job. **`AYIN_MAX_ROUNDS` overrides
-both** — for a caller that wants a short, forced-spend run rather than an open-ended one. The
-`ayin watch` hound sets it: its job is to make a handful of greps and answer, and a 1000-round
-leash on that shape produces deliberation, not evidence. Values below 1 or unparseable are ignored,
-so a typo cannot wedge the loop at zero rounds.
+**Round budget (`getMaxRounds`) — unlimited by default.** The loop runs until the model stops calling
+tools and answers, or until the operator cancels (`Ctrl+C` → `interruptAgent`). There is no round
+cap unless someone deliberately sets one.
+
+It used to cap at 15 interactive. A cap is a guess about how long a task takes, made before anyone
+knows what the task is: it truncated real investigations, and — because the round counter is *in the
+prompt* — it taught the model to rush, since an agent told it has three rounds left writes a
+conclusion it has not earned. Removing the number removes both failures. This is not an infinite
+loop; the cap was never what ended a normal turn, only what cut a long one short.
+
+Two ways to put a cap back, both deliberate:
+
+- **`AYIN_MAX_ROUNDS`** — the `ayin watch` hound sets it to 10, because its job is to make a handful
+  of greps and answer, and an open-ended leash on that shape produces deliberation, not evidence.
+  Values below 1 or unparseable are ignored, so a typo cannot wedge the loop at zero rounds.
+- **`config.maxToolRounds`**, but only when the operator has actually set it — read through
+  `getConfigIfSet` so the shipped default cannot silently reinstate the cap this removed.
+
+With no cap the prompt says `[Round N. Take the rounds you need; stop when the work is done.]` — the
+round number still tells the model it is mid-turn, but every deadline line is gone, since there is no
+deadline to announce and `[Round 3/Infinity]` is nonsense a model will reason about. The two other
+places that did arithmetic on the budget degrade correctly: the headless CTA reminder now fires until
+the deliverable exists, and the QA fix-runway rewind becomes a no-op because the runway is unlimited.
+
+**Operator modes (`modes.ts`).** Two persistent toggles, stored in `prompts.json` so they survive a
+restart, injected as prompt text into the system message's stable prefix (they change only when a
+command is typed, so a toggle costs one KV-cache invalidation, not one per round).
+
+| Command | Default | Effect |
+|---|---|---|
+| `/verbose` · `/verbose off` | **off** | Without it, answers are the shortest that fully answer — no preamble, no restating the question, no recap (`prompts/ayin/brevity.txt`). The prompt states explicitly that this governs **what is written, never how much is verified**; brevity that becomes laziness trades a wall of text for a wrong answer |
+| `/logcover` · `/logcover off` | off | While on, every feature built gets heavy instrumentation — entry arguments, branches taken, external calls with outcomes, caught errors with their state (`prompts/ayin/logCoverage.txt`). Off by default because logging every branch is right while bringing a thing up and wrong for a small edit to working code |
 
 Three gates wrap the loop, each on a **deterministic trigger** — no model decides whether they run.
 Plan mode, the Presenter pass, and the QA gate are also each **OFF by default for the session** — a
@@ -1623,12 +1649,126 @@ tightening the prose of `planGrounding.txt` saved ~800 characters; retrieving in
 
 ## Retrieval
 
-None. ayin finds code the agentic way — `grep`, `find_files`, `read_file` and `explore`. The
-earlier retrieval surfaces (a grounded Q&A corpus generator, transcript-mined episodes, and a
-`docs_search` tool over a specific backend's documentation index) were **removed**: each one
-was naive retrieval and each one hard-wired ayin to one operator's private backend. A
-redesigned retrieval layer is planned; until it lands, no code path in ayin embeds, indexes or
-retrieves anything.
+**Nothing is retrieved yet.** ayin still finds code the agentic way — `grep`, `find_files`,
+`read_file` and `explore`. The earlier retrieval surfaces (a grounded Q&A corpus generator,
+transcript-mined episodes, and a `docs_search` tool over a specific backend's documentation index)
+were **removed**: each one was naive retrieval and each one hard-wired ayin to one operator's
+private backend. No code path embeds, indexes or retrieves anything.
+
+The replacement is being built in three phases. **Phase 1 — `indulge`, the corpus — is partially
+landed: the store, discovery and question generation exist, the command does not.**
+`src/indulge/{store,discover,questions}.ts` are on disk and gated (`npm run check:indulge`);
+`answer`, `report` and the `ayin indulge` argv dispatch are not written yet, so there is currently no
+way to produce a corpus end to end.
+
+### `indulge` — the per-repo corpus (`src/indulge/`)
+
+    ayin indulge --repoPath <path> --domains "rendering,checkout-flow"
+
+The eventual shape: a **domain** is an arbitrary string the operator types. It maps to nothing
+structural and **may match nothing in the repo** — in which case indulge records `matched: 0` and
+stops. It never invents a file list to have something to work with; a corpus containing invented
+files is worse than no corpus, because it is confidently wrong at retrieval time.
+
+Three stages, each writing its results to disk as it produces them: **discover** the files a domain
+touches, **generate** the questions worth answering about them (model-generated, not templated),
+and **answer** each one as a full explore-style investigation. Every answer carries citations that
+are verified — path, line range and blob sha — **before** its chunk is written; a chunk whose proof
+does not resolve is recorded `failed` and never stored.
+
+**It is an overnight job, and that sets every design decision in the store.** The operator starts it
+in the evening and closes the laptop, so a crash, a reboot or a `kill -9` at 02:00 must cost at most
+the one question in flight — never the hours before it:
+
+| Property | How |
+|---|---|
+| Nothing lives only in memory | JSONL, appended and flushed per record (`appendFileSync` opens, writes, closes) |
+| A torn line never costs the corpus | Every reader skips a line that will not parse — the normal aftermath of a power cut mid-append |
+| Status changes never rewrite a file | `pending → answered` is a second line with the same `id`; readers merge in order, last wins |
+| Whole-file documents are atomic | `manifest.json` / `progress.json` go through `writeAtomic` (temp + rename) |
+| A restart knows what was in flight | Runs left `running` are closed as `interrupted`; their data stays and is what the next run resumes from |
+| A stale lock needs no human | A lock whose pid is dead (same host) or whose heartbeat stopped (any host) is **adopted**, not obeyed. A live one is refused by name |
+| Re-runs expand, never restart | `questionId` and `chunkId` are content-derived and stable; a known id is skipped. `sourceSha` is the invalidation key — unchanged file, no re-answer |
+
+Storage is **outside the work tree**, in `~/.ayin-cli/rag/<repo-key>/` (`AYIN_RAG_DIR` overrides it;
+`<repo-key>` is a slug plus a hash of the absolute path, so two checkouts of one repo are separate
+corpora — they sit on different commits). Chunks quote method bodies, and a work repo belongs to an
+employer: one `git add -A` in the wrong directory would publish the corpus.
+
+```
+~/.ayin-cli/rag/<repo-key>/
+  manifest.json      repoPath + one row per run (domains, headSha, totals, status)
+  files.jsonl        stage 1 — one line per discovered file
+  questions.jsonl    stage 2 — one line per question, PLUS one line per status change
+  chunks/<id>.json   stage 3 — one answered, citation-verified question
+  progress.json      heartbeat — stage, done/total, current item
+  run.lock           the running process, so two indulges cannot share one corpus
+```
+
+Duplicate-checking is O(1) per append against an in-process id cache seeded from disk. This is not a
+micro-optimisation: re-parsing the JSONL per append is quadratic, and measured at 175ms for 500
+questions but 51s for 8000 — a repo whose files × entities × 5 categories reach five figures would
+have spent the night on bookkeeping instead of answers.
+
+#### Stage 1 — discovery (`discover.ts`)
+
+The model picks the **seeds** (only something that reads code can answer "which files implement
+checkout?"), and every path it names is resolved against the filesystem before it is kept: a path
+that escapes the repo, does not exist, or is a directory is refused. Refused paths are counted as
+`hallucinated` and reported, never stored. `exploreExecute` gained a `cwd` param for this — indulge
+investigates the repo at `--repoPath`, and passing it per call is what keeps that from becoming a
+`process.chdir()`.
+
+From the seeds the walk is **deterministic**, because stage 3's citations have to be real. Three
+edge kinds, strongest first:
+
+| Edge | Built from | Why |
+|---|---|---|
+| import | relative `import`/`require` specifiers, resolved to files that exist | Names the file directly. `./x.js` → `x.ts` is handled — under NodeNext every TS file imports its sibling that way |
+| imported-by | the same edges reversed | "who calls this" is half of what a corpus is asked |
+| mention | identifiers intersected with the declared-type table (`surfaceOf`) | The only signal in C#, where a `using` names a namespace and same-assembly types need no import at all |
+
+Mention edges are filtered through the language's own `isBuiltinType`, and a name declared in more
+than three files is dropped as ambiguous. Both guards are measured, not theoretical: `session-record.ts`
+declares `type Event`, and without the filter every file mentioning the DOM/Node `Event` was linked
+to it — a plausible edge that is simply false. `referencesOf` is deliberately *not* used for edges;
+it answers entangle's question (which manifest unit does this cross), and a bare specifier names a
+package rather than a file.
+
+`bin/` is **not** in the skip list. It is MSBuild output in .NET but the CLI entry point in a Node
+package, and skipping it dropped a real source file that imported the seed. `obj/` stays skipped —
+MSBuild generates `.cs` there, which would be indexed as if hand-written.
+
+Verified on ayin's own source: seeded with `session-record.ts`, depth 1 returned exactly the four
+files that import it plus the one it imports — the same set `grep -rl` returns, with no extras.
+
+#### Stage 2 — question generation (`questions.ts`)
+
+Questions are **model-generated, not templated**: a fixed list asked of every project produces a
+corpus of answers nobody needed. One call per **(target, category)**, where a target is the file
+itself or one entity in it (declared type, public method, public property — a private helper is not
+what tomorrow asks about). Per category rather than one call for all five, because asking for five
+kinds of thing at once returns five shallow examples of the easiest kind; each category's focus is
+one tunable line in `prompts/indulge/category*.txt`, wrapped by `questionFrame.txt`.
+
+`NONE` is a real answer that must survive as zero questions — a file with nothing worth asking
+should produce nothing rather than four questions invented to fill a quota. The source shown to the
+model is clipped at 12k characters and **the clip is announced in the prompt**, so it never writes
+questions about code it was not given.
+
+**Resume granularity is the (file, entity, category) triple.** If the store already holds a question
+for one, the model is not asked again — a resumed run makes zero calls for work already done. A
+generation that FAILS (model down) writes nothing and leaves its triple un-done, so the next run
+retries it rather than recording it as complete. `shouldStop` is checked between calls, so a
+shutdown lands between records. Caps per target and per file keep one verbose generation from
+ballooning the night's work.
+
+The `ask` seam is injectable, which is what lets the gate prove resume, caps, dedup and the
+failure path — the parts that decide whether a night is lost or repeated — without a GPU.
+
+**Phase 2** embeds the chunks into a local vector space per repo. **Phase 3** injects retrieved
+chunks at named prompt sites. Neither is designed yet — Phase 1's chunks get read and judged by hand
+first, because a RAG is worth exactly what its chunks are worth.
 
 ## TUI (`src/ui/`)
 
@@ -2103,6 +2243,16 @@ src/
 │   ├── review.ts       one judged pass → {verdict, summary, issues[]}
 │   └── index.ts        the trigger, the turn state, executor prepare→probe→criteria, the ≤3-pass
 │                       fix loop, the verdict card
+├── indulge/            per-repo RAG corpus (Phase 1 — store + discovery so far, no command yet):
+│   ├── store.ts        ~/.ayin-cli/rag/<repo-key>/ — append-only JSONL flushed per record, atomic
+│   │                   manifest/progress, run lock that adopts a dead holder, stable content ids.
+│   │                   Everything that makes an overnight run survive a power cut lives here
+│   ├── discover.ts     stage 1: model-picked seeds, every path verified against the filesystem,
+│   │                   then a deterministic import/imported-by/mention walk to depth 3
+│   └── questions.ts    stage 2: one call per (file|entity, category); resume keyed on that triple,
+│                       caps per target and file, `ask` injectable so the gate needs no GPU
+├── modes.ts            /verbose (brevity is the DEFAULT, this opts out) and /logcover, persisted
+│                       in prompts.json and injected as prompt text
 ├── permissions.ts      approval dialogs + allow-lists
 ├── summary.ts          rolling session summary
 ├── goal.ts             auto-determined session goal (anti-wander anchor; LLM-distilled, cursive)

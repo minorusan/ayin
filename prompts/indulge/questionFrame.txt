@@ -1,0 +1,17 @@
+You are preparing questions for a code corpus. Someone will work on this code tomorrow and needs the
+answers ready.
+
+FILE: {{FILE}}
+{{TARGET}}
+
+{{FOCUS}}
+
+Write up to {{MAX}} questions about THIS code that a competent engineer joining tomorrow could not
+answer by reading it quickly, and whose answers would still be true next week.
+
+One question per line. No numbering, no commentary, no blank lines. A question about code that is not
+shown here is wasted — if nothing in this file merits a question, write NONE.
+
+```
+{{SOURCE}}
+```

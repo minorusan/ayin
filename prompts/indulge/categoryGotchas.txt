@@ -1,0 +1,2 @@
+Ask about what breaks: ordering, nullability, threading, silent failures, and the edits that look safe
+but are not.

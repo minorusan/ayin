@@ -123,6 +123,18 @@ export function getConfig(key: string, defaultValue: number): number {
 }
 
 /**
+ * The value only if the OPERATOR set it — no shipped default, no caller fallback.
+ *
+ * "Unset" and "set to the same number the default happens to be" are different facts, and one
+ * feature needs to tell them apart: the round budget is unlimited unless someone deliberately capped
+ * it, so reading a shipped default there would reinstate the cap this build removed.
+ */
+export function getConfigIfSet(key: string): number | undefined {
+  const v = loadConfig()[key];
+  return typeof v === 'number' ? v : undefined;
+}
+
+/**
  * Every config key this build actually reads. Kept beside the reader so it goes stale loudly rather
  * than quietly: `/set` uses it to tell an operator when a key they just set is one nobody consults.
  * A new `getConfigString('x')` anywhere means a new entry here.
@@ -135,6 +147,10 @@ export const KNOWN_CONFIG_KEYS = [
   'onboardedAt',
   // 'on' enables wheel scrolling, at the cost of the terminal's native text selection — off by default.
   'mouse',
+  // Operator modes (modes.ts), written by /verbose and /logcover as 1/0.
+  'verbose', 'logCoverage',
+  // Only honoured when the operator sets it — the round budget is otherwise unlimited (agent.ts).
+  'maxToolRounds',
 ];
 
 export function getConfigString(key: string): string | undefined {

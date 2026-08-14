@@ -33,8 +33,9 @@ import { recordPrompt, recordTool, recordAnswer } from './session-record.js';
 // The FULL record (opt-in, unclipped) runs alongside the clipped operating record above — see
 // transcript.ts for why both exist. Every call here is a no-op unless /transcribe is on.
 import { transcribeAnswer, transcribePrompt, transcribeResponse, transcribeTool } from './transcript.js';
-import { getConfig, getPrompt } from './prompts.js';
+import { getConfig, getConfigIfSet, getPrompt } from './prompts.js';
 import { getRules } from './rules.js';
+import { isLogCoverage, isVerbose } from './modes.js';
 import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { extractSignals } from './tools/signals.js';
@@ -124,14 +125,30 @@ function detectProjectExpertise(cwd: string): string {
 }
 
 function getWindowSize(): number { return getConfig('windowSize', 12); }
-/** Headless runs a long leash (1000) because a `-p` task is expected to finish the job. A caller
- *  that wants a SHORT, forced-spend run — the hound, which must grep a handful of facts and answer,
- *  not deliberate — sets AYIN_MAX_ROUNDS. Ignored when unparseable or <1, so a typo can't wedge the
- *  loop at zero rounds. */
-function getMaxRounds(): number {
+/**
+ * How many rounds the loop may run. **Unlimited by default** — it works until it is done or the
+ * operator cancels.
+ *
+ * The cap used to be 15 interactive, and a cap is a guess about how long a task takes made before
+ * anyone knows what the task is. It cut real work mid-investigation and taught the model to rush:
+ * the round counter is in the prompt, so an agent told it has three rounds left writes a conclusion
+ * it has not earned. Removing the number removes both.
+ *
+ * This is not an infinite loop. A turn ends when the model stops calling tools and answers — the
+ * cap was never what ended a normal turn, only what truncated a long one. `Ctrl+C` (`interruptAgent`)
+ * remains the stop.
+ *
+ * Two ways to put a cap back, both deliberate:
+ *   - `AYIN_MAX_ROUNDS` — what the hound uses to force a short, grep-and-answer run.
+ *   - `config.maxToolRounds` in prompts.json, but ONLY if the operator actually set it. Read through
+ *     `getConfigIfSet` so the shipped default cannot silently reinstate the cap this removed.
+ */
+export function getMaxRounds(): number {
   const capped = parseInt(process.env.AYIN_MAX_ROUNDS || '', 10);
   if (Number.isFinite(capped) && capped >= 1) return capped;
-  return HEADLESS ? 1000 : getConfig('maxToolRounds', 15);
+  const configured = getConfigIfSet('maxToolRounds');
+  if (configured !== undefined && configured >= 1) return configured;
+  return Infinity;
 }
 
 let exploreCallCount = 0;
@@ -493,6 +510,16 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     systemContent = `You are an expert in: ${projectExpertise}.\n\n${systemContent}`;
   }
 
+  // Operator modes. Both are stable for the whole turn — they change only when a command is typed —
+  // so they live above the prefix boundary and cost one cache invalidation per toggle, not per round.
+  // Brevity is the DEFAULT and `/verbose` opts out of it; log coverage is opt-in via `/logcover`.
+  if (!isVerbose()) {
+    systemContent += `\n\n${getPrompt('brevity')}`;
+  }
+  if (isLogCoverage()) {
+    systemContent += `\n\n${getPrompt('logCoverage')}`;
+  }
+
   const rules = getRules();
   if (rules) {
     systemContent = `<rules>\n${rules}\n</rules>\n\n${systemContent}`;
@@ -588,7 +615,12 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     volatile += `\n\nYour deliverable: write the final output to ${ctaTarget}. You have not done this yet.`;
   }
 
-  if (remaining <= 3) {
+  // With no cap there is no denominator and no deadline to announce. Stating a bare round number is
+  // still worth it — it is how the model knows it is mid-turn — but every pressure line is gone:
+  // "3 rounds left" is exactly the nudge that bought rushed conclusions, and it cannot be true here.
+  if (!Number.isFinite(maxRounds)) {
+    volatile += `\n\n[Round ${round + 1}. Take the rounds you need; stop when the work is done.]`;
+  } else if (remaining <= 3) {
     volatile += `\n\n[URGENT: Round ${round + 1}/${maxRounds}. Only ${remaining} round(s) left. Write your final answer now.]`;
   } else if (round >= Math.floor(maxRounds * 0.75)) {
     volatile += `\n\n[Round ${round + 1}/${maxRounds}. Past 75% — converge toward your conclusion.]`;
@@ -1512,7 +1544,9 @@ async function writeHandoff(reason: string, userInput: string, round: number, ma
     ? `\nDirections tried: ${directions.map(d => d.substring(0, 80)).join('; ')}`
     : '';
 
-  process.stdout.write(`\n--- HANDOFF (${reason}, round ${round}/${maxRounds}) ---\n`);
+  // `round 3/Infinity` is what an uncapped budget prints if the denominator is not guarded.
+  const budget = Number.isFinite(maxRounds) ? `round ${round}/${maxRounds}` : `round ${round}`;
+  process.stdout.write(`\n--- HANDOFF (${reason}, ${budget}) ---\n`);
   process.stdout.write(`Original prompt: ${userInput.substring(0, 200)}\n`);
   process.stdout.write(`CTA: ${ctaTarget || '(none detected)'} — ${ctaDelivered ? 'DELIVERED' : 'NOT DELIVERED'}\n`);
   process.stdout.write(`Tool calls: ${totalToolCalls} (explore: ${exploreCallCount})\n`);

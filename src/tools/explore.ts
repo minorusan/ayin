@@ -327,7 +327,11 @@ function isAllowed(cmd: string): boolean {
 export async function exploreExecute(params: Record<string, string>): Promise<string> {
   const question = params.question;
   const context = params.context || '';
-  const cwd = process.cwd();
+  // Every command and the context expansion run here. Defaults to the process cwd — which is what
+  // the agent loop wants, since the operator's session IS the repo. `indulge` investigates a repo
+  // named by `--repoPath` instead, and passing it here is what keeps that from becoming a
+  // `process.chdir()`: a global mutation for a per-call fact.
+  const cwd = params.cwd || process.cwd();
   // thorough: let the investigation run long before the digest-commit guard
   // may cut it — broad "how does X work" questions legitimately need many read steps.
   const digestCommitAt = params.thorough === 'true' ? 9 : 4;

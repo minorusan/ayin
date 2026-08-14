@@ -1,0 +1,8 @@
+Instrument every feature you build. A feature that cannot be diagnosed from its logs alone is unfinished.
+
+Log the entry of each significant function with the arguments that decide its behaviour, every branch
+actually taken, every external or IO call with its outcome and duration, every caught error with the
+state that produced it, and the value finally returned.
+
+Use the project's existing logger and its level conventions — read a neighbouring file and match it.
+NEVER log a secret, token, password, key or personal data.

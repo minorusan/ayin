@@ -1,0 +1,2 @@
+Ask about behaviour: what it does, what it returns, what it guarantees, and which invariants the code
+assumes without stating.

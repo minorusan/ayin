@@ -1,0 +1,2 @@
+Ask about what this needs and what needs it: imports, injected services, and which of those cross a
+package or assembly boundary.
