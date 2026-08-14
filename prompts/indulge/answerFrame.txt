@@ -1,0 +1,17 @@
+Answer this question about {{FILE}} using ONLY the investigation below.
+
+QUESTION: {{QUESTION}}
+
+INVESTIGATION:
+{{EVIDENCE}}
+
+Write the answer as prose an engineer can act on: what is true, and what follows from it. Name the
+functions, fields and call sites involved. If the investigation does not settle the question, say what
+it does establish and what is still unknown — a hedged true answer is worth more than a confident wrong one.
+
+Then cite the code the answer rests on. One per line, at the end, in exactly this form:
+
+CITE: path/to/file.ext:START-END
+
+Line numbers are those shown in the investigation. Cite only ranges you actually saw there; a citation
+nobody can resolve discards this whole answer.

@@ -17,6 +17,11 @@
  * expansion into a restart that also doubles the corpus.
  */
 
+// Declare ourselves headless BEFORE importing anything from dist: `answer.js` wires the tool
+// runtime, and `ui/index.ts` builds real blessed widgets at module load unless HEADLESS is set —
+// which grabs the terminal and leaves escape codes behind when the process exits.
+if (!process.argv.includes('-p')) process.argv.push('-p');
+
 import { appendFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { hostname, tmpdir } from 'node:os';
@@ -294,6 +299,97 @@ qstop.addFile({ domain: 'w', path: 'src/widget.ts', depth: 0, why: 'seed', sha: 
 const stopped = await Q.generateQuestions({ store: qstop, repoPath: ENT, ask, shouldStop: () => true });
 ok(stopped.stopped === true && stopped.calls === 0, 'shouldStop halts before spending a call', JSON.stringify(stopped));
 qstop.endRun('q2');
+
+// ── stage 3: NO PROOF, NO CHUNK ─────────────────────────────────────────────────
+// The corpus's whole value is that a retrieved chunk is true. A plausible-but-wrong chunk is worse
+// than a missing one, because at retrieval time nothing distinguishes it from a correct one — it
+// gets injected into a prompt, believed, and acted on. So verification is adversarial here.
+
+const AN = await import(join(ROOT, 'dist/indulge/answer.js'));
+
+const V = join(TMP, 'verify-repo');
+mkdirSync(join(V, 'src'), { recursive: true });
+const tenLines = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n');
+writeFileSync(join(V, 'src/a.ts'), tenLines);
+
+const keep = AN.verifyCitations(V, 'CITE: src/a.ts:2-4');
+ok(keep.citations.length === 1 && keep.rejected === 0, 'a resolvable citation is kept');
+ok(keep.citations[0].sha === S.blobSha(tenLines), 'the sha is computed from disk, not taken from the model');
+ok(keep.citations[0].startLine === 2 && keep.citations[0].endLine === 4, 'the line range is preserved');
+
+const reject = (text, label) => {
+  const r = AN.verifyCitations(V, text);
+  ok(r.citations.length === 0 && r.rejected === 1, label, JSON.stringify(r.citations));
+};
+reject('CITE: src/a.ts:0-3', 'line 0 is refused — citations are 1-indexed');
+reject('CITE: src/a.ts:4-2', 'an inverted range is refused');
+reject('CITE: src/a.ts:1-11', 'a range past the end of the file is refused');
+reject('CITE: src/nope.ts:1-2', 'a citation to a file that does not exist is refused');
+reject('CITE: ../../../etc/passwd:1-2', 'a citation escaping the repo is refused');
+reject('CITE: /etc/passwd:1-2', 'an absolute path outside the repo is refused');
+
+const none = AN.verifyCitations(V, 'The answer is obviously 42, no proof needed.');
+ok(none.citations.length === 0 && none.rejected === 0, 'an answer with no citation yields none');
+ok(AN.verifyCitations(V, 'CITE: src/a.ts:2-4\nCITE: src/a.ts:2-4').citations.length === 1,
+  'a repeated citation is counted once');
+ok(AN.stripCitations('Answer.\n\nCITE: src/a.ts:1-2\n') === 'Answer.', 'CITE lines are stripped from the prose');
+
+// The end-to-end guarantee: a model that cites nothing resolvable must produce NO chunk.
+const av = S.openStore(V);
+av.beginRun({ runId: 'a1', domains: ['d'], headSha: 'h' });
+av.addFile({ domain: 'd', path: 'src/a.ts', depth: 0, why: 'seed', sha: S.blobSha(tenLines) });
+const mkQ = (text, category = 'functionality') => {
+  const id = S.questionId(text, 'src/a.ts', null);
+  av.addQuestion({ id, file: 'src/a.ts', entity: null, category, text });
+  return id;
+};
+const badId = mkQ('What does this do when the input is empty?');
+const bad = await AN.answerQuestions({
+  store: av, repoPath: V,
+  investigate: async () => 'I looked at the file and formed a strong opinion about it.',
+  ask: async () => 'It handles the empty case by returning early.\nCITE: src/imaginary.ts:1-5',
+});
+ok(bad.answered === 0 && bad.failed === 1 && bad.rejectedCitations === 1,
+  'an answer whose only citation is unresolvable is FAILED, never stored', JSON.stringify(bad));
+ok(av.chunks().length === 0, 'no chunk reached disk');
+ok(av.questions().find((q) => q.id === badId).status === 'failed', 'the question is marked failed');
+ok(/citation/i.test(av.questions().find((q) => q.id === badId).note || ''), 'the failure note says why');
+
+const goodId = mkQ('Which line carries the boundary condition?');
+const good = await AN.answerQuestions({
+  store: av, repoPath: V,
+  investigate: async () => 'Read src/a.ts, lines 1-10.',
+  ask: async () => 'Line 3 carries it.\nCITE: src/a.ts:3-3\nCITE: src/gone.ts:1-2',
+});
+ok(good.answered === 1 && good.rejectedCitations === 1,
+  'a partly-verifiable answer keeps the proof that resolves and drops the rest', JSON.stringify(good));
+const chunk = av.chunks()[0];
+ok(chunk.citations.length === 1 && chunk.citations[0].path === 'src/a.ts', 'only the verified citation is stored');
+ok(chunk.files.length === 1 && chunk.sourceSha === S.blobSha(tenLines), 'sourceSha is the invalidation key');
+ok(chunk.chunkId === S.chunkId(av.key, 'src/a.ts', null, 'functionality', goodId), 'the chunk id is the derived one');
+ok(av.questions().find((q) => q.id === goodId).status === 'answered', 'the question is marked answered');
+
+// Resume: an already-chunked question costs nothing and is not re-asked.
+let asked = 0;
+const again = await AN.answerQuestions({
+  store: av, repoPath: V,
+  investigate: async () => { asked++; return 'x'; }, ask: async () => { asked++; return 'y'; },
+});
+ok(asked === 0 && again.attempted === 0, 'a resumed run re-answers nothing', JSON.stringify(again));
+
+// A stop lands between questions, and a vanished file fails rather than throwing.
+const stopId = mkQ('Anything at all?');
+const halted = await AN.answerQuestions({ store: av, repoPath: V, shouldStop: () => true, ask: async () => 'x' });
+ok(halted.stopped === true && halted.attempted === 0, 'shouldStop halts before spending a call');
+rmSync(join(V, 'src/a.ts'));
+const gone = await AN.answerQuestions({ store: av, repoPath: V, ask: async () => 'x' });
+ok(gone.failed >= 1 && av.questions().find((q) => q.id === stopId).status === 'failed',
+  'a file that vanished between stages fails the question instead of throwing');
+av.endRun('a1');
+
+// git-category facts come from git, and an invented sha is caught.
+ok(AN.gitShasResolve(ROOT, 'see commit deadbeefdeadbeef for details') === false, 'an invented commit sha is refused');
+ok(AN.answerFromGit(join(TMP, 'not-a-repo'), 'x.ts') === null, 'a non-repo yields no git answer');
 
 rmSync(TMP, { recursive: true, force: true });
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');

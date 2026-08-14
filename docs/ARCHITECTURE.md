@@ -1656,10 +1656,10 @@ were **removed**: each one was naive retrieval and each one hard-wired ayin to o
 private backend. No code path embeds, indexes or retrieves anything.
 
 The replacement is being built in three phases. **Phase 1 — `indulge`, the corpus — is partially
-landed: the store, discovery and question generation exist, the command does not.**
-`src/indulge/{store,discover,questions}.ts` are on disk and gated (`npm run check:indulge`);
-`answer`, `report` and the `ayin indulge` argv dispatch are not written yet, so there is currently no
-way to produce a corpus end to end.
+landed: the four working stages exist, the command does not.**
+`src/indulge/{store,discover,questions,answer}.ts` are on disk and gated (`npm run check:indulge`,
+83 assertions); `report` and the `ayin indulge` argv dispatch are not written yet, so a corpus can be
+produced by calling the stages but not yet from a terminal.
 
 ### `indulge` — the per-repo corpus (`src/indulge/`)
 
@@ -1765,6 +1765,40 @@ ballooning the night's work.
 
 The `ask` seam is injectable, which is what lets the gate prove resume, caps, dedup and the
 failure path — the parts that decide whether a night is lost or repeated — without a GPU.
+
+#### Stage 3 — answering, and proving it (`answer.ts`)
+
+**No proof, no chunk.** Every answer carries citations, and every citation is verified against the
+filesystem *before* the chunk is written: the path resolves **inside** the repo, the line range is
+within the file's real line count, and the blob sha is computed from the bytes on disk rather than
+taken from the model. Unresolvable citations are dropped and counted (`rejectedCitations`); if none
+survive, the question is recorded `failed` and stored nowhere.
+
+That severity is the point. A plausible-but-wrong chunk is worse than a missing one, because at
+retrieval time nothing distinguishes it from a correct one — it gets injected into a prompt,
+believed, and acted on.
+
+Two paths:
+
+- **`git`** — the facts come from `git log` / `rev-list` / `shortlog`, never from a model, because an
+  approximated commit sha is a lie with a plausible shape. The model only selects and phrases over
+  that output **plus the current source**, and every sha it writes is re-checked with `rev-parse
+  --verify`. Both refinements were measured: answering deterministically returned a commit listing to
+  *"which commit explains **why** `noteShape` uses a bounding-box heuristic?"*, which is a non-answer;
+  and given history alone the model correctly refused, noting it had not been shown the code. The
+  reason a thing looks the way it does is usually in the file.
+- **everything else** — a full `explore` investigation, then a separate call that turns the evidence
+  into an answer plus `CITE:` lines. Investigation and writing are separate calls on purpose: a model
+  asked to search and conclude in one breath concludes first.
+
+Sequential for now — the GPU serialises generation anyway, so concurrency would only hide file and
+git I/O while complicating progress and resume. Recorded in `TechDebt.md` as the knob to add if a
+real night proves I/O-bound.
+
+Verified against real code (naamah, gemma4): 3 answered, 0 failed, **0 rejected citations**, 110s.
+Spot-checked by hand — a claim about recursive descent cited `extract.mjs:43-47`, whose line 46 is
+exactly `else yield* groups(inner);`, and a git answer pointed at `115-121`, the comment that does
+explain the heuristic.
 
 **Phase 2** embeds the chunks into a local vector space per repo. **Phase 3** injects retrieved
 chunks at named prompt sites. Neither is designed yet — Phase 1's chunks get read and judged by hand
@@ -2249,8 +2283,10 @@ src/
 │   │                   Everything that makes an overnight run survive a power cut lives here
 │   ├── discover.ts     stage 1: model-picked seeds, every path verified against the filesystem,
 │   │                   then a deterministic import/imported-by/mention walk to depth 3
-│   └── questions.ts    stage 2: one call per (file|entity, category); resume keyed on that triple,
-│                       caps per target and file, `ask` injectable so the gate needs no GPU
+│   ├── questions.ts    stage 2: one call per (file|entity, category); resume keyed on that triple,
+│   │                   caps per target and file, `ask` injectable so the gate needs no GPU
+│   └── answer.ts       stage 3: explore-style investigation → answer + CITE lines, every citation
+│                       verified against disk before the chunk is written; no proof, no chunk
 ├── modes.ts            /verbose (brevity is the DEFAULT, this opts out) and /logcover, persisted
 │                       in prompts.json and injected as prompt text
 ├── permissions.ts      approval dialogs + allow-lists
