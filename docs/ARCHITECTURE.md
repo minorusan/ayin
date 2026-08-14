@@ -1656,10 +1656,10 @@ were **removed**: each one was naive retrieval and each one hard-wired ayin to o
 private backend. No code path embeds, indexes or retrieves anything.
 
 The replacement is being built in three phases. **Phase 1 — `indulge`, the corpus — is partially
-landed: the four working stages exist, the command does not.**
-`src/indulge/{store,discover,questions,answer}.ts` are on disk and gated (`npm run check:indulge`,
-83 assertions); `report` and the `ayin indulge` argv dispatch are not written yet, so a corpus can be
-produced by calling the stages but not yet from a terminal.
+landed and RUNNABLE.** `ayin indulge` builds a corpus end to end, gated by
+`npm run check:indulge` (94 assertions). Phase 2 (embeddings) and Phase 3 (injection sites) are not
+designed yet — Phase 1's chunks get read and judged by hand first, because a RAG is worth exactly
+what its chunks are worth.
 
 ### `indulge` — the per-repo corpus (`src/indulge/`)
 
@@ -1790,6 +1790,26 @@ Two paths:
 - **everything else** — a full `explore` investigation, then a separate call that turns the evidence
   into an answer plus `CITE:` lines. Investigation and writing are separate calls on purpose: a model
   asked to search and conclude in one breath concludes first.
+
+#### The command
+
+    ayin indulge --domains "rendering,checkout" [--repoPath <path>]
+    ayin indulge --status      what it is doing now, how far along, and whether it is still alive
+    ayin indulge --report      write the audit markdown and stop
+    ayin indulge --dry-run     discover only — file list + question estimate, spends nothing
+    ayin indulge --restart     discard the corpus and rebuild (the default is RESUME)
+
+`indulge` is in `NO_TUI_COMMANDS`: it runs for hours under `nohup`, so blessed must never grab the
+terminal. **Resume is the default** — every stage reads its remaining work from disk, so re-running
+after a kill continues rather than restarts. SIGINT/SIGTERM are cooperative: the flag is set, the
+record in flight finishes, the manifest closes honestly, and a second signal exits at once.
+Generation is enqueued through the **llm authority** as a background consumer, so an overnight sweep
+never starves a human at the keyboard; no resource layer simply means the provider is reached
+directly. A domain matching nothing exits 0 having written only a manifest.
+
+Verified through the CLI on naamah: a no-match domain wrote no file list; a real build produced 2
+chunks with 0 rejected citations; a re-run generated **0** new questions, answered only what was
+left, and reached 4 chunks with 0 pending.
 
 Sequential for now — the GPU serialises generation anyway, so concurrency would only hide file and
 git I/O while complicating progress and resume. Recorded in `TechDebt.md` as the knob to add if a
@@ -2285,8 +2305,12 @@ src/
 │   │                   then a deterministic import/imported-by/mention walk to depth 3
 │   ├── questions.ts    stage 2: one call per (file|entity, category); resume keyed on that triple,
 │   │                   caps per target and file, `ask` injectable so the gate needs no GPU
-│   └── answer.ts       stage 3: explore-style investigation → answer + CITE lines, every citation
-│                       verified against disk before the chunk is written; no proof, no chunk
+│   ├── answer.ts       stage 3: explore-style investigation → answer + CITE lines, every citation
+│   │                   verified against disk before the chunk is written; no proof, no chunk
+│   ├── report.ts       the audit deliverable: one markdown grouping chunks by file and category,
+│   │                   RE-verifying every citation as it writes and marking stale ones
+│   └── index.ts        `ayin indulge` — argv, the stage pipeline, progress heartbeat, cooperative
+│                       SIGINT, and the llm authority held as a background consumer
 ├── modes.ts            /verbose (brevity is the DEFAULT, this opts out) and /logcover, persisted
 │                       in prompts.json and injected as prompt text
 ├── permissions.ts      approval dialogs + allow-lists

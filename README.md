@@ -541,6 +541,40 @@ later, not bundled into every call.
 A missing README or unconfigured Jira never blocks the report — the gaps are stated honestly
 ("no original intent could be recovered") rather than papered over.
 
+## `ayin indulge` — prepare a repo overnight
+
+You know in the evening that tomorrow is a rendering day. Start this, close the laptop, and by
+morning the questions worth asking about that part of the codebase are already answered.
+
+```bash
+ayin indulge --domains "rendering,checkout"   # in the repo you'll work in tomorrow
+ayin indulge --status                         # the morning check: how far, still alive?
+ayin indulge --report                         # the audit markdown, grouped by file
+ayin indulge --dry-run                        # what it WOULD do; spends nothing
+```
+
+A **domain** is any string you type. It maps to nothing structural and it may match nothing at all —
+in which case indulge says so and stops. It never invents a file list to have something to work with.
+
+It works in three stages: find the files a domain touches (a model picks the seeds, then a
+deterministic import/reference walk expands them — and every path a model names is checked against
+the filesystem before it is kept), generate the questions worth asking about each file and entity,
+then answer each one with a full investigation.
+
+**Every answer carries citations, and every citation is verified before the chunk is stored** — the
+path resolves inside the repo, the line range is real, the blob sha matches the bytes on disk. An
+answer whose proof does not resolve is recorded as unproven and stored nowhere. A corpus you cannot
+trust is worse than no corpus, because at retrieval time nothing tells the two apart.
+
+It is built to be interrupted. Every record is written the moment it exists, so a crash, a reboot or
+a closed laptop costs at most the one question in flight; re-running resumes. `Ctrl+C` finishes the
+current step and stops cleanly. Nothing is written into your repo — the corpus lives in
+`~/.ayin-cli/rag/<repo-key>/`, because chunks quote your code and one stray `git add -A` would
+publish them.
+
+*Today the corpus is a deliverable you read. Retrieval — ayin consulting it while it works — is the
+next phase.*
+
 ## Repo watcher — automatic post-commit code review
 
 ```bash

@@ -391,6 +391,50 @@ av.endRun('a1');
 ok(AN.gitShasResolve(ROOT, 'see commit deadbeefdeadbeef for details') === false, 'an invented commit sha is refused');
 ok(AN.answerFromGit(join(TMP, 'not-a-repo'), 'x.ts') === null, 'a non-repo yields no git answer');
 
+// ── the command surface, and the audit deliverable ──────────────────────────────
+
+const IX = await import(join(ROOT, 'dist/indulge/index.js'));
+const RP = await import(join(ROOT, 'dist/indulge/report.js'));
+
+const p1 = IX.parseArgs(['--domains', 'a, b ,,c', '--depth', '2', '--max-questions', '5']);
+ok(JSON.stringify(p1.args.domains) === '["a","b","c"]', 'domains split and trim, empties dropped', JSON.stringify(p1.args.domains));
+ok(p1.args.maxDepth === 2 && p1.args.maxQuestions === 5 && p1.errors.length === 0, 'numeric flags parse');
+ok(IX.parseArgs(['--domains=x', '--depth=3']).args.maxDepth === 3, '--flag=value form works too');
+ok(IX.parseArgs(['--frobnicate']).errors.length === 1, 'an unknown flag is an error, never guessed at');
+ok(IX.parseArgs(['--depth', 'lots']).errors.length === 1, 'a non-numeric count is refused');
+ok(IX.parseArgs([]).args.domains.length === 0, 'no domains parses to none (the caller refuses it)');
+
+// The report re-verifies rather than trusting the flag set when the chunk was stored: "the proof
+// resolved once" and "the proof resolves now" are different claims, and a stale chunk presented as
+// current defeats the document's purpose.
+const R = join(TMP, 'report-repo');
+mkdirSync(join(R, 'src'), { recursive: true });
+const src = 'a\nb\nc\nd\n';
+writeFileSync(join(R, 'src/f.ts'), src);
+const repStore = S.openStore(R);
+repStore.beginRun({ runId: 'r1', domains: ['d'], headSha: 'h' });
+repStore.addFile({ domain: 'd', path: 'src/f.ts', depth: 0, why: 'seed', sha: S.blobSha(src) });
+const rq = S.questionId('what is b?', 'src/f.ts', null);
+repStore.addQuestion({ id: rq, file: 'src/f.ts', entity: null, category: 'functionality', text: 'what is b?' });
+const rc = {
+  chunkId: S.chunkId(repStore.key, 'src/f.ts', null, 'functionality', rq), questionId: rq, repoKey: repStore.key,
+  repoPath: R, domain: 'd', question: 'what is b?', answer: 'It is the second line.',
+  files: ['src/f.ts'], citations: [{ path: 'src/f.ts', startLine: 2, endLine: 2, sha: S.blobSha(src) }],
+  entity: null, category: 'functionality', model: 'test', createdAt: new Date().toISOString(), sourceSha: S.blobSha(src),
+};
+repStore.saveChunk(rc);
+ok(RP.chunkStillResolves(R, rc) === true, 'a chunk whose bytes are unchanged still resolves');
+const rep1 = RP.writeReport({ store: repStore, repoPath: R });
+ok(existsSync(rep1.path) && rep1.chunks === 1 && rep1.stale === 0, 'the report is written and counts its chunks', JSON.stringify(rep1));
+ok(readFileSync(rep1.path, 'utf-8').includes('src/f.ts:2-2'), 'a citation is rendered as path:start-end so a reader can jump to it');
+
+writeFileSync(join(R, 'src/f.ts'), 'a\nCHANGED\nc\nd\n');
+ok(RP.chunkStillResolves(R, rc) === false, 'editing the cited file makes the chunk stale');
+const rep2 = RP.writeReport({ store: repStore, repoPath: R });
+ok(rep2.stale === 1 && readFileSync(rep2.path, 'utf-8').includes('STALE'),
+  'the report marks stale chunks instead of presenting them as current', JSON.stringify(rep2));
+repStore.endRun('r1');
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);

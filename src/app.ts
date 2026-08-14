@@ -919,6 +919,12 @@ async function main(): Promise<void> {
     await runWatch(process.argv.slice(3));
     return;
   }
+  if (process.argv[2] === 'indulge') {
+    // Overnight per-repo corpus build — no TUI, no agent loop, resumes itself. See src/indulge/.
+    const { runIndulge } = await import('./indulge/index.js');
+    process.exitCode = await runIndulge(process.argv.slice(3));
+    return;
+  }
   if (process.argv[2] === 'update') {
     // Self-update from the configured npm registry, whichever one this install points at.
     // No TUI: it's a plain command that prints and exits. See src/updater.ts.

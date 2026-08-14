@@ -11,6 +11,7 @@ const NO_TUI_COMMANDS = new Set([
   'update',     // self-update from the registry
   'version', '--version', '-v',
   'explain',    // headless `ayin explain "<question>"` — prints the narrative, exits
+  'indulge',    // overnight corpus build — runs for hours under nohup; must never open a TUI
 ]);
 
 export const HEADLESS = process.argv.some(a => a === '-p' || a === '--prompt' || a === '--non-interactive')
