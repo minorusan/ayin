@@ -32,13 +32,13 @@ POST /api/generate   { messages, temperature?, thinking?, images? }  ->  { conte
 GET  /api/status     ->  { ok: true, model }
 ```
 
-The endpoint is resolved by `llmBaseUrl()` in priority order: **`AYIN_LLM_URL`** env → persisted
+The endpoint is resolved by `llmBaseUrl()` in priority order: **`AYIN_MODEL_URL`** env → persisted
 `llmUrl` in `~/.ayin-cli/prompts.json` (`/set llm-url …`) → `http://localhost:9100`.
 
 > **One name each, no aliases.** An install still exporting an older spelling gets the localhost
 > default, which fails loudly against a remote endpoint instead of quietly resolving to the wrong one.
 > Anything that sets the endpoint out of this repo's reach — a shell profile, a launchd plist, a
-> systemd unit, a CI file — has to name `AYIN_LLM_URL`.
+> systemd unit, a CI file — has to name `AYIN_MODEL_URL`.
 
 Transport details: retries on transient errors, a long timeout (coder models can think for minutes),
 and image attach for vision turns. See [`SETUP.md`](../SETUP.md) for the ways to stand up an endpoint.
@@ -53,7 +53,7 @@ inside the app cannot run before the terminal is taken, however early in the fil
 import is the only ordering that holds. Keep `index.ts` free of features: code there runs with no log
 sink and no UI, able to talk to the operator only through stdout.
 
-- **Configured is not reachable, and the gate acts on REACHABLE.** `AYIN_LLM_URL` exported in a shell
+- **Configured is not reachable, and the gate acts on REACHABLE.** `AYIN_MODEL_URL` exported in a shell
   profile passed a presence check on a laptop that was not on that LAN — so the TUI opened, took a
   prompt, and failed with a connection error: the same first-run failure, one step later. So a configured
   URL is *probed* (`/api/tags`, `/api/status`), because reachability is a property of now, not of when it
@@ -78,7 +78,7 @@ struggling, quietly ask the hosted model — is gone: a provider that bills per 
 fallen into, and "which model am I paying for" must never be a guess.
 
 What replaced it is a plain default. Provider resolution (`llm/select.ts`) ends at OpenAI when
-**nothing is configured anywhere** — no `AYIN_LLM_PROVIDER`, no `llmUrl`, no `AYIN_LLM_URL`, and no
+**nothing is configured anywhere** — no `AYIN_LLM_PROVIDER`, no `llmUrl`, no `AYIN_MODEL_URL`, and no
 resource surface at the localhost default. That is exactly the fresh-clone state, and it is the
 difference between a repo someone can try and one that needs a GPU first: `direct` against a localhost
 endpoint that isn't there fails on every prompt with a connection error, which reads as "ayin is
@@ -1495,7 +1495,7 @@ The moving parts, designed to survive interruption at any point:
   pattern="…" path="Assets"` — not a shell command, because the agent has no shell and refused
   `bash` calls burn the whole budget. Searches are scoped to `Assets/` in a Unity repo: `Library/`
   is gigabytes of generated cache that git ignores and `grep -r` does not. The engine is ayin, not
-  `claude -p` — no LAN address to hardcode; it inherits whatever `AYIN_LLM_URL` this install uses.
+  `claude -p` — no LAN address to hardcode; it inherits whatever `AYIN_MODEL_URL` this install uses.
 
   **The output contract is enforced in the script, not requested in the prompt.** A finding whose
   citation does not resolve to a real path in the repo is **dropped** (this is what makes an
@@ -2069,7 +2069,7 @@ src/
 │   ├── manager.ts      active-model resolution + dialect selection; all LLM calls route here
 │   ├── types.ts        ModelDialect interface
 │   └── dialects/       xml.ts (shared base) · gemma.ts · qwen.ts
-├── connection.ts       transport: the configured endpoint + OpenAI fallback; AYIN_LLM_URL resolver
+├── connection.ts       transport: the configured endpoint + OpenAI fallback; AYIN_MODEL_URL resolver
 ├── parser.ts           lenient tool-call parser (multi-format)
 ├── shell.ts            cross-platform shell: /bin/bash (POSIX) · Git Bash/cmd (Windows) + killTree
 ├── tools.ts            tool registry (a static array — every tool ships inside this repo)
@@ -2153,7 +2153,7 @@ tool/
 Each of these is an absence on purpose, not a gap waiting to be filled. They are listed because the
 absence is load-bearing: adding any of them back would break a property the agent depends on.
 
-- **No service discovery.** `connection.ts` talks to exactly ONE configured endpoint (`AYIN_LLM_URL` →
+- **No service discovery.** `connection.ts` talks to exactly ONE configured endpoint (`AYIN_MODEL_URL` →
   `/set llm-url` → loopback). Nothing is looked up, so a misconfigured endpoint fails loudly instead
   of quietly probing alternatives and adding a timeout to every refresh — which is also why
   `tokens.ts` only ever asks that same host for `/api/estimate` and otherwise estimates chars/4.

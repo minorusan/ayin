@@ -82,12 +82,12 @@ GET  /api/status     ->  { ok: true, model }
 `/api/status` is how ayin learns **which model** it's talking to, so it can pick the right
 **dialect** (tool-call format). It finds the endpoint via, in priority order:
 
-1. the **`AYIN_LLM_URL`** environment variable,
+1. the **`AYIN_MODEL_URL`** environment variable,
 2. a persisted `llmUrl` in `~/.ayin-cli/prompts.json` (set once with `/set llm-url …`),
 3. `http://localhost:9100` (the default).
 
 ```bash
-AYIN_LLM_URL=http://<backend-host>:9100 node dist/index.js
+AYIN_MODEL_URL=http://<backend-host>:9100 node dist/index.js
 # or persist it once inside the TUI:   /set llm-url http://<backend-host>:9100
 ```
 
@@ -103,7 +103,7 @@ bundled:
 
 ```bash
 OLLAMA_MODEL=qwen3-coder:30b node examples/ollama-adapter.mjs      # terminal 1 → :9100
-AYIN_LLM_URL=http://localhost:9100 node dist/index.js              # terminal 2
+AYIN_MODEL_URL=http://localhost:9100 node dist/index.js              # terminal 2
 ```
 
 Env: `OLLAMA_MODEL` (required), `OLLAMA_URL` (default `http://localhost:11434`), `PORT` (default
@@ -132,7 +132,7 @@ A rejected key drops you straight back to local rather than leaving a session th
 
 **Interactive (TUI):**
 ```bash
-AYIN_LLM_URL=http://localhost:9100 node dist/index.js
+AYIN_MODEL_URL=http://localhost:9100 node dist/index.js
 ```
 Type a task; ayin works in your **current directory**. Keys: `Ctrl+O` browse tool outputs,
 `Ctrl+S` session summary, `Ctrl+C` quit. When a tool needs approval you get a y/a/n prompt.
@@ -149,7 +149,7 @@ live output; scroll back to the bottom to resume.
 **Headless (one-shot, scriptable):**
 ```bash
 cd /path/to/your/project
-AYIN_LLM_URL=http://localhost:9100 node /path/to/ayin/dist/index.js -p "Add a /health route and a test for it, then run the tests."
+AYIN_MODEL_URL=http://localhost:9100 node /path/to/ayin/dist/index.js -p "Add a /health route and a test for it, then run the tests."
 ```
 In headless mode ayin auto-approves its own `write_file`/`bash` and runs until the task is
 done (or it exhausts its round budget), printing a final summary. **Run it inside the repo
@@ -275,8 +275,8 @@ silently missing, and a name that collides with a built-in is refused at boot.
 
 ## 9. Troubleshooting
 
-- **`No reachable LLM backend at …`** — nothing is serving the contract at `AYIN_LLM_URL`.
-  Start the Ollama adapter (Option A) or fix the URL. Verify: `curl $AYIN_LLM_URL/api/status`
+- **`No reachable LLM backend at …`** — nothing is serving the contract at `AYIN_MODEL_URL`.
+  Start the Ollama adapter (Option A) or fix the URL. Verify: `curl $AYIN_MODEL_URL/api/status`
   should return `{"ok":true,"model":"…"}`.
 - **Wrong / garbled tool calls** — ayin picks its dialect from `/api/status`'s `model`
   field. If your model isn't recognised (not gemma/qwen), it defaults to the gemma dialect;

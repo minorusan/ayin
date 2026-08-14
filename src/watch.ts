@@ -277,7 +277,7 @@ async function selfHealHooks(): Promise<void> {
 //   VERIFY  ayin itself, read-only (AYIN_READONLY=1 → grep/read only, never edit), capped at a small
 //           round budget (AYIN_MAX_ROUNDS), asked ONLY to grep the repo and say which facts actually
 //           break something. Engine is ayin, not `claude -p` — no LAN address to hardcode, no
-//           separate config; it inherits whatever AYIN_LLM_URL this install already talks to.
+//           separate config; it inherits whatever AYIN_MODEL_URL this install already talks to.
 //
 // The contract is ENFORCED in the script, not requested in the prompt: a finding whose citation does
 // not resolve to a real path is dropped, and `greps_run: 0` forces UNVERIFIED. The previous hound

@@ -13,7 +13,7 @@
  * symlink, `node dist/index.js`, the vendored launcher) goes through it without changing.
  *
  * CONFIGURED IS NOT REACHABLE. The gate acts on whether a model ANSWERS, so a configured URL is probed
- * (bounded, a few ms on a LAN) — an `AYIN_LLM_URL` in a shell profile passed a presence check on a laptop
+ * (bounded, a few ms on a LAN) — an `AYIN_MODEL_URL` in a shell profile passed a presence check on a laptop
  * that was not on that network, which put the original failure back one step. A stored OpenAI key is
  * taken at face value: `/openai` verified it when it was written.
  *
@@ -35,6 +35,49 @@ const OLLAMA_DEFAULT = 'http://127.0.0.1:11434';
 
 /** Commands that work with no model at all. */
 const NO_MODEL_NEEDED = new Set(['version', '--version', '-v', 'update', 'help', '--help', '-h']);
+
+/**
+ * ONBOARDING IS A DECISION THE OPERATOR MAKES ONCE — not a config value that happens to exist.
+ *
+ * The first version of this gate skipped itself whenever *something* was configured, and an
+ * `AYIN_MODEL_URL` inherited from a shell profile qualified. So on a machine that had never been set up,
+ * ayin went straight into the TUI: the operator had chosen nothing, been asked nothing, and the one
+ * moment where the tool could explain itself was skipped because of a line in `.zshrc` written months
+ * earlier for something else.
+ *
+ * The flag is what makes "ask once" different from both "never ask" and "nag forever": until it is
+ * written, the menu runs even when a model is reachable — with the reachable option offered as the
+ * default, so accepting takes one keypress. After it is written, ayin is silent and only checks that a
+ * model still answers.
+ */
+const ONBOARDED_KEY = 'onboardedAt';
+
+/**
+ * The PREVIOUS name for the endpoint variable, deliberately not read any more.
+ *
+ * It was renamed because a line in a shell profile — written months earlier, for a machine that was not
+ * this one — silently satisfied the setup gate, so ayin skipped the one moment where it explains itself
+ * and dropped a brand-new install straight into the TUI. Honouring the old name "for compatibility" would
+ * reproduce exactly that. It is reported instead, once, so nothing is mysterious: the variable is
+ * visibly ignored rather than invisibly obeyed.
+ */
+const LEGACY_URL_VAR = 'AYIN_LLM_URL';
+
+function legacyVarNotice(): string {
+  const legacy = (process.env[LEGACY_URL_VAR] ?? '').trim();
+  if (!legacy || (process.env.AYIN_MODEL_URL ?? '').trim()) return '';
+  return `\n  note: ${LEGACY_URL_VAR} is set but NO LONGER READ — the variable is AYIN_MODEL_URL now.\n`
+    + `        Update your shell profile, or choose an endpoint below and ayin will remember it.\n`;
+}
+
+function isOnboarded(): boolean {
+  return Boolean(getConfigString(ONBOARDED_KEY));
+}
+
+function markOnboarded(how: string): void {
+  // The timestamp is the flag AND the record of what was chosen — worth reading in a bug report.
+  setConfigValue(ONBOARDED_KEY, `${new Date().toISOString()} ${how}`.trim());
+}
 
 /**
  * IS THE RUNNING BUILD OLDER THAN THE SOURCE? Say so, loudly, before anything else.
@@ -83,7 +126,7 @@ export function hasModelConfigured(): boolean {
   const env = process.env;
   return Boolean(
     readOpenAiKey()
-    || (env.AYIN_LLM_URL ?? '').trim() || getConfigString('llmUrl')
+    || (env.AYIN_MODEL_URL ?? '').trim() || getConfigString('llmUrl')
     || (env.AYIN_OLLAMA_URL ?? '').trim() || getConfigString('ollamaUrl')
     || (env.AYIN_LLM_PROVIDER ?? '').trim() || getConfigString('llmProvider'),
   );
@@ -94,7 +137,7 @@ export interface ModelState {
   configured: boolean;
   /** A model will actually answer. This is the one the gate acts on. */
   ok: boolean;
-  /** What was tried, for the operator: `AYIN_LLM_URL http://…`, `OpenAI key`, … */
+  /** What was tried, for the operator: `AYIN_MODEL_URL http://…`, `OpenAI key`, … */
   how: string;
   /** Why it failed, when it did. */
   detail: string;
@@ -103,7 +146,7 @@ export interface ModelState {
 /**
  * CONFIGURED IS NOT REACHABLE, and the gate must act on reachable.
  *
- * `AYIN_LLM_URL` exported in a shell profile made the presence check pass on a laptop whose endpoint was
+ * `AYIN_MODEL_URL` exported in a shell profile made the presence check pass on a laptop whose endpoint was
  * on a LAN it was not currently on — so the TUI opened, took a prompt, and failed with a connection
  * error. That is the same first-run failure the gate exists to prevent, moved one step later. "You told
  * me where the model is" is not the guarantee worth making; "a model is there" is.
@@ -126,10 +169,10 @@ export async function checkModel(): Promise<ModelState> {
     return { configured: true, ok: p.ok && p.models > 0, how: `Ollama ${url}`, detail: p.ok ? (p.models === 0 ? 'reachable, but it has no models' : '') : p.detail };
   }
 
-  const endpoint = (env.AYIN_LLM_URL ?? '').trim() || getConfigString('llmUrl') || '';
+  const endpoint = (env.AYIN_MODEL_URL ?? '').trim() || getConfigString('llmUrl') || '';
   if (endpoint) {
     const p = await probeEndpoint(endpoint);
-    const src = (env.AYIN_LLM_URL ?? '').trim() ? 'AYIN_LLM_URL' : 'llm-url';
+    const src = (env.AYIN_MODEL_URL ?? '').trim() ? 'AYIN_MODEL_URL' : 'llm-url';
     return { configured: true, ok: p.ok, how: `${src} ${endpoint}`, detail: p.detail };
   }
 
@@ -152,7 +195,7 @@ function instructions(): string {
     'Pick one:',
     '  OpenAI          ayin  →  /openai sk-…            (hosted; needs no GPU)',
     '  Local Ollama    export AYIN_LLM_PROVIDER=ollama  (or: ayin → /set llm-provider ollama)',
-    '  An endpoint     export AYIN_LLM_URL=http://host:9100',
+    '  An endpoint     export AYIN_MODEL_URL=http://host:9100',
     '',
     'See SETUP.md for the full list.',
     '',
@@ -210,10 +253,16 @@ async function probeOpenAi(key: string): Promise<{ ok: boolean; detail: string }
  * Every option is VERIFIED before it is accepted — the point of the gate is that ayin starts in a state
  * that works, and storing an unreachable URL would just move the original failure one step later.
  */
-async function setupLoop(state: ModelState): Promise<boolean> {
+async function setupLoop(state: ModelState, onboarded: boolean): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    if (state.configured) {
+    if (state.ok && !onboarded) {
+      // Something already works, but nobody chose it — an inherited env var, or config from another tool.
+      // Ask once, with that option as the default, so confirming costs one keypress.
+      out('\n  ayin — first run\n');
+      out(`  A model already answers here: ${state.how}\n`);
+      out('  Confirm it, or pick something else. Asked once, then never again.\n');
+    } else if (state.configured) {
       // Configured but not answering. Name what was tried and why it failed — the operator usually knows
       // instantly ("I'm not on that network"), and a bare menu would hide the one useful fact.
       out('\n  ayin — no model is answering\n');
@@ -236,9 +285,19 @@ async function setupLoop(state: ModelState): Promise<boolean> {
       else out('  1) Local Ollama at another URL\n');
       out('  2) OpenAI API key                        [hosted; needs no GPU]\n');
       out('  3) An endpoint serving ayin\'s HTTP contract\n');
-      if (state.configured) out(`  r) Retry ${state.how}\n`);
+      if (state.ok) out(`  k) Keep ${state.how}                  [it answers now — press Enter]\n`);
+      else if (state.configured) out(`  r) Retry ${state.how}\n`);
       out('  q) Quit\n');
-      const choice = (await rl.question(`\n  Choose 1/2/3/${state.configured ? 'r/' : ''}q: `)).trim().toLowerCase();
+      const hint = state.ok ? 'k/' : state.configured ? 'r/' : '';
+      const raw = (await rl.question(`\n  Choose 1/2/3/${hint}q [${state.ok ? 'k' : ''}]: `)).trim().toLowerCase();
+      // Enter accepts the working default when there is one; otherwise it just re-asks.
+      const choice = raw === '' && state.ok ? 'k' : raw;
+
+      if (choice === 'k' && state.ok) {
+        markOnboarded(state.how);
+        out(`  keeping ${state.how}.\n`);
+        return true;
+      }
 
       if (choice === 'q' || choice === 'quit') {
         out('\n' + instructions());
@@ -249,7 +308,7 @@ async function setupLoop(state: ModelState): Promise<boolean> {
       if ((choice === 'r' || choice === 'retry') && state.configured) {
         out(`  re-checking ${state.how} … `);
         const again = await checkModel();
-        if (again.ok) { out('ok.\n'); return true; }
+        if (again.ok) { out('ok.\n'); markOnboarded(again.how); return true; }
         out(`still no.\n  ${again.detail || 'no answer'}\n`);
         continue;
       }
@@ -267,6 +326,7 @@ async function setupLoop(state: ModelState): Promise<boolean> {
         }
         setConfigValue('llmProvider', 'ollama');
         if (url !== OLLAMA_DEFAULT) setConfigValue('ollamaUrl', url);
+        markOnboarded(`Ollama ${url}`);
         out(`ok (${p.models} model(s)). Saved.\n`);
         return true;
       }
@@ -278,6 +338,7 @@ async function setupLoop(state: ModelState): Promise<boolean> {
         const p = await probeOpenAi(key);
         if (!p.ok) { out(`no.\n  ${p.detail}\n`); continue; }
         writeOpenAiCredentials({ key, model: '' });
+        markOnboarded('OpenAI key');
         out('ok. Saved to ~/.ayin-cli/openai.env (0600).\n');
         out('  Note: that call is free, so it proves the key — not that the account has credit.\n');
         return true;
@@ -290,6 +351,7 @@ async function setupLoop(state: ModelState): Promise<boolean> {
         const p = await probeEndpoint(url);
         if (!p.ok) { out(`no.\n  ${p.detail}\n`); continue; }
         setConfigValue('llmUrl', url);
+        markOnboarded(`endpoint ${url}`);
         out(`ok${p.detail ? ` (${p.detail})` : ''}. Saved.\n`);
         return true;
       }
@@ -311,13 +373,20 @@ export async function preflight(): Promise<void> {
     // the operator is about to read may be describing code that is not running.
     const stale = staleBuildWarning();
     if (stale) process.stderr.write(stale);
+    const legacy = legacyVarNotice();
+    if (legacy) process.stderr.write(legacy);
 
     if (NO_MODEL_NEEDED.has(process.argv[2] ?? '')) return;
 
     const state = await checkModel();
-    if (state.ok) return;
+    const onboarded = isOnboarded();
+    // Silent only once the operator has actually been through this and a model still answers.
+    if (onboarded && state.ok) return;
 
     if (nonInteractive()) {
+      // A script cannot be onboarded, and blocking one forever over a ceremony it cannot perform would
+      // be worse than the ceremony being skipped. A reachable model is enough here.
+      if (state.ok) return;
       process.stderr.write(
         state.configured
           ? `\n  ayin: no model is answering.\n  Tried: ${state.how}\n${state.detail ? `  ${state.detail}\n` : ''}\n`
@@ -326,7 +395,7 @@ export async function preflight(): Promise<void> {
       process.exit(1);
     }
 
-    const ok = await setupLoop(state);
+    const ok = await setupLoop(state, onboarded);
     if (!ok) process.exit(1);
     // Re-checked rather than trusted: the loop returns true only after a verified write, and this proves
     // the write is visible to the config reader the app will use.

@@ -2,7 +2,7 @@
  * Token estimation for the session meter.
  *
  * Tries the endpoint's exact tokenizer at `${llmBaseUrl()}/api/estimate` (same host as the LLM,
- * resolved identically — env AYIN_LLM_URL → /set llm-url → localhost). An endpoint that does not serve
+ * resolved identically — env AYIN_MODEL_URL → /set llm-url → localhost). An endpoint that does not serve
  * /api/estimate degrades gracefully to a char/4 estimate; if it is added later this picks it up for
  * free. Deliberately NO discovery of any other host: probing for a tokenizer somewhere else only
  * ever added 3s timeouts to every refresh.

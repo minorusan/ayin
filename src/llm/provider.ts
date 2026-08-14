@@ -18,7 +18,7 @@
  *
  * THE RULE FOR CONSUMERS: an absent capability renders as NOTHING. Not an error, not a spinner that
  * never resolves, not a crash — the feature is simply not part of this installation. A stranger who
- * clones ayin, runs `examples/ollama-adapter.mjs` and points `AYIN_LLM_URL` at it must see a working
+ * clones ayin, runs `examples/ollama-adapter.mjs` and points `AYIN_MODEL_URL` at it must see a working
  * agent, not a UI full of red about a resource layer they have never heard of.
  *
  * Implementations live in `providers/`:

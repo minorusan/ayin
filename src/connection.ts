@@ -1,7 +1,7 @@
 /**
  * Connection — the HTTP edge. ONE configured endpoint, no discovery.
  *
- * Every LLM call goes to `POST <endpoint>/api/generate`; the endpoint comes from the `AYIN_LLM_URL`
+ * Every LLM call goes to `POST <endpoint>/api/generate`; the endpoint comes from the `AYIN_MODEL_URL`
  * env var, else `/set llm-url`, else loopback. There is no service mesh, no registry, nothing to look
  * up: if the endpoint is wrong the call fails loudly instead of silently probing alternatives.
  */
@@ -67,7 +67,7 @@ import { getConfigString } from './prompts.js';
  * Resolve the LLM endpoint's base URL — the ONE place, so no two call sites can disagree.
  *
  * Priority order:
- *   1. `AYIN_LLM_URL` env (set by a dispatcher, or by your shell)
+ *   1. `AYIN_MODEL_URL` env (set by a dispatcher, or by your shell)
  *   2. persisted per-machine config `llmUrl` in ~/.ayin-cli/prompts.json (`/set llm-url …`)
  *   3. http://localhost:9100 — ONLY correct when the endpoint runs on THIS machine.
  *
@@ -76,7 +76,7 @@ import { getConfigString } from './prompts.js';
  * remote endpoint rather than quietly serving the wrong one.
  */
 export function llmBaseUrl(): string {
-  if (process.env.AYIN_LLM_URL) return process.env.AYIN_LLM_URL;
+  if (process.env.AYIN_MODEL_URL) return process.env.AYIN_MODEL_URL;
   const configured = getConfigString('llmUrl');
   if (configured) return configured;
   return 'http://localhost:9100';
@@ -143,7 +143,7 @@ export async function llmChat(
     // down. `llm/providers/openai.ts` is the one OpenAI path, and it is entered on purpose.
     throw new Error(
       `No reachable LLM endpoint at ${llmBaseUrl()}. Point ayin at yours: ` +
-      `set env AYIN_LLM_URL=http://<host>:9100 or run \`/set llm-url http://<host>:9100\`. ` +
+      `set env AYIN_MODEL_URL=http://<host>:9100 or run \`/set llm-url http://<host>:9100\`. ` +
       `Or switch to the hosted model with \`/model openai\` (needs a key: \`/openai sk-…\`).`,
     );
   }

@@ -221,11 +221,18 @@ console.log('\nayin refuses to start without a model');
   ok(/if \(nonInteractive\(\)\) \{[\s\S]{0,600}?process\.exit\(1\);/.test(pf),
     'a -p run or a daemon EXITS with instructions instead of blocking on a prompt nobody will answer');
 
-  // CONFIGURED IS NOT REACHABLE. `AYIN_LLM_URL` exported in a shell profile passed the presence check on
+  // CONFIGURED IS NOT REACHABLE. `AYIN_MODEL_URL` exported in a shell profile passed the presence check on
   // a laptop that was not on that LAN, so the TUI opened and failed on the first prompt — the same
   // first-run failure, one step later. The gate acts on `ok` (a model answers), never on `configured`.
-  ok(/await checkModel\(\)[\s\S]{0,120}if \(state\.ok\) return;/.test(pf),
-    'the gate returns only when a model actually ANSWERS, not merely when one is configured');
+  // Two conditions now, and both matter: a model must ANSWER, and the operator must have been asked
+  // once. An inherited env var satisfied the old check, so a machine nobody had set up went straight
+  // into the TUI having explained nothing.
+  ok(/if \(onboarded && state\.ok\) return;/.test(pf),
+    'the gate returns only when a model ANSWERS *and* onboarding was completed once');
+  ok(/const LEGACY_URL_VAR = 'AYIN_LLM_URL'/.test(pf) && !/process\.env\[LEGACY_URL_VAR\][\s\S]{0,80}return \{/.test(pf),
+    'the old endpoint variable is reported, never honoured — honouring it would recreate the bug');
+  ok(/markOnboarded\(/.test(pf) && (pf.match(/markOnboarded\(/g) || []).length >= 5,
+    'every path that settles on a model records that onboarding happened', String((pf.match(/markOnboarded\(/g) || []).length));
   ok(/const p = await probeEndpoint\(endpoint\)/.test(pf) && /const p = await probeOllama\(url\)/.test(pf),
     'a configured URL is probed — reachability is a property of now, not of when it was typed');
   ok(/if \(key\) return \{ configured: true, ok: true/.test(pf),

@@ -89,9 +89,17 @@ node dist/index.js                # asks, if nothing is configured yet
 /openai sk-…                      # verified with OpenAI, then saved to ~/.ayin-cli/openai.env (0600)
 ```
 
-It checks that a model **answers**, not merely that one is configured — a `AYIN_LLM_URL` pointing at a
-LAN you are not currently on gets you the menu (with a **Retry** option), not a TUI that fails on your
-first prompt. An OpenAI key is taken at face value, since it was verified when you set it.
+It asks **once**, and it asks even when something already works — an env var inherited from a shell
+profile is not a decision you made. Whatever already answers is offered as the default, so confirming is
+one keypress, and the choice is recorded (`onboardedAt`) so you are never asked again.
+
+After that it only checks that a model still **answers**: an `AYIN_MODEL_URL` pointing at a LAN you are
+not currently on gets you the menu with a **Retry** option, not a TUI that fails on your first prompt. An
+OpenAI key is taken at face value, since it was verified when you set it.
+
+> **The endpoint variable is `AYIN_MODEL_URL`.** It was `AYIN_LLM_URL`; that name is no longer read,
+> because a line left in a shell profile silently satisfied setup and skipped the one moment ayin has to
+> explain itself. If the old one is still exported, ayin says so and ignores it.
 
 `ayin version` and `ayin update` work regardless. A `-p` run or the `watch` daemon never prompts — with
 nothing reachable they exit with the same instructions, because there is nobody there to answer.
@@ -577,7 +585,7 @@ only when its bytes actually change.
 > update` replaces `/usr/local/lib/node_modules/ayin` and the daemon never notices, so it silently
 > serves an old build (this is how a Mac ran a pre-hygiene build for three days). Use
 > `/usr/local/lib/node_modules/ayin/dist/index.js` — then a restart after `ayin update` is all it
-> takes. Also set `AYIN_LLM_URL` and `PATH` in the unit: launchd does **not** read your shell profile.
+> takes. Also set `AYIN_MODEL_URL` and `PATH` in the unit: launchd does **not** read your shell profile.
 
 **Working-tree pass — the one that stages for you.** Every **10 min** (`WORKTREE_REVIEW_MS`) the
 daemon fingerprints each watched repo's *unstaged* work (`git diff` + untracked, ayin's own outputs
@@ -623,7 +631,7 @@ because it lives in the files that did *not* change.
 Then it runs **ayin itself** — read-only (`AYIN_READONLY=1`: grep and read, never edit; no shell)
 on a small round budget — with one job: grep the repo and say which of those facts actually breaks
 something. The engine is ayin, not `claude -p` — no LAN address to hardcode, it just talks to
-whatever `AYIN_LLM_URL` this install already uses.
+whatever `AYIN_MODEL_URL` this install already uses.
 
 The output contract is **enforced by the hook, not requested in the prompt**: a finding whose
 citation does not resolve to a real file in the repo is discarded, and a report that ran zero greps

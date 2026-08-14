@@ -130,6 +130,9 @@ export function getConfig(key: string, defaultValue: number): number {
 export const KNOWN_CONFIG_KEYS = [
   'llmProvider', 'llmUrl', 'ollamaCtx', 'ollamaModel', 'ollamaUrl',
   'openAiKey', 'openAiModel', 'searxngUrl', 'updateRegistry',
+  // Written by the first-run gate: the timestamp AND what was chosen. Its presence is what makes
+  // onboarding happen exactly once — see preflight.ts.
+  'onboardedAt',
 ];
 
 export function getConfigString(key: string): string | undefined {

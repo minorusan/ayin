@@ -58,7 +58,7 @@ function configured(): 'direct' | 'resource' | 'ollama' | 'openai' | null {
 
 /** Whether the operator has pointed ayin at an endpoint at all. Absent = a clone nobody configured. */
 function endpointConfigured(): boolean {
-  return Boolean((process.env.AYIN_LLM_URL ?? '').trim() || getConfigString('llmUrl'));
+  return Boolean((process.env.AYIN_MODEL_URL ?? '').trim() || getConfigString('llmUrl'));
 }
 
 async function resolve(): Promise<LlmProvider> {

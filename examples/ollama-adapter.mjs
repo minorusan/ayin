@@ -10,17 +10,17 @@
  *     GET  /api/status     -> { ok: true, model }
  *
  * This adapter implements that contract on top of Ollama's /api/chat, so you can
- * point ayin at it with AYIN_LLM_URL and run fully local — no a backend needed.
+ * point ayin at it with AYIN_MODEL_URL and run fully local — no a backend needed.
  *
  * Usage:
  *     OLLAMA_MODEL=qwen3-coder:30b node examples/ollama-adapter.mjs
  *     # then, in another shell:
- *     AYIN_LLM_URL=http://localhost:9100 node dist/index.js -p "your task"
+ *     AYIN_MODEL_URL=http://localhost:9100 node dist/index.js -p "your task"
  *
  * Env:
  *     OLLAMA_MODEL   (required)  the Ollama model to use, e.g. qwen3-coder:30b
  *     OLLAMA_URL     default http://localhost:11434
- *     PORT           default 9100   (the port ayin's AYIN_LLM_URL should point at)
+ *     PORT           default 9100   (the port ayin's AYIN_MODEL_URL should point at)
  *     NUM_CTX        default 32768  context window
  */
 import { createServer } from 'node:http';
@@ -86,5 +86,5 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`ollama-adapter → ${OLLAMA_URL} (model: ${MODEL}) listening on http://localhost:${PORT}`);
-  console.log(`point ayin at it:  AYIN_LLM_URL=http://localhost:${PORT} node dist/index.js -p "..."`);
+  console.log(`point ayin at it:  AYIN_MODEL_URL=http://localhost:${PORT} node dist/index.js -p "..."`);
 });

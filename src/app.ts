@@ -797,7 +797,7 @@ onInput(async (text: string) => {
         addMessage('system', '/arduino-explain — for an Arduino project in this dir: a validated wiring diagram per sketch (board + component rectangles, PUML+SVG), opened in VS Code');
         addMessage('system', '/explain <feature> — the story of a feature in plain prose: history/authorship, lifecycle/bugs, composition, how it\'s wired up — grounded in explore + real git history + validated Jira tickets, opened in VS Code. Also runnable headless: ayin explain "<question>"');
         addMessage('system', '/clear — clear chat');
-        addMessage('system', '/set llm-url <http://host:9100> — point ayin at the LLM endpoint (an adapter, or a backend). Env: AYIN_LLM_URL');
+        addMessage('system', '/set llm-url <http://host:9100> — point ayin at the LLM endpoint (an adapter, or a backend). Env: AYIN_MODEL_URL');
         addMessage('system', '/set llm-provider <ollama|direct|resource|auto> — ollama talks to a local runtime directly (tools declared natively); the others expect the HTTP contract (default: auto-detect)');
         addMessage('system', '/set ollama-model <name> — which model the ollama provider asks for (default: whatever is loaded) · ollama-url, ollama-ctx');
         // (`/set default-model` was removed in 1.0.210 — ayin no longer picks a model implicitly.)

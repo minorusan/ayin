@@ -27,14 +27,14 @@ $repo = Split-Path -Parent $PSScriptRoot            # <repo> (parent of tool\)
 $entry = Join-Path $repo "dist\index.js"
 if (-not (Test-Path $entry)) { throw "built entrypoint not found: $entry  (run `npm run build` first)" }
 
-# A tiny launcher .cmd that sets AYIN_LLM_URL then runs the daemon — avoids Task Scheduler arg-quoting
+# A tiny launcher .cmd that sets AYIN_MODEL_URL then runs the daemon — avoids Task Scheduler arg-quoting
 # pain and gives one place to see/edit the env.
 $dir = Join-Path $env:USERPROFILE ".ayin-cli"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $cmd = Join-Path $dir "ayin-watch.cmd"
 @"
 @echo off
-set AYIN_LLM_URL=$LlmUrl
+set AYIN_MODEL_URL=$LlmUrl
 "$node" "$entry" watch
 "@ | Set-Content -Encoding ASCII $cmd
 
@@ -51,6 +51,6 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Se
 Start-ScheduledTask -TaskName $TaskName
 
 Write-Host "Installed scheduled task '$TaskName'."
-Write-Host "Launcher: $cmd   (AYIN_LLM_URL=$LlmUrl)"
+Write-Host "Launcher: $cmd   (AYIN_MODEL_URL=$LlmUrl)"
 Write-Host "Register a repo to watch:  ayin watch --repo C:\path\to\repo"
 Write-Host "Stop/remove:  Unregister-ScheduledTask -TaskName $TaskName -Confirm:`$false"
