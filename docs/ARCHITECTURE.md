@@ -1807,6 +1807,12 @@ types, depth 2 pulled in 337 files for a 40-type feature and hit the cap. A ment
 (same-namespace types need none). On a fixture where 40 unrelated files name the same type from
 another namespace, discovery returns 3 files instead of 43.
 
+**A seed must be SOURCE.** A real run seeded on `Core.csproj`, a test `.csproj`, and — best of all —
+ayin's own `AYIN-REPORT-*.md` output file, and the csprojs each produced four questions. Those exist,
+so the path check passed them; a question about a generated project manifest is a spent
+investigation. Seeds now require `languageFor()` to handle the file, and skipped paths are reported.
+Citations stay unrestricted — a citation may point at anything that exists.
+
 **Unity sidecars never enter the corpus.** A `.meta` exists beside every file, so a model asked for
 "the files that implement X" lists `RewardService.cs.meta` and the path check passes — a question
 about a GUID costs a real investigation and answers nothing. `NOISE_EXTENSIONS` refuses those plus

@@ -282,6 +282,27 @@ gs3.endRun('g3');
     JSON.stringify(paths));
   ok(cr.added === 3, 'three files, not fifteen', String(cr.added));
   ok(!paths.some((p2) => p2.endsWith('.meta')), 'Unity .meta sidecars never enter the corpus');
+  // A real run seeded on Core.csproj AND on ayin's own AYIN-REPORT-*.md, and both produced
+  // questions. Seeds must be SOURCE; citations stay unrestricted, since a citation may point at
+  // anything that exists.
+  writeFileSync(join(CS, 'Core.csproj'), '<Project />\n');
+  const sfRepo = join(TMP, 'seed-filter-repo');
+  mkdirSync(sfRepo, { recursive: true });
+  writeFileSync(join(sfRepo, 'Core.csproj'), '<Project />\n');
+  writeFileSync(join(sfRepo, 'NOTES.md'), '# notes\n');
+  writeFileSync(join(sfRepo, 'a.ts'), 'export const a = 1;\n');
+  const sfStore = S.openStore(sfRepo);
+  sfStore.beginRun({ runId: 'sf', domains: ['x'], headSha: 'h' });
+  const sf = await D.discoverDomain({
+    store: sfStore, repoPath: sfRepo, domain: 'x', maxDepth: 0,
+    seedsOverride: ['Core.csproj', 'NOTES.md', 'a.ts'],
+  });
+  ok(sf.seeds === 1 && sfStore.files().every((f) => f.path === 'a.ts'),
+    'a .csproj/.md that EXISTS is still not a seed — a corpus answers questions about code',
+    JSON.stringify(sfStore.files().map((f) => f.path)));
+  ok(sf.skippedNonSource.length === 2, 'and the skip is reported, not silent', JSON.stringify(sf.skippedNonSource));
+  sfStore.endRun('sf');
+  ok(D.resolveInRepo(CS, 'Core.csproj') !== null, 'a .csproj still RESOLVES — a citation may point anywhere that exists');
   ok(D.resolveInRepo(CS, 'Rewards/RewardService.cs.meta') === null,
     'a .meta a model names is refused even though it exists — a GUID answers no question');
   cstore.endRun('cs');

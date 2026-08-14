@@ -121,6 +121,8 @@ export interface DiscoverReport {
   added: number;
   /** Paths the model named that do not exist in the repo. Kept for the report, never stored. */
   hallucinated: string[];
+  /** Paths that exist but are not source — .csproj, .md, generated manifests. */
+  skippedNonSource: string[];
   byDepth: Record<number, number>;
   /** A cap stopped the walk before it ran out of graph. */
   truncated: boolean;
@@ -400,7 +402,7 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
   const maxDepth = opts.maxDepth ?? DEFAULT_MAX_DEPTH;
   const maxFiles = opts.maxFiles ?? DEFAULT_MAX_FILES;
   const report: DiscoverReport = {
-    domain, seeds: 0, added: 0, hallucinated: [], byDepth: {}, truncated: false, indexed: 0,
+    domain, seeds: 0, added: 0, hallucinated: [], skippedNonSource: [], byDepth: {}, truncated: false, indexed: 0,
   };
 
   // ── seeds ──────────────────────────────────────────────────────────────────────
@@ -421,8 +423,16 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
   const seeds: string[] = [];
   for (const c of candidates) {
     const r = resolveInRepo(repoPath, c);
-    if (r) { if (!seeds.includes(r)) seeds.push(r); }
-    else if (!opts.seedsOverride) report.hallucinated.push(c);
+    if (!r) { if (!opts.seedsOverride) report.hallucinated.push(c); continue; }
+    // A corpus answers questions about CODE. `Core.csproj` is a generated file list, and a real run
+    // even seeded on ayin's own `AYIN-REPORT-*.md` output — both produced questions, and an answer
+    // about a project manifest is a spent investigation that helps nobody.
+    if (!languageFor(r)) { report.skippedNonSource.push(r); continue; }
+    if (!seeds.includes(r)) seeds.push(r);
+  }
+  if (report.skippedNonSource.length) {
+    onStatus?.(`${report.skippedNonSource.length} named path(s) are not source and were skipped`
+      + ` (${report.skippedNonSource.slice(0, 3).join(', ')}${report.skippedNonSource.length > 3 ? ', …' : ''})`);
   }
   report.seeds = seeds.length;
 
