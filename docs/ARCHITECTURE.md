@@ -1895,9 +1895,27 @@ the tool RESULT, so it inherits the window's observation masking (it compresses 
 after a few messages) and never churns the KV-cached prefix.
 
 **Pull — `corpus_search`.** Everything else, on demand, so an open-ended lookup costs attention only
-when the agent asks. Lexical for now (question text ×3, path ×2, answer ×1); semantic search is
-Phase 2, and faking it today would return confident nonsense for anything not sharing words with the
-query.
+when the agent asks. Two passes, coarse to fine.
+
+*Cheap pass first (`lexicon.ts`).* Most real questions carry a **handle** — a file, a class, a method.
+An exact symbol match is not "probably relevant", it is the thing that was asked about, and it costs
+no model. Chunks carrying a matched name become the candidate set; the rest are out of the race
+rather than merely out-ranked. Three mechanics: **normalise for the index** (`noteShape`,
+`NoteShape`, `note_shape` → one key — edit distance tolerates those differences, but only between
+strings it is asked to compare, and bucketing decides which pairs ever meet); **all trigrams, not the
+leading three** (`ntoeShape` buckets under `nto` and would never meet `not` — this is what pg_trgm
+exists to solve); and **Levenshtein last, on candidates only**, since edit distance is a re-ranker,
+never a scan.
+
+Symbols come from `entity.name`, file paths, **and the question/answer text** — measured: on a real
+corpus every chunk had `entity: null`, so the index held nothing but file paths and `noteShape`
+matched nothing. Backticked spans are the strongest source (the model marks code that way
+consistently); camelCase/PascalCase words are the second. Plain prose contributes nothing, because an
+index of every word is the same as no index.
+
+*Then the corpus pass* over that candidate set (question ×3, path ×2, answer ×1 today; cosine once
+Phase 2 lands). A named hit adds a flat boost above any amount of word overlap — it is a different
+KIND of evidence.
 
 Both label staleness through `assessChunk` — a pulled chunk is exactly as dangerous as a pushed one —
 and both end with a line stating these are notes from an earlier pass, not the code. `/corpus off`

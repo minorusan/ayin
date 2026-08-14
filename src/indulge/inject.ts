@@ -25,6 +25,7 @@
  */
 
 import { isCorpusInjection } from '../modes.js';
+import { buildLexicon, lookupNames } from './lexicon.js';
 import { assessChunk } from './staleness.js';
 import { openStore, type Chunk } from './store.js';
 
@@ -142,7 +143,16 @@ export function corpusSearch(repoPath: string, query: string, limit = 3): string
   const terms = query.toLowerCase().split(/[^\p{L}\p{N}_.]+/u).filter((t) => t.length > 2);
   if (terms.length === 0) return 'Query too short to search on.';
 
-  const scored = store.chunks().map((c) => {
+  // ── cheap pass first: does the query NAME something? ──
+  // An exact symbol or file match is not "probably relevant" — it is the thing that was asked
+  // about, and it costs no model. Chunks carrying a matched name become the candidate set;
+  // everything else is out of the race rather than merely out-ranked.
+  const all = store.chunks();
+  const named = lookupNames(buildLexicon(all), query);
+  const namedIds = new Set(named.flatMap((n) => [...n.handle.chunkIds]));
+  const pool = namedIds.size ? all.filter((c) => namedIds.has(c.chunkId)) : all;
+
+  const scored = pool.map((c) => {
     const q = c.question.toLowerCase();
     const body = c.answer.toLowerCase();
     const paths = [c.entity?.file ?? '', ...c.files].join(' ').toLowerCase();
@@ -152,6 +162,8 @@ export function corpusSearch(repoPath: string, query: string, limit = 3): string
       if (paths.includes(t)) score += 2;    // a path is a precise handle
       if (body.includes(t)) score += 1;
     }
+    // A named hit outranks any amount of word overlap: it is a different KIND of evidence.
+    if (namedIds.has(c.chunkId)) score += 10;
     return { chunk: c, score };
   }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
 
@@ -159,7 +171,11 @@ export function corpusSearch(repoPath: string, query: string, limit = 3): string
     return `Nothing in the corpus matches "${query}". It holds ${store.totals().chunks} answered question(s) for this repo.`;
   }
 
-  const out: string[] = [`${scored.length} of ${store.totals().chunks} chunk(s) match "${query}":`];
+  const matchedNames = named.slice(0, 3).map((n) => n.handle.raw).join(', ');
+  const out: string[] = [
+    `${scored.length} of ${store.totals().chunks} chunk(s) match "${query}"`
+    + (matchedNames ? ` (matched on: ${matchedNames})` : '') + ':',
+  ];
   for (const { chunk } of scored) {
     const state = assessChunk(repoPath, chunk);
     out.push('');

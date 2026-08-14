@@ -594,6 +594,43 @@ ok(/Nothing in the corpus matches/.test(INJ.corpusSearch(IR, 'quantum blockchain
 ok(/ayin indulge/.test(INJ.corpusSearch(join(TMP, 'no-corpus-repo'), 'anything')),
   'searching a repo with no corpus names the command that would build one');
 
+// ── the cheap pass: find chunks by NAME before anything semantic ────────────────
+
+const LX = await import(join(ROOT, 'dist/indulge/lexicon.js'));
+
+ok(LX.normalizeName('noteShape') === LX.normalizeName('NoteShape')
+  && LX.normalizeName('note_shape') === LX.normalizeName('noteShape'),
+  'case, camelCase and underscores collapse to one index key — otherwise they never become candidates');
+ok(LX.normalizeName('HTTPServer') === 'http server', 'an acronym boundary splits too');
+ok([...LX.trigrams('noteshape')].includes('not') && [...LX.trigrams('noteshape')].includes('ape'),
+  'ALL trigrams are indexed, not just the leading three');
+ok(LX.levenshtein('noteshape', 'ntoeshape') === 2, 'edit distance measures a transposed typo');
+ok(LX.levenshtein('noteshape', 'somethingelse', 3) > 3, 'a far-off name bails out instead of computing a full matrix');
+
+ok(LX.symbolsIn('why does `noteShape` use `tailApex`?').includes('noteShape'),
+  'backticked identifiers are pulled out of question text');
+ok(LX.symbolsIn('the `groups(inner)` generator').includes('groups'), 'a call is indexed by its name, without the args');
+ok(!LX.symbolsIn('the quick brown fox jumped').length, 'plain prose contributes no symbols — an index of everything is no index');
+
+{
+  const lchunks = [{
+    chunkId: 'L1', question: 'In `noteShape`, why is the `tailApex` found by shrinking the box?',
+    answer: 'It removes each vertex.', files: ['src/extract.mjs'],
+    citations: [{ path: 'src/extract.mjs', startLine: 1, endLine: 9, sha: 'x' }],
+    entity: null, category: 'gotchas', domains: ['render'],
+  }];
+  const lex = LX.buildLexicon(lchunks);
+  const top = (q) => LX.lookupNames(lex, q)[0];
+  ok(top('noteShape')?.score === 1, 'an exact symbol match scores 1');
+  ok(top('noteshape')?.handle.raw === 'noteShape', 'case-only difference still resolves');
+  ok(top('ntoeShape')?.handle.raw === 'noteShape',
+    'a typo in the FIRST THREE characters still finds it — the reason for all-trigrams over leading-3');
+  ok(top('tail apex')?.handle.raw === 'tailApex', 'a two-word query finds the camelCase symbol');
+  ok(top('extract.mjs')?.handle.kind === 'file', 'file names are handles too');
+  ok(LX.lookupNames(lex, 'RewardService').length === 0, 'a name that is not in the corpus matches nothing');
+  ok(LX.lookupNames(lex, 'the and for with').length === 0, 'stopwords match nothing');
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
