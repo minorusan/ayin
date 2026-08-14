@@ -31,8 +31,9 @@
  */
 
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync,
+  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync,
 } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { homedir, hostname } from 'node:os';
 import { basename, join, resolve } from 'node:path';
@@ -100,7 +101,12 @@ export interface Chunk {
   chunkId: string;
   questionId: string;
   repoKey: string;
-  repoPath: string;
+  /**
+   * DEPRECATED and no longer written. It held an absolute path, which made every chunk carry the
+   * building machine's home directory — not portable, and a personal detail in a file that may be
+   * copied to another box. Nothing ever read it; the manifest holds the repo path.
+   */
+  repoPath?: string;
   domain: string;
   question: string;
   answer: string;
@@ -142,6 +148,9 @@ export interface RunRecord {
 export interface Manifest {
   version: number;
   repoKey: string;
+  /** How the key was derived — so a directory name is explicable rather than a mystery hash. */
+  identity?: { kind: IdentityKind; value: string };
+  /** Where it was last built, for the report header. Local information, never an identity. */
   repoPath: string;
   createdAt: string;
   runs: RunRecord[];
@@ -189,17 +198,86 @@ export function ragRoot(): string {
 }
 
 /**
- * `<slug>-<hash8>` for an absolute repo path.
+ * How a repo is identified, so a corpus built on one machine is usable on another.
  *
- * The slug is for a human reading `ls ~/.ayin-cli/rag`; the hash is what makes it correct. Two
- * checkouts of the same repo in different directories are different corpora — they can sit on
- * different commits with different code, and merging them would produce chunks that cite lines
- * neither tree has.
+ * The corpus itself has always been portable — every path inside a chunk is repo-relative POSIX.
+ * What was not portable was its NAME: keying on the absolute path meant `~/work/ayin` and
+ * `/Users/you/ayin` were different corpora, so a night of GPU built on one box could not be dropped
+ * onto another.
+ *
+ * Identity, in order of preference:
+ *   1. the `origin` remote, normalised (`github.com/owner/repo`) — the same everywhere a repo is
+ *      cloned, and readable by a human wondering what a directory holds;
+ *   2. the ROOT COMMIT — identical in every clone, immune to renames and re-hosting, but it changes
+ *      if history is ever rewritten (ayin's own was), which is why the remote comes first;
+ *   3. the absolute path, for a directory that is not a git repo at all. Not portable, and honest
+ *      about it.
+ *
+ * The slug is derived from the identity too, never from the directory name — a repo cloned into a
+ * differently-named folder must still resolve to the same corpus.
  */
-export function repoKey(repoPath: string): string {
+export type IdentityKind = 'remote' | 'root' | 'path';
+
+export interface RepoIdentity {
+  kind: IdentityKind;
+  /** The raw identity value, recorded in the manifest so a key is explicable. */
+  value: string;
+  key: string;
+}
+
+function gitOut(repoPath: string, args: string[]): string {
+  try {
+    return execFileSync('git', ['-C', repoPath, ...args], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 8000,
+    }).trim();
+  } catch { return ''; }
+}
+
+/** `git@github.com:owner/repo.git` and `https://github.com/owner/repo` → `github.com/owner/repo`. */
+export function normalizeRemote(url: string): string {
+  return url.trim()
+    .replace(/^[a-z+]+:\/\//i, '')     // scheme
+    .replace(/^[^@/]+@/, '')            // user@
+    .replace(/:(?=[^/])/, '/')          // scp-style host:path
+    // Trailing slashes FIRST: `…/ayin.git/` must lose the slash before `.git` can be recognised,
+    // or the same repo cloned from a URL with a trailing slash gets its own corpus.
+    .replace(/\/+$/, '')
+    .replace(/\.git$/i, '')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+}
+
+const slugify = (s: string): string =>
+  s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'repo';
+
+export function repoIdentity(repoPath: string): RepoIdentity {
   const abs = resolve(repoPath);
-  const slug = basename(abs).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'repo';
-  return `${slug}-${createHash('sha1').update(abs).digest('hex').slice(0, 8)}`;
+  const remote = gitOut(abs, ['remote', 'get-url', 'origin']);
+  if (remote) {
+    const value = normalizeRemote(remote);
+    return { kind: 'remote', value, key: `${slugify(value.split('/').pop() || 'repo')}-${hash8(value)}` };
+  }
+  // `--max-parents=0` can list several roots; the last is the oldest, and sorting keeps it stable.
+  const roots = gitOut(abs, ['rev-list', '--max-parents=0', 'HEAD']).split('\n').filter(Boolean).sort();
+  if (roots.length) {
+    const value = roots[0];
+    return { kind: 'root', value, key: `repo-${hash8(value)}` };
+  }
+  return { kind: 'path', value: abs, key: `${slugify(basename(abs))}-${hash8(abs)}` };
+}
+
+const hash8 = (s: string): string => createHash('sha1').update(s).digest('hex').slice(0, 8);
+
+/** The corpus key for this repo — identity-derived, so it is the same on every machine. */
+export function repoKey(repoPath: string): string {
+  return repoIdentity(repoPath).key;
+}
+
+/** The pre-1.0.268 key: a hash of the absolute path. Kept ONLY so an existing corpus can be found
+ *  and migrated rather than orphaned — a corpus costs a night of GPU. */
+export function legacyRepoKey(repoPath: string): string {
+  const abs = resolve(repoPath);
+  return `${slugify(basename(abs))}-${hash8(abs)}`;
 }
 
 /**
@@ -276,7 +354,9 @@ function pidAlive(pid: number): boolean {
 export class IndulgeStore {
   readonly key: string;
   readonly repoPath: string;
-  readonly dir: string;
+  readonly identity: RepoIdentity;
+  /** Not readonly: a legacy corpus that cannot be renamed is used where it lies. */
+  dir: string;
   private readonly manifestFile: string;
   private readonly filesFile: string;
   private readonly questionsFile: string;
@@ -298,14 +378,28 @@ export class IndulgeStore {
 
   constructor(repoPath: string) {
     this.repoPath = resolve(repoPath);
-    this.key = repoKey(this.repoPath);
+    this.identity = repoIdentity(this.repoPath);
+    this.key = this.identity.key;
     this.dir = join(ragRoot(), this.key);
+    this.adoptLegacyCorpus();
     this.manifestFile = join(this.dir, 'manifest.json');
     this.filesFile = join(this.dir, 'files.jsonl');
     this.questionsFile = join(this.dir, 'questions.jsonl');
     this.chunksDir = join(this.dir, 'chunks');
     this.progressFile = join(this.dir, 'progress.json');
     this.lockFile = join(this.dir, 'run.lock');
+  }
+
+  /**
+   * A corpus built before identity keying sits under a path-derived name. Adopt it rather than
+   * silently starting an empty one beside it — that would look like the night's work had vanished.
+   * Renamed so the two never diverge; if the rename fails the legacy directory is used in place.
+   */
+  private adoptLegacyCorpus(): void {
+    if (existsSync(this.dir)) return;
+    const legacy = join(ragRoot(), legacyRepoKey(this.repoPath));
+    if (legacy === this.dir || !existsSync(legacy)) return;
+    try { renameSync(legacy, this.dir); } catch { this.dir = legacy; }
   }
 
   /** Create the directory tree. Safe to call repeatedly; never touches existing content. */
@@ -416,6 +510,7 @@ export class IndulgeStore {
     m.version = STORE_VERSION;
     m.repoKey = this.key;
     m.repoPath = this.repoPath;
+    m.identity = { kind: this.identity.kind, value: this.identity.value };
     m.runs.push(run);
     this.writeManifest(m);
     return run;

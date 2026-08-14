@@ -51,8 +51,30 @@ const gitSha = execFileSync('git', ['-C', REPO, 'hash-object', 'src/A.cs'], { en
 ok(S.blobSha(readFileSync(join(REPO, 'src/A.cs'))) === gitSha,
   'blobSha is git\'s blob sha, so sourceSha can be checked with git hash-object');
 ok(S.repoKey(REPO) === S.repoKey(REPO + '/'), 'repoKey ignores a trailing slash');
-ok(S.repoKey(REPO) !== S.repoKey(join(TMP, 'other-checkout')),
-  'two checkouts of one repo are separate corpora (they sit on different commits)');
+// REVERSED in 1.0.268, deliberately. This used to assert that two checkouts of one repo were
+// separate corpora, reasoning that they sit on different commits. That predated the staleness
+// layer: every chunk is now labelled per-file against the tree in front of it, so sharing one
+// corpus across checkouts is safe — and keying on the absolute path made a corpus unmovable
+// between machines, which is the whole point of building one overnight on a bigger box.
+{
+  const clone = join(TMP, 'clone-elsewhere');
+  mkdirSync(clone, { recursive: true });
+  execFileSync('bash', ['-c', `git init -q . && git remote add origin https://example.invalid/o/r.git`], { cwd: clone, stdio: 'ignore' });
+  execFileSync('bash', ['-c', `git remote add origin https://example.invalid/o/r.git 2>/dev/null; true`], { cwd: REPO, stdio: 'ignore' });
+  ok(S.repoKey(REPO) === S.repoKey(clone),
+    'two checkouts of the SAME repo share one corpus — that is what makes it portable', `${S.repoKey(REPO)} vs ${S.repoKey(clone)}`);
+  ok(S.repoIdentity(REPO).kind === 'remote', 'identity prefers the remote — stable across clones and machines');
+  ok(S.normalizeRemote('git@github.com:o/r.git') === S.normalizeRemote('https://github.com/o/r/'),
+    'ssh and https forms of one remote normalise to the same identity');
+  execFileSync('bash', ['-c', 'git remote remove origin'], { cwd: REPO, stdio: 'ignore' });
+  // A root commit only exists once something has been committed — until then there is nothing
+  // stable to key on, which is itself the correct answer.
+  ok(S.repoIdentity(REPO).kind === 'path', 'a git repo with NO commits has no stable identity yet — path, honestly');
+  execFileSync('bash', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm first'], { cwd: REPO, stdio: 'ignore' });
+  ok(S.repoIdentity(REPO).kind === 'root', 'once committed and with no remote, it keys on the ROOT COMMIT — identical in every clone');
+  ok(S.repoIdentity(join(TMP, 'not-a-repo-at-all')).kind === 'path',
+    'a plain directory falls back to its path, and says so rather than pretending to be portable');
+}
 
 const ent = { kind: 'method', name: 'Ingest', file: 'src/A.cs' };
 const qA = S.questionId('What breaks if I change this?', 'src/A.cs', ent);

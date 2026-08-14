@@ -1722,10 +1722,32 @@ the one question in flight — never the hours before it:
 | A stale lock needs no human | A lock whose pid is dead (same host) or whose heartbeat stopped (any host) is **adopted**, not obeyed. A live one is refused by name |
 | Re-runs expand, never restart | `questionId` and `chunkId` are content-derived and stable; a known id is skipped. `sourceSha` is the invalidation key — unchanged file, no re-answer |
 
-Storage is **outside the work tree**, in `~/.ayin-cli/rag/<repo-key>/` (`AYIN_RAG_DIR` overrides it;
-`<repo-key>` is a slug plus a hash of the absolute path, so two checkouts of one repo are separate
-corpora — they sit on different commits). Chunks quote method bodies, and a work repo belongs to an
-employer: one `git add -A` in the wrong directory would publish the corpus.
+Storage is **outside the work tree**, in `~/.ayin-cli/rag/<repo-key>/` (`AYIN_RAG_DIR` overrides it).
+Chunks quote method bodies, and a work repo belongs to an employer: one `git add -A` in the wrong
+directory would publish the corpus.
+
+**The corpus is PORTABLE — build it overnight on a big box, use it on a laptop.** Every path inside a
+chunk is repo-relative POSIX, and `<repo-key>` is derived from the repo's IDENTITY rather than its
+location: the normalised `origin` remote (`github.com/owner/repo`), else the **root commit** (identical
+in every clone, immune to renames and re-hosting — but it changes if history is rewritten, which is
+why the remote comes first), else the absolute path for a directory that is not a git repo, which is
+not portable and says so. The slug comes from the identity too, so a repo cloned into a
+differently-named folder still resolves to the same corpus. `manifest.identity` records which was
+used, so a directory name is explicable rather than a mystery hash.
+
+    scp -r nuk:~/.ayin-cli/rag/<key> ~/.ayin-cli/rag/     # or:
+    ayin indulge --import <dir>
+
+`--import` refuses a corpus built for a *different* repo — dropping one project's answers onto another
+fills retrieval with authoritative-looking chunks citing files this tree does not have — and reports
+how many are already stale against this checkout. It refuses to merge into an existing corpus silently.
+
+Keying on the path was the earlier design, chosen so two checkouts of one repo stayed separate.
+That predated the staleness layer; now every chunk is labelled per-file against the tree in front of
+it, so sharing is safe and immobility was pure cost. A corpus built before this is **adopted** on
+first open (renamed to the identity key) rather than orphaned — it cost a night of GPU.
+`chunk.repoPath` is deprecated and no longer written: it was an absolute path, unread by anything,
+that put the building machine's home directory in every chunk.
 
 ```
 ~/.ayin-cli/rag/<repo-key>/

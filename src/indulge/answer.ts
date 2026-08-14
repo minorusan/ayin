@@ -257,7 +257,6 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
       chunkId: id,
       questionId: q.id,
       repoKey: store.key,
-      repoPath,
       domain: domainOfFile(store, q.file),
       question: q.text,
       answer: built.answer.slice(0, MAX_ANSWER_CHARS),

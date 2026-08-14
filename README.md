@@ -588,6 +588,15 @@ current step and stops cleanly. Nothing is written into your repo — the corpus
 `~/.ayin-cli/rag/<repo-key>/`, because chunks quote your code and one stray `git add -A` would
 publish them.
 
+**Build it on one machine, use it on another.** The corpus is keyed by the repo's identity (its
+remote, or its root commit), not by where the folder happens to live, and every path inside a chunk is
+repo-relative — so an overnight run on a workstation can be copied straight to a laptop:
+
+```bash
+scp -r bigbox:~/.ayin-cli/rag/<key> ~/.ayin-cli/rag/
+ayin indulge --import <dir>     # or explicitly, which also reports what is already stale here
+```
+
 **ayin then uses it while it works.** Reading a file shows what was already answered about that file,
 with its citations and how old it is; `corpus_search` finds the rest on demand. Anything whose cited
 code has changed since is labelled — `[corpus · STALE] answered 2026-08-14 on dev · src/Match.cs

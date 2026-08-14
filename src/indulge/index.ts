@@ -15,14 +15,15 @@
  * presses Ctrl+C twice means it.
  */
 
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { cpSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { acquireLlm, type LlmHold } from '../llm/authority.js';
 import { answerQuestions } from './answer.js';
 import { discoverDomain } from './discover.js';
 import { generateQuestions } from './questions.js';
 import { writeReport } from './report.js';
-import { openStore, StoreLockedError, type Category, type Stage } from './store.js';
+import { assessChunk } from './staleness.js';
+import { openStore, StoreLockedError, type Category, type Manifest, type Stage } from './store.js';
 
 const out = (line = ''): void => { process.stdout.write(`${line}\n`); };
 
@@ -33,6 +34,7 @@ export interface IndulgeArgs {
   report: boolean;
   dryRun: boolean;
   restart: boolean;
+  importFrom?: string;
   maxDepth?: number;
   maxFiles?: number;
   maxQuestions?: number;
@@ -61,6 +63,7 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--report': args.report = true; break;
       case '--dry-run': args.dryRun = true; break;
       case '--restart': args.restart = true; break;
+      case '--import': args.importFrom = value(); break;
       case '--depth': args.maxDepth = num(value(), 'depth'); break;
       case '--max-files': args.maxFiles = num(value(), 'max-files'); break;
       case '--max-questions': args.maxQuestions = num(value(), 'max-questions'); break;
@@ -80,6 +83,7 @@ const USAGE = [
   '  ayin indulge --report        write the audit markdown and stop',
   '  ayin indulge --dry-run       discover only — file list + question estimate, spends nothing',
   '',
+  '  --import <dir>               install a corpus built elsewhere (nuk overnight -> laptop)',
   '  --restart                    discard the corpus and rebuild (default is RESUME)',
   '  --depth N                    reference-walk depth (default 3)',
   '  --max-files N                cap discovered files per domain',
@@ -125,6 +129,59 @@ function printStatus(repoPath: string): number {
   return 0;
 }
 
+/**
+ * Install a corpus built on another machine.
+ *
+ * This is the point of identity keying: chunks hold only repo-relative paths, so a corpus copied
+ * from the box that spent the night is directly usable here. Nothing is rewritten on import.
+ *
+ * It refuses a corpus belonging to a DIFFERENT repo — dropping one project's answers onto another
+ * would poison retrieval with chunks that cite files this tree does not have, and every one would
+ * look authoritative. It also reports how much of it is already stale against this checkout, because
+ * "142 chunks" and "142 chunks, 9 of them describing code you have since changed" are different
+ * things to be handed.
+ */
+function importCorpus(repoPath: string, from: string): number {
+  const src = resolve(from);
+  if (!existsSync(join(src, 'manifest.json'))) {
+    out(`Not a corpus: ${src} (no manifest.json)`);
+    return 2;
+  }
+  const store = openStore(repoPath);
+  const incoming = JSON.parse(readFileSync(join(src, 'manifest.json'), 'utf-8')) as Manifest;
+  const mine = store.identity;
+  const theirs = incoming.identity;
+
+  if (theirs && theirs.value !== mine.value) {
+    out(`That corpus belongs to a different repo.`);
+    out(`  it was built for : ${theirs.kind} ${theirs.value}`);
+    out(`  this repo is     : ${mine.kind} ${mine.value}`);
+    out('Importing it would fill retrieval with answers about code this tree does not have.');
+    return 3;
+  }
+  if (!theirs) out('note: that corpus predates identity tracking — cannot verify it is for this repo.');
+
+  if (resolve(store.dir) === src) { out('That corpus is already installed here.'); return 0; }
+  if (existsSync(store.dir)) {
+    out(`A corpus already exists for this repo: ${store.dir}`);
+    out('Move or delete it first — refusing to merge two corpora silently.');
+    return 3;
+  }
+
+  mkdirSync(dirname(store.dir), { recursive: true });
+  cpSync(src, store.dir, { recursive: true });
+
+  const after = openStore(repoPath);
+  const chunks = after.chunks();
+  let stale = 0;
+  for (const c of chunks) if (assessChunk(repoPath, c).state !== 'fresh') stale++;
+  out(`installed ${chunks.length} chunk(s) → ${after.dir}`);
+  out(stale
+    ? `${stale} of them describe code that has changed in this checkout — those are labelled STALE when used.`
+    : 'every chunk still matches the code in this checkout.');
+  return 0;
+}
+
 export async function runIndulge(argv: string[]): Promise<number> {
   // Help first: asking for help must never be answered with "unknown flag: --help".
   if (argv.includes('--help') || argv.includes('-h')) { out(USAGE); return 0; }
@@ -135,6 +192,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
   if (!existsSync(repoPath)) { out(`No such directory: ${repoPath}`); return 2; }
 
   if (args.status) return printStatus(repoPath);
+  if (args.importFrom) return importCorpus(repoPath, args.importFrom);
 
   const store = openStore(repoPath);
 
