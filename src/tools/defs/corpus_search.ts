@@ -24,6 +24,6 @@ export const tool: Tool = {
     if (!params.query?.trim()) return 'Error: query required';
     const asked = parseInt(params.limit || '3', 10);
     const limit = Number.isFinite(asked) && asked > 0 ? Math.min(asked, 8) : 3;
-    return corpusSearch(process.cwd(), params.query, limit);
+    return await corpusSearch(process.cwd(), params.query, limit);
   },
 };

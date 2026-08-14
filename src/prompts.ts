@@ -149,6 +149,9 @@ export const KNOWN_CONFIG_KEYS = [
   'mouse',
   // Operator modes (modes.ts), written by /verbose and /logcover as 1/0.
   'verbose', 'logCoverage', 'corpusInject',
+  // Embedding model for corpus vectors (indulge/embed.ts). Vectors are only comparable to others
+  // from the SAME model, so changing this means re-embedding the corpus.
+  'embedModel',
   // Only honoured when the operator sets it — the round budget is otherwise unlimited (agent.ts).
   'maxToolRounds',
 ];

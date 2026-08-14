@@ -20,6 +20,7 @@ import { dirname, join, resolve } from 'node:path';
 import { acquireLlm, type LlmHold } from '../llm/authority.js';
 import { answerQuestions } from './answer.js';
 import { discoverDomain } from './discover.js';
+import { embedCorpus } from './embed.js';
 import { generateQuestions } from './questions.js';
 import { writeReport } from './report.js';
 import { assessChunk } from './staleness.js';
@@ -34,6 +35,7 @@ export interface IndulgeArgs {
   report: boolean;
   dryRun: boolean;
   restart: boolean;
+  embedOnly: boolean;
   importFrom?: string;
   maxDepth?: number;
   maxFiles?: number;
@@ -45,7 +47,7 @@ export interface IndulgeArgs {
 export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[] } {
   const errors: string[] = [];
   const args: IndulgeArgs = {
-    repoPath: process.cwd(), domains: [], status: false, report: false, dryRun: false, restart: false,
+    repoPath: process.cwd(), domains: [], status: false, report: false, dryRun: false, restart: false, embedOnly: false,
   };
   const num = (v: string, name: string): number | undefined => {
     const n = parseInt(v, 10);
@@ -64,6 +66,7 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--dry-run': args.dryRun = true; break;
       case '--restart': args.restart = true; break;
       case '--import': args.importFrom = value(); break;
+      case '--embed': args.embedOnly = true; break;
       case '--depth': args.maxDepth = num(value(), 'depth'); break;
       case '--max-files': args.maxFiles = num(value(), 'max-files'); break;
       case '--max-questions': args.maxQuestions = num(value(), 'max-questions'); break;
@@ -82,6 +85,8 @@ const USAGE = [
   '  ayin indulge --status        what it is doing now, and how far along',
   '  ayin indulge --report        write the audit markdown and stop',
   '  ayin indulge --dry-run       discover only — file list + question estimate, spends nothing',
+  '',
+  '  ayin indulge --embed         vectorise the corpus for semantic search (CPU, no GPU needed)',
   '',
   '  --import <dir>               install a corpus built elsewhere (nuk overnight -> laptop)',
   '  --restart                    discard the corpus and rebuild (default is RESUME)',
@@ -193,6 +198,22 @@ export async function runIndulge(argv: string[]): Promise<number> {
 
   if (args.status) return printStatus(repoPath);
   if (args.importFrom) return importCorpus(repoPath, args.importFrom);
+
+  if (args.embedOnly) {
+    const store = openStore(repoPath);
+    if (!store.exists()) { out(`No corpus for ${repoPath} yet — run indulge first.`); return 2; }
+    let stopping = false;
+    process.on('SIGINT', () => { stopping = true; out('\nstopping after the current chunk…'); });
+    const r = await embedCorpus({
+      store, onStatus: (n) => out(`  ${n}`), shouldStop: () => stopping,
+      onProgress: (done, total, current) => store.setProgress({
+        runId: 'embed', stage: 'answer', done, total, current, startedAt: new Date().toISOString(),
+      }),
+    });
+    out(`${r.embedded} embedded · ${r.skipped} already done · ${r.failed} failed` + (r.foreign ? ` · ${r.foreign} from another model` : ''));
+    out(`model: ${r.model} — vectors are only comparable to others from this same model.`);
+    return r.failed && !r.embedded ? 1 : 0;
+  }
 
   const store = openStore(repoPath);
 

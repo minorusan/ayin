@@ -1926,7 +1926,38 @@ Not injected: **grep** (many hits per call, in tight loops, weak per-hit relevan
 (its whole value is that it goes and checks — feeding it pre-baked conclusions is the one place a
 stale chunk does the most damage; it can call `corpus_search` itself instead).
 
-**Phase 2** embeds the chunks into a local vector space per repo. **Phase 3** injects retrieved
+#### Phase 2 — vectors (`embed.ts`)
+
+    ayin indulge --embed        # CPU, no GPU, no authority taken
+
+An embedding model is **not** a chat model: `nomic-embed-text` is ~270 MB against gemma's 15+ GB,
+generates nothing, streams nothing, and returns one 768-float array per input in milliseconds on CPU.
+It does not compete for the card and evicts nothing, which is why this stage takes no LLM authority.
+
+Two rules make vectors safe to keep. **A vector is only comparable to vectors from the same model** —
+not "worse results", meaningless ones; mismatched dimensions crash (lucky), matching dimensions
+produce confident garbage silently, so every record carries the model NAME and a foreign-model vector
+is counted and ignored rather than reused. And **vectors are derived data; chunks are the asset** —
+`chunks/` is portable and model-agnostic, `vectors.jsonl` is neither, so a corpus copied to another
+machine is re-embedded there (minutes on a CPU) rather than shipping numbers that machine cannot read.
+
+Search is coarse-to-fine, and cosine is the LAST stage:
+
+1. **names** (`lexicon.ts`) — only a *strong* match (≥0.9) restricts the candidate set. Measured: "how
+   does it figure out where the speech bubble **points**" fuzzy-matched the symbol `pathPoints` and
+   gated away the chunk that actually answered it. An exact name is evidence; a fuzzy hit on an
+   English word is a coincidence, so weak hits boost instead of filtering.
+2. **domains** — a domain's vector is the **centroid** of its chunks, not the embedding of its name; a
+   domain is an arbitrary operator string and `liveops` may describe its contents poorly or not at
+   all. Top-K domains, never a threshold, so a badly-phrased query still retrieves something.
+3. **cosine** over what survived.
+
+Verified on a real corpus: *"why might the box come out the wrong size"* returns the `tailApex`
+bounding-box chunk while sharing almost no words with it. If nothing is embedded or the endpoint is
+down, `corpus_search` silently falls back to the keyword path — the header says `[semantic]` or
+`[keyword]` so which one answered is never a guess.
+
+**Phase 3** injects retrieved chunks at named prompt sites. **Phase 3** injects retrieved
 chunks at named prompt sites. Neither is designed yet — Phase 1's chunks get read and judged by hand
 first, because a RAG is worth exactly what its chunks are worth.
 

@@ -25,7 +25,8 @@
  */
 
 import { isCorpusInjection } from '../modes.js';
-import { buildLexicon, lookupNames } from './lexicon.js';
+import { chunksByIds, embedText, hasUsableVectors, loadVectors, vectorSearch } from './embed.js';
+import { buildLexicon, lookupNames, type NameHit } from './lexicon.js';
 import { assessChunk } from './staleness.js';
 import { openStore, type Chunk } from './store.js';
 
@@ -135,7 +136,7 @@ export function corpusBlockFor(repoPath: string, file: string, range?: LineRange
  *
  * Staleness is labelled here too. A pulled chunk is exactly as dangerous as a pushed one.
  */
-export function corpusSearch(repoPath: string, query: string, limit = 3): string {
+export async function corpusSearch(repoPath: string, query: string, limit = 3): Promise<string> {
   const store = openStore(repoPath);
   if (!store.exists()) {
     return 'No corpus for this repo yet. Build one with: ayin indulge --domains "<what you are working on>"';
@@ -149,8 +150,30 @@ export function corpusSearch(repoPath: string, query: string, limit = 3): string
   // everything else is out of the race rather than merely out-ranked.
   const all = store.chunks();
   const named = lookupNames(buildLexicon(all), query);
-  const namedIds = new Set(named.flatMap((n) => [...n.handle.chunkIds]));
-  const pool = namedIds.size ? all.filter((c) => namedIds.has(c.chunkId)) : all;
+
+  // Only a STRONG name match may restrict the field. Measured: "how does it figure out where the
+  // speech bubble points" fuzzy-matched the symbol `pathPoints` on the word "points", which then
+  // gated the candidate set — so the chunk that actually answers it (the tail apex) was never
+  // considered. An exact name is evidence; a fuzzy hit on an English word is a coincidence.
+  const STRONG = 0.9;
+  const strongIds = new Set(named.filter((n) => n.score >= STRONG).flatMap((n) => [...n.handle.chunkIds]));
+  const namedIds = new Set(named.flatMap((n) => [...n.handle.chunkIds]));   // weak hits still BOOST
+  const pool = strongIds.size ? all.filter((c) => strongIds.has(c.chunkId)) : all;
+
+  // ── vector pass, when the corpus has vectors from the model configured right now ──
+  // Names narrowed the field; domains narrow it again; cosine only ranks what survived. If the
+  // endpoint is down or nothing is embedded, fall through to lexical rather than failing the tool.
+  if (hasUsableVectors(store)) {
+    try {
+      const qv = await embedText(query);
+      const hits = vectorSearch(loadVectors(store), qv, {
+        limit, within: strongIds.size ? strongIds : undefined,
+      });
+      if (hits.length) {
+        return render(repoPath, store, chunksByIds(all, hits.map((h) => h.chunkId)), query, named, 'semantic');
+      }
+    } catch { /* no endpoint / model not pulled — lexical still works */ }
+  }
 
   const scored = pool.map((c) => {
     const q = c.question.toLowerCase();
@@ -171,12 +194,23 @@ export function corpusSearch(repoPath: string, query: string, limit = 3): string
     return `Nothing in the corpus matches "${query}". It holds ${store.totals().chunks} answered question(s) for this repo.`;
   }
 
-  const matchedNames = named.slice(0, 3).map((n) => n.handle.raw).join(', ');
+  return render(repoPath, store, scored.map((s2) => s2.chunk), query, named, 'keyword');
+}
+
+/** One rendering for both passes — the agent should not be able to tell which found the chunk. */
+function render(
+  repoPath: string, store: ReturnType<typeof openStore>, chunks: Chunk[],
+  query: string, named: NameHit[], how: 'semantic' | 'keyword',
+): string {
+  // Only names that actually decided the result are named. Reporting a weak fuzzy hit as "matched
+  // on: pathPoints" when the answer came from semantics tells the agent something untrue about why
+  // it is looking at this chunk.
+  const matchedNames = named.filter((n) => n.score >= 0.9).slice(0, 3).map((n) => n.handle.raw).join(', ');
   const out: string[] = [
-    `${scored.length} of ${store.totals().chunks} chunk(s) match "${query}"`
+    `${chunks.length} of ${store.totals().chunks} chunk(s) match "${query}" [${how}]`
     + (matchedNames ? ` (matched on: ${matchedNames})` : '') + ':',
   ];
-  for (const { chunk } of scored) {
+  for (const chunk of chunks) {
     const state = assessChunk(repoPath, chunk);
     out.push('');
     out.push(state.label);

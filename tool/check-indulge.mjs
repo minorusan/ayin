@@ -588,10 +588,10 @@ ok(INJ.corpusBlockFor(IR, 'src/x.ts') === null, '/corpus off injects nothing —
 MODES.setCorpusInjection(true);
 ok(INJ.corpusBlockFor(IR, 'src/x.ts') !== null, '/corpus on restores it');
 
-ok(/what is beta/.test(INJ.corpusSearch(IR, 'beta', 3)), 'corpus_search finds a chunk by keyword');
-ok(/Nothing in the corpus matches/.test(INJ.corpusSearch(IR, 'quantum blockchain', 3)),
+ok(/what is beta/.test(await INJ.corpusSearch(IR, 'beta', 3)), 'corpus_search finds a chunk by keyword');
+ok(/Nothing in the corpus matches/.test(await INJ.corpusSearch(IR, 'quantum blockchain', 3)),
   'a query that matches nothing says so instead of returning the nearest thing');
-ok(/ayin indulge/.test(INJ.corpusSearch(join(TMP, 'no-corpus-repo'), 'anything')),
+ok(/ayin indulge/.test(await INJ.corpusSearch(join(TMP, 'no-corpus-repo'), 'anything')),
   'searching a repo with no corpus names the command that would build one');
 
 // ── the cheap pass: find chunks by NAME before anything semantic ────────────────
@@ -629,6 +629,60 @@ ok(!LX.symbolsIn('the quick brown fox jumped').length, 'plain prose contributes 
   ok(top('extract.mjs')?.handle.kind === 'file', 'file names are handles too');
   ok(LX.lookupNames(lex, 'RewardService').length === 0, 'a name that is not in the corpus matches nothing');
   ok(LX.lookupNames(lex, 'the and for with').length === 0, 'stopwords match nothing');
+}
+
+// ── vectors: the expensive pass, and the rules that keep it honest ──────────────
+
+const EM = await import(join(ROOT, 'dist/indulge/embed.js'));
+
+ok(EM.cosine([1, 0, 0], [1, 0, 0]) === 1, 'identical vectors score 1');
+ok(Math.abs(EM.cosine([1, 0, 0], [0, 1, 0])) < 1e-9, 'orthogonal vectors score 0');
+ok(EM.cosine([2, 0], [8, 0]) === 1, 'magnitude is divided out — only DIRECTION matters');
+
+{
+  // a domain's vector is the MEAN of its chunks', not the embedding of its arbitrary name
+  const vs = [
+    { chunkId: 'x', domains: ['a'], model: 'm', dim: 2, vector: [1, 0] },
+    { chunkId: 'y', domains: ['a'], model: 'm', dim: 2, vector: [0, 1] },
+    { chunkId: 'z', domains: ['b'], model: 'm', dim: 2, vector: [-1, 0] },
+  ];
+  const cents = EM.domainCentroids(vs);
+  ok(Math.abs(cents.get('a')[0] - 0.5) < 1e-9 && Math.abs(cents.get('a')[1] - 0.5) < 1e-9,
+    'a domain centroid is the mean of its chunks');
+
+  // coarse-then-fine: a chunk in a losing domain is not a candidate, however it scores
+  const hits = EM.vectorSearch(vs, [1, 0], { topDomains: 1, limit: 5 });
+  ok(hits.every((h) => h.chunkId !== 'z'),
+    'a chunk in an unranked domain cannot win — scoping beats scoring');
+  ok(hits[0].chunkId === 'x', 'within the chosen domain, the closest chunk wins');
+  ok(EM.vectorSearch(vs, [1, 0], { topDomains: 1, limit: 5, within: new Set(['y']) })
+    .every((h) => h.chunkId === 'y'), 'a name-restricted candidate set is respected');
+}
+
+{
+  // vectors from another model must never be treated as usable
+  const vstore = S.openStore(join(TMP, 'vec-repo'));
+  mkdirSync(join(TMP, 'vec-repo'), { recursive: true });
+  vstore.beginRun({ runId: 'v', domains: ['d'], headSha: 'h' });
+  const vq = S.questionId('q?', 'f.ts', null);
+  vstore.addQuestion({ id: vq, file: 'f.ts', entity: null, category: 'functionality', text: 'q?' });
+  vstore.saveChunk({
+    chunkId: S.chunkId(vstore.key, 'f.ts', null, 'functionality', vq), questionId: vq, repoKey: vstore.key,
+    domains: ['d'], question: 'q?', answer: 'a', files: ['f.ts'],
+    citations: [{ path: 'f.ts', startLine: 1, endLine: 1, sha: 'x' }], entity: null,
+    category: 'functionality', model: 'm', createdAt: '2026-08-14T00:00:00Z', sourceSha: 'x',
+  });
+  let calls = 0;
+  const r1 = await EM.embedCorpus({ store: vstore, embed: async () => { calls++; return [1, 2, 3]; } });
+  ok(r1.embedded === 1 && calls === 1, 'each chunk is embedded once');
+  const r2 = await EM.embedCorpus({ store: vstore, embed: async () => { calls++; return [1, 2, 3]; } });
+  ok(r2.embedded === 0 && r2.skipped === 1 && calls === 1,
+    're-running embeds nothing — resumable, like every other stage');
+  ok(EM.loadVectors(vstore)[0].model === EM.embedModel(),
+    'every vector records the model that produced it — a vector is only comparable to its own kind');
+  const stopped = await EM.embedCorpus({ store: vstore, shouldStop: () => true, embed: async () => [1] });
+  ok(stopped.stopped === true, 'a kill lands between chunks');
+  vstore.endRun('v');
 }
 
 rmSync(TMP, { recursive: true, force: true });
