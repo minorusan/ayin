@@ -335,6 +335,34 @@ gs3.endRun('g3');
   ustore.endRun('u');
 }
 
+// ── depth decides priority: a seed IS the feature, a neighbour is context ───────
+// Measured on a real repo: with --max-questions 15, an alphabetical order spent every answer on a
+// depth-1 neighbour and the seed got none. And peripheral interfaces produced 40 questions each
+// against the seed's 12, so the corpus described the surroundings better than the thing asked for.
+{
+  const AN3 = await import(join(ROOT, 'dist/indulge/answer.js'));
+  const P2 = join(TMP, 'priority-repo');
+  mkdirSync(join(P2, 'src'), { recursive: true });
+  writeFileSync(join(P2, 'src/aaa-neighbour.ts'), 'export const n = 1;\n');
+  writeFileSync(join(P2, 'src/zzz-seed.ts'), 'export const s = 1;\n');
+  const ps = S.openStore(P2);
+  ps.beginRun({ runId: 'p', domains: ['d'], headSha: 'h' });
+  ps.addFile({ domain: 'd', path: 'src/zzz-seed.ts', depth: 0, why: 'explore seed', sha: 'a' });
+  ps.addFile({ domain: 'd', path: 'src/aaa-neighbour.ts', depth: 1, why: 'references src/zzz-seed.ts', sha: 'b' });
+  for (const [file, text] of [['src/aaa-neighbour.ts', 'q about the neighbour'], ['src/zzz-seed.ts', 'q about the seed']]) {
+    ps.addQuestion({ id: S.questionId(text, file, null), file, entity: null, category: 'gotchas', text });
+  }
+  const order = [];
+  await AN3.answerQuestions({
+    store: ps, repoPath: P2, limit: 1,
+    ask: async () => { order.push('called'); return 'x\nCITE: src/zzz-seed.ts:1-1'; },
+  });
+  ok(ps.chunks()[0]?.question === 'q about the seed',
+    'a capped run answers the SEED first, though it sorts last alphabetically',
+    ps.chunks()[0]?.question);
+  ps.endRun('p');
+}
+
 // ── the direct answer path: the code, one call, no rediscovery ──────────────────
 {
   const AN = await import(join(ROOT, 'dist/indulge/answer.js'));

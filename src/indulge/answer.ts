@@ -310,9 +310,19 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
   // subprocesses per call.
   const provenance = repoProvenance(repoPath);
 
-  // Grouped by file: consecutive questions then share the same sources prefix, which is the whole
-  // point of putting the code first. Interleaving files would evict the cache on every question.
-  const pending = store.pendingQuestions().sort((a, b) => a.file.localeCompare(b.file));
+  // DEPTH first, then file. On a capped run the order IS the corpus: measured on a real repo, an
+  // alphabetical sort spent all 15 answers on a depth-1 neighbour while the seed — the file the
+  // domain actually named — got none. Seeds are the feature; neighbours are context.
+  // Within a depth, still grouped by file, so consecutive questions share the cached sources prefix.
+  const depthOf = new Map<string, number>();
+  for (const f of store.files()) {
+    const prev = depthOf.get(f.path);
+    if (prev === undefined || f.depth < prev) depthOf.set(f.path, f.depth);
+  }
+  const pending = store.pendingQuestions().sort((a, b) => {
+    const d = (depthOf.get(a.file) ?? 99) - (depthOf.get(b.file) ?? 99);
+    return d !== 0 ? d : a.file.localeCompare(b.file);
+  });
   const queue = opts.limit ? pending.slice(0, opts.limit) : pending;
   onStatus?.(`${pending.length} question(s) pending${opts.limit ? `, answering ${queue.length} this run` : ''}`);
 

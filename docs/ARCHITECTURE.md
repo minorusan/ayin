@@ -1834,6 +1834,13 @@ what tomorrow asks about). Per category rather than one call for all five, becau
 kinds of thing at once returns five shallow examples of the easiest kind; each category's focus is
 one tunable line in `prompts/indulge/category*.txt`, wrapped by `questionFrame.txt`.
 
+**Depth decides priority, in both stages.** A seed IS the feature; a neighbour is context. Questions
+are budgeted by depth (a seed gets the full per-target allowance, depth 1 half of it and fewer
+entities, deeper still one), and answers are ordered **depth first, then file**. Both were measured
+on a real repo: peripheral interfaces reached at depth 1 produced 40 questions each against the
+seed's 12, and with `--max-questions 15` an alphabetical answer order spent every one of them on a
+depth-1 neighbour while the seed got none. On a capped run the order IS the corpus.
+
 `NONE` is a real answer that must survive as zero questions — a file with nothing worth asking
 should produce nothing rather than four questions invented to fill a quota. The source shown to the
 model is clipped at 12k characters and **the clip is announced in the prompt**, so it never writes

@@ -145,6 +145,20 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
 
   // One entry per path — a file discovered under two domains is one file to ask about.
   const paths = [...new Set(store.files().map((f) => f.path))].sort();
+  // A seed IS the feature; a neighbour is context. Measured on a real repo: peripheral interfaces
+  // reached at depth 1 produced 40 questions each (many members x 4 each) while the seed produced
+  // 12, so the corpus described the surroundings better than the thing asked about.
+  const depthOf = new Map<string, number>();
+  for (const f of store.files()) {
+    const prev = depthOf.get(f.path);
+    if (prev === undefined || f.depth < prev) depthOf.set(f.path, f.depth);
+  }
+  const budgetFor = (file: string): { perTarget: number; entities: number } => {
+    const d = depthOf.get(file) ?? 0;
+    if (d === 0) return { perTarget: maxPerTarget, entities: maxEntities };
+    if (d === 1) return { perTarget: Math.max(2, Math.floor(maxPerTarget / 2)), entities: Math.min(maxEntities, 5) };
+    return { perTarget: 1, entities: 2 };
+  };
   const existing = store.questions();
   // (file, entity, category) triples already carrying a question — the resume key.
   const done = new Set(existing.map((q) => `${q.file}|${q.entity ? `${q.entity.kind}:${q.entity.name}` : ''}|${q.category}`));
@@ -153,19 +167,20 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
 
   // Total is an upper bound: resumed triples are skipped without a call, and it is reported as such.
   let total = 0;
-  const plan: Array<{ file: string; source: string; targets: Array<Entity | null> }> = [];
+  const plan: Array<{ file: string; source: string; targets: Array<Entity | null>; perTarget: number }> = [];
   for (const path of paths) {
     let source: string;
     try { source = readFileSync(join(repoPath, path), 'utf-8'); } catch { report.skipped++; continue; }
-    const targets = targetsFor(path, source, maxEntities);
-    plan.push({ file: path, source, targets });
+    const budget = budgetFor(path);
+    const targets = targetsFor(path, source, budget.entities);
+    plan.push({ file: path, source, targets, perTarget: budget.perTarget });
     total += targets.length * categories.length;
   }
   report.files = plan.length;
   onStatus?.(`${plan.length} file(s) → up to ${total} generation calls`);
 
   let step = 0;
-  for (const { file, source, targets } of plan) {
+  for (const { file, source, targets, perTarget } of plan) {
     const clipped = source.length > MAX_SOURCE_CHARS;
     const shown = clipped
       ? `${source.slice(0, MAX_SOURCE_CHARS)}\n… (file clipped at ${MAX_SOURCE_CHARS} of ${source.length} characters)`
@@ -201,7 +216,7 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
         }
         report.calls++;
 
-        for (const text of parseQuestions(reply, maxPerTarget)) {
+        for (const text of parseQuestions(reply, perTarget)) {
           if ((perFile.get(file) ?? 0) >= maxPerFile) break;
           const id = questionId(text, file, entity);
           if (store.addQuestion({ id, file, entity, category, text })) {
