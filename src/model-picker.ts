@@ -336,50 +336,46 @@ export async function openModelPicker(): Promise<void> {
 }
 
 /** `/model` → popup · `/model <name|qwen|gemma>` → straight switch. */
+/**
+ * `/model` — pick the ADAPTER. Nothing else.
+ *
+ * There is no physical connection between this command and anything on a GPU. ayin does not know what
+ * Ollama has pulled, what the resource layer is serving, or whether a card exists at all — and it has no
+ * business knowing. An adapter is a MODEL SPECIFICATION: how that family formats and parses tool calls.
+ * Gemma is Google's and does it differently from Qwen. That is the entire subject.
+ *
+ * So this reads from ayin's OWN list of adapters and makes no network call. If the endpoint is serving
+ * qwen and the operator selects gemma, ayin speaks gemma and is blindfolded — deliberately, because that
+ * is the operator's decision to make and ayin is in no position to overrule it.
+ *
+ * It used to fetch a catalogue and swap the served model. On a shared card that is ayin reaching into
+ * someone else's business: another process may be mid-run on that model, and one session promoting its
+ * own preference is the race the host's queue exists to prevent.
+ */
 export async function handleModelCommand(arg: string): Promise<void> {
-  const t = arg.trim();
+  const want = arg.trim().toLowerCase();
+  const names = adapterNames();
+  const cur = activeAdapter();
 
-  // `/model adapter <name>` — choose how ayin SPEAKS to whatever is served, rather than what is served.
-  // On a shared host ayin does not own the model: another process may be using it, and forcing a swap to
-  // suit this session is the race the authority layer exists to prevent. The adapter is the half ayin can
-  // legitimately decide.
-  const ad = /^adapter(?:\s+(\S+))?$/i.exec(t);
-  if (ad) {
-    const want = ad[1];
-    if (!want) {
-      const cur = activeAdapter();
-      addMessage('system',
-        `Adapter: ${cur.id}${cur.forced ? ' (forced)' : ' (matched from the served model)'}. `
-        + `Available: ${adapterNames().join(', ')}, auto. Set with /model adapter <name>.`);
-      return;
-    }
-    if (!setAdapter(want)) {
-      addMessage('system', `No adapter "${want}". Available: ${adapterNames().join(', ')}, auto.`);
-      return;
-    }
-    const cur = activeAdapter();
-    addMessage('system', cur.forced
-      ? `Adapter forced to ${cur.id} — ayin will speak ${cur.id} whatever the endpoint serves.`
-      : `Adapter back to automatic — now ${cur.id}, matched from the served model.`);
+  if (!want) {
+    addMessage('system',
+      `Adapter: ${cur.id}${cur.forced ? ' (chosen)' : ' (matched from the served model id)'}\n`
+      + `Available: ${names.join(', ')}, auto\n`
+      + `An adapter is how a model FAMILY formats tool calls — ayin's own list, nothing to do with what `
+      + `the endpoint is serving. /model <name> to choose, /model auto to match automatically.`);
     return;
   }
 
-  if (!t) { await openModelPicker(); return; }
-  if (await reportFixedModel()) return;
+  if (!setAdapter(want)) {
+    addMessage('system',
+      `No adapter "${arg.trim()}". Available: ${names.join(', ')}, auto. `
+      + `This selects how ayin SPEAKS, not what the endpoint serves — ayin cannot change that and does `
+      + `not know what it is.`);
+    return;
+  }
 
-  const cat = await fetchCatalog({ force: true });
-  if (!cat) {
-    addMessage('system', `Cannot reach the llm resource at ${statusSource()} — model unchanged (serving ${activeModelId() || 'unknown'}).`);
-    return;
-  }
-  const model = resolveModelName(t, cat);
-  if (!model) {
-    addMessage('system', `No installed model matches "${t}". Known: ${cat.models.map(m => m.name).join(', ')}`);
-    return;
-  }
-  if (model === cat.activeModel && cat.loadedModel === cat.activeModel) {
-    addMessage('system', `${model} is already the served model.`);
-    return;
-  }
-  await switchModel(model, cat);
+  const now = activeAdapter();
+  addMessage('system', now.forced
+    ? `Adapter: ${now.id}. ayin will speak ${now.id} regardless of what the endpoint serves.`
+    : `Adapter: automatic — ${now.id}, matched from the served model id.`);
 }

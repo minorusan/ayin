@@ -824,7 +824,7 @@ onInput(async (text: string) => {
         addMessage('system', '/set update-registry <http://host:4873> — where `ayin update` looks (public npm is refused: "ayin" there is someone else)');
         addMessage('system', '/openai — switch to the hosted model for a hard task (billed per token); again to switch back');
         addMessage('system', '/openai <model> — switch and pick the model · /openai key <sk-...> — store the key');
-        addMessage('system', '/model adapter <gemma|qwen|auto> — how ayin SPEAKS to whatever is served; it does not move the model on a shared host');
+        addMessage('system', '/model <gemma|qwen|auto> — the ADAPTER: how ayin formats tool calls. Its own list; it does not know or change what the endpoint serves');
         addMessage('system', '/disentangle — release a bound design (the agent cannot: it would only switch its own gate off)');
         addMessage('system', '/reset — restore default prompts');
         addMessage('system', '/quit — exit');
