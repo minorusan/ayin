@@ -1853,6 +1853,12 @@ Two paths:
     ayin indulge --dry-run     discover only — file list + question estimate, spends nothing
     ayin indulge --restart     discard the corpus and rebuild (the default is RESUME)
 
+Every run writes a **session record** (`~/.ayin-cli/sessions/<id>.jsonl`) — the invocation, each
+stage's counts, and a closing line naming chunks/unproven/pending and the report path. Without it the
+command established no session id, so `session-record.ts` silently no-opped and an eight-hour
+unattended run left no account anywhere a reader would think to look. That matters most when the run
+happened on a different machine: the record is what comes back.
+
 `indulge` is in `NO_TUI_COMMANDS`: it runs for hours under `nohup`, so blessed must never grab the
 terminal. **Resume is the default** — every stage reads its remaining work from disk, so re-running
 after a kill continues rather than restarts. SIGINT/SIGTERM are cooperative: the flag is set, the

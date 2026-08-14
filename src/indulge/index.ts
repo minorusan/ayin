@@ -23,6 +23,8 @@ import { discoverDomain } from './discover.js';
 import { embedCorpus } from './embed.js';
 import { generateQuestions } from './questions.js';
 import { writeReport } from './report.js';
+import { recordAnswer, recordPrompt, recordTool } from '../session-record.js';
+import { initSession } from '../session-store.js';
 import { assessChunk } from './staleness.js';
 import { openStore, StoreLockedError, type Category, type Manifest, type Stage } from './store.js';
 
@@ -204,6 +206,8 @@ export async function runIndulge(argv: string[]): Promise<number> {
     if (!store.exists()) { out(`No corpus for ${repoPath} yet — run indulge first.`); return 2; }
     let stopping = false;
     process.on('SIGINT', () => { stopping = true; out('\nstopping after the current chunk…'); });
+    const embedSession = await initSession();
+    recordPrompt(`ayin indulge --embed --repoPath ${repoPath}`);
     const r = await embedCorpus({
       store, onStatus: (n) => out(`  ${n}`), shouldStop: () => stopping,
       onProgress: (done, total, current) => store.setProgress({
@@ -211,7 +215,9 @@ export async function runIndulge(argv: string[]): Promise<number> {
       }),
     });
     out(`${r.embedded} embedded · ${r.skipped} already done · ${r.failed} failed` + (r.foreign ? ` · ${r.foreign} from another model` : ''));
+    recordAnswer(`indulge --embed · ${r.embedded} embedded · ${r.skipped} already done · ${r.failed} failed · model ${r.model}`);
     out(`model: ${r.model} — vectors are only comparable to others from this same model.`);
+    out(`session ${embedSession}`);
     return r.failed && !r.embedded ? 1 : 0;
   }
 
@@ -238,6 +244,12 @@ export async function runIndulge(argv: string[]): Promise<number> {
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
   const shouldStop = (): boolean => stopping;
+
+  // A session record, so an overnight run on another machine leaves a readable trail. Without one
+  // `session-record.ts` no-ops on a null session id and indulge is invisible: eight hours of work
+  // whose only account is a manifest the operator would have to know to look for.
+  const sessionId = await initSession();
+  recordPrompt(`ayin indulge --domains "${args.domains.join(',')}" --repoPath ${repoPath}`);
 
   const runId = `run-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   const headSha = '';
@@ -282,6 +294,9 @@ export async function runIndulge(argv: string[]): Promise<number> {
       });
       matched += r.added;
       progress('discover', i + 1, args.domains.length, domain);
+      recordTool('indulge:discover', domain, JSON.stringify({
+        seeds: r.seeds, added: r.added, hallucinated: r.hallucinated.length, truncated: r.truncated, indexed: r.indexed,
+      }));
       if (r.seeds === 0) out(`  "${domain}" matched nothing in this repo — no files written.`);
       else out(`  ${r.added} file(s)${r.truncated ? ' (capped — the walk stopped early)' : ''}` +
         `${r.hallucinated.length ? ` · ${r.hallucinated.length} named path(s) did not exist and were dropped` : ''}`);
@@ -310,6 +325,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
       store, repoPath, categories: args.categories, onStatus: status, shouldStop,
       onProgress: (done, total, current) => progress('questions', done, total, current),
     });
+    recordTool('indulge:questions', args.categories?.join(',') ?? 'all', JSON.stringify(q));
     out(`  ${q.generated} new question(s)` +
       `${q.duplicates ? `, ${q.duplicates} already known` : ''}${q.skipped ? `, ${q.skipped} skipped (already generated)` : ''}`);
 
@@ -320,6 +336,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
       store, repoPath, limit: args.maxQuestions, onStatus: status, shouldStop,
       onProgress: (done, total, current) => progress('answer', done, total, current),
     });
+    recordTool('indulge:answer', `limit=${args.maxQuestions ?? 'none'}`, JSON.stringify(a));
     out(`  ${a.answered} answered · ${a.failed} unproven (not stored) · ${a.rejectedCitations} citation(s) rejected`);
 
     // ── the deliverable ────────────────────────────────────────────────────────
@@ -334,12 +351,19 @@ export async function runIndulge(argv: string[]): Promise<number> {
     out(`report  ${r.path}`);
     out(`corpus  ${totals.chunks} chunk(s) · ${totals.answered} answered · ${totals.failed} unproven · ${totals.pending} still pending`);
     if (stopping) out('Stopped early — re-run to continue where this left off.');
+    // The one line worth finding later: what this night actually produced.
+    recordAnswer(`indulge ${stopping ? 'INTERRUPTED' : 'finished'} · domains ${args.domains.join(',')}`
+      + ` · ${totals.chunks} chunk(s) · ${totals.answered} answered · ${totals.failed} unproven`
+      + ` · ${totals.pending} pending · report ${r.path}`);
+    out(`session ${sessionId} — the run is logged in ~/.ayin-cli/sessions/${sessionId}.jsonl`);
     return 0;
   } catch (err) {
     // The run stays `running` in the manifest only until the next run adopts it, which is what makes
     // a crash indistinguishable from a kill: both resume.
     store.endRun(runId, 'interrupted');
-    out(`indulge failed: ${err instanceof Error ? err.message : String(err)}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    recordAnswer(`indulge FAILED: ${msg}`);
+    out(`indulge failed: ${msg}`);
     return 1;
   } finally {
     // Same shape as the watch daemon: only a real grant has a release, and letting it go matters —
