@@ -68,7 +68,9 @@ export const tool: Tool = {
       let corpus = '';
       try {
         const rel = relative(process.cwd(), resolved).split(sep).join('/');
-        if (rel && !rel.startsWith('..')) corpus = corpusBlockFor(process.cwd(), rel) ?? '';
+        if (rel && !rel.startsWith('..')) {
+          corpus = corpusBlockFor(process.cwd(), rel, { startLine: off + 1, endLine: lastShown }) ?? '';
+        }
       } catch { corpus = ''; }
       return `${header}${numbered}${footer}${corpus}`;
     },

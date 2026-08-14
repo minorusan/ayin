@@ -257,7 +257,7 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
       chunkId: id,
       questionId: q.id,
       repoKey: store.key,
-      domain: domainOfFile(store, q.file),
+      domains: domainsOfFile(store, q.file),
       question: q.text,
       answer: built.answer.slice(0, MAX_ANSWER_CHARS),
       files: [...new Set(built.citations.map((c) => c.path))],
@@ -281,9 +281,9 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
   return report;
 }
 
-/** The domain that surfaced this file, for the chunk's provenance. */
-function domainOfFile(store: IndulgeStore, file: string): string {
-  return store.files().find((f) => f.path === file)?.domain ?? '';
+/** EVERY domain that surfaced this file — a file discovered under two domains belongs to both. */
+function domainsOfFile(store: IndulgeStore, file: string): string[] {
+  return [...new Set(store.files().filter((f) => f.path === file).map((f) => f.domain).filter(Boolean))];
 }
 
 async function buildAnswer(

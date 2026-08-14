@@ -1881,8 +1881,16 @@ Two halves, deliberately asymmetric.
 **Push — `read_file`.** Reading a file appends what the corpus already answered *about that file*.
 It is an exact path lookup (`entity.file`, `files[]`, every citation), **not** a similarity search:
 no embedding, no threshold to tune, and it cannot surface a plausible-but-unrelated chunk, which is
-the failure mode every score eventually produces. Capped at 2 chunks — every injected token costs a
-slice of the attention available to every other token, including the hard constraints. It lands in
+the failure mode every score eventually produces. Ranked by **overlap with the lines actually on screen**, not by recency — measured wrong: reading
+lines 115-118 surfaced a chunk about lines 277-287 first, while the chunk citing 115-136 came second.
+The most recent answer about a file is not the one about the part you are looking at. A narrow read
+(≤60 lines) carries ONE chunk, a whole-file read two: a four-line peek used to come back with 2.7 KB
+of notes attached, eight times the size of the code it annotated.
+
+Chunks carry `domains: string[]`, not one domain. A file discovered under two domains belongs to
+both, and a single label made it invisible from the other — which matters because domains are the
+coarse index retrieval searches first. Corpora written before this still read via their single
+`domain`. It lands in
 the tool RESULT, so it inherits the window's observation masking (it compresses to a stub on its own
 after a few messages) and never churns the KV-cached prefix.
 

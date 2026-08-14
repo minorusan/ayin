@@ -544,7 +544,7 @@ istore.saveChunk({
   repoPath: IR, domain: 'd', question: 'what is beta?', answer: 'Beta is the second line and nothing depends on it.',
   files: ['src/x.ts'], citations: [{ path: 'src/x.ts', startLine: 2, endLine: 2, sha: S.blobSha(rsrc) }],
   entity: null, category: 'functionality', model: 'm', createdAt: '2026-08-14T10:00:00Z', sourceSha: S.blobSha(rsrc),
-  branch: 'dev', commit: 'abc123',
+  branch: 'dev', commit: 'abc123', domains: ['d'],
 });
 istore.endRun('i1');
 
@@ -552,6 +552,30 @@ const block = INJ.corpusBlockFor(IR, 'src/x.ts');
 ok(block && /what is beta/.test(block), 'reading a file surfaces what the corpus answered about it');
 ok(block.includes('on dev'), 'the injected chunk carries its provenance label', (block.match(/\[corpus[^\]]*\]/) || [''])[0]);
 ok(/src\/x.ts:2-2/.test(block), 'the citation is shown so the agent can go and check');
+
+// Ranking: the chunk about the lines ON SCREEN wins, not the most recent one. Measured wrong
+// before this — reading lines 115-118 of a file surfaced a chunk about lines 277-287 first.
+{
+  const far = S.questionId('what is far away?', 'src/x.ts', null);
+  istore.addQuestion({ id: far, file: 'src/x.ts', entity: null, category: 'gotchas', text: 'what is far away?' });
+  istore.saveChunk({
+    chunkId: S.chunkId(istore.key, 'src/x.ts', null, 'gotchas', far), questionId: far, repoKey: istore.key,
+    domains: ['d'], question: 'what is far away?', answer: 'About the end of the file.',
+    files: ['src/x.ts'], citations: [{ path: 'src/x.ts', startLine: 3, endLine: 3, sha: S.blobSha(rsrc) }],
+    entity: null, category: 'gotchas', model: 'm', createdAt: '2027-01-01T00:00:00Z',  // NEWER
+    sourceSha: S.blobSha(rsrc), branch: 'dev', commit: 'abc123',
+  });
+  const near = INJ.corpusBlockFor(IR, 'src/x.ts', { startLine: 2, endLine: 2 });
+  ok(/what is beta/.test(near) && !/far away/.test(near),
+    'the chunk citing the lines being read wins over a NEWER chunk about elsewhere in the file');
+  const wide = INJ.corpusBlockFor(IR, 'src/x.ts', { startLine: 1, endLine: 300 });
+  ok((wide.match(/^Q\. /gm) || []).length === 2, 'a whole-file read may carry two chunks; a narrow peek only one');
+  ok((near.match(/^Q\. /gm) || []).length === 1, 'a four-line peek does not come back with a briefing attached');
+}
+
+ok(INJ.domainsOf({ domains: ['a', 'b'] }).length === 2, 'a chunk can belong to several domains');
+ok(INJ.domainsOf({ domain: 'legacy' })[0] === 'legacy',
+  'a chunk written before domains[] still reports its single domain');
 ok(/not the code/.test(block), 'the block says plainly that these are notes, not the source');
 ok(INJ.corpusBlockFor(IR, 'src/never-mentioned.ts') === null, 'a file with no chunks injects nothing');
 

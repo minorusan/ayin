@@ -107,7 +107,18 @@ export interface Chunk {
    * copied to another box. Nothing ever read it; the manifest holds the repo path.
    */
   repoPath?: string;
-  domain: string;
+  /**
+   * Every domain this chunk's file was discovered under.
+   *
+   * An ARRAY because a file legitimately belongs to several: discovery run for `liveops` and for
+   * `trail-minigame` can surface the same file, and recording only the first made the chunk
+   * invisible when searching the other. It is also the coarse index retrieval searches first —
+   * pick the domains, then rank chunks inside them — so a chunk stranded in one domain is a chunk
+   * that cannot be found from the other.
+   */
+  domains: string[];
+  /** DEPRECATED single-domain form, still read from corpora written before `domains`. */
+  domain?: string;
   question: string;
   answer: string;
   files: string[];

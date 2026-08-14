@@ -30,17 +30,50 @@ import { openStore, type Chunk } from './store.js';
 
 /** Two is a nudge; five is a briefing nobody asked for. */
 const MAX_CHUNKS = 2;
+/** Below this many lines, a read is a targeted peek — one chunk, or the note dwarfs the code. */
+const NARROW_READ_LINES = 60;
 /** An answer longer than this is clipped — the citation is there for the full story. */
 const MAX_ANSWER_CHARS = 700;
 
-/** Chunks that answer something about this exact file, freshest first. */
-export function chunksForFile(repoPath: string, file: string): Chunk[] {
+/** A chunk's domains, whichever schema wrote it. Old corpora carry a single `domain`. */
+export function domainsOf(chunk: Chunk): string[] {
+  if (Array.isArray(chunk.domains) && chunk.domains.length) return chunk.domains;
+  return chunk.domain ? [chunk.domain] : [];
+}
+
+/** How many of a chunk's cited lines fall inside the range actually being read. */
+function overlapWith(chunk: Chunk, file: string, range?: LineRange): number {
+  if (!range) return 0;
+  let best = 0;
+  for (const c of chunk.citations) {
+    if (c.path !== file) continue;
+    const lo = Math.max(c.startLine, range.startLine);
+    const hi = Math.min(c.endLine, range.endLine);
+    if (hi >= lo) best = Math.max(best, hi - lo + 1);
+  }
+  return best;
+}
+
+export interface LineRange { startLine: number; endLine: number }
+
+/**
+ * Chunks about this file, best first.
+ *
+ * Ordered by OVERLAP with the lines actually on screen, not by age. Ranking by recency was
+ * measured wrong: reading lines 115-118 of a file surfaced a chunk about lines 277-287 first,
+ * while the chunk citing 115-136 — the exact code being read — came second. The most recent
+ * answer about a file is not the one about the part you are looking at.
+ */
+export function chunksForFile(repoPath: string, file: string, range?: LineRange): Chunk[] {
   const store = openStore(repoPath);
   if (!store.exists()) return [];
   const hits = store.chunks().filter((c) =>
     c.entity?.file === file || c.files.includes(file) || c.citations.some((x) => x.path === file));
-  // Newest first: a later answer about the same file supersedes an earlier one.
-  return hits.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  return hits.sort((a, b) => {
+    const ov = overlapWith(b, file, range) - overlapWith(a, file, range);
+    if (ov !== 0) return ov;
+    return (b.createdAt || '').localeCompare(a.createdAt || '');   // tie-break: newer answer wins
+  });
 }
 
 /**
@@ -50,9 +83,9 @@ export function chunksForFile(repoPath: string, file: string): Chunk[] {
  * fresher exists, because "this was true on dev last week" is worth more than silence, provided it
  * says so.
  */
-export function corpusBlockFor(repoPath: string, file: string): string | null {
+export function corpusBlockFor(repoPath: string, file: string, range?: LineRange): string | null {
   if (!isCorpusInjection()) return null;
-  const all = chunksForFile(repoPath, file);
+  const all = chunksForFile(repoPath, file, range);
   if (all.length === 0) return null;
 
   const assessed = all.map((c) => ({ chunk: c, state: assessChunk(repoPath, c) }));
@@ -60,11 +93,20 @@ export function corpusBlockFor(repoPath: string, file: string): string | null {
   const usable = assessed.filter((a) => a.state.state !== 'missing');
   if (usable.length === 0) return null;
 
+  // Freshness breaks ties only — it must not drag an unrelated fresh chunk above the one that
+  // cites the lines on screen. Overlap already ordered them; keep that order among equals.
   const rank = { fresh: 0, stale: 1, divergent: 2, missing: 3 };
-  usable.sort((a, b) => rank[a.state.state] - rank[b.state.state]);
+  usable.sort((a, b) => {
+    const ov = overlapWith(b.chunk, file, range) - overlapWith(a.chunk, file, range);
+    if (ov !== 0) return ov;
+    return rank[a.state.state] - rank[b.state.state];
+  });
+
+  // A four-line peek should not come back with 2.7 KB of notes attached.
+  const budget = range && (range.endLine - range.startLine + 1) <= NARROW_READ_LINES ? 1 : MAX_CHUNKS;
 
   const lines: string[] = ['', `--- what indulge already knows about ${file} (${usable.length} answered) ---`];
-  for (const { chunk, state } of usable.slice(0, MAX_CHUNKS)) {
+  for (const { chunk, state } of usable.slice(0, budget)) {
     const answer = chunk.answer.length > MAX_ANSWER_CHARS
       ? `${chunk.answer.slice(0, MAX_ANSWER_CHARS)}…`
       : chunk.answer;
@@ -74,9 +116,9 @@ export function corpusBlockFor(repoPath: string, file: string): string | null {
     lines.push(answer);
     lines.push(`cited: ${chunk.citations.map((c) => `${c.path}:${c.startLine}-${c.endLine}`).join(' · ')}`);
   }
-  if (usable.length > MAX_CHUNKS) {
+  if (usable.length > budget) {
     lines.push('');
-    lines.push(`(${usable.length - MAX_CHUNKS} more answered question(s) about this file — ask corpus_search for them.)`);
+    lines.push(`(${usable.length - budget} more answered question(s) about this file — ask corpus_search for them.)`);
   }
   lines.push('');
   lines.push('These are notes from an earlier pass, not the code. Verify anything you act on.');
