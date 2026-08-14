@@ -177,12 +177,141 @@ async function globalPrefixWritable(): Promise<{ prefix: string; writable: boole
  * own terms and a half-downloaded tarball leaves the existing binary untouched — interrupt it and
  * the old ayin still runs. Exits non-zero when it could not update, so a wrapper can react.
  */
+/**
+ * The git checkout this build actually runs from, or null for a plain registry install.
+ *
+ * Node resolves symlinks when loading modules, so `HERE` is the REAL directory even when the binary was
+ * reached through `/usr/local/bin/ayin` → `lib/node_modules/ayin` → an `npm link`ed checkout. That is
+ * what makes "update the repo the link points at" resolvable without parsing anything.
+ */
+function gitCheckout(): string | null {
+  const root = join(HERE, '..');
+  return existsSync(join(root, '.git')) ? root : null;
+}
+
+/**
+ * `ayin update` FOR A LINKED CHECKOUT: pull, install, build, remap.
+ *
+ * ayin is distributed as a git repo now, so the registry path updates the wrong thing on the machine that
+ * matters: it replaces a GLOBAL package while the binary on PATH runs a linked working tree, and the old
+ * code keeps running while the command reports success. This pulls the tree the link resolves to, rebuilds
+ * it, and re-points the global bin at it — so `ayin update` changes what `ayin` actually runs.
+ *
+ * `npm install` is not skipped even when package.json looks unchanged: a pull that adds a dependency (the
+ * `openai` SDK did exactly that) leaves a tree that compiles against modules which are not there.
+ *
+ * A DIRTY TREE IS NEVER TOUCHED. Someone else's uncommitted work is not this command's to stash, and a
+ * merge conflict mid-update leaves a build that matches no commit.
+ */
+async function updateFromCheckout(root: string, opts: { check: boolean; force: boolean }): Promise<void> {
+  const current = getCurrentVersion();
+  const git = (...args: string[]): Promise<{ code: number; out: string }> => run('git', ['-C', root, ...args]);
+
+  const branch = (await git('rev-parse', '--abbrev-ref', 'HEAD')).out.trim();
+  process.stdout.write(`ayin ${current}  ·  checkout ${root}${branch ? ` (${branch})` : ''}\n`);
+  if (branch === 'HEAD') {
+    process.stderr.write('ayin update: this checkout is on a detached HEAD — `git checkout main` first.\n');
+    process.exit(1);
+    return;
+  }
+
+  const before = (await git('rev-parse', 'HEAD')).out.trim();
+  process.stdout.write('Fetching…\n');
+  const fetched = await git('fetch', '--quiet');
+  if (fetched.code !== 0) {
+    process.stderr.write(`ayin update: git fetch failed — ${fetched.out.trim() || 'no detail'}\n`);
+    process.exit(fetched.code || 1);
+    return;
+  }
+  const remote = (await git('rev-parse', `origin/${branch}`)).out.trim();
+  if (remote && remote === before && !opts.force) {
+    process.stdout.write(`Already up to date with origin/${branch} (${before.slice(0, 7)}).\n`);
+    return;
+  }
+  const behind = (await git('rev-list', '--count', `${before}..origin/${branch}`)).out.trim();
+  process.stdout.write(`Update available: ${behind || '?'} commit(s) behind origin/${branch}.\n`);
+  if (opts.check) return;
+
+  // Only now: --check reports without touching anything, so a dirty tree must not stop it. Someone
+  // else's uncommitted work is not this command's to stash, and a conflict mid-update leaves a build
+  // that matches no commit.
+  const dirty = (await git('status', '--porcelain')).out.trim();
+  if (dirty && !opts.force) {
+    const n = dirty.split('\n').length;
+    process.stderr.write(`ayin update: ${n} uncommitted change(s) in ${root} — refusing to pull over them.\n`);
+    process.stderr.write('             Commit or stash them, or re-run with --force to pull anyway.\n');
+    process.exit(1);
+    return;
+  }
+
+  const pulled = await git('pull', '--ff-only');
+  if (pulled.code !== 0) {
+    process.stderr.write(`ayin update: git pull failed — ${pulled.out.trim() || 'no detail'}\n`);
+    process.stderr.write('             The previous build is untouched.\n');
+    process.exit(pulled.code || 1);
+    return;
+  }
+
+  // Dependencies first: a pull that added one leaves a tree that cannot compile.
+  process.stdout.write('Installing dependencies…\n');
+  const installed = await run('npm', ['install', '--prefix', root], { inherit: true });
+  if (installed.code !== 0) {
+    process.stderr.write(`ayin update: npm install failed (exit ${installed.code}).\n`);
+    process.exit(installed.code || 1);
+    return;
+  }
+
+  process.stdout.write('Building…\n');
+  const built = await run('npm', ['run', '--prefix', root, 'build'], { inherit: true });
+  if (built.code !== 0) {
+    process.stderr.write(`ayin update: build failed (exit ${built.code}) — dist/ may be inconsistent.\n`);
+    process.stderr.write(`             Fix it in ${root}, then re-run \`npm run build\`.\n`);
+    process.exit(built.code || 1);
+    return;
+  }
+
+  // REMAP. Only when the global bin does not already resolve here — `npm link` needs a writable prefix
+  // and would otherwise demand sudo on every update for no reason.
+  const linked = await run('node', ['-e', 'try{process.stdout.write(require("fs").realpathSync(require("child_process").execSync("command -v ayin").toString().trim()))}catch{}']);
+  const pointsHere = linked.out.trim().startsWith(root);
+  if (!pointsHere) {
+    process.stdout.write('Re-pointing the `ayin` command at this checkout…\n');
+    const relinked = await run('npm', ['link', '--prefix', root], { inherit: true });
+    if (relinked.code !== 0) {
+      process.stderr.write('ayin update: built successfully, but `npm link` failed — the global `ayin` still\n');
+      process.stderr.write(`             runs the old build. Re-run as: sudo npm link --prefix ${root}\n`);
+    }
+  }
+
+  const after = getCurrentVersionFrom(root);
+  log('INFO', 'ayin_updated_from_checkout', { root, from: current, to: after, before: before.slice(0, 7) });
+  process.stdout.write(`ayin is now ${after} (${(await git('rev-parse', '--short', 'HEAD')).out.trim()}). Restart any running session to pick it up.\n`);
+  await restartWatchDaemon(after);
+}
+
+/** The version in a checkout's package.json — read AFTER a pull, so it reflects what was just built. */
+function getCurrentVersionFrom(root: string): string {
+  try {
+    return JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8')).version || '0.0.0';
+  } catch {
+    return getCurrentVersion();
+  }
+}
+
 export async function runUpdate(argv: string[]): Promise<void> {
   const flag = (name: string): string | undefined => {
     const i = argv.indexOf(`--${name}`);
     return i >= 0 ? argv[i + 1] : undefined;
   };
   const has = (name: string): boolean => argv.includes(`--${name}`);
+
+  // A LINKED CHECKOUT IS THE NORMAL CASE NOW, and updating the global package would change something
+  // other than what runs here. `--registry` is taken as an explicit request for the old path.
+  const checkout = gitCheckout();
+  if (checkout && !flag('registry')) {
+    await updateFromCheckout(checkout, { check: has('check'), force: has('force') });
+    return;
+  }
 
   const current = getCurrentVersion();
   const tag = flag('tag') ?? 'latest';

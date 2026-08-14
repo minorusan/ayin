@@ -31,7 +31,7 @@ const OLLAMA_DEFAULT = 'http://127.0.0.1:11434';
 /** Commands that work with no model at all. */
 const NO_MODEL_NEEDED = new Set(['version', '--version', '-v', 'update', 'help', '--help', '-h']);
 
-/** True when ayin already knows where to get a model. Config only — no network. */
+/** True when ayin has been TOLD where a model is. Says nothing about whether one answers. */
 export function hasModelConfigured(): boolean {
   const env = process.env;
   return Boolean(
@@ -40,6 +40,57 @@ export function hasModelConfigured(): boolean {
     || (env.AYIN_OLLAMA_URL ?? '').trim() || getConfigString('ollamaUrl')
     || (env.AYIN_LLM_PROVIDER ?? '').trim() || getConfigString('llmProvider'),
   );
+}
+
+export interface ModelState {
+  /** Something is configured — an endpoint, an Ollama, or a key. */
+  configured: boolean;
+  /** A model will actually answer. This is the one the gate acts on. */
+  ok: boolean;
+  /** What was tried, for the operator: `AYIN_LLM_URL http://…`, `OpenAI key`, … */
+  how: string;
+  /** Why it failed, when it did. */
+  detail: string;
+}
+
+/**
+ * CONFIGURED IS NOT REACHABLE, and the gate must act on reachable.
+ *
+ * `AYIN_LLM_URL` exported in a shell profile made the presence check pass on a laptop whose endpoint was
+ * on a LAN it was not currently on — so the TUI opened, took a prompt, and failed with a connection
+ * error. That is the same first-run failure the gate exists to prevent, moved one step later. "You told
+ * me where the model is" is not the guarantee worth making; "a model is there" is.
+ *
+ * An OpenAI key is accepted on PRESENCE alone: it was verified when `/openai` stored it, and re-verifying
+ * on every launch would spend a network round trip to re-learn what is already known. A URL is probed,
+ * because a URL's reachability is a property of right now, not of when it was typed.
+ */
+export async function checkModel(): Promise<ModelState> {
+  const env = process.env;
+
+  const key = readOpenAiKey();
+  if (key) return { configured: true, ok: true, how: 'OpenAI key', detail: '' };
+
+  const ollamaUrl = (env.AYIN_OLLAMA_URL ?? '').trim() || getConfigString('ollamaUrl') || '';
+  const provider = ((env.AYIN_LLM_PROVIDER ?? '').trim() || getConfigString('llmProvider') || '').toLowerCase();
+  if (ollamaUrl || provider === 'ollama') {
+    const url = ollamaUrl || OLLAMA_DEFAULT;
+    const p = await probeOllama(url);
+    return { configured: true, ok: p.ok && p.models > 0, how: `Ollama ${url}`, detail: p.ok ? (p.models === 0 ? 'reachable, but it has no models' : '') : p.detail };
+  }
+
+  const endpoint = (env.AYIN_LLM_URL ?? '').trim() || getConfigString('llmUrl') || '';
+  if (endpoint) {
+    const p = await probeEndpoint(endpoint);
+    const src = (env.AYIN_LLM_URL ?? '').trim() ? 'AYIN_LLM_URL' : 'llm-url';
+    return { configured: true, ok: p.ok, how: `${src} ${endpoint}`, detail: p.detail };
+  }
+
+  // A provider was named but is not one that can be probed here (`direct`, `resource`) — take the
+  // operator's word for it rather than blocking on a shape this file does not understand.
+  if (provider) return { configured: true, ok: true, how: `llm-provider ${provider}`, detail: '' };
+
+  return { configured: false, ok: false, how: '', detail: '' };
 }
 
 function out(s: string): void {
@@ -112,11 +163,19 @@ async function probeOpenAi(key: string): Promise<{ ok: boolean; detail: string }
  * Every option is VERIFIED before it is accepted — the point of the gate is that ayin starts in a state
  * that works, and storing an unreachable URL would just move the original failure one step later.
  */
-async function setupLoop(): Promise<boolean> {
+async function setupLoop(state: ModelState): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    out('\n  ayin — first run\n');
-    out('  No model is configured yet. This is the only thing standing between you and a working agent.\n');
+    if (state.configured) {
+      // Configured but not answering. Name what was tried and why it failed — the operator usually knows
+      // instantly ("I'm not on that network"), and a bare menu would hide the one useful fact.
+      out('\n  ayin — no model is answering\n');
+      out(`  Tried: ${state.how}\n`);
+      if (state.detail) out(`  ${state.detail}\n`);
+    } else {
+      out('\n  ayin — first run\n');
+      out('  No model is configured yet. This is the only thing standing between you and a working agent.\n');
+    }
 
     // A local Ollama is the one option that can be OFFERED rather than asked for, so look once.
     const found = await probeOllama(OLLAMA_DEFAULT);
@@ -130,12 +189,22 @@ async function setupLoop(): Promise<boolean> {
       else out('  1) Local Ollama at another URL\n');
       out('  2) OpenAI API key                        [hosted; needs no GPU]\n');
       out('  3) An endpoint serving ayin\'s HTTP contract\n');
+      if (state.configured) out(`  r) Retry ${state.how}\n`);
       out('  q) Quit\n');
-      const choice = (await rl.question('\n  Choose 1/2/3/q: ')).trim().toLowerCase();
+      const choice = (await rl.question(`\n  Choose 1/2/3/${state.configured ? 'r/' : ''}q: `)).trim().toLowerCase();
 
       if (choice === 'q' || choice === 'quit') {
         out('\n' + instructions());
         return false;
+      }
+
+      // A backend that is merely still booting must not force the operator to reconfigure anything.
+      if ((choice === 'r' || choice === 'retry') && state.configured) {
+        out(`  re-checking ${state.how} … `);
+        const again = await checkModel();
+        if (again.ok) { out('ok.\n'); return true; }
+        out(`still no.\n  ${again.detail || 'no answer'}\n`);
+        continue;
       }
 
       if (choice === '1') {
@@ -192,14 +261,20 @@ async function setupLoop(): Promise<boolean> {
 export async function preflight(): Promise<void> {
   try {
     if (NO_MODEL_NEEDED.has(process.argv[2] ?? '')) return;
-    if (hasModelConfigured()) return;
+
+    const state = await checkModel();
+    if (state.ok) return;
 
     if (nonInteractive()) {
-      process.stderr.write('\n' + instructions());
+      process.stderr.write(
+        state.configured
+          ? `\n  ayin: no model is answering.\n  Tried: ${state.how}\n${state.detail ? `  ${state.detail}\n` : ''}\n`
+          : '\n' + instructions(),
+      );
       process.exit(1);
     }
 
-    const ok = await setupLoop();
+    const ok = await setupLoop(state);
     if (!ok) process.exit(1);
     // Re-checked rather than trusted: the loop returns true only after a verified write, and this proves
     // the write is visible to the config reader the app will use.

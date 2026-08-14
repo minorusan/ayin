@@ -76,8 +76,30 @@ node dist/index.js                # asks, if nothing is configured yet
 /openai sk-…                      # verified with OpenAI, then saved to ~/.ayin-cli/openai.env (0600)
 ```
 
+It checks that a model **answers**, not merely that one is configured — a `AYIN_LLM_URL` pointing at a
+LAN you are not currently on gets you the menu (with a **Retry** option), not a TUI that fails on your
+first prompt. An OpenAI key is taken at face value, since it was verified when you set it.
+
 `ayin version` and `ayin update` work regardless. A `-p` run or the `watch` daemon never prompts — with
-nothing configured they exit with the same instructions, because there is nobody there to answer.
+nothing reachable they exit with the same instructions, because there is nobody there to answer.
+
+### `ayin update` updates what `ayin` runs
+
+If the binary resolves to a git checkout — an `npm link`ed clone, which is the normal setup — `ayin
+update` **pulls that checkout, installs, rebuilds, and re-points the global command at it**. It used to
+install the global package from a registry, which on a linked machine changes something other than what
+runs, and reports success while the old build keeps going.
+
+```bash
+ayin update --check      # fetch and report; touches nothing, works on a dirty tree
+ayin update              # pull → npm install → npm run build → remap → restart the watch daemon
+ayin update --force      # pull even with uncommitted changes in the checkout
+ayin update --registry <url>   # the old path, for a genuine registry install
+```
+
+`npm install` is never skipped: a pull that adds a dependency otherwise leaves a tree that cannot
+compile. A **dirty checkout is refused** — someone else's uncommitted work is not this command's to
+stash, and a conflict mid-update leaves a build matching no commit.
 
 **With a local model** — nothing leaves your machine, and no account anywhere:
 

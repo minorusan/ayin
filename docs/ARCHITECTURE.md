@@ -53,7 +53,15 @@ inside the app cannot run before the terminal is taken, however early in the fil
 import is the only ordering that holds. Keep `index.ts` free of features: code there runs with no log
 sink and no UI, able to talk to the operator only through stdout.
 
-- **Configured is free**: two config reads, no probe, no launch delay. The gate is invisible in normal use.
+- **Configured is not reachable, and the gate acts on REACHABLE.** `AYIN_LLM_URL` exported in a shell
+  profile passed a presence check on a laptop that was not on that LAN — so the TUI opened, took a
+  prompt, and failed with a connection error: the same first-run failure, one step later. So a configured
+  URL is *probed* (`/api/tags`, `/api/status`), because reachability is a property of now, not of when it
+  was typed. An OpenAI **key** is accepted on presence alone — `/openai` verified it when it was stored,
+  and re-verifying every launch spends a request to re-learn a known fact. Cheapest check first, every
+  probe bounded by a short timeout, so a dead endpoint fails the gate rather than hanging it.
+- **Unreachable but configured** offers **Retry** alongside the menu: a backend still booting must not
+  force anyone to reconfigure anything.
 - **Unconfigured + interactive**: a plain-terminal menu (readline, before blessed exists). A local Ollama
   is *detected and offered* rather than asked for; every option is **verified** before it is stored
   (`/api/tags` for Ollama, `/api/status` for an endpoint, `models.list` for OpenAI), because storing an

@@ -208,13 +208,45 @@ console.log('\nayin refuses to start without a model');
   const flight = await import(`file://${join(DIST, 'preflight.js')}`);
   ok(typeof flight.hasModelConfigured === 'function', 'the check is exported and testable');
   // Free when configured: the happy path must not probe the network on every launch.
-  ok(!/await probe/.test(pf.slice(pf.indexOf('export function hasModelConfigured'), pf.indexOf('function out('))),
-    'the configured path reads config only — no probe, no launch delay');
+  // This used to assert the launch path never probes. It now MUST probe — configured is not reachable —
+  // so the property worth protecting changed from "no network" to "bounded network": every probe carries
+  // its own short timeout, or a dead endpoint would hang the launch instead of failing it.
+  ok(/AbortSignal\.timeout\(3000\)/.test(pf) && /AbortSignal\.timeout\(5000\)/.test(pf),
+    'every launch probe is bounded by a short timeout — a dead endpoint fails the gate, it cannot hang it');
+  ok(/if \(key\) return/.test(pf) && pf.indexOf('if (key) return') < pf.indexOf('probeOllama(url)'),
+    'and the cheapest answer is checked first, so a keyed setup pays for no probe at all');
   // A command that needs no model must not be held hostage by the gate.
   ok(/NO_MODEL_NEEDED[\s\S]{0,200}'version'/.test(pf) && /'update'/.test(pf),
     'version and update bypass the gate — refusing to print a version over a missing key would be absurd');
-  ok(/nonInteractive\(\)[\s\S]{0,200}process\.exit\(1\)/.test(pf),
+  ok(/if \(nonInteractive\(\)\) \{[\s\S]{0,600}?process\.exit\(1\);/.test(pf),
     'a -p run or a daemon EXITS with instructions instead of blocking on a prompt nobody will answer');
+
+  // CONFIGURED IS NOT REACHABLE. `AYIN_LLM_URL` exported in a shell profile passed the presence check on
+  // a laptop that was not on that LAN, so the TUI opened and failed on the first prompt — the same
+  // first-run failure, one step later. The gate acts on `ok` (a model answers), never on `configured`.
+  ok(/await checkModel\(\)[\s\S]{0,120}if \(state\.ok\) return;/.test(pf),
+    'the gate returns only when a model actually ANSWERS, not merely when one is configured');
+  ok(/const p = await probeEndpoint\(endpoint\)/.test(pf) && /const p = await probeOllama\(url\)/.test(pf),
+    'a configured URL is probed — reachability is a property of now, not of when it was typed');
+  ok(/if \(key\) return \{ configured: true, ok: true/.test(pf),
+    'an OpenAI key is accepted on presence: /openai already verified it, and re-checking every launch is waste');
+  ok(/Retry \$\{state\.how\}/.test(pf),
+    'and a configured-but-unreachable endpoint offers RETRY — a booting backend must not force reconfiguration');
+
+  // `ayin update` must change what `ayin` RUNS. With a linked checkout, installing the global package
+  // updates something else entirely while reporting success.
+  const up = readFileSync(join(DIST, '..', 'src', 'updater.ts'), 'utf-8');
+  ok(/function gitCheckout\(\)/.test(up) && /existsSync\(join\(root, '\.git'\)\)/.test(up),
+    'the updater locates the checkout the running binary resolves to');
+  ok(/if \(checkout && !flag\('registry'\)\)/.test(up),
+    'and prefers it over the registry — the registry path is now an explicit --registry request');
+  ok(/'pull', '--ff-only'/.test(up) && /'npm', \['install', '--prefix', root\]/.test(up)
+    && /'npm', \['run', '--prefix', root, 'build'\]/.test(up),
+    'update = pull, then INSTALL (a pull can add a dependency), then build');
+  ok(/npm', \['link', '--prefix', root\]/.test(up) && /pointsHere/.test(up),
+    'then remaps the global bin, but only when it does not already point here');
+  ok(up.indexOf("if (opts.check) return;") < up.indexOf('refusing to pull over them'),
+    '--check reports on a dirty tree; only an actual pull refuses to clobber uncommitted work');
 }
 
 // THE FINISHED-REPLY MARKER IS ACCEPTED AT EITHER END.
