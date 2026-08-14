@@ -40,7 +40,43 @@ let cachedModelId = '';
 let cachedDialect: ModelDialect = DEFAULT;
 let refreshKicked = false;
 
+/**
+ * An adapter chosen by the OPERATOR, overriding what the model id suggests.
+ *
+ * ayin does not own the model on a shared host — another process may be serving whatever it likes, and
+ * ayin must not force a swap to suit itself. What it CAN choose is how to speak to what is there. So the
+ * adapter is selectable: point ayin at the gemma adapter and it talks gemma, whatever the endpoint calls
+ * the model. Empty means "match on the served model id", which is right almost always.
+ */
+let adapterOverride = '';
+
+export function adapterNames(): string[] {
+  return DIALECTS.map((d) => d.id);
+}
+
+/** '' clears the override and returns to matching on the model id. Unknown name → false, nothing changes. */
+export function setAdapter(name: string): boolean {
+  const want = name.trim().toLowerCase();
+  if (!want || want === 'auto') {
+    adapterOverride = '';
+    cachedDialect = pickDialect(cachedModelId);
+    log('INFO', 'adapter_override_cleared', { resolved: cachedDialect.id });
+    return true;
+  }
+  const found = DIALECTS.find((d) => d.id.toLowerCase() === want);
+  if (!found) return false;
+  adapterOverride = found.id;
+  cachedDialect = found;
+  log('INFO', 'adapter_override', { adapter: found.id, model: cachedModelId || '(unknown)' });
+  return true;
+}
+
+export function activeAdapter(): { id: string; forced: boolean } {
+  return { id: cachedDialect.id, forced: adapterOverride !== '' };
+}
+
 function pickDialect(modelId: string): ModelDialect {
+  if (adapterOverride) return DIALECTS.find((d) => d.id === adapterOverride) ?? DEFAULT;
   return DIALECTS.find(d => d.matches(modelId)) ?? DEFAULT;
 }
 

@@ -30,7 +30,7 @@ import { acquireLlm, type LlmHold } from './llm/authority.js';
 import { llmProvider } from './llm/select.js';
 import { setRequestAuthority } from './connection.js';
 import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
-import { refreshActiveModel, activeModelId } from './llm/manager.js';
+import { refreshActiveModel, activeModelId, setAdapter, adapterNames, activeAdapter } from './llm/manager.js';
 import { getConfig, getConfigString } from './prompts.js';
 import { log } from './log.js';
 
@@ -338,6 +338,32 @@ export async function openModelPicker(): Promise<void> {
 /** `/model` → popup · `/model <name|qwen|gemma>` → straight switch. */
 export async function handleModelCommand(arg: string): Promise<void> {
   const t = arg.trim();
+
+  // `/model adapter <name>` — choose how ayin SPEAKS to whatever is served, rather than what is served.
+  // On a shared host ayin does not own the model: another process may be using it, and forcing a swap to
+  // suit this session is the race the authority layer exists to prevent. The adapter is the half ayin can
+  // legitimately decide.
+  const ad = /^adapter(?:\s+(\S+))?$/i.exec(t);
+  if (ad) {
+    const want = ad[1];
+    if (!want) {
+      const cur = activeAdapter();
+      addMessage('system',
+        `Adapter: ${cur.id}${cur.forced ? ' (forced)' : ' (matched from the served model)'}. `
+        + `Available: ${adapterNames().join(', ')}, auto. Set with /model adapter <name>.`);
+      return;
+    }
+    if (!setAdapter(want)) {
+      addMessage('system', `No adapter "${want}". Available: ${adapterNames().join(', ')}, auto.`);
+      return;
+    }
+    const cur = activeAdapter();
+    addMessage('system', cur.forced
+      ? `Adapter forced to ${cur.id} — ayin will speak ${cur.id} whatever the endpoint serves.`
+      : `Adapter back to automatic — now ${cur.id}, matched from the served model.`);
+    return;
+  }
+
   if (!t) { await openModelPicker(); return; }
   if (await reportFixedModel()) return;
 
