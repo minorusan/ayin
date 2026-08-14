@@ -22,11 +22,49 @@ export interface ToolParameter {
   required?: boolean;
 }
 
+/**
+ * A slash command that runs one tool DIRECTLY, bypassing the model's choice of tool.
+ *
+ * The model deciding which tool to call is the right default and stays the default. But some tools are
+ * not a step in a plan — they ARE the answer, and a whole outer round spent on "which tool?" is a round
+ * spent on a question the operator already answered by typing the command. A connector is the clearest
+ * case: its `execute` is its own agentic loop, so the outer model's only contribution is to relay text
+ * into it and text back out, twice, at full prompt cost.
+ *
+ * The tool declares this itself rather than a central list naming it, because the registry is a
+ * DIRECTORY: a list would reintroduce exactly the shared file that directory discovery removed, and an
+ * installed third-party tool could never appear in it.
+ */
+export interface ToolSlash {
+  /** Without the leading slash: `jira` → `/jira`. */
+  command: string;
+  /** Which parameter receives the rest of the line. */
+  param: string;
+  /** One line shown by `/help` and on a bare invocation. */
+  usage: string;
+  /**
+   * The argument is a SECRET — a token, a key, a password.
+   *
+   * An ordinary command's text is worth keeping: it goes into the persisted input history so arrow-up
+   * re-runs it, and into the agent's conversation window so a follow-up question has context. Both are
+   * wrong for a credential. The history file is plaintext on disk and survives the session; the
+   * conversation window is sent to the model on every subsequent round, which means the operator's Jira
+   * token would be uploaded to whatever is serving the model, repeatedly, for the rest of the session.
+   *
+   * Set this and the argument is kept out of both — the history entry becomes the bare command, and the
+   * turn is never recorded. The result is still shown on screen: the operator typed it, and they need to
+   * see whether it worked.
+   */
+  secret?: boolean;
+}
+
 export interface Tool {
   name: string;
   description: string;
   parameters: ToolParameter[];
   execute(params: Record<string, string>): Promise<string>;
+  /** Run this tool directly from a slash command. See ToolSlash. */
+  readonly slash?: ToolSlash;
   /** Source prompts directory shipped by this tool, if it has prompts. Read-only at runtime. */
   readonly promptsSourceDir?: string;
   /** Called by the registry with the LOCAL bundle once its prompts are materialized. */
@@ -41,6 +79,9 @@ export abstract class BaseTool implements Tool {
 
   /** Override in a tool that ships prompts. Absolute path to its `prompts/` directory. */
   readonly promptsSourceDir?: string;
+
+  /** Override in a tool that wants a slash command of its own. */
+  readonly slash?: ToolSlash;
 
   #prompts?: PromptBundle;
 

@@ -18,7 +18,7 @@ ensureToolRuntime();
 import {
   screen, addMessage, setStatus, setAgentStatus, clearChat,
   onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
-  showAlert, setStickyAlert, clearStickyAlert,
+  showAlert, setStickyAlert, clearStickyAlert, registerCommand,
 } from './ui.js';
 import { isTranscribing, startTranscript, stopTranscript, transcriptPath, transcriptSize, flush as flushTranscript } from './transcript.js';
 import { executeWipe, humanBytes, planWipe, wipeOverview, type WipeScope } from './wipe.js';
@@ -27,15 +27,15 @@ import { refreshActiveModel, activeModelId } from './llm/manager.js';
 import { initLlmProvider } from './llm/select.js';
 import { getSummaryText, getSummary, resetSummary } from './summary.js';
 import { estimateSessionTokens } from './tokens.js';
-import { loadHistory, pushEntry } from './history.js';
+import { loadHistory, pushEntry, forgetEntry } from './history.js';
 import { forcePlanNextTurn, togglePlanSession } from './plan/index.js';
 import { toggleQaSession, forceQaNextTurn } from './qa/index.js';
 import { togglePresenterSession, forcePresenterNextTurn } from './presenter/index.js';
-import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation } from './agent.js';
+import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation, recordSlashTurn } from './agent.js';
+import { findToolBySlash, slashTools, loadTools } from './tools.js';
 import { startPromptServer } from './prompt-server.js';
 import { acquireLlm, type LlmHold } from './llm/authority.js';
-import { setProviderOverride, providerOverrideName, llmProvider } from './llm/select.js';
-import { openAiKey, openAiModel } from './llm/providers/openai.js';
+import { llmProvider } from './llm/select.js';
 import { handleModelCommand, releaseModelHold, isModelBooked, lockSession, unlockSession, isSessionLocked, lockSupported } from './model-picker.js';
 import { showDialog } from './dialog.js';
 import { startLlmStatusPoll, findOwnPlace } from './llm-status.js';
@@ -381,7 +381,10 @@ let busy = false;
 
 onInput(async (text: string) => {
   if (busy) {
-    pushEntry(text);
+    // A slash command typed while the agent works is REFUSED below, so its argument is never acted on —
+    // and an argument that is never acted on has no business being persisted, least of all a credential
+    // pasted into /jira-auth. Only the command word goes to history.
+    pushEntry(text.startsWith('/') ? text.split(' ')[0] : text);
     addMessage('user', text);
 
     if (text.startsWith('/')) {
@@ -407,46 +410,14 @@ onInput(async (text: string) => {
         shutdown();
         return;
       /**
-       * `/openai` — switch this session to the hosted model for a task worth paying for, and back.
+       * `/openai` is no longer a case here — it is the `openai_auth` TOOL's slash command, which stores
+       * the key (verified against OpenAI first, into `~/.ayin-cli/openai.env` at 0600, and kept out of
+       * both the input history and the model's context).
        *
-       * Never automatic: a provider that bills per token is asked for, never fallen into. The command
-       * reports what it switched to, because "which model am I paying for" must never be a guess.
-       *   /openai            → toggle on/off
-       *   /openai <model>    → switch on, using that model
-       *   /openai key sk-…   → store the key (env OPENAI_API_KEY still wins)
+       * Choosing OpenAI to ANSWER is `/model openai`. Setting a credential and deciding to spend money
+       * are two decisions; the old `/openai` merged them, so storing a key and switching to a billed
+       * provider were the same keystroke.
        */
-      case '/openai': {
-        const arg = text.slice('/openai'.length).trim();
-        if (arg.startsWith('key ')) {
-          const k = arg.slice(4).trim();
-          if (!k.startsWith('sk-')) { addMessage('system', 'That does not look like an OpenAI key (expected sk-…).'); return; }
-          setConfigValue('openAiKey', k);
-          addMessage('system', `OpenAI key stored (…${k.slice(-4)}). Switch with /openai.`);
-          return;
-        }
-        if (providerOverrideName() && !arg) {
-          setProviderOverride(null);
-          await refreshActiveModel();
-          addMessage('system', `Back on the local provider (${activeModelId() || 'resolving…'}).`);
-          return;
-        }
-        if (!openAiKey()) {
-          addMessage('system', 'No OpenAI key. Set one with `/openai key sk-…` or export OPENAI_API_KEY.');
-          return;
-        }
-        setProviderOverride('openai');
-        const provider = await llmProvider();
-        if (arg) await provider.setModel?.(arg);
-        const status = await provider.status();
-        if (!status.ok) {
-          setProviderOverride(null);
-          addMessage('system', 'OpenAI rejected the key or is unreachable — staying local.');
-          return;
-        }
-        await refreshActiveModel();
-        addMessage('system', `Switched to OpenAI (${openAiModel()}) — billed per token. /openai again to go back.`);
-        return;
-      }
       case '/model':
         await handleModelCommand(text.slice('/model'.length));
         return;
@@ -633,7 +604,7 @@ onInput(async (text: string) => {
       case '/set': {
         const parts = text.split(' ');
         if (parts.length < 3) {
-          addMessage('system', 'Usage: /set <key> <value>  (e.g. /set openai-key sk-...)');
+          addMessage('system', 'Usage: /set <key> <value>  (e.g. /set llm-url http://localhost:9100)');
           return;
         }
         const key = parts[1];
@@ -653,8 +624,15 @@ onInput(async (text: string) => {
         // NOTHING reads and answered "Set ollama-model ✓" — a setting that lies is worse than one that
         // is missing. The conversion is general now, and a key outside the known list still stores
         // (an operator may know something this build does not) but says plainly that nobody reads it.
+        // `openai-key` is refused rather than mapped: it wrote an UNVERIFIED secret into prompts.json,
+        // beside prompt-tuning numbers, world-readable by default and easy to paste into a bug report.
+        // `/openai` verifies the key against OpenAI first and writes a 0600 file. Redirect, don't store.
+        if (key === 'openai-key') {
+          addMessage('system', 'Use `/openai sk-…` — it verifies the key with OpenAI, then saves it to ~/.ayin-cli/openai.env (0600), and keeps it out of your shell history and the model\'s context.');
+          return;
+        }
         const keyMap: Record<string, string> = {
-          'openai-key': 'openAiKey', 'llm-url': 'llmUrl',
+          'llm-url': 'llmUrl',
           'update-registry': 'updateRegistry', 'llm-provider': 'llmProvider',
         };
         const configKey = keyMap[key] ?? key.replace(/-([a-z])/g, (_m, c: string) => c.toUpperCase());
@@ -822,16 +800,57 @@ onInput(async (text: string) => {
         addMessage('system', '/set ollama-model <name> — which model the ollama provider asks for (default: whatever is loaded) · ollama-url, ollama-ctx');
         // (`/set default-model` was removed in 1.0.210 — ayin no longer picks a model implicitly.)
         addMessage('system', '/set update-registry <http://host:4873> — where `ayin update` looks (public npm is refused: "ayin" there is someone else)');
-        addMessage('system', '/openai — switch to the hosted model for a hard task (billed per token); again to switch back');
-        addMessage('system', '/openai <model> — switch and pick the model · /openai key <sk-...> — store the key');
         addMessage('system', '/model <gemma|qwen|auto> — the ADAPTER: how ayin formats tool calls. Its own list; it does not know or change what the endpoint serves');
+        addMessage('system', '/model openai — switch WHO answers to OpenAI (billed per token) · /model local — switch back');
         addMessage('system', '/disentangle — release a bound design (the agent cannot: it would only switch its own gate off)');
         addMessage('system', '/reset — restore default prompts');
         addMessage('system', '/quit — exit');
+        // Tool-owned commands are listed from the registry, not hardcoded here: the registry is a
+        // directory, so an installed tool set can add commands this file has never heard of.
+        // Discovery is awaited because it otherwise happens on the first AGENT turn — `/help` as the very
+        // first thing typed would read an empty registry and throw.
+        await loadTools();
+        for (const t of slashTools()) addMessage('system', t.slash!.usage);
         return;
-      default:
-        addMessage('system', `Unknown command: ${cmd}`);
+      default: {
+        // Not a built-in command — a TOOL may claim it (Tool.slash). Running it here rather than
+        // letting the model pick skips two full prompt-cost rounds whose only content is relaying text
+        // into a tool the operator already named, which is the whole point of typing the command.
+        // Discovery normally happens on the first agent turn; a slash command can be the first thing
+        // typed, so it is awaited here or the registry is read before it exists.
+        await loadTools();
+        const tool = findToolBySlash(cmd);
+        if (!tool || !tool.slash) {
+          addMessage('system', `Unknown command: ${cmd}`);
+          return;
+        }
+        const arg = text.slice(cmd.length).trim();
+        // A tool whose slash param is optional is allowed to run bare — that is how `/jira-auth` with
+        // nothing after it reports status instead of printing usage at someone who typed it on purpose.
+        const param = tool.parameters.find((p) => p.name === tool.slash!.param);
+        if (!arg && param?.required !== false) {
+          addMessage('system', tool.slash.usage);
+          return;
+        }
+        // A credential must leave no copy behind: the history file is plaintext and outlives the session,
+        // and anything in the conversation window is re-sent to the model every later round.
+        if (tool.slash.secret) forgetEntry(text, cmd);
+        busy = true;
+        try {
+          addMessage('system', `${tool.name}…`);
+          const out = await tool.execute({ [tool.slash.param]: arg });
+          addMessage('assistant', out);
+          // The turn is recorded so the agent can refer back to it: an operator who runs /jira and then
+          // asks "which of those is blocked?" means the tickets they just read, and a loop that never
+          // saw them answers about nothing. Never for a secret argument.
+          if (!tool.slash.secret) recordSlashTurn(text, out);
+        } catch (err) {
+          addMessage('system', `${tool.name} failed: ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+          busy = false;
+        }
         return;
+      }
     }
   }
 
@@ -1011,6 +1030,16 @@ async function runHeadless(): Promise<void> {
 async function runInteractive(): Promise<void> {
   loadHistory();
   setStatus({ connection: 'connecting', cwd: process.cwd() });
+
+  // Tool-owned slash commands into the hint panel. Discovery is kicked here rather than awaited: a
+  // command the operator cannot see typed is a command they will not learn exists, but blocking the TUI
+  // on it would make an unrelated bad tool package delay the whole boot. `/help` and the dispatcher await
+  // discovery themselves, so a command typed before this resolves still works.
+  void loadTools()
+    .then(() => {
+      for (const t of slashTools()) registerCommand({ name: `/${t.slash!.command}`, description: t.description });
+    })
+    .catch((err) => log('WARN', 'slash_registration_failed', { error: err instanceof Error ? err.message : String(err) }));
 
   // Live LLM phase in the status bar (swapping/preprocessing/responding/postprocessing) —
   // fed by the backend llm resource's SSE event stream, reconnects on its own.

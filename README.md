@@ -9,9 +9,9 @@ open-weights model you host yourself.</em></p>
 
 ---
 
-ayin runs on Ollama, on any endpoint serving a tiny HTTP contract, or on OpenAI when a task is worth
-paying for. Full-screen TUI for live work, headless `-p` for scripting. No key required, no service to
-stand up, and your code never leaves your machine.
+ayin runs on Ollama, on any endpoint serving a tiny HTTP contract, or on OpenAI. Full-screen TUI for
+live work, headless `-p` for scripting. Run it locally and your code never leaves your machine; run it
+on an OpenAI key and you need no GPU at all.
 
 > **ayin** (עין) — "eye". A small agent that looks at your code and acts.
 
@@ -26,8 +26,9 @@ stand up, and your code never leaves your machine.
 
 ## Why ayin
 
-- **Local-first & open.** No SaaS, no API key required. Point it at your own Ollama
-  server (or OpenAI if you prefer). Your code never leaves your machine.
+- **Local-first & open, but not local-only.** Point it at your own Ollama server and no API key is
+  required — your code never leaves your machine. Point it at OpenAI (`/openai sk-…`) and it runs on a
+  laptop with no GPU. ayin never moves a session onto the paid provider by itself.
 - **Model-agnostic.** A small **LLM-manager + dialect** layer (`src/llm/`) isolates the
   only thing that differs between models — how tool calls are formatted and parsed — so
   ayin works with **gemma**, **Qwen3-Coder**, and is a ~30-line dialect away from any
@@ -46,12 +47,24 @@ stand up, and your code never leaves your machine.
 
 ## Quickstart
 
-Four commands from nothing to a running agent. No key, no account, no service to stand up.
+From nothing to a running agent. Pick the model you have: an **OpenAI key**, or a **local GPU**.
 
 ```bash
 git clone --recursive <this-repo> ayin && cd ayin
-npm install                       # 3 deps: blessed, sharp, undici
+npm install                       # 4 deps: blessed, openai, sharp, undici
 npm run build
+```
+
+**With an OpenAI key** — no GPU, no download; OpenAI is the default when nothing else is configured:
+
+```bash
+node dist/index.js
+/openai sk-…                      # verified with OpenAI, then saved to ~/.ayin-cli/openai.env (0600)
+```
+
+**With a local model** — nothing leaves your machine, and no account anywhere:
+
+```bash
 ollama pull qwen3-coder:30b       # or qwen2.5-coder:7b on 8 GB
 
 AYIN_LLM_PROVIDER=ollama node dist/index.js                      # the TUI
@@ -106,14 +119,30 @@ Those live in `~/.ayin-cli/prompts.json`, outside any repo, and are read fresh o
 |---|---|
 | **Node ≥ 18** | global `fetch` and `AbortSignal.timeout` |
 | **a POSIX shell** | the file tools shell out to `grep`/`find`; on Windows use WSL or Git Bash |
-| **a model** | Ollama locally, any endpoint serving the HTTP contract, or OpenAI via `/openai` |
+| **a model** | an OpenAI key is enough — Ollama or an HTTP-contract endpoint if you'd rather run local |
 
 | Optional — absent, the feature simply isn't there | |
 |---|---|
 | `plantuml` | `diagram`, `arduino_diagram`, and rendering a design |
 | `arduino-cli` | compiling/uploading sketches |
 | a SearXNG instance | web search prefers it; DuckDuckGo is the keyless default |
-| an OpenAI key | `/openai` for the tasks a local model struggles with |
+| a Jira token | `/jira` — your current sprint, asked in plain words |
+| a Sentry token | `/sentry` — what is failing in production, asked in plain words |
+
+### The shortest way to a working ayin
+
+No GPU, no model download, no local runtime:
+
+```bash
+npm install && npm run build
+node dist/index.js
+/openai sk-…            # your key — verified with OpenAI, then saved (0600)
+```
+
+With nothing else configured ayin **defaults to OpenAI**, so that is the whole setup. If you have no
+key yet it says so on the first prompt and names all three ways to set one. To go local later, point it
+at Ollama or an endpoint (`/set llm-provider ollama`) — a configured endpoint always wins over the
+default, and ayin never moves a session onto a billed provider on its own.
 
 Nothing above is checked at startup and nothing fails obscurely: a tool whose dependency is missing says
 which one, and the rest of the agent carries on.
@@ -174,13 +203,39 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 | `arduino_db` | Look up a component from a shipped catalogue — keyword search, no network | — |
 | `diagram` | A PlantUML diagram, validated in a loop until it really parses | plantuml |
 | `arduino_diagram` | A wiring diagram grounded in the real sketch and the component catalogue | plantuml |
+| `jira` | Ask about your current sprint in plain words — a connector with its own agentic loop, scoped to your tickets | a Jira token |
+| `jira_auth` | Store that token from a pasted blob; verified before it is saved | — |
 
-**Twelve of the fourteen need nothing but Node and a POSIX shell** — including `naama` and `entangle`,
-which is the pair worth reading about below. The other two want `plantuml`.
+**Twelve of the eighteen need nothing but Node and a POSIX shell** — including `naama` and `entangle`,
+which is the pair worth reading about below. Two want `plantuml`; the Jira and Sentry tools are inert
+until you run `/jira-auth` / `/sentry-auth`.
 
-Nothing here needs a server, an account or a key. Tools that consumed a private backend were removed
-rather than shipped inert — they cost prompt tokens on every turn and implied ayin needs a service it
-does not. They live in a directory outside this repo now, which is exactly what the loader below is for.
+Several own a **slash command**, which runs the tool directly instead of asking the model to pick it:
+`/jira`, `/sentry`, and the three credential commands `/openai`, `/jira-auth`, `/sentry-auth`. Any tool
+can declare one.
+
+Nothing here needs a server ayin does not talk to directly. Tools that consumed a *private backend* were
+removed rather than shipped inert — they cost prompt tokens on every turn and implied ayin needs a service
+it does not. They live in a directory outside this repo now, which is exactly what the loader below is for.
+The Jira connector is not one of those: it holds its own credential and speaks Jira's REST API itself, so
+it works against your Jira with no middleman.
+
+### Jira, in two commands
+
+```
+/jira-auth <paste your token, your site, and the expiry date — any order, any wording>
+/jira what is still open on me?
+```
+
+`/jira-auth` parses the paste, **verifies the credential against your site before saving it**, and writes
+`~/.ayin-cli/jira.env` (chmod 0600). Jira **Cloud** needs your email alongside the API token; **Server /
+Data Center** needs only a personal access token — ayin picks Basic or Bearer from what you gave it. To
+rotate later, paste just the new token: the site is remembered. Bare `/jira-auth` reports who you are
+authenticated as and when the token expires; within a week of that date, every answer says so.
+
+`/jira` is scoped to **your tickets in the open sprint** — enforced by the query, so it cannot wander —
+and answers in plain words, reading a ticket's comments only when your question needs them. Env vars
+(`JIRA_SITE`, `JIRA_TOKEN`, `JIRA_EMAIL`) override the file, for CI.
 
 **The registry is a directory, not a list.** A tool is a file in `src/tools/defs/`, so adding one touches
 nothing that already exists — and `AYIN_TOOL_DIRS=/path/to/your/tools` loads your own without forking
@@ -595,7 +650,7 @@ from inside the TUI with `/set`:
 /set llm-provider ollama               # talk to a local Ollama runtime directly
 /set ollama-model qwen3-coder:30b      # which model it asks for
 /set llm-url http://localhost:9100     # …or the HTTP endpoint, for the contract providers
-/set openai-key <your-api-key>         # the hosted model, reached with /openai
+/openai sk-…                           # the OpenAI key (verified, then saved to ~/.ayin-cli/openai.env)
 ```
 
 See [`SETUP.md`](SETUP.md) for the full list of tunables.

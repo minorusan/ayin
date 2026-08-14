@@ -4,12 +4,14 @@
  * Resolution order, and it NEVER throws — a failure to decide always lands on the provider that
  * needs nothing:
  *
- *   1. EXPLICIT   env `AYIN_LLM_PROVIDER=ollama|direct|resource`, else config `llmProvider`
- *                 (`openai` is reached only by asking, via `/openai` — never by config or probe)
+ *   1. EXPLICIT   env `AYIN_LLM_PROVIDER=ollama|direct|resource|openai`, else config `llmProvider`
  *                 (`/set llm-provider resource`). An operator who says which one gets which one,
  *                 with no probe and no startup latency.
  *   2. PROBE      ask the configured endpoint whether it exposes the llm resource surface.
- *   3. DIRECT     the public default. A clone with a plain model endpoint lands here silently.
+ *   3. OPENAI     nothing configured anywhere — the fresh-clone case. Needs a key, nothing else, and
+ *                 says how to set one. Never inferred when an endpoint IS configured but merely
+ *                 unreachable: that is a booting backend, and it must not become a bill.
+ *   4. DIRECT     an endpoint is configured but exposes no resource surface — a plain model endpoint.
  *
  * THE INCONCLUSIVE PROBE. "The backend said 404" and "the backend did not answer" are different
  * facts and must not be treated alike: ayin is often launched while its backend is still coming up
@@ -42,21 +44,31 @@ let provisional = false;
 let lastProbeAt = 0;
 let inFlight: Promise<LlmProvider> | null = null;
 
-function configured(): 'direct' | 'resource' | 'ollama' | null {
+function configured(): 'direct' | 'resource' | 'ollama' | 'openai' | null {
   const raw = (process.env.AYIN_LLM_PROVIDER || getConfigString('llmProvider') || '').trim().toLowerCase();
   if (raw === 'direct') return 'direct';
   if (raw === 'resource') return 'resource';
   // Explicit only. Never chosen by probe in preference to a resource layer that exists: on a shared
   // GPU two writers is the race the authority prevents. A box with no backend gets it by asking.
   if (raw === 'ollama') return 'ollama';
+  // Billed per token, so never inferred — but an operator who has decided may persist it.
+  if (raw === 'openai') return 'openai';
   return null; // '', 'auto', or a typo → auto-detect rather than fail
+}
+
+/** Whether the operator has pointed ayin at an endpoint at all. Absent = a clone nobody configured. */
+function endpointConfigured(): boolean {
+  return Boolean((process.env.AYIN_LLM_URL ?? '').trim() || getConfigString('llmUrl'));
 }
 
 async function resolve(): Promise<LlmProvider> {
   const forced = configured();
   if (forced) {
     provisional = false;
-    const p = forced === 'resource' ? createResourceProvider() : forced === 'ollama' ? createOllamaProvider() : createDirectProvider();
+    const p = forced === 'resource' ? createResourceProvider()
+      : forced === 'ollama' ? createOllamaProvider()
+        : forced === 'openai' ? createOpenAiProvider()
+          : createDirectProvider();
     log('INFO', 'llm_provider_selected', { provider: p.name, via: 'config' });
     return p;
   }
@@ -67,6 +79,23 @@ async function resolve(): Promise<LlmProvider> {
     log('INFO', 'llm_provider_selected', { provider: 'resource', via: 'probe' });
     return createResourceProvider();
   }
+
+  /**
+   * NOTHING CONFIGURED AT ALL → OpenAI. This is the fresh-clone case, and it is the difference between
+   * a repo someone can try and a repo that needs a GPU first: `direct` against the localhost default
+   * fails on every prompt with a connection error, which reads as "ayin is broken", while OpenAI needs
+   * only a key and says exactly how to set one.
+   *
+   * Deliberately NOT reached when an endpoint IS configured but unreachable — that is a backend still
+   * booting, and quietly moving a session onto a billed provider because a local service was slow is a
+   * charge the operator never agreed to. That case keeps the provisional `direct` behaviour below.
+   */
+  if (!endpointConfigured()) {
+    provisional = false;
+    log('INFO', 'llm_provider_selected', { provider: 'openai', via: 'no-endpoint-configured' });
+    return createOpenAiProvider();
+  }
+
   provisional = !probe.conclusive;
   log('INFO', 'llm_provider_selected', { provider: 'direct', via: probe.conclusive ? 'probe' : 'probe-unreachable' });
   return createDirectProvider();

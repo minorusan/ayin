@@ -121,6 +121,30 @@ export function getTool(name: string): Tool | undefined {
   return toolMap.get(name);
 }
 
+/**
+ * The tool a slash command runs directly, or undefined. `cmd` may carry the leading slash.
+ *
+ * Refused on collision for the same reason duplicate NAMES are: two tools answering to `/jira` means the
+ * operator cannot tell which one ran, and load order is not an answer an operator can reason about. It
+ * throws rather than picking, and names both tools.
+ */
+export function findToolBySlash(cmd: string): Tool | undefined {
+  assertLoaded();
+  const want = cmd.replace(/^\//, '').trim().toLowerCase();
+  if (!want) return undefined;
+  const hits = tools.filter((t) => t.slash?.command.toLowerCase() === want);
+  if (hits.length > 1) {
+    throw new Error(`slash command "/${want}" is claimed by ${hits.map((t) => t.name).join(' and ')}`);
+  }
+  return hits[0];
+}
+
+/** Every tool that declares a slash command, for `/help`. */
+export function slashTools(): Tool[] {
+  assertLoaded();
+  return tools.filter((t) => t.slash);
+}
+
 function assertLoaded(): void {
   if (!ready) {
     throw new Error('tools were read before discovery — core must await loadTools() at boot');

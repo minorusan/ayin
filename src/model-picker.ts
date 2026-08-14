@@ -1,10 +1,17 @@
 /**
  * `/model` — the model picker and the session's model booking.
  *
- * `/model` with no argument opens the popup (the same overlay the tool-permission prompt uses):
- * every chat model the backend has installed, polled live from the llm resource, with the active
- * one pre-selected. Enter initiates the reload; Esc changes nothing.
- * `/model qwen` · `/model gemma4:26b` skip the popup and switch straight away.
+ * `/model` with no argument opens a popup (the same overlay the tool-permission prompt uses) whose rows
+ * are PROVIDERS — who answers: the local endpoint, or OpenAI. Enter switches; Esc changes nothing.
+ *
+ * It used to list every chat model the backend had installed. That stopped being ayin's business when
+ * the model became the endpoint's to choose — ayin does not know or control what is served — but the
+ * popup was the right shape and is kept: this is a pick-one-from-a-short-list decision, and printing a
+ * paragraph that asks the operator to type a second command is not.
+ *
+ * `/model gemma|qwen|auto` is a DIFFERENT choice on the same command: the adapter, i.e. how ayin formats
+ * tool calls for a model family. It stays on the argument form so it cannot be mistaken in a list for
+ * something that changes the model.
  *
  * ONE DOOR. ayin never touches a model runtime and never picks a model by itself: it takes the
  * `ayin` authority through the provider and calls the guarded `setModel` action with that token,
@@ -27,7 +34,9 @@
 import { addMessage, setAgentStatus } from './ui.js';
 import { showDialog, type DialogOption } from './dialog.js';
 import { acquireLlm, type LlmHold } from './llm/authority.js';
-import { llmProvider } from './llm/select.js';
+import { llmProvider, llmProviderName, setProviderOverride, providerOverrideName } from './llm/select.js';
+import { openAiKey, openAiModel } from './llm/providers/openai.js';
+import { noKeyMessage } from './tools/credentials/openai.js';
 import { setRequestAuthority } from './connection.js';
 import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
 import { refreshActiveModel, activeModelId, setAdapter, adapterNames, activeAdapter } from './llm/manager.js';
@@ -352,25 +361,114 @@ export async function openModelPicker(): Promise<void> {
  * someone else's business: another process may be mid-run on that model, and one session promoting its
  * own preference is the race the host's queue exists to prevent.
  */
+/**
+ * `/model openai` and `/model local` — WHICH BRAIN, as opposed to which adapter.
+ *
+ * These sit in the same command because they answer the same operator question ("what is answering me,
+ * and how do I change it?"), and separating them put the two halves of one decision behind two verbs.
+ * They remain different KINDS of choice, and the listing says so: an adapter is how ayin speaks to
+ * whatever the endpoint serves; the provider is who serves it.
+ *
+ * OpenAI is never entered without a key. Switching to a provider that then throws on every prompt is a
+ * worse failure than refusing the switch, because the operator has already moved on by the time it
+ * surfaces — and it is billed per token, so the refusal costs them nothing to discover.
+ */
+async function handleProviderChoice(want: string): Promise<boolean> {
+  if (want === 'openai' || want === 'gpt') {
+    if (!openAiKey()) {
+      addMessage('system', noKeyMessage());
+      return true;
+    }
+    setProviderOverride('openai');
+    const provider = await llmProvider();
+    const status = await provider.status();
+    if (!status.ok) {
+      setProviderOverride(null);
+      addMessage('system', 'OpenAI is unreachable or rejected the key — staying on the local provider. Re-check with /openai.');
+      return true;
+    }
+    await refreshActiveModel();
+    addMessage('system', `Now on OpenAI (${status.model || openAiModel()}) — billed per token. /model local to go back.`);
+    return true;
+  }
+
+  if (want === 'local') {
+    if (!providerOverrideName()) {
+      addMessage('system', 'Already on the local provider.');
+      return true;
+    }
+    setProviderOverride(null);
+    await refreshActiveModel();
+    addMessage('system', `Back on the local provider (${activeModelId() || 'resolving…'}).`);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Bare `/model` — a POPUP, and the choice is WHO ANSWERS.
+ *
+ * It used to list the models installed on a backend, which stopped being ayin's business when the model
+ * became the endpoint's to choose. The popup is the right shape though: this is a pick-one-from-a-short-
+ * list decision, and a printed paragraph asking the operator to type a second command is not.
+ *
+ * The rows are providers. Adapters stay on the argument form (`/model gemma|qwen|auto`) because they are
+ * a different kind of choice — how ayin SPEAKS, not who it speaks to — and mixing both into one list
+ * would make an adapter look like something that changes the model.
+ */
+async function showProviderPicker(): Promise<void> {
+  const onOpenAi = providerOverrideName() === 'openai';
+  const key = openAiKey();
+  const cur = activeAdapter();
+  const localName = llmProviderName() || 'resolving…';
+  const localModel = activeModelId();
+
+  const options: DialogOption[] = [
+    {
+      label: 'Local',
+      note: onOpenAi ? localName : `${localName} · active`,
+      sub: localModel ? `serving ${localModel}` : 'a model you host — nothing leaves this machine',
+    },
+    {
+      label: 'OpenAI',
+      note: key ? (onOpenAi ? 'active · billed per token' : 'billed per token') : 'no key',
+      // The absence of a key is the whole reason a row would not work, so it says the fix here rather
+      // than after the operator has already picked it.
+      sub: key ? `${openAiModel()} · hosted, needs no GPU` : 'run /openai sk-… first — the key is verified before it is saved',
+    },
+  ];
+
+  const choice = await showDialog('Who answers', options, {
+    subtitle: `adapter ${cur.id}${cur.forced ? ' (chosen)' : ' (matched)'} · /model gemma|qwen|auto to change how ayin formats tool calls`,
+    selected: onOpenAi ? 1 : 0,
+    footer: '↑↓ select · Enter switch · Esc cancel',
+  });
+
+  if (choice < 0) return;
+  if (choice === 1) {
+    await handleProviderChoice('openai');
+    return;
+  }
+  await handleProviderChoice('local');
+}
+
 export async function handleModelCommand(arg: string): Promise<void> {
   const want = arg.trim().toLowerCase();
   const names = adapterNames();
   const cur = activeAdapter();
 
   if (!want) {
-    addMessage('system',
-      `Adapter: ${cur.id}${cur.forced ? ' (chosen)' : ' (matched from the served model id)'}\n`
-      + `Available: ${names.join(', ')}, auto\n`
-      + `An adapter is how a model FAMILY formats tool calls — ayin's own list, nothing to do with what `
-      + `the endpoint is serving. /model <name> to choose, /model auto to match automatically.`);
+    await showProviderPicker();
     return;
   }
 
+  if (await handleProviderChoice(want)) return;
+
   if (!setAdapter(want)) {
     addMessage('system',
-      `No adapter "${arg.trim()}". Available: ${names.join(', ')}, auto. `
-      + `This selects how ayin SPEAKS, not what the endpoint serves — ayin cannot change that and does `
-      + `not know what it is.`);
+      `No adapter "${arg.trim()}". Available: ${names.join(', ')}, auto — or openai / local to change `
+      + `WHO answers. An adapter selects how ayin SPEAKS, not what the endpoint serves — ayin cannot `
+      + `change that and does not know what it is.`);
     return;
   }
 

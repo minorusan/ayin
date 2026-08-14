@@ -1,0 +1,14 @@
+Extract Sentry credentials from the operator's text. Reply with ONLY a JSON object, no prose:
+
+{"token": "", "org": "", "project": "", "apiBase": ""}
+
+token   the secret itself, copied exactly, no surrounding quotes
+org     the organization SLUG (as it appears in a Sentry URL), not its display name
+project the project slug, only if one is clearly given
+apiBase only for a self-hosted Sentry, as https://host/api/0
+
+Use "" for anything absent. NEVER invent, complete or correct a value — a guessed org is a 403 the
+operator cannot diagnose.
+
+Text:
+{{TEXT}}

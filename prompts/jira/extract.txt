@@ -1,0 +1,14 @@
+Extract Jira credentials from the operator's text. Reply with ONLY a JSON object, no prose:
+
+{"site": "", "email": "", "token": "", "expires": ""}
+
+site    host only, no https:// and no path
+email   only if one is present; a personal access token has none
+token   the secret itself, copied exactly, no surrounding quotes
+expires ISO date (YYYY-MM-DD) if a date is mentioned
+
+Use "" for anything absent. NEVER invent, complete or correct a value — a guessed token is a login
+failure the operator cannot diagnose.
+
+Text:
+{{TEXT}}

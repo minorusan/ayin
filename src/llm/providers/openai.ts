@@ -1,35 +1,80 @@
 /**
- * The OPENAI provider — a hosted model for the tasks a local one struggles with.
+ * The OPENAI provider — the one ayin can run on with nothing but a key.
  *
- * Everything about ayin assumes a model you host: the whole point of the port is that the agent does
- * not care what serves it. This provider is the deliberate exception, reached by `/openai` when a task
- * is worth money — a gnarly multi-file change, an unfamiliar framework, a bug that has already eaten an
- * hour locally.
+ * Everything else about ayin assumes a model you host: the whole point of the port is that the agent
+ * does not care what serves it. This provider is the exception that makes the repo testable — a clone
+ * with no GPU, no runtime and no model download works as soon as `/openai sk-…` succeeds, which is why
+ * it is the default when nothing else is configured (`select.ts`).
  *
- * TWO THINGS THAT MAKE IT DIFFERENT FROM THE LOCAL PROVIDERS
+ * ON THE OFFICIAL SDK (`openai`, a runtime dependency), not hand-rolled HTTP. One client means one
+ * definition of the base URL, the auth header, retry policy and error shape. There WAS a second,
+ * hand-rolled path — an "emergency fallback" in `connection.ts` that fired when no local endpoint
+ * answered — and being a second definition is exactly how it rotted: it pinned `gpt-4.1`, honoured only
+ * the FIRST tool call in a reply, and sidestepped the gate forbidding a stale model default by living
+ * in another file. It is gone, and a gate now forbids any hand-rolled request to the API.
  *
- * 1. It costs money per token, so it is never selected automatically. Not by probe, not by fallback,
- *    not because the local endpoint was briefly unreachable. A provider that can bill you is a provider
- *    you must ASK for. (`connection.ts` still has an emergency OpenAI fallback from before this file;
- *    that one is a different thing and is not this provider.)
+ * THREE THINGS THAT MAKE IT DIFFERENT FROM THE LOCAL PROVIDERS
+ *
+ * 1. It costs money per token, so it is never ESCALATED to. It may be the default when nothing is
+ *    configured, and it may be chosen with `/model openai` — but a configured endpoint that is merely
+ *    unreachable falls back to `direct`, never here. A slow local service must not become a bill.
  *
  * 2. `tools: 'native'` — the API takes function schemas and returns structured `tool_calls`, so the
  *    model never has to be taught ayin's text format, and ayin's prompt drops its tool catalogue
  *    entirely. Tool-call arguments come back as a JSON STRING here (unlike Ollama, which returns an
  *    object), which is the one shape difference worth knowing when reading `renderToolCalls`.
  *
+ * 3. The key arrives through the provider runtime (`providerCredential`), so this file does not know
+ *    where credentials live — the same seam that keeps `config` and `log` out of here.
+ *
  * WHAT IT DOES NOT IMPLEMENT: acquire / authority / telemetry / events. There is no GPU to arbitrate
  * and no queue to narrate — those segments vanish, which is honest.
  */
 
+import OpenAI from 'openai';
 import type {
   GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ModelEntry, ProviderStatus,
 } from '../provider.js';
-import { providerLog, providerConfig } from './runtime.js';
+import { providerLog, providerCredential } from './runtime.js';
 
-const API = 'https://api.openai.com/v1';
 const GENERATE_TIMEOUT_MS = 10 * 60_000;
 const PROBE_TIMEOUT_MS = 8_000;
+
+/**
+ * Retries, by the SDK. Two, because ayin's own callers already retry the AGENT round: a transient 429
+ * retried at both layers multiplies into a wait the operator reads as a hang.
+ */
+const MAX_RETRIES = 2;
+
+/**
+ * The client, rebuilt when the key changes.
+ *
+ * `/openai` can store a new key mid-session, so a client captured once would keep authenticating with
+ * the old one until restart — a "the key I just set does nothing" bug with no visible cause. Keyed on
+ * the key itself rather than invalidated by a callback: there is then no state to forget to update.
+ */
+let cached: { key: string; client: OpenAI } | null = null;
+
+function client(key: string): OpenAI {
+  if (cached?.key === key) return cached.client;
+  cached = { key, client: new OpenAI({ apiKey: key, timeout: GENERATE_TIMEOUT_MS, maxRetries: MAX_RETRIES }) };
+  return cached.client;
+}
+
+/**
+ * An SDK error, made safe to show. `APIError` carries the status and the API's own message, which is
+ * what an operator needs ("insufficient_quota", "model not found") — but it is rendered here rather
+ * than thrown raw so nothing in it can carry the request headers, and therefore the key.
+ */
+function describe(err: unknown): string {
+  if (err instanceof OpenAI.APIError) {
+    const detail = (err.message || 'request failed').slice(0, 300);
+    return err.status === 401
+      ? `openai 401: the key was rejected — it is wrong, revoked, or from another account. Re-set it with /openai.`
+      : `openai ${err.status ?? '?'}: ${detail}`;
+  }
+  return `openai: ${err instanceof Error ? err.message : String(err)}`;
+}
 
 /**
  * Default model, and it is a JUDGEMENT not a constant: this file will rot the moment the lineup moves.
@@ -48,29 +93,33 @@ const DEFAULT_MODEL = 'gpt-5.5';
 // Env ONLY at module scope — see the same note in `ollama.ts`. `model()` resolves config on first use.
 let currentModel = process.env.AYIN_OPENAI_MODEL || '';
 
-/** The model this session pays for, resolving config the first time anyone asks. */
+/** The model this session pays for, resolving stored state the first time anyone asks. */
 function model(): string {
-  if (!currentModel) currentModel = providerConfig('openAiModel') || DEFAULT_MODEL;
+  if (!currentModel) currentModel = providerCredential('openai').model || DEFAULT_MODEL;
   return currentModel;
 }
 
-/** Env first so a shell export beats stored state; `/openai key …` writes the config copy. */
+/** The key, from wherever core keeps it. This file does not know, and must not. */
 export function openAiKey(): string {
-  return (process.env.OPENAI_API_KEY || providerConfig('openAiKey') || '').trim();
+  return providerCredential('openai').key.trim();
+}
+
+/** What to tell the operator when there is no key — core owns the wording, since core owns the store. */
+export function openAiSetupHint(): string {
+  return providerCredential('openai').setupHint;
 }
 
 export function openAiModel(): string {
   return model();
 }
 
+/**
+ * Read structurally rather than as the SDK's tool-call union: newer API versions add call kinds
+ * (custom tools, and whatever comes next) and a narrow type would make an unknown kind a COMPILE
+ * error in a file that should simply skip it. Only `function` calls mean anything to ayin.
+ */
 interface OpenAiToolCall {
   function?: { name?: string; arguments?: string };
-}
-
-interface OpenAiChatResponse {
-  choices?: Array<{ message?: { content?: string | null; tool_calls?: OpenAiToolCall[] } }>;
-  error?: { message?: string };
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
 /**
@@ -97,10 +146,10 @@ function renderToolCalls(calls: OpenAiToolCall[] | undefined): string {
     .join('\n');
 }
 
-function toOpenAiTools(tools: GenerateOptions['tools']): unknown[] | undefined {
+function toOpenAiTools(tools: GenerateOptions['tools']): OpenAI.Chat.Completions.ChatCompletionTool[] | undefined {
   if (!tools?.length) return undefined;
   return tools.map((t) => ({
-    type: 'function',
+    type: 'function' as const,
     function: {
       name: t.name,
       description: t.description,
@@ -127,35 +176,34 @@ export function createOpenAiProvider(): LlmProvider {
     async generate(messages: LlmMessage[], opts?: GenerateOptions): Promise<GenerateResult> {
       const key = openAiKey();
       if (!key) {
-        throw new Error('no OpenAI key — set one with `/openai key sk-…` or OPENAI_API_KEY, then try again.');
+        // The full setup instructions, not a hint: this throw is what a fresh clone hits on its very
+        // first prompt, and it is the one error where the reader has no context to fall back on.
+        throw new Error(openAiSetupHint());
       }
-      const body: Record<string, unknown> = {
-        model: model(),
-        messages: messages.map((m) => ({ role: m.role, content: m.content })),
-        ...(opts?.temperature !== undefined ? { temperature: opts.temperature } : {}),
-      };
       const tools = toOpenAiTools(opts?.tools);
-      if (tools) body.tools = tools;
-
-      const res = await fetch(`${API}/chat/completions`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
-      });
-      const data = (await res.json().catch(() => ({}))) as OpenAiChatResponse;
-      if (!res.ok || data.error) {
-        // The message is shown to the operator, so it must not contain the key.
-        throw new Error(`openai ${res.status}: ${(data.error?.message ?? 'request failed').slice(0, 300)}`);
+      let completion: OpenAI.Chat.Completions.ChatCompletion;
+      try {
+        completion = await client(key).chat.completions.create({
+          model: model(),
+          messages: messages.map((m) => ({
+            role: m.role as 'system' | 'user' | 'assistant',
+            content: m.content,
+          })),
+          ...(opts?.temperature !== undefined ? { temperature: opts.temperature } : {}),
+          ...(tools ? { tools } : {}),
+        });
+      } catch (err) {
+        throw new Error(describe(err));
       }
-      const msg = data.choices?.[0]?.message;
+
+      const msg = completion.choices?.[0]?.message;
       const text = msg?.content ?? '';
-      const rendered = renderToolCalls(msg?.tool_calls);
-      if (data.usage) {
+      const rendered = renderToolCalls(msg?.tool_calls as OpenAiToolCall[] | undefined);
+      if (completion.usage) {
         providerLog().info('openai_usage', {
           model: model(),
-          in: String(data.usage.prompt_tokens ?? 0),
-          out: String(data.usage.completion_tokens ?? 0),
+          in: String(completion.usage.prompt_tokens ?? 0),
+          out: String(completion.usage.completion_tokens ?? 0),
         });
       }
       return { content: rendered ? (text ? `${text}\n${rendered}` : rendered) : text };
@@ -166,11 +214,9 @@ export function createOpenAiProvider(): LlmProvider {
       const key = openAiKey();
       if (!key) return { ok: false, model: null };
       try {
-        const res = await fetch(`${API}/models`, {
-          headers: { authorization: `Bearer ${key}` },
-          signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-        });
-        return res.ok ? { ok: true, model: model() } : { ok: false, model: null };
+        // A status poll must never wait the generate timeout, so the probe overrides it per request.
+        await client(key).models.list({ timeout: PROBE_TIMEOUT_MS, maxRetries: 0 });
+        return { ok: true, model: model() };
       } catch {
         return { ok: false, model: null };
       }
@@ -184,13 +230,8 @@ export function createOpenAiProvider(): LlmProvider {
       const key = openAiKey();
       if (!key) return null;
       try {
-        const res = await fetch(`${API}/models`, {
-          headers: { authorization: `Bearer ${key}` },
-          signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-        });
-        if (!res.ok) return null;
-        const data = (await res.json()) as { data?: Array<{ id?: string }> };
-        const models: ModelEntry[] = (data.data ?? [])
+        const list = await client(key).models.list({ timeout: PROBE_TIMEOUT_MS, maxRetries: 0 });
+        const models: ModelEntry[] = list.data
           .map((m) => String(m.id ?? ''))
           .filter((id) => /^(gpt|o\d)/i.test(id) && !/audio|realtime|image|tts|whisper|embed|moderation/i.test(id))
           .sort()

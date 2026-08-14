@@ -182,21 +182,92 @@ ok(!/<tool_call>/.test(instr),
 ok(!/cheapest tool|identical call|prefer str_replace/i.test(instr),
   'rules the harness enforces mechanically are not restated in every prompt');
 
-// A provider that BILLS must never be reachable by accident — not by probe, not by fallback.
-console.log('\nthe paid provider is opt-in only');
+// THE FINISHED-REPLY MARKER IS ACCEPTED AT EITHER END.
+// The contract says a finished reply starts with `$`; gemma4 routinely appends it instead. Read strictly,
+// that is an unmarked reply, so the loop nudged a model that had just said it was done — a wasted round
+// on every turn. Position is not the signal.
+console.log('\nthe $ marker is read wherever the model puts it');
+{
+  const fm = await import(`file://${join(DIST, 'final-marker.js')}`);
+  ok(fm.hasFinalMarker('$ done here'), 'leading marker still works');
+  ok(fm.hasFinalMarker('the work is done. $'), 'a TRAILING marker counts as finished');
+  ok(fm.hasFinalMarker('all files written\n$'), 'and one alone on the last line');
+  // The reason the trailing form demands whitespace before it: prose about money must not end a turn.
+  ok(!fm.hasFinalMarker('the licence costs 5$'), 'a dollar sign with no space before it is prose, not a marker');
+  ok(!fm.hasFinalMarker('next I will edit the file'), 'an unmarked reply is still unfinished');
+  ok(fm.stripFinalMarker('the work is done. $') === 'the work is done.',
+    'the trailing marker is stripped from what the operator reads', JSON.stringify(fm.stripFinalMarker('the work is done. $')));
+  ok(fm.stripFinalMarker('$ done') === 'done', 'and so is the leading one');
+
+  // AND IT MUST NEVER BE PRINTED. The marker is a signal to the harness, not text for the operator, but
+  // the reply is painted from `parsed.text` in six places — the earliest of them before the old strip
+  // point — so the `$` was shown every time. Invisible while models put it first (it reads as a prompt
+  // character); obvious the moment gemma4 began appending it to finished answers.
+  const agentSrc = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
+  ok(/parsed\.text = stripFinalMarker\(parsed\.text \?\? ''\);/.test(agentSrc),
+    'the marker is stripped from parsed.text at the parse site, before any print path can reach it');
+  const strippedAt = agentSrc.indexOf('parsed.text = stripFinalMarker');
+  const firstPrint = agentSrc.indexOf("addMessage('assistant', parsed.text)");
+  ok(strippedAt > 0 && firstPrint > strippedAt,
+    'and it is stripped BEFORE the first print, not after — the ordering is the whole bug');
+}
+
+// A provider that BILLS may be the fresh-clone DEFAULT, but must never be reached by accident: not
+// because a configured backend was slow, and never without the operator having supplied a key.
+console.log('\nthe paid provider is never reached by accident');
 const sel = await import(`file://${join(DIST, 'llm', 'select.js')}`);
 const oai = await import(`file://${join(DIST, 'llm', 'providers', 'openai.js')}`);
 ok(sel.providerOverrideName() === '', 'no provider override until the operator asks for one');
 const selSrc = readFileSync(join(DIST, '..', 'src', 'llm', 'select.ts'), 'utf-8');
-const constructions = selSrc.split('createOpenAiProvider()').length - 1;
-const before = selSrc.split('createOpenAiProvider()')[0];
-ok(constructions === 1 && /setProviderOverride[\s\S]{0,400}$/.test(before),
-  'it is constructed exactly once, inside setProviderOverride — never by the probe or a fallback',
-  `constructions=${constructions}`);
+// OpenAI is now the FRESH-CLONE default (it needs a key and nothing else, which is what makes the repo
+// testable without a GPU), so "constructed exactly once" no longer holds. The safety property that
+// replaces it is narrower and is the one that actually protects the operator's money: a configured
+// endpoint that is merely UNREACHABLE — a backend mid-reboot — must never silently become a paid call.
+ok(/if \(!endpointConfigured\(\)\)[\s\S]{0,600}?createOpenAiProvider\(\)/.test(selSrc),
+  'the paid provider is reached by fallback ONLY when no endpoint is configured at all');
+ok(/provisional = !probe\.conclusive;[\s\S]{0,300}?return createDirectProvider\(\)/.test(selSrc),
+  'an endpoint that is configured but unreachable still falls back to direct — a booting backend is not a bill');
+ok(/'openai'/.test(selSrc.slice(selSrc.indexOf('function configured'), selSrc.indexOf('function endpointConfigured'))),
+  'and an operator may persist the choice explicitly (/set llm-provider openai)');
+ok(/\/openai/.test(oai.openAiSetupHint()) && /OPENAI_API_KEY/.test(oai.openAiSetupHint())
+  && /openai\.env/.test(oai.openAiSetupHint()),
+  'the no-key error names all three ways to set it: the command, the env var, and the file');
 ok(oai.createOpenAiProvider().tools === 'native',
   'it declares tools natively, so the prompt drops its own catalogue');
 const oaiSrc = readFileSync(join(DIST, '..', 'src', 'llm', 'providers', 'openai.ts'), 'utf-8');
-ok(!/gpt-4/.test(oaiSrc), 'the default model is not a stale generation');
+// CODE only. Prose in this file legitimately names old models — the header explains that the deleted
+// hand-rolled fallback had pinned `gpt-4.1`, and a tripwire that forbids describing a past mistake is a
+// tripwire that gets worked around by deleting the explanation.
+const oaiCode = oaiSrc.split('\n').filter((l) => {
+  const t = l.trim();
+  return t && !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('/*');
+}).join('\n');
+ok(!/gpt-4/.test(oaiCode), 'the default model is not a stale generation');
+
+// ONE WAY TO REACH OPENAI: the official SDK. Two ways means two definitions of the base URL, the auth
+// header and the error shape — and the pair drifts the moment either changes. Measured: the old
+// hand-rolled fallback in connection.ts had pinned `gpt-4.1` and honoured only the FIRST tool call of a
+// reply, and it evaded the stale-model gate above by living in a different file.
+{
+  const usesSdk = /^import OpenAI from 'openai'/m.test(oaiSrc);
+  ok(usesSdk, 'the provider talks to OpenAI through the official SDK');
+  const srcFiles = execFileSync('git', ['ls-files', 'src/*.ts', 'src/**/*.ts'], { cwd: join(DIST, '..'), encoding: 'utf-8' })
+    .split('\n').filter(Boolean);
+  // Asserted, because a scan that found NO files passes every filter below it — a green light for
+  // having looked nowhere.
+  ok(srcFiles.length > 40, 'the source tree was actually enumerated for this check', `${srcFiles.length} files`);
+  const rawCallers = srcFiles.filter((f) => {
+    const body = readFileSync(join(DIST, '..', f), 'utf-8');
+    // A request, not a mention: the host inside a fetch/undici call or a URL constant.
+    return /(?:fetch|undiciFetch)\(\s*[`'"]https:\/\/api\.openai\.com/.test(body)
+      || /=\s*['"`]https:\/\/api\.openai\.com/.test(body);
+  });
+  ok(rawCallers.length === 0,
+    'and nothing anywhere issues a hand-rolled request to api.openai.com', rawCallers.join(', '));
+  const connSrc = readFileSync(join(DIST, '..', 'src', 'connection.ts'), 'utf-8');
+  ok(!/openAiKey/.test(connSrc),
+    'the endpoint layer no longer reads an OpenAI key — it cannot escalate to a paid model on its own');
+}
 
 // TOOLS ARE DECLARED ONCE. Whoever declares them, the other side must stay quiet: a provider that hands
 // schemas to the runtime means ayin's system prompt must NOT also list every tool and a call format.
@@ -296,7 +367,13 @@ console.log('\nthe $ marker: a finished reply says so, and the harness verifies 
   ok(/^FINISHED REPLIES START WITH \$/.test(sys),
     'the rule is the FIRST thing in the system prompt — position is load-bearing, the middle gets skimmed');
   const ag = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
-  ok(/const FINAL_MARKER = \/\^/.test(ag), 'the marker is anchored to the START of the reply');
+  // The marker now lives in its own module and is accepted at EITHER end — see the note there. The rule
+  // stated to the model is still "start with $", because one position has to be taught; what changed is
+  // that the harness no longer PUNISHES the other one.
+  const fmSrc = readFileSync(join(DIST, '..', 'src', 'final-marker.ts'), 'utf-8');
+  ok(/export const FINAL_MARKER = \/\^/.test(fmSrc), 'the leading marker is still anchored to the START');
+  ok(/FINAL_MARKER_TRAILING = \/\(\?:\^\|\\s\)/.test(fmSrc),
+    'and the trailing form requires whitespace before it, so prose about money is not a marker');
   ok(/MAX_CONTINUE_NUDGES/.test(ag) && /continueNudges < MAX_CONTINUE_NUDGES/.test(ag),
     'the nudge is capped — a model that cannot progress must not spin');
   ok(/recordAnswer\(response_\)/.test(ag) && /transcribeAnswer\(response_\)/.test(ag),
@@ -460,7 +537,7 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
   const agSrc = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
   ok(/stopAwaitingOperator\(\) \? \[\] : gateAdoption\(\)/.test(agSrc),
     'the adoption nudge yields to a pending stop');
-  ok(/!FINAL_MARKER\.test\(response\) && !stopAwaitingOperator\(\)/.test(agSrc),
+  ok(/!hasFinalMarker\(response\) && !stopAwaitingOperator\(\)/.test(agSrc),
     'so does the $ marker nudge — a stop is a legitimate end of turn');
 
   ent.disentangle();
@@ -529,9 +606,134 @@ console.log('\ntools are discovered, and a private set needs no fork');
 
   const builtin = await loader.discoverTools([]);
   ok(builtin.tools.length >= 12, 'the built-ins are DISCOVERED from defs/, not listed', `${builtin.tools.length}`);
-  ok(!builtin.tools.some((t) => t.name === 'jira' || t.name === 'send_push'),
+  // `jira` was in this list while it was a CLIENT of a host application's /resource/jira door — useless
+  // to anyone not running that application. It now speaks Jira REST itself with its own credential, so it
+  // is shippable; `send_push` still needs a host and is not.
+  ok(!builtin.tools.some((t) => t.name === 'send_push'),
     'the public catalogue ships no tool that needs a backend a stranger does not run');
+  {
+    const jiraSrc = ['client', 'credentials', 'loop', 'auth']
+      .map((f) => readFileSync(join(DIST, '..', 'src', 'tools', 'connectors', 'jira', `${f}.ts`), 'utf-8'))
+      .join('\n');
+    ok(!/toolBackendUrl|resource\//.test(jiraSrc),
+      'the jira connector reaches Jira directly — no host application in the path');
+    // Only a DIALABLE literal counts — scheme plus host. `yourcompany.atlassian.net` in a help string is
+    // a placeholder the operator replaces; `https://real.host` in source is a coupling.
+    // `example.com/net/org` are reserved for documentation (RFC 2606) — they cannot BE anyone's Jira, so
+    // a comment illustrating the parser with one is not a coupling.
+    // `api.atlassian.com` is ATLASSIAN's own gateway — the vendor's API, the same class of literal as
+    // api.openai.com or sentry.io. It is how a token discovers which sites it can reach, which is what
+    // lets `/jira-auth <token>` need nothing else. The operator's OWN site is the thing that must never
+    // be a literal, and it stays interpolated.
+    const dialable = jiraSrc
+      .replace(/https:\/\/\$\{[^}]+\}/g, '')
+      .replace(/https:\/\/api\.atlassian\.com\S*/g, '')
+      .replace(/https?:\/\/[a-z0-9-]+\.example\.(com|net|org)\S*/gi, '')
+      .match(/https?:\/\/[a-z0-9-]+\.[a-z][^\s'"`)]*/gi);
+    ok(dialable === null, 'and it hardcodes no site: an unconfigured connector dials nowhere', String(dialable));
+  }
   ok(builtin.duplicates.length === 0 && builtin.failed.length === 0, 'and they load clean');
+
+  // A TOOL CAN OWN A SLASH COMMAND. Asserted through discovery rather than by reading index.ts, because
+  // the point of the mechanism is that no central file names the commands.
+  {
+    const slashed = builtin.tools.filter((t) => t.slash);
+    ok(slashed.length >= 2, 'tools declare their own slash commands', slashed.map((t) => `/${t.slash.command}`).join(' '));
+    ok(slashed.every((t) => t.parameters.some((p) => p.name === t.slash.param)),
+      'and every declared slash param is a real parameter of its tool');
+    const commands = slashed.map((t) => t.slash.command);
+    ok(new Set(commands).size === commands.length, 'no two tools claim one command');
+
+    // A CREDENTIAL COMMAND LEAVES NO COPY. `pushEntry` writes the typed line to a plaintext history file
+    // that outlives the session, and `recordSlashTurn` puts it in the conversation window — which is
+    // re-sent to whatever serves the model on every later round. A token pasted into /jira-auth would go
+    // to both. Asserted on the DISPATCHER, not just the flag, because the flag alone protects nothing.
+    const credentialTools = ['jira_auth', 'openai_auth', 'sentry_auth'];
+    ok(credentialTools.every((n) => slashed.find((t) => t.name === n)?.slash.secret === true),
+      'every credential command declares its argument secret', credentialTools.join(', '));
+    const { maskSecret } = await import(`file://${join(DIST, 'tools', 'credentials', 'envfile.js')}`);
+    const secret = 'sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    ok(!maskSecret(secret).includes('MNOPQRSTUVWXYZ') && maskSecret(secret).length < secret.length,
+      'a masked secret cannot be reassembled from what is displayed', maskSecret(secret));
+    ok(maskSecret('short').length <= 3, 'a secret too short to mask safely is hidden entirely');
+    const idx = readFileSync(join(DIST, '..', 'src', 'index.ts'), 'utf-8');
+    ok(/if \(tool\.slash\.secret\) forgetEntry\(text, cmd\)/.test(idx),
+      'and the dispatcher rewrites its history entry to the bare command');
+    ok(/if \(!tool\.slash\.secret\) recordSlashTurn\(/.test(idx),
+      'and never records it into the window the model is sent');
+    ok(/pushEntry\(text\.startsWith\('\/'\) \? text\.split\(' '\)\[0\] : text\)/.test(idx),
+      'a slash command refused while busy persists only its command word — it was never executed');
+  }
+
+  // THE PASTE PARSER. An operator pastes whatever Atlassian showed them; getting a field wrong stores a
+  // credential that fails later as an unexplained 401. The token is found by ELIMINATION, so each of these
+  // is a distinct way that elimination can pick the wrong word.
+  {
+    const { extractDeterministic } = await import(`file://${join(DIST, 'tools', 'connectors', 'jira', 'auth.js')}`);
+    const { normalizeSite, daysUntilExpiry } = await import(`file://${join(DIST, 'tools', 'connectors', 'jira', 'credentials.js')}`);
+    const eq = (got, want, name) => ok(JSON.stringify(got) === JSON.stringify(want), name, JSON.stringify(got));
+
+    eq(extractDeterministic('site: acme.atlassian.net\nemail me@acme.com\ntoken ATATT3xFfGF0abcdefghijklmnop1234567890\nexpires 2026-09-12'),
+      { site: 'acme.atlassian.net', email: 'me@acme.com', token: 'ATATT3xFfGF0abcdefghijklmnop1234567890', expires: '2026-09-12', board: '' },
+      'a labelled Cloud paste yields all four fields with no LLM call');
+
+    eq(extractDeterministic('here you go https://acme.atlassian.net/jira/software my login is me@acme.com and the key is ATATT3xFfGF0zzzz9999 (valid until 12 September 2026)'),
+      { site: 'acme.atlassian.net', email: 'me@acme.com', token: 'ATATT3xFfGF0zzzz9999', expires: '2026-09-12', board: '' },
+      'unlabelled prose with a URL and a month-name date parses too');
+
+    // Fixture chosen to be UNMISTAKABLY not a credential. The first version of this line used a
+    // realistic-looking base64 blob, and GitHub's push protection rejected the whole push as a
+    // "Bitbucket Server Personal Access Token" — correctly in spirit: a credential-SHAPED string in a
+    // public repo is indistinguishable from a leaked one, to a scanner and to a reader. It still has to
+    // satisfy the parser's shape rule (>=16 chars of token-legal characters), so it says what it is.
+    const FAKE_TOKEN = 'EXAMPLE-NOT-A-REAL-TOKEN-0123456789';
+    eq(extractDeterministic(FAKE_TOKEN).token, FAKE_TOKEN,
+      'a bare token is recognised — rotation is the common case, and site/email merge from the stored file');
+
+    eq(extractDeterministic('me@gmail.com token ATATT3xFfGF0abcdefghijklmnop').site, '',
+      "the email's own domain is never mistaken for the Jira site");
+
+    eq(extractDeterministic('jira.internal.example.net  PAT: MDk4NzY1NDMyMTA5ODc2NTQzMjE  expires 2026-12-01'),
+      { site: 'jira.internal.example.net', email: '', token: 'MDk4NzY1NDMyMTA5ODc2NTQzMjE', expires: '2026-12-01', board: '' },
+      'a Data Center PAT parses with no email — which is what selects Bearer over Basic');
+
+    eq(normalizeSite('https://acme.atlassian.net/'), 'acme.atlassian.net', 'a pasted URL normalizes to a bare host');
+    eq(extractDeterministic('ATATT3xFfGF0abcdefghijklmnop board=1').board, '1',
+      'a board id is parsed, so "my sprint" can be pinned to one board');
+
+    // WHY THE BOARD MATTERS. `sprint IN openSprints()` means "not completed", which includes FUTURE
+    // sprints and spans every board the account can see. Measured on a real instance with 18 boards: the
+    // query returned 13 issues across two unrelated projects, one from another team's board. The active
+    // sprint is not expressible in JQL — the state lives on the issue's Sprint field — so the filtering
+    // must happen on the data, against one board.
+    const jiraClientSrc = readFileSync(join(DIST, '..', 'src', 'tools', 'connectors', 'jira', 'client.ts'), 'utf-8');
+    ok(/state === 'active'/.test(jiraClientSrc),
+      'the sprint list keeps only issues in an ACTIVE sprint, not merely a not-completed one');
+    ok(/s\.boardId === board/.test(jiraClientSrc),
+      'and only from one board, so another team\'s sprint cannot leak in');
+    ok(/f\.name === 'Sprint'/.test(jiraClientSrc),
+      'the Sprint field id is looked up, never hardcoded — it is a custom field and differs per instance');
+
+    // SENTRY. The org slug is the field that cannot be discovered — a correctly-scoped token gets 403
+    // from /organizations/ (measured) — so parsing it out of the paste is load-bearing, not convenience.
+    const sentry = await import(`file://${join(DIST, 'tools', 'connectors', 'sentry', 'auth.js')}`);
+    const sx = (t) => sentry.extractDeterministic(t);
+    eq(sx('sntryu_0123456789abcdefghijklmnopqrstuvwxyz org: my-org project: my-proj'),
+      { token: 'sntryu_0123456789abcdefghijklmnopqrstuvwxyz', org: 'my-org', project: 'my-proj', apiBase: '' },
+      'a labelled Sentry paste yields token, org and project');
+    eq(sx('https://my-org.sentry.io/issues/  sntrys_0123456789abcdefghijklmnopqrstuvwxyz').org, 'my-org',
+      'the org slug is read from a Sentry subdomain URL');
+    eq(sx('https://sentry.io/organizations/my-org/issues/ sntryu_0123456789abcdefghijklmnopqrst').org, 'my-org',
+      'and from an /organizations/<slug>/ path');
+    eq(sx('https://us.sentry.io/issues/ sntryu_0123456789abcdefghijklmnopqrst').org, '',
+      "Sentry's regional hosts are not mistaken for an org slug");
+    eq(sx('token only: sntryu_0123456789abcdefghijklmnopqrst').org, '',
+      'no org is invented when the paste has none — it merges from the stored file instead');
+    ok(/[0-9a-f]{64}/.source && sx(`legacy ${'a'.repeat(64)}`).token === 'a'.repeat(64),
+      'a legacy 64-hex Sentry token is still recognised');
+    ok(daysUntilExpiry({ expires: '2020-01-01' }) < 0, 'a lapsed expiry reads negative, so the warning can fire');
+    ok(daysUntilExpiry({ expires: '' }) === null, 'an unrecorded expiry is null, never a fake deadline');
+  }
 
   const withExt = await loader.discoverTools([ext]);
   ok(withExt.tools.some((t) => t.name === 'private_thing'),

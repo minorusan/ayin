@@ -246,7 +246,7 @@ export class ChatLog {
     //   ▌ bold        — the user (indigo bar)
     //   ◉ text        — ayin speaking (ayin = "eye"; accent glyph on the first line)
     //   ▸ │ ╰ cards   — tool calls (indented one step under the flow, amber frame)
-    //   · dim         — system notices (quietest thing on screen)
+    //   · subtle      — system notices (quiet, but still readable — see the note at the branch)
     // VERTICAL RHYTHM. A turn is prompt → tool cards → answer, and with everything one line apart it
     // read as one wall of text. A SPEAKER CHANGE earns a blank line (two before a user prompt, which
     // starts a new exchange); consecutive tool messages do NOT, because a call and its result are
@@ -286,8 +286,13 @@ export class ChatLog {
         }
       } else {
         if (speakerChanged) lines.push(''); // system notices shouldn't crowd the answer above them
+        // `subtle`, not `dim`. These were the quietest thing on screen by design, and it went too far:
+        // dim is #59685f against a #0d1411 panel, which reads as black on a real terminal — the version
+        // line, every `/set` confirmation and every "not configured, run X" instruction were all but
+        // invisible. A notice nobody can read is not quiet, it is missing. Quietness comes from the `·`
+        // gutter and the lack of a speaker glyph; it does not need to come from contrast too.
         msg.content.split('\n').forEach((line, i) => {
-          lines.push(`${GUTTER}{${theme.dim}-fg}${i === 0 ? '· ' : '  '}${line}{/}`);
+          lines.push(`${GUTTER}{${theme.subtle}-fg}${i === 0 ? '· ' : '  '}${line}{/}`);
         });
       }
     }

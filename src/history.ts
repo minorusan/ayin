@@ -39,6 +39,31 @@ export function pushEntry(text: string): void {
 }
 
 /**
+ * Replace a persisted entry — for a line that turned out to carry a secret.
+ *
+ * `pushEntry` writes to disk immediately, and whether an argument is a credential is only known once the
+ * tool that owns the command has been resolved. So the entry is rewritten rather than prevented: `save()`
+ * rewrites the whole file, so the original text is gone from it, not merely appended past.
+ *
+ * `replacement` is what stays in history — the bare command, so arrow-up still recalls what was run
+ * without recalling the token.
+ */
+export function forgetEntry(text: string, replacement: string): void {
+  let changed = false;
+  entries = entries.map((e) => {
+    if (e !== text) return e;
+    changed = true;
+    return replacement;
+  });
+  if (!changed) return;
+  // A repeat of the same command would otherwise leave two identical bare entries.
+  entries = entries.filter((e, i) => i === 0 || e !== entries[i - 1]);
+  save();
+  cursor = -1;
+  savedInput = '';
+}
+
+/**
  * Navigate up (older). Returns the entry to display, or null if at top.
  * On first up press, saves the current input buffer.
  */

@@ -26,6 +26,7 @@ import { getGoal } from './goal.js';
 import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLESS, formatToolResultForChat, formatToolCallForChat, escapeBlessedTags, toItalic } from './ui.js';
 import { theme } from './ui/theme.js';
 import { log } from './log.js';
+import { hasFinalMarker, stripFinalMarker } from './final-marker.js';
 import { checkPermission } from './permissions.js';
 import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
 import { recordPrompt, recordTool, recordAnswer } from './session-record.js';
@@ -376,6 +377,19 @@ function pushToWindow(role: string, content: string): void {
 }
 
 /**
+ * Record a turn the AGENT LOOP never ran — a tool invoked directly from its slash command.
+ *
+ * `conversationWindow` is what the model sees as "what we have been doing". A slash-invoked connector
+ * answers on screen without ever entering the loop, so the next ordinary question ("which of those is
+ * blocked?") reaches a model that never saw the tickets and answers about nothing. Appended as a normal
+ * user/assistant pair, clipped like any tool result — a whole sprint dump is not worth the window.
+ */
+export function recordSlashTurn(userInput: string, answer: string): void {
+  pushToWindow('user', userInput);
+  pushToWindow('assistant', clipForWindow(answer));
+}
+
+/**
  * Load prior turns into the agent's window — what makes `/resume` actually resume.
  *
  * `conversationWindow` is the ONLY source of history `buildMessages` reads, and it was
@@ -405,8 +419,6 @@ export function restoreConversation(turns: Array<{ role: string; content: string
  * A finished reply starts with `$`. Leading whitespace is tolerated because a model that opens with a
  * newline meant the same thing; anything else before it is not the marker.
  */
-const FINAL_MARKER = /^\s*\$\s?/;
-
 /** Refusals of an unmarked, tool-less turn before it is accepted anyway. Three clears the reflex. */
 const MAX_CONTINUE_NUDGES = 3;
 
@@ -840,6 +852,20 @@ export async function runAgent(userInput: string): Promise<void> {
     setStatus({ llm: { phase: 'postprocessing', detail: 'ayin' } });
     const parsed = parseToolCalls(response);
     setStatus({ llm: null });
+    /**
+     * THE MARKER IS A SIGNAL TO THE HARNESS, NEVER TEXT FOR THE OPERATOR — so it is removed HERE, once,
+     * before anything can print it.
+     *
+     * It used to be stripped much further down, from `response_`, which is the copy that goes into the
+     * record and the window. But the reply is PRINTED from `parsed.text` in six places, the earliest of
+     * them (pre-tool reasoning, just below) long before that point — so the `$` was shown to the operator
+     * every time. Invisible while models put it first, where it reads as a prompt character; obvious the
+     * moment gemma4 started appending it and it turned up at the end of finished answers.
+     *
+     * `response` is deliberately left untouched: the marker test below reads the RAW reply, and the
+     * transcript above has already recorded the raw text, which is the point of the transcript.
+     */
+    parsed.text = stripFinalMarker(parsed.text ?? '');
     const hasToolCalls = parsed.toolCalls.length > 0;
     // The RAW model text, before any parsing strips the tool-call markup — this is the thing you need
     // when the question is "why did it call that", and it is the first thing every other record drops.
@@ -873,7 +899,7 @@ export async function runAgent(userInput: string): Promise<void> {
       // reaction re-states the rule, so drifting out of the convention is self-correcting. The default is
       // also the safe one: forgetting the marker costs one round, while the failure it replaces cost six
       // unwritten files.
-      if (!FINAL_MARKER.test(response) && !stopAwaitingOperator() && continueNudges < MAX_CONTINUE_NUDGES) {
+      if (!hasFinalMarker(response) && !stopAwaitingOperator() && continueNudges < MAX_CONTINUE_NUDGES) {
         continueNudges++;
         log('INFO', 'continue_nudge', { nudge: String(continueNudges), round: String(round) });
         pushToWindow('assistant', response);
@@ -884,7 +910,7 @@ export async function runAgent(userInput: string): Promise<void> {
           + `further, start that reply with $ as its first character.`);
         continue;
       }
-      const response_ = response.replace(FINAL_MARKER, '');
+      const response_ = stripFinalMarker(response);
 
       // ENTANGLED: a text-only turn is not an ANSWER while the design still has unimplemented types.
       //

@@ -1,0 +1,11 @@
+Answer {{ME}}'s question about their current sprint using only the evidence below.
+
+{{ME}}'s tickets in the open sprint:
+{{SPRINT}}
+
+Detail read from Jira:
+{{OBSERVATIONS}}
+
+Cite ticket keys. Report what the data says, including "nobody has replied" or "nothing is blocked".
+State what the evidence does NOT show rather than filling the gap. NEVER invent a ticket, status, person
+or comment that is not above. Answer in prose, no preamble.

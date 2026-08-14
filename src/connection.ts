@@ -125,8 +125,8 @@ export async function disconnect(): Promise<void> {
 
 /**
  * Send structured messages to the configured endpoint (`POST /api/generate`).
- * Falls back to OpenAI (via openAiKey in prompts.json) when no endpoint is available.
  * Passes thinking=true when --thinking flag is active. Retries once on transient errors.
+ * No endpoint means an error naming the fix — never a silent hosted-model call.
  */
 export async function llmChat(
   messages: Array<{ role: string; content: string }>,
@@ -136,14 +136,15 @@ export async function llmChat(
   const llmUrl = await getLlmUrl();
 
   if (!llmUrl) {
-    const openAiKey = getConfigString('openAiKey');
-    if (openAiKey) {
-      fileLog('INFO', 'endpoint_unavailable_openai_fallback', {});
-      return llmChatOpenAI(messages, openAiKey);
-    }
+    // NO SILENT ESCALATION TO OPENAI. This used to notice a stored key and quietly bill the operator
+    // for a call they thought was local — with a hardcoded two-generation-old model, and only the first
+    // tool call of the reply honoured. Dropped deliberately (operator's call, 2026-08-14): a provider
+    // that costs money is CHOSEN, via `/model openai`, never fallen into because a local service was
+    // down. `llm/providers/openai.ts` is the one OpenAI path, and it is entered on purpose.
     throw new Error(
       `No reachable LLM endpoint at ${llmBaseUrl()}. Point ayin at yours: ` +
-      `set env AYIN_LLM_URL=http://<host>:9100 or run \`/set llm-url http://<host>:9100\`.`,
+      `set env AYIN_LLM_URL=http://<host>:9100 or run \`/set llm-url http://<host>:9100\`. ` +
+      `Or switch to the hosted model with \`/model openai\` (needs a key: \`/openai sk-…\`).`,
     );
   }
 
@@ -237,69 +238,6 @@ export async function llmChat(
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-async function llmChatOpenAI(
-  messages: Array<{ role: string; content: string }>,
-  apiKey: string,
-): Promise<string> {
-  const { getAllTools } = await import('./tools.js');
-
-  const tools = getAllTools().map(t => ({
-    type: 'function' as const,
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters: {
-        type: 'object',
-        properties: Object.fromEntries(
-          t.parameters.map(p => [p.name, { type: p.type === 'number' ? 'number' : 'string', description: p.description }])
-        ),
-        required: t.parameters.filter(p => p.required).map(p => p.name),
-      },
-    },
-  }));
-
-  const controller = new AbortController();
-  activeLlmController = controller;
-  const timeout = setTimeout(() => controller.abort(), 600_000);
-
-  try {
-    const res = await undiciFetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: 'gpt-4.1', messages, tools, tool_choice: 'auto' }),
-      signal: controller.signal,
-      dispatcher: llmAgent,
-    });
-
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`OpenAI ${res.status}: ${body}`);
-    }
-
-    type OAIMessage = {
-      content: string | null;
-      tool_calls?: Array<{ function: { name: string; arguments: string } }>;
-    };
-    const data = await res.json() as { choices: Array<{ message: OAIMessage }> };
-    const msg = data.choices[0]?.message;
-    const text = msg?.content || '';
-
-    const tc = msg?.tool_calls?.[0];
-    if (tc) {
-      const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
-      const paramLines = Object.entries(args)
-        .map(([k, v]) => `<parameter=${k}>\n${String(v)}\n</parameter>`)
-        .join('\n');
-      const xml = `<function=${tc.function.name}>\n${paramLines}\n</function>`;
-      return text ? `${text}\n${xml}` : xml;
-    }
-
-    return text;
-  } finally {
-    clearTimeout(timeout);
-    if (activeLlmController === controller) activeLlmController = null;
-  }
-}
 
 /** Simple single-prompt call (for summarizer etc.) */
 export async function llmCall(prompt: string): Promise<string> {

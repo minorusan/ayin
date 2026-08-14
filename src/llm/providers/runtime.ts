@@ -28,6 +28,17 @@ export interface ProviderServices {
    * takes them; one that cannot never calls this, and the queue stays for whoever can.
    */
   takePendingImages(): string[];
+  /**
+   * A stored credential for a vendor that needs one, by name (`openai`), and the setup text to show
+   * when it is absent.
+   *
+   * Config would not do: a key is not a setting. It belongs in a 0600 file of its own, written by the
+   * command that verifies it, and a provider must not have to know which file or how it got there —
+   * exactly the reason `config` and `log` arrive this way. `setupHint` travels WITH the credential
+   * because the provider is where the absence is discovered, and a fresh clone's first prompt is the
+   * one error message that has to carry the whole instruction.
+   */
+  credential(vendor: string): { key: string; model: string; setupHint: string };
 }
 
 let services: ProviderServices | null = null;
@@ -56,6 +67,10 @@ export function providerConfig(key: string): string | undefined {
 
 export function providerPendingImages(): string[] {
   return require_().takePendingImages();
+}
+
+export function providerCredential(vendor: string): { key: string; model: string; setupHint: string } {
+  return require_().credential(vendor);
 }
 
 export function providerRuntimeReady(): boolean {

@@ -40,11 +40,50 @@ The endpoint is resolved by `llmBaseUrl()` in priority order: **`AYIN_LLM_URL`**
 > Anything that sets the endpoint out of this repo's reach — a shell profile, a launchd plist, a
 > systemd unit, a CI file — has to name `AYIN_LLM_URL`.
 
-If the
-endpoint is unreachable and an OpenAI key is configured (`/set openai-key`), ayin falls back to
-the OpenAI chat API and adapts its native tool-calls into ayin's XML form. Transport details:
-retries on transient errors, a long timeout (coder models can think for minutes), and image
-attach for vision turns. See [`SETUP.md`](../SETUP.md) for the ways to stand up an endpoint.
+Transport details: retries on transient errors, a long timeout (coder models can think for minutes),
+and image attach for vision turns. See [`SETUP.md`](../SETUP.md) for the ways to stand up an endpoint.
+
+### OpenAI — the default a fresh clone can actually run
+
+**Ayin never escalates to OpenAI on its own.** The older idea — notice the local endpoint is
+struggling, quietly ask the hosted model — is gone: a provider that bills per token is chosen, never
+fallen into, and "which model am I paying for" must never be a guess.
+
+What replaced it is a plain default. Provider resolution (`llm/select.ts`) ends at OpenAI when
+**nothing is configured anywhere** — no `AYIN_LLM_PROVIDER`, no `llmUrl`, no `AYIN_LLM_URL`, and no
+resource surface at the localhost default. That is exactly the fresh-clone state, and it is the
+difference between a repo someone can try and one that needs a GPU first: `direct` against a localhost
+endpoint that isn't there fails on every prompt with a connection error, which reads as "ayin is
+broken", while OpenAI needs only a key and says how to get one.
+
+The dangerous neighbouring case is excluded deliberately: an endpoint that **is** configured but is
+merely unreachable — a backend mid-reboot — still falls back to `direct`, provisionally, and re-probes.
+Moving a session onto a billed provider because a local service was slow is a charge nobody agreed to.
+Gated (`the paid provider is never reached by accident`).
+
+- **`/openai sk-…`** stores the key. It is the `openai_auth` tool's slash command, so it is verified
+  against OpenAI before anything is written, lands in `~/.ayin-cli/openai.env` at 0600, and — being
+  `slash.secret` — never reaches the input history or the model's context. Bare `/openai` reports
+  status. `/set openai-key` is refused and redirects here: it used to write an unverified secret into
+  `prompts.json` beside prompt-tuning numbers.
+- **`/model openai`** switches who answers; **`/model local`** switches back. Setting a credential and
+  deciding to spend money are two decisions, and the old `/openai` merged them into one keystroke.
+  The switch is refused outright when no key is configured — entering a provider that then throws on
+  every prompt is a worse failure than refusing, because by then the operator has moved on.
+- It runs on the **official `openai` SDK**, a runtime dependency, not hand-rolled HTTP — one definition
+  of the base URL, auth header, retry policy and error shape. There used to be a second, hand-rolled
+  path (an "emergency fallback" in `connection.ts` that fired when no local endpoint answered) and being
+  a second definition is how it rotted: pinned `gpt-4.1`, honoured only the **first** tool call in a
+  reply, and evaded the stale-model gate by living in another file. Removed 2026-08-14 along with the
+  escalation it served; a gate now forbids any hand-rolled request to `api.openai.com`.
+- The client is rebuilt when the key changes, keyed on the key itself — `/openai` can store a new one
+  mid-session, and a client captured once would keep using the old key until restart.
+- The key reaches the provider through the **provider runtime seam** (`providerCredential('openai')`),
+  not by importing the credential module: `llm/providers/*` import nothing outside `llm/`, the same
+  rule that keeps `tools/` self-contained. Core knows where secrets live; a provider only knows it
+  needs one. The legacy `openAiKey` in `prompts.json` is still *read* there, so an existing install
+  keeps working — an upgrade that silently forgets a stored key is indistinguishable from one that
+  broke it.
 
 ## naamah — the renderer, and the one real submodule (`naamah/`)
 
@@ -974,7 +1013,105 @@ families.
 Each tool is `{ name, description, parameters, execute }`; the model calls it by its unique
 name. **Core** (no external deps): `read_file`, `grep`, `find_files`, `write_file`,
 `str_replace`, `bash`, `explore`, `status`, `arduino_db`. **Optional integrations** (inert unless
-configured): `diagram`, `web_search`, `jira`, `send_push`. See the README table.
+configured): `diagram`, `web_search`, `jira`, `jira_auth`. See the README table.
+
+### A tool may own a slash command (`Tool.slash`)
+
+A tool declaring `slash: { command, param, usage }` is invoked **directly** by that command, bypassing
+the model's choice of tool: `/jira what is still open on me?` runs the `jira` tool with
+`question=<the rest of the line>`.
+
+The model choosing the tool is the right default and stays the default. But a **connector** (below) is
+not a step in a plan — it *is* the answer, and letting the outer loop pick it costs two full rounds
+whose only content is relaying text into a tool the operator already named by typing the command.
+
+- The **tool** declares the command, not a central list — the registry is a directory, so a list would
+  reintroduce the shared file discovery removed, and an installed third-party tool could never appear
+  in it. `/help` lists tool-owned commands from the registry.
+- Two tools claiming one command is **refused**, like a duplicate tool name: load order is not an
+  answer an operator can reason about.
+- A slash param that is **not required** may be invoked bare — that is how `/jira-auth` alone reports
+  status instead of printing usage.
+- The turn is written into the agent's conversation window (`recordSlashTurn`), so a follow-up like
+  "which of those is blocked?" reaches a model that actually saw the tickets.
+
+### Connectors (`src/tools/connectors/`)
+
+A connector is a tool whose `execute` is **its own agentic loop** against a service API. The operator
+asks in plain words; the connector decides how much of the service it must read. The outer agent spends
+no rounds on the service's mechanics and never composes a query language.
+
+**`jira`** — scoped to the **authenticated user's current sprint**:
+
+- Scope is a property of the **query** (`assignee = currentUser() AND sprint IN openSprints()`), not an
+  instruction in a prompt. `open KEY` is refused unless KEY is in the fetched sprint set — a prompt
+  saying "only your sprint" is a request; an unavailable answer is a fact.
+- The sprint list is fetched **once, up front**: most questions about a sprint are answered by the list
+  of tickets in it, so the common case is a single LLM call, and every later round shares one frame of
+  reference. Only a question needing a description or comments costs another round.
+- The inner protocol is **one line** (`open KEY` / `answer <text>`). A small local model asked for JSON
+  mid-reasoning produces malformed JSON far more often than a wrong verb. An unmarked reply is taken as
+  the answer rather than spending a round correcting protocol.
+- **Cloud and Data Center are detected, not configured** — the search endpoint
+  (`/rest/api/3/search/jql` vs `/rest/api/2/search`) and body format (ADF document tree vs plain text)
+  are both discoverable on the first call. ADF is flattened to text before any model sees it.
+- Descriptions and comments are **clipped head-and-tail** with the omission stated.
+
+**`jira_auth`** — fills the credential file from whatever the operator pasted:
+
+- **Deterministic first, model second.** A regex pass handles the ordinary paste; only a blob it cannot
+  resolve reaches the LLM, so the common case cannot be hallucinated. The token has no reliable syntax,
+  so it is found by **elimination** — the longest secret-shaped run that is not the email, the host, or
+  a date.
+- **Rotation is the common case.** A paste containing only a new token **merges** over the stored
+  credential, because the token expires every few weeks and the site does not.
+- **Never writes an unverified credential** — the file lands only after the token authenticates against
+  the site. A stored-but-wrong credential fails later, elsewhere, as a 401 with no memory of where it
+  came from.
+- Credentials live in **`~/.ayin-cli/jira.env`** (`KEY=value`, chmod 0600, written atomically), not in
+  `prompts.json`: this secret expires, so an operator edits it by hand, and a secret beside
+  prompt-tuning numbers is one that gets pasted into a bug report by accident. **Env wins** over the
+  file, for CI. `JIRA_EMAIL` present selects Basic (Cloud); absent selects Bearer (a Server/DC personal
+  access token) — one question the operator's own credential already answers.
+- `JIRA_TOKEN_EXPIRES` is the operator's own note, and is **advisory**: within 7 days every `jira`
+  answer carries a warning line. The server remains the authority on whether a token works, so a wrong
+  note never blocks a call that would have succeeded.
+
+**`sentry`** — scoped to **unresolved issues in the operator's organization**, last 14 days, ranked by
+frequency. Same loop shape as `jira`; three things are specific to it:
+
+- **The org slug is part of the credential, not a setting.** Every read endpoint is
+  `/organizations/{org}/…`, and a correctly-scoped token gets **403** from `/organizations/` — measured
+  against a real token — so ayin cannot discover it. `/sentry-auth` parses it from the paste (a Sentry
+  URL carries it as a subdomain or an `/organizations/<slug>/` path) and verification runs the **same
+  issue query the connector uses**, so "verified" means "what you are about to do works". Verifying
+  against `/organizations/` would reject exactly the narrowly-scoped tokens this is designed for.
+- **A logged error is not a crash.** An SDK reporting logged errors (a Unity game's logger, say)
+  produces events with no exception and no stacktrace at all — measured: 12 of the top issues in a real
+  org had zero frames. For those the **breadcrumb trail** is the whole story, so `open` returns the last
+  10 crumbs (the tail, nearest the failure) when there is no stack, and says which it is showing.
+- **Events are reduced before any model sees them.** A single Sentry event can carry hundreds of frames
+  plus every request header; `in_app` frames are kept ahead of library noise, and every omission is
+  stated in the output rather than silently truncated.
+
+### Both connector loops end in a forced answer
+
+Bounded evidence, then a mandatory answer — enforced by the loop, not requested in the prompt:
+
+- The last round, a **repeated** `open` (the tool-guard rule: a second identical call is a stall, not
+  thoroughness), or **two** issues opened → the gathering phase ends.
+- The answer-only round uses a **different prompt containing no protocol at all**. Telling the model
+  `open` was unavailable did not stop it: the word was in the operator's own question ("open the top
+  issue and tell me…") and it was **mirroring, not choosing** — measured as three rounds of `open` with
+  the answer already in context. A prompt that mentions no commands has nothing to mirror.
+- If it still will not summarise, the connector returns **what it read** rather than "could not settle
+  on an answer" — the data is what the operator wanted, and discarding it because the model went quiet
+  is the worst of both.
+
+`/explain`'s ticket validation (`src/jira.ts`) goes through this connector too, so a fresh clone can
+validate a `PROJECT-123`-shaped string in a commit message. It is **not** sprint-scoped — those keys
+come out of git history and are usually old — but it is capped and self-validating: only keys that
+resolve to a real issue come back. Unconfigured is an honest gap in the evidence, never an error.
 
 - **`str_replace`** is the preferred edit tool — a single-unique-match find/replace that
   touches only the targeted block. `write_file` is for new files / deliberate full rewrites

@@ -20,6 +20,7 @@ import { llmBaseUrl } from './connection.js';
 import { initToolRuntime, toolRuntimeReady, type ToolProcess } from './tools/runtime.js';
 import { initProviderRuntime, providerRuntimeReady } from './llm/providers/runtime.js';
 import { takePendingImages } from './image.js';
+import { noKeyMessage, readOpenAiKey, readOpenAiModel } from './tools/credentials/openai.js';
 import type { ChildProcess } from 'node:child_process';
 
 export function ensureToolRuntime(): void {
@@ -77,5 +78,16 @@ export function ensureProviderRuntime(): void {
     },
     config: (key) => getConfigString(key),
     takePendingImages: () => takePendingImages(),
+    // Core knows where credentials live; the provider only knows it needs one. The legacy
+    // `openAiKey` config entry is still read here so an existing install keeps working — an upgrade
+    // that silently forgets a stored key is indistinguishable from one that broke it.
+    credential: (vendor) => {
+      if (vendor !== 'openai') return { key: '', model: '', setupHint: `no credential source for "${vendor}"` };
+      return {
+        key: readOpenAiKey() || (getConfigString('openAiKey') ?? '').trim(),
+        model: readOpenAiModel() || (getConfigString('openAiModel') ?? ''),
+        setupHint: noKeyMessage(),
+      };
+    },
   });
 }

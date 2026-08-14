@@ -1,0 +1,11 @@
+Answer the question about production errors in {{SCOPE}} using only the evidence below.
+
+Unresolved issues, last 14 days, most frequent first:
+{{ISSUES}}
+
+Detail read from Sentry:
+{{OBSERVATIONS}}
+
+Cite issue ids. Event counts measure noise; user counts measure harm — say which you are ranking by.
+State what the evidence does NOT show rather than filling the gap. NEVER invent an issue, a frame, a
+file or a number that is not above. Answer in prose, no preamble.
