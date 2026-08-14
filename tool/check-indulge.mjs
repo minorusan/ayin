@@ -314,6 +314,43 @@ gs3.endRun('g3');
   ustore.endRun('u');
 }
 
+// ── the direct answer path: the code, one call, no rediscovery ──────────────────
+{
+  const AN = await import(join(ROOT, 'dist/indulge/answer.js'));
+  const DA = join(TMP, 'direct-repo');
+  mkdirSync(join(DA, 'src'), { recursive: true });
+  writeFileSync(join(DA, 'src/svc.ts'), 'export class Svc { run() {} }\n');
+  writeFileSync(join(DA, 'src/user.ts'), 'import { Svc } from "./svc.js";\nnew Svc().run();\n');
+  const ds = S.openStore(DA);
+  ds.beginRun({ runId: 'd', domains: ['x'], headSha: 'h' });
+  ds.addFile({ domain: 'x', path: 'src/svc.ts', depth: 0, why: 'explore seed', sha: 'a' });
+  ds.addFile({ domain: 'x', path: 'src/user.ts', depth: 1, why: 'imports src/svc.ts', sha: 'b' });
+
+  const ctx = AN.contextFilesFor(ds, 'src/svc.ts');
+  ok(ctx[0] === 'src/svc.ts', 'the file the question is about comes first');
+  ok(ctx.includes('src/user.ts'), 'a file whose reason names it is a neighbour — the graph already knew');
+  ok(AN.contextFilesFor(ds, 'src/user.ts').includes('src/svc.ts'),
+    'the INBOUND edge counts too: the file this one was reached from');
+
+  const src = AN.buildSources(DA, ctx);
+  ok(/^1 export class Svc/m.test(src), 'sources carry 1-based line numbers — what a CITE must refer to');
+  ok(src.indexOf('src/svc.ts') < src.indexOf('src/user.ts'),
+    'the question\'s own file leads, so questions about it share a cached prefix');
+  const tiny = AN.buildSources(DA, ctx, 60);
+  ok(/CLIPPED|not shown/.test(tiny), 'exceeding the context budget is ANNOUNCED, never silent');
+
+  // one call, no explore
+  let calls = 0;
+  const dq = S.questionId('what does run do?', 'src/svc.ts', null);
+  ds.addQuestion({ id: dq, file: 'src/svc.ts', entity: null, category: 'functionality', text: 'what does run do?' });
+  const dr = await AN.answerQuestions({
+    store: ds, repoPath: DA,
+    ask: async (prompt) => { calls++; return `It does nothing.\nCITE: src/svc.ts:1-1`; },
+  });
+  ok(calls === 1 && dr.answered === 1, 'one model call per question, not an investigation', `${calls} call(s)`);
+  ds.endRun('d');
+}
+
 // ── stage 2: generation bookkeeping — resume, caps and dedup, without a GPU ──────
 // These are the parts that decide whether a night's work is lost or repeated, and none of them
 // should need a model to prove. The `ask` seam exists for exactly this.

@@ -16,10 +16,14 @@
  *     re-checked with `rev-parse --verify`. (It answered them deterministically at first. Measured on
  *     a real run, the generated questions ask things like *"which commit explains why `noteShape`
  *     uses a bounding-box heuristic?"* — and a commit listing is a non-answer to that.)
- *   - **everything else** — a full explore-style investigation (multi-iteration, greps, reads,
- *     follows references), then one call that turns the evidence into an answer plus citations. The
- *     investigation and the writing are separate calls on purpose: a model asked to search and
- *     conclude in one breath tends to conclude first.
+ *   - **everything else** — the code itself, in ONE call. Stage 1 already walked the reference graph
+ *     and wrote down every neighbour and why it is one, so `files.jsonl` answers "which files matter"
+ *     before the question is asked. Running a 12-iteration explore loop to rediscover that cost 5-10
+ *     model calls per question: measured at 131s each, against 17s for the direct path — 7.7x, with
+ *     the same citations verified the same way. Sources go FIRST in the prompt and questions are
+ *     answered grouped by file, so consecutive questions share a byte-identical prefix and the
+ *     server's KV cache pays prefill once per file rather than once per question.
+ *     `--deep` restores the explore path when thoroughness matters more than the night.
  *
  * `sourceSha` is the invalidation key. A re-run skips a question whose file has not changed, and
  * re-answers it when it has — that is what makes "ask indulge again" an expansion, not a restart.
@@ -49,9 +53,29 @@ const GIT_LOG_COUNT = 10;
 /** Source lines shown as evidence for a git question. */
 const MAX_SOURCE_LINES = 400;
 
+/**
+ * The context budget for a direct answer, in characters.
+ *
+ * `AYIN_OLLAMA_CTX` defaults to 16384 tokens and that number was measured, not guessed: context past
+ * it costs the VRAM holding model layers, and 10 spilled layers ran ~7x slower. ~50k characters is
+ * roughly 12-13k tokens, leaving room for the question, the instructions and the answer.
+ */
+const MAX_CONTEXT_CHARS = 50_000;
+/** Neighbour files fed alongside the one the question is about. */
+const MAX_NEIGHBOURS = 6;
+
 export interface AnswerOptions {
   store: IndulgeStore;
   repoPath: string;
+  /**
+   * Run the full explore investigation per question instead of answering directly.
+   *
+   * Off by default because explore was re-deriving what stage 1 already wrote down: the question
+   * names its file, and `files.jsonl` records every neighbour and WHY it is one. A 12-iteration
+   * agentic loop to rediscover that costs ~5-10 model calls per question — measured at ~2 min each,
+   * which turns a 200-question night into a fortnight. Feeding the code directly is one call.
+   */
+  deep?: boolean;
   /** Answer at most this many questions this run (a bounded night, not an unbounded one). */
   limit?: number;
   onStatus?: (note: string) => void;
@@ -124,6 +148,75 @@ export function repoProvenance(repoPath: string): { branch: string; commit: stri
     branch = git(repoPath, ['describe', '--tags', '--exact-match']) || '(detached)';
   }
   return { branch, commit };
+}
+
+/**
+ * The files to put in front of the model for a question about `file`.
+ *
+ * `file` first, then its graph neighbours — the ones discovery already recorded as importing it,
+ * imported by it, or referencing it. Stage 1 walked that graph deterministically; asking a model to
+ * find them again is paying twice for one answer.
+ */
+export function contextFilesFor(store: IndulgeStore, file: string): string[] {
+  const records = store.files();
+  const neighbours: string[] = [];
+
+  // OUTBOUND: files whose reason names this one — "imported by src/A.ts", "references src/A.ts (X)".
+  for (const r of records) {
+    if (r.path !== file && r.why.includes(file)) neighbours.push(r.path);
+  }
+  // INBOUND: the file this one was reached FROM. Its own `why` names it, and that edge is just as
+  // real — without this, asking about a type omits the file that uses it, which is usually the
+  // whole point of the question.
+  const known = new Set(records.map((r) => r.path));
+  for (const r of records.filter((x) => x.path === file)) {
+    for (const m of r.why.matchAll(/[A-Za-z0-9_./-]+\.[A-Za-z0-9]{1,6}/g)) {
+      if (known.has(m[0]) && m[0] !== file) neighbours.push(m[0]);
+    }
+  }
+  // Shallower files first: a direct neighbour explains more than one three hops out.
+  const depthOf = (p: string): number => records.find((r) => r.path === p)?.depth ?? 99;
+  neighbours.sort((a, b) => depthOf(a) - depthOf(b));
+  return [file, ...[...new Set(neighbours)].slice(0, MAX_NEIGHBOURS)];
+}
+
+/**
+ * The sources block, numbered, within budget.
+ *
+ * Ordered file-first and placed at the TOP of the prompt on purpose: every question about the same
+ * file then shares a byte-identical prefix, so the server's KV cache carries it and prefill is paid
+ * once per file rather than once per question. Four questions about one file is four times the
+ * saving.
+ *
+ * Anything dropped is announced. A silently clipped file reads as the whole file, and the model
+ * cites line numbers that do not exist in what it was shown.
+ */
+export function buildSources(repoPath: string, files: string[], budget = MAX_CONTEXT_CHARS): string {
+  const blocks: string[] = [];
+  let used = 0;
+  const skipped: string[] = [];
+  for (const f of files) {
+    let text: string;
+    try { text = readFileSync(join(repoPath, f), 'utf-8'); } catch { continue; }
+    const lines = text.split('\n');
+    const numbered = lines.map((l, i) => `${i + 1} ${l}`).join('\n');
+    const block = `=== ${f} (${lines.length} lines) ===\n${numbered}`;
+    if (used + block.length > budget) {
+      if (blocks.length === 0) {
+        // The first file alone exceeds the budget: show as much as fits, and say so.
+        const head = numbered.slice(0, budget - 200);
+        blocks.push(`=== ${f} (${lines.length} lines, CLIPPED to fit the context) ===\n${head}`);
+        used = budget;
+      } else skipped.push(f);
+      continue;
+    }
+    blocks.push(block);
+    used += block.length;
+  }
+  if (skipped.length) {
+    blocks.push(`=== not shown (context full): ${skipped.join(', ')} ===`);
+  }
+  return blocks.join('\n\n');
 }
 
 /** The file with 1-based line numbers, clipped — the numbers are what a CITE line must refer to. */
@@ -217,7 +310,9 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
   // subprocesses per call.
   const provenance = repoProvenance(repoPath);
 
-  const pending = store.pendingQuestions();
+  // Grouped by file: consecutive questions then share the same sources prefix, which is the whole
+  // point of putting the code first. Interleaving files would evict the cache on every question.
+  const pending = store.pendingQuestions().sort((a, b) => a.file.localeCompare(b.file));
   const queue = opts.limit ? pending.slice(0, opts.limit) : pending;
   onStatus?.(`${pending.length} question(s) pending${opts.limit ? `, answering ${queue.length} this run` : ''}`);
 
@@ -296,6 +391,23 @@ async function buildAnswer(
   // Git history alone cannot answer "why is it written this way" — measured: the model correctly
   // refused, noting it had not been given the code. The reason a thing looks the way it does is
   // usually in the file (a comment, the shape of the function), so a git question gets both.
+  // ── the DIRECT path: the code itself, one call ──
+  // Stage 1 already knows which files matter; explore would rediscover them at ~5-10 model calls
+  // per question. Sources go first so questions about one file share a cached prefix.
+  if (!gitFacts && !opts.deep && !opts.investigate) {
+    const sources = buildSources(repoPath, contextFilesFor(opts.store, q.file));
+    if (!sources) return null;
+    const direct = indulgePrompts().get('answerDirect', {
+      SOURCES: sources, FILE: q.file, QUESTION: q.text,
+    });
+    let reply: string;
+    try {
+      reply = opts.ask ? await opts.ask(direct) : await toolLlm().ask([{ role: 'user', content: direct }]);
+    } catch { return null; }
+    const v = verifyCitations(repoPath, reply);
+    return { answer: stripCitations(reply), citations: v.citations, rejected: v.rejected };
+  }
+
   const evidence = gitFacts
     ? `${gitFacts.answer}\n\nCURRENT SOURCE of ${q.file}:\n${readSource(repoPath, q.file)}`
     : opts.investigate

@@ -38,6 +38,7 @@ export interface IndulgeArgs {
   dryRun: boolean;
   restart: boolean;
   embedOnly: boolean;
+  deep: boolean;
   importFrom?: string;
   maxDepth?: number;
   maxFiles?: number;
@@ -49,7 +50,7 @@ export interface IndulgeArgs {
 export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[] } {
   const errors: string[] = [];
   const args: IndulgeArgs = {
-    repoPath: process.cwd(), domains: [], status: false, report: false, dryRun: false, restart: false, embedOnly: false,
+    repoPath: process.cwd(), domains: [], status: false, report: false, dryRun: false, restart: false, embedOnly: false, deep: false,
   };
   const num = (v: string, name: string): number | undefined => {
     const n = parseInt(v, 10);
@@ -69,6 +70,7 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--restart': args.restart = true; break;
       case '--import': args.importFrom = value(); break;
       case '--embed': args.embedOnly = true; break;
+      case '--deep': args.deep = true; break;
       case '--depth': args.maxDepth = num(value(), 'depth'); break;
       case '--max-files': args.maxFiles = num(value(), 'max-files'); break;
       case '--max-questions': args.maxQuestions = num(value(), 'max-questions'); break;
@@ -91,6 +93,7 @@ const USAGE = [
   '  ayin indulge --embed         vectorise the corpus for semantic search (CPU, no GPU needed)',
   '',
   '  --import <dir>               install a corpus built elsewhere (nuk overnight -> laptop)',
+  '  --deep                       full explore investigation per question (~8x slower, more thorough)',
   '  --restart                    discard the corpus and rebuild (default is RESUME)',
   '  --depth N                    reference-walk depth (default 3)',
   '  --max-files N                cap discovered files per domain',
@@ -333,7 +336,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
     out();
     out('[answers]');
     const a = await answerQuestions({
-      store, repoPath, limit: args.maxQuestions, onStatus: status, shouldStop,
+      store, repoPath, limit: args.maxQuestions, deep: args.deep, onStatus: status, shouldStop,
       onProgress: (done, total, current) => progress('answer', done, total, current),
     });
     recordTool('indulge:answer', `limit=${args.maxQuestions ?? 'none'}`, JSON.stringify(a));

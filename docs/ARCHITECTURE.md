@@ -1864,9 +1864,24 @@ Two paths:
   *"which commit explains **why** `noteShape` uses a bounding-box heuristic?"*, which is a non-answer;
   and given history alone the model correctly refused, noting it had not been shown the code. The
   reason a thing looks the way it does is usually in the file.
-- **everything else** — a full `explore` investigation, then a separate call that turns the evidence
-  into an answer plus `CITE:` lines. Investigation and writing are separate calls on purpose: a model
-  asked to search and conclude in one breath concludes first.
+- **everything else** — the code itself, in **one call**. Stage 1 already walked the reference graph
+  and recorded every neighbour and *why* it is one, so `files.jsonl` answers "which files matter"
+  before the question is asked; running a 12-iteration explore loop to rediscover it cost 5–10 model
+  calls per question. Measured on the same three questions: **131s each via explore, 17s direct** —
+  7.7×, with 0 failed and 0 rejected citations either way. Citations get *better*, not worse: the
+  model cites line numbers from the numbered file in front of it rather than from remembered grep
+  output.
+
+  Context is `q.file` plus its graph neighbours in both directions (files whose reason names it, and
+  the file it was reached *from*), capped at `MAX_CONTEXT_CHARS` (50k ≈ 12–13k tokens, against the
+  measured `AYIN_OLLAMA_CTX` default of 16384). Anything dropped is **announced** — a silently
+  clipped file makes the model cite lines that were never shown.
+
+  **Sources go first, question last**, and questions are answered grouped by file, so consecutive
+  questions about one file share a byte-identical prefix and the server's KV cache pays prefill once
+  per file instead of once per question.
+
+  `--deep` restores the explore path when thoroughness matters more than the night.
 
 #### The command
 

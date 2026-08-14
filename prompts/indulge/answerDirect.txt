@@ -1,0 +1,15 @@
+{{SOURCES}}
+
+Answer this question about {{FILE}} using only the code above.
+
+QUESTION: {{QUESTION}}
+
+Write what an engineer can act on: what is true, and what follows from it. Name the functions, fields
+and call sites involved. If the code above does not settle it, say what it does establish and what is
+still unknown — a hedged true answer is worth more than a confident wrong one.
+
+Then cite the lines the answer rests on. One per line, at the end, in exactly this form:
+
+CITE: path/to/file.ext:START-END
+
+Use the line numbers shown above. A citation nobody can resolve discards this whole answer.
