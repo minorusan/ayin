@@ -1789,6 +1789,17 @@ to it — a plausible edge that is simply false. `referencesOf` is deliberately 
 it answers entangle's question (which manifest unit does this cross), and a bare specifier names a
 package rather than a file.
 
+**Popularity disqualifies a name.** A type mentioned by more than `MAX_MENTIONERS` (25) files is
+*ambient* and stops being an edge in either direction — `ILogger` named by 300 files says nothing
+about which of them belong to this feature; the popularity IS the proof that it does not
+discriminate. And each file gets a `MAX_FANOUT_PER_FILE` (12) budget per depth, a structural bound so
+one hub cannot decide the corpus. Measured: on a namespace-free Unity-shaped repo of 206 files where
+201 name one ambient type, discovery returns 5 — the seed, the type it really uses, and the three
+files that really use that.
+
+The namespace gate below does nothing in a codebase with **no namespaces**, which is most Unity C#;
+these two caps are what hold there.
+
 **A shared name is not a dependency.** Measured on a real 3454-file Unity repo: C# has no relative
 imports, so `0 import edge(s) resolved` and every hop fell through to mentions — with 5270 declared
 types, depth 2 pulled in 337 files for a 40-type feature and hit the cap. A mention edge now requires

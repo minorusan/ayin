@@ -287,6 +287,33 @@ gs3.endRun('g3');
   cstore.endRun('cs');
 }
 
+// ── Unity shape: no namespaces at all, and one ambient type ─────────────────────
+// The namespace gate does nothing in a codebase that has no namespaces — which is most Unity C#.
+// Measured on a real 3454-file project: depth 1 added 4 files and depth 2 added 393, because a
+// widely-used type drags in every file that names it. Popularity is proof a name does NOT
+// discriminate, so an over-mentioned name stops being an edge, and each file gets a fan-out budget.
+{
+  const U = join(TMP, 'unity-repo');
+  const wu = (n, body) => { mkdirSync(join(U, 'Assets'), { recursive: true }); writeFileSync(join(U, 'Assets', n), body); };
+  wu('RewardService.cs', 'public class RewardService { RewardConfig cfg; ILogger log; }\n');
+  wu('RewardConfig.cs', 'public class RewardConfig { public int Amount; }\n');
+  wu('ILogger.cs', 'public class ILogger { }\n');
+  for (let i = 0; i < 60; i++) wu(`Screen${i}.cs`, `public class Screen${i} { ILogger log; }\n`);
+  for (let i = 0; i < 3; i++) wu(`RewardUser${i}.cs`, `public class RewardUser${i} { RewardConfig c; }\n`);
+
+  const ustore = S.openStore(U);
+  ustore.beginRun({ runId: 'u', domains: ['reward'], headSha: 'h' });
+  const ur = await D.discoverDomain({ store: ustore, repoPath: U, domain: 'reward', maxDepth: 2, seedsOverride: ['Assets/RewardService.cs'] });
+  const up = ustore.files().map((f) => f.path);
+  ok(up.includes('Assets/RewardConfig.cs'), 'a genuinely used type is still reached with no namespaces present');
+  ok(!up.some((x) => x.includes('Screen')),
+    'the 60 files naming an AMBIENT type are excluded — popularity proves the name does not discriminate',
+    JSON.stringify(up.length));
+  ok(!up.includes('Assets/ILogger.cs'), 'the ambient type itself is not pulled in either');
+  ok(ur.added < 10, 'a namespace-free repo does not explode', String(ur.added));
+  ustore.endRun('u');
+}
+
 // ── stage 2: generation bookkeeping — resume, caps and dedup, without a GPU ──────
 // These are the parts that decide whether a night's work is lost or repeated, and none of them
 // should need a model to prove. The `ask` seam exists for exactly this.

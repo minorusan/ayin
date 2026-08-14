@@ -75,6 +75,26 @@ const MAX_SOURCE_BYTES = 512 * 1024;
 /** A type name declared in more files than this is ambiguous — it cannot point at one of them. */
 const MAX_DECLARERS = 3;
 
+/**
+ * A type MENTIONED by more files than this is ambient, not a dependency.
+ *
+ * The forward direction was capped from the start; the reverse was not, and that is where a real
+ * repo blew up. Measured on a 3454-file Unity project: depth 1 added 4 files and depth 2 added 393,
+ * because a widely-used type pulls in every file that names it. `ILogger` being mentioned by 300
+ * files tells you nothing about which of them belong to THIS feature — the popularity is the proof
+ * that it does not discriminate.
+ */
+const MAX_MENTIONERS = 25;
+
+/**
+ * The most files one file may contribute at a single depth.
+ *
+ * A structural bound on blast radius, independent of language or naming. Without it one hub file
+ * decides the whole corpus, and the cap that eventually stops it is the global file cap — by which
+ * point the walk has already stopped being about the domain that was asked for.
+ */
+const MAX_FANOUT_PER_FILE = 12;
+
 /** Hard ceilings. Every one of them is REPORTED when hit — a silent cap reads as "covered everything". */
 const DEFAULT_MAX_INDEX_FILES = 20000;
 const DEFAULT_MAX_FILES = 400;
@@ -200,6 +220,8 @@ interface RefIndex {
   declaredIn: Map<string, string[]>;
   /** Repo-relative file → the declared names it mentions (any file's, not just its own). */
   mentions: Map<string, Set<string>>;
+  /** declared name → the files that mention it. Popularity is what makes a name useless as an edge. */
+  mentionedBy: Map<string, Set<string>>;
   /** file → its own namespace (C#; '' elsewhere). */
   namespace: Map<string, string>;
   /** file → the namespaces it can see: its own plus everything it `using`s. */
@@ -314,6 +336,7 @@ function buildIndex(repoPath: string, cap: number, onStatus?: (n: string) => voi
   const mentions = new Map<string, Set<string>>();
   const imports = new Map<string, string[]>();
   const importedBy = new Map<string, string[]>();
+  const mentionedBy = new Map<string, Set<string>>();
   const namespace = new Map<string, string>();
   const visible = new Map<string, Set<string>>();
   for (const abs of files) {
@@ -329,6 +352,10 @@ function buildIndex(repoPath: string, cap: number, onStatus?: (n: string) => voi
       hit.add(name);
     }
     mentions.set(r, hit);
+    for (const name of hit) {
+      const who = mentionedBy.get(name);
+      if (who) who.add(r); else mentionedBy.set(name, new Set([r]));
+    }
 
     // C# has no relative imports, so `using` + namespace IS its edge information. Without this the
     // language contributed no import edges at all — measured on a real 3454-file Unity repo: "0 import
@@ -349,7 +376,9 @@ function buildIndex(repoPath: string, cap: number, onStatus?: (n: string) => voi
     }
   }
   onStatus?.(`${[...imports.values()].reduce((n, v) => n + v.length, 0)} import edge(s) resolved`);
-  return { declaredIn, mentions, imports, importedBy, namespace, visible, indexed: files.length, truncated };
+  const ambient = [...mentionedBy.entries()].filter(([, who]) => who.size > MAX_MENTIONERS).length;
+  if (ambient) onStatus?.(`${ambient} name(s) are mentioned everywhere — ignored as edges`);
+  return { declaredIn, mentions, mentionedBy, imports, importedBy, namespace, visible, indexed: files.length, truncated };
 }
 
 /** The dependency unit a file sits in, for the audit line. Never stored as the operator's domain. */
@@ -429,6 +458,8 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
     for (let depth = 1; depth <= maxDepth && frontier.length; depth++) {
       const next: string[] = [];
       for (const file of frontier) {
+        // Each file gets its own budget: one hub must not decide the whole corpus.
+        let fanout = 0;
         // The strongest edges first: a resolved relative import names the file directly.
         for (const target of index.imports.get(file) ?? []) {
           if (write(target, depth, `imported by ${file}`)) next.push(target);
@@ -440,18 +471,27 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
         // A shared identifier is not a dependency: with 5270 declared types, matching on the name
         // alone made every hop transitive and the walk swallowed the repo.
         for (const name of index.mentions.get(file) ?? []) {
+          if ((index.mentionedBy.get(name)?.size ?? 0) > MAX_MENTIONERS) continue;   // ambient
           for (const target of index.declaredIn.get(name) ?? []) {
             if (target === file || !reachable(index, file, target)) continue;
-            if (write(target, depth, `referenced by ${file} (${name})`)) next.push(target);
+            if (fanout >= MAX_FANOUT_PER_FILE) break;
+            if (write(target, depth, `referenced by ${file} (${name})`)) { next.push(target); fanout++; }
           }
         }
         // reverse: files mentioning a type this file declares
-        const declaredHere = [...index.declaredIn.entries()].filter(([, fs]) => fs.includes(file)).map(([n]) => n);
+        const declaredHere = [...index.declaredIn.entries()]
+          .filter(([, fs]) => fs.includes(file))
+          // An ambient name is not a handle on this feature — see MAX_MENTIONERS.
+          .filter(([n]) => (index.mentionedBy.get(n)?.size ?? 0) <= MAX_MENTIONERS)
+          .map(([n]) => n);
         if (declaredHere.length) {
           for (const [other, names] of index.mentions) {
             if (other === file || seen.has(other)) continue;
+            if (fanout >= MAX_FANOUT_PER_FILE) break;
             const via = declaredHere.find((n) => names.has(n));
-            if (via && reachable(index, other, file) && write(other, depth, `references ${file} (${via})`)) next.push(other);
+            if (via && reachable(index, other, file) && write(other, depth, `references ${file} (${via})`)) {
+              next.push(other); fanout++;
+            }
           }
         }
       }
