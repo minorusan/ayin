@@ -1780,7 +1780,7 @@ edge kinds, strongest first:
 |---|---|---|
 | import | relative `import`/`require` specifiers, resolved to files that exist | Names the file directly. `./x.js` → `x.ts` is handled — under NodeNext every TS file imports its sibling that way |
 | imported-by | the same edges reversed | "who calls this" is half of what a corpus is asked |
-| mention | identifiers intersected with the declared-type table (`surfaceOf`) | The only signal in C#, where a `using` names a namespace and same-assembly types need no import at all |
+| mention | identifiers intersected with the declared-type table (`surfaceOf`), **gated by reachability** | The only signal in C#. A mention counts only if the target's namespace is one the source `using`s, or its own |
 
 Mention edges are filtered through the language's own `isBuiltinType`, and a name declared in more
 than three files is dropped as ambiguous. Both guards are measured, not theoretical: `session-record.ts`
@@ -1788,6 +1788,18 @@ declares `type Event`, and without the filter every file mentioning the DOM/Node
 to it — a plausible edge that is simply false. `referencesOf` is deliberately *not* used for edges;
 it answers entangle's question (which manifest unit does this cross), and a bare specifier names a
 package rather than a file.
+
+**A shared name is not a dependency.** Measured on a real 3454-file Unity repo: C# has no relative
+imports, so `0 import edge(s) resolved` and every hop fell through to mentions — with 5270 declared
+types, depth 2 pulled in 337 files for a 40-type feature and hit the cap. A mention edge now requires
+`reachable()`: the target's namespace must be one the source declares with `using`, or its own
+(same-namespace types need none). On a fixture where 40 unrelated files name the same type from
+another namespace, discovery returns 3 files instead of 43.
+
+**Unity sidecars never enter the corpus.** A `.meta` exists beside every file, so a model asked for
+"the files that implement X" lists `RewardService.cs.meta` and the path check passes — a question
+about a GUID costs a real investigation and answers nothing. `NOISE_EXTENSIONS` refuses those plus
+binary assets, even when a model names them explicitly.
 
 `bin/` is **not** in the skip list. It is MSBuild output in .NET but the CLI entry point in a Node
 package, and skipping it dropped a real source file that imported the seed. `obj/` stays skipped —

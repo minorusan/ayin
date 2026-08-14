@@ -255,6 +255,38 @@ const gr3 = await D.discoverDomain({ store: gs3, repoPath: G, domain: 'seed', ma
 ok(gr3.truncated === true && gr3.added === 2, 'hitting the file cap sets truncated', JSON.stringify(gr3));
 gs3.endRun('g3');
 
+// ── C#: a shared name is not a dependency ───────────────────────────────────────
+// Measured on a real 3454-file Unity repo: "0 import edge(s) resolved" (C# has no relative
+// imports), so every hop fell through to mention edges and depth 2 pulled 337 files for a
+// 40-type feature. A mention now has to be REACHABLE — the target's namespace must be one the
+// source `using`s, or its own.
+{
+  const CS = join(TMP, 'cs-repo');
+  const w = (rel2, body) => { mkdirSync(join(CS, dirname(rel2)), { recursive: true }); writeFileSync(join(CS, rel2), body); };
+  w('Rewards/RewardService.cs', 'namespace Game.Rewards {\nusing Game.Shared;\npublic class RewardService { RewardConfig c; Logger l; }\n}\n');
+  w('Rewards/RewardConfig.cs', 'namespace Game.Rewards {\npublic class RewardConfig { public int A; }\n}\n');
+  w('Shared/Logger.cs', 'namespace Game.Shared {\npublic class Logger { }\n}\n');
+  for (let i = 0; i < 12; i++) {
+    w(`Other/Screen${i}.cs`, `namespace Game.Unrelated {\npublic class Screen${i} { void X() { RewardConfig c; } }\n}\n`);
+  }
+  w('Rewards/RewardService.cs.meta', 'guid: abc\n');
+
+  const cstore = S.openStore(CS);
+  cstore.beginRun({ runId: 'cs', domains: ['reward'], headSha: 'h' });
+  const cr = await D.discoverDomain({ store: cstore, repoPath: CS, domain: 'reward', seedsOverride: ['Rewards/RewardService.cs'] });
+  const paths = cstore.files().map((f) => f.path);
+  ok(paths.includes('Rewards/RewardConfig.cs'), 'a type in the SAME namespace is reached without any using');
+  ok(paths.includes('Shared/Logger.cs'), 'a type in a namespace the file `using`s is reached');
+  ok(!paths.some((p2) => p2.startsWith('Other/')),
+    'files that merely NAME the type from an unreachable namespace are excluded — a shared word is not a dependency',
+    JSON.stringify(paths));
+  ok(cr.added === 3, 'three files, not fifteen', String(cr.added));
+  ok(!paths.some((p2) => p2.endsWith('.meta')), 'Unity .meta sidecars never enter the corpus');
+  ok(D.resolveInRepo(CS, 'Rewards/RewardService.cs.meta') === null,
+    'a .meta a model names is refused even though it exists — a GUID answers no question');
+  cstore.endRun('cs');
+}
+
 // ── stage 2: generation bookkeeping — resume, caps and dedup, without a GPU ──────
 // These are the parts that decide whether a night's work is lost or repeated, and none of them
 // should need a model to prove. The `ask` seam exists for exactly this.

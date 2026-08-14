@@ -49,6 +49,26 @@ const SKIP_DIRS = new Set([
   'Library', 'Temp', 'Logs', '.next', '.cache', 'coverage', 'vendor', '__pycache__',
 ]);
 
+/**
+ * Extensions that are never worth a question, whatever a model names.
+ *
+ * Unity writes a `.meta` beside EVERY file — a GUID and import settings, no behaviour. They are not
+ * indexed (no language handles them) but a model asked for "the files that implement X" will happily
+ * list `RewardService.cs.meta`, and it exists, so the path check passes. A question about a GUID
+ * costs a real investigation and answers nothing.
+ */
+const NOISE_EXTENSIONS = new Set([
+  '.meta', '.asset', '.prefab', '.unity', '.mat', '.anim', '.controller', '.shader', '.shadergraph',
+  '.png', '.jpg', '.jpeg', '.tga', '.psd', '.fbx', '.wav', '.mp3', '.ogg', '.ttf', '.otf',
+  '.dll', '.so', '.dylib', '.exe', '.zip', '.lock', '.map', '.min.js',
+]);
+
+function isNoise(path: string): boolean {
+  const lower = path.toLowerCase();
+  for (const ext of NOISE_EXTENSIONS) if (lower.endsWith(ext)) return true;
+  return false;
+}
+
 /** A file bigger than this is not hand-written source worth indexing (generated, minified, data). */
 const MAX_SOURCE_BYTES = 512 * 1024;
 
@@ -107,6 +127,7 @@ export function resolveInRepo(repoPath: string, candidate: string): string | nul
   try {
     if (!existsSync(abs) || !statSync(abs).isFile()) return null;
   } catch { return null; }
+  if (isNoise(cleaned)) return null;   // exists, but a `.meta` GUID answers no question
   return rel(root, abs);
 }
 
@@ -151,11 +172,38 @@ function walkSources(repoPath: string, cap: number): { files: string[]; truncate
   return { files, truncated: false };
 }
 
+/** `namespace Game.Rewards;` or `namespace Game.Rewards {` — C#'s unit of visibility. */
+function namespaceOf(source: string): string {
+  const m = source.match(/^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)/m);
+  return m ? m[1] : '';
+}
+
+/**
+ * Can `from` actually reach `to`, or do the two files merely share a word?
+ *
+ * For a namespaced language the answer is exact: `to`'s namespace must be one `from` declares with
+ * `using`, or `from`'s own (same-namespace types need no `using` in C#). Files without a namespace
+ * are unconstrained — import edges already carry the weight there.
+ *
+ * Measured on a real 3454-file Unity repo: without this, a shared identifier among 5270 declared
+ * types made every hop transitive and depth 2 swallowed 337 files for a 40-type feature.
+ */
+function reachable(index: RefIndex, from: string, to: string): boolean {
+  const target = index.namespace.get(to) ?? '';
+  if (!target) return true;
+  const seen = index.visible.get(from);
+  return seen ? seen.has(target) : true;
+}
+
 interface RefIndex {
   /** Declared type name → the repo-relative files declaring it. */
   declaredIn: Map<string, string[]>;
   /** Repo-relative file → the declared names it mentions (any file's, not just its own). */
   mentions: Map<string, Set<string>>;
+  /** file → its own namespace (C#; '' elsewhere). */
+  namespace: Map<string, string>;
+  /** file → the namespaces it can see: its own plus everything it `using`s. */
+  visible: Map<string, Set<string>>;
   /** Repo-relative file → the repo-relative files it imports by relative specifier. */
   imports: Map<string, string[]>;
   /** The same edges reversed. */
@@ -266,6 +314,8 @@ function buildIndex(repoPath: string, cap: number, onStatus?: (n: string) => voi
   const mentions = new Map<string, Set<string>>();
   const imports = new Map<string, string[]>();
   const importedBy = new Map<string, string[]>();
+  const namespace = new Map<string, string>();
+  const visible = new Map<string, Set<string>>();
   for (const abs of files) {
     let source: string;
     try { source = readFileSync(abs, 'utf-8'); } catch { continue; }
@@ -280,6 +330,17 @@ function buildIndex(repoPath: string, cap: number, onStatus?: (n: string) => voi
     }
     mentions.set(r, hit);
 
+    // C# has no relative imports, so `using` + namespace IS its edge information. Without this the
+    // language contributed no import edges at all — measured on a real 3454-file Unity repo: "0 import
+    // edge(s) resolved", so every hop fell through to mention edges and depth 2 pulled in 337 files
+    // for a 40-type feature.
+    const lang2 = languageFor(abs);
+    const ns = namespaceOf(source);
+    namespace.set(r, ns);
+    const seen = new Set<string>(ns ? [ns] : []);
+    if (lang2) for (const u of lang2.referencesOf(source)) seen.add(u);
+    visible.set(r, seen);
+
     const targets = importEdges(repoPath, r, source);
     if (targets.length) imports.set(r, targets);
     for (const t of targets) {
@@ -288,7 +349,7 @@ function buildIndex(repoPath: string, cap: number, onStatus?: (n: string) => voi
     }
   }
   onStatus?.(`${[...imports.values()].reduce((n, v) => n + v.length, 0)} import edge(s) resolved`);
-  return { declaredIn, mentions, imports, importedBy, indexed: files.length, truncated };
+  return { declaredIn, mentions, imports, importedBy, namespace, visible, indexed: files.length, truncated };
 }
 
 /** The dependency unit a file sits in, for the audit line. Never stored as the operator's domain. */
@@ -375,10 +436,13 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
         for (const importer of index.importedBy.get(file) ?? []) {
           if (write(importer, depth, `imports ${file}`)) next.push(importer);
         }
-        // forward: files declaring a type this file mentions
+        // forward: files declaring a type this file mentions — but only ones this file can SEE.
+        // A shared identifier is not a dependency: with 5270 declared types, matching on the name
+        // alone made every hop transitive and the walk swallowed the repo.
         for (const name of index.mentions.get(file) ?? []) {
           for (const target of index.declaredIn.get(name) ?? []) {
-            if (target !== file && write(target, depth, `referenced by ${file} (${name})`)) next.push(target);
+            if (target === file || !reachable(index, file, target)) continue;
+            if (write(target, depth, `referenced by ${file} (${name})`)) next.push(target);
           }
         }
         // reverse: files mentioning a type this file declares
@@ -387,7 +451,7 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
           for (const [other, names] of index.mentions) {
             if (other === file || seen.has(other)) continue;
             const via = declaredHere.find((n) => names.has(n));
-            if (via && write(other, depth, `references ${file} (${via})`)) next.push(other);
+            if (via && reachable(index, other, file) && write(other, depth, `references ${file} (${via})`)) next.push(other);
           }
         }
       }
