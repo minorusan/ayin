@@ -49,6 +49,14 @@ import { loadRules } from './rules.js';
 import { runBang, cancelBang, bangRunning } from './bang.js';
 import { setConfigValue, resetPromptsToDefaults, promptDriftWarnings, KNOWN_CONFIG_KEYS } from './prompts.js';
 import { isCorpusInjection, isLogCoverage, isVerbose, setCorpusInjection, setLogCoverage, setVerbose } from './modes.js';
+import { clearPendingCorpus, corpusForPrompt, setPendingCorpus } from './indulge/inject.js';
+
+// `/embed` for the session, `/embedthis` for one prompt — the same shape as /plan and /qa, because
+// a third convention for the same idea is one more thing to remember.
+let embedSession = false;
+let embedNextTurn = false;
+/** The FIRST prompt states the task; later ones are refinements. Only the first is automatic. */
+let promptsThisSession = 0;
 import { getGoal, setGoal, clearGoal, refreshGoal } from './goal.js';
 import { runArduinoDiagram, formatArduinoDiagramOutcome } from './tools/arduino-diagram.js';
 import { runExplain, formatExplainOutcome as formatExplainReportOutcome } from './explain/index.js';
@@ -548,6 +556,24 @@ onInput(async (text: string) => {
           : 'Verbose OFF — shortest answer that fully answers (the default).');
         return;
       }
+      case '/embed': {
+        const arg = text.slice('/embed'.length).trim().toLowerCase();
+        embedSession = arg === '' ? !embedSession : arg !== 'off' && arg !== '0';
+        addMessage('system', embedSession
+          ? 'Corpus lookup ON for every prompt this session · /embed off'
+          : 'Corpus lookup back to first-prompt-only. /embedthis <question> forces one.');
+        return;
+      }
+      case '/embedthis': {
+        const arg = text.slice('/embedthis'.length).trim();
+        if (!arg) {
+          addMessage('system', 'Usage: /embedthis <question> — looks the question up in the corpus for this one prompt');
+          return;
+        }
+        embedNextTurn = true;
+        text = arg;
+        break;
+      }
       case '/corpus': {
         const arg = text.slice('/corpus'.length).trim().toLowerCase();
         const on = arg === '' ? !isCorpusInjection() : arg !== 'off' && arg !== '0';
@@ -839,6 +865,8 @@ onInput(async (text: string) => {
         addMessage('system', '/lock — hold the model for this session (self-releases 10 min after you stop responding) · /unlock');
         addMessage('system', '!<command> — runs it in your shell verbatim and shows the output in bold; the model never sees it (Esc cancels)');
         addMessage('system', '/verbose — full explanations; without it, answers are as short as the question allows · /verbose off');
+        addMessage('system', '/embed — look this session\'s prompts up in the corpus (first prompt is automatic) · /embed off');
+        addMessage('system', '/embedthis <question> — corpus lookup for one prompt only');
         addMessage('system', '/corpus — what indulge already answered is shown when a file is read (default ON) · /corpus off');
         addMessage('system', '/logcover — heavy log coverage on every feature built while it is on · /logcover off');
         addMessage('system', '/summary — show session summary (Esc to close)');
@@ -927,6 +955,20 @@ onInput(async (text: string) => {
       setAgentStatus('Determining goal...');
       await Promise.race([refreshGoal(text), new Promise(r => setTimeout(r, 12_000))]);
     }
+
+    // Corpus lookup for this prompt: the first of the session (it states the task), or when asked.
+    promptsThisSession++;
+    const wantCorpus = isCorpusInjection() && (embedNextTurn || embedSession || promptsThisSession === 1);
+    embedNextTurn = false;
+    if (wantCorpus) {
+      setAgentStatus('Checking the corpus...');
+      try {
+        const block = await corpusForPrompt(process.cwd(), text);
+        setPendingCorpus(block);
+        if (block) addMessage('system', 'corpus: found related answers from an earlier indulge run');
+      } catch { setPendingCorpus(null); }
+    }
+
     await runAgent(text);
   } catch (err) {
     setAgentStatus('');
@@ -934,6 +976,9 @@ onInput(async (text: string) => {
     addMessage('system', `Agent error: ${msg}`);
     log('ERROR', 'agent_error', { error: msg });
   }
+  // The block belongs to the TURN. Clearing it here is what keeps a lookup made for "how does the
+  // reward service work" out of the next turn about something else entirely.
+  clearPendingCorpus();
   busy = false;
 
   // Refresh token display

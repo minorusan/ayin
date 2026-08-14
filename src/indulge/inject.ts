@@ -222,3 +222,42 @@ function render(
   out.push('Notes from an earlier pass, not the code. Verify anything you act on.');
   return out.join('\n');
 }
+
+
+// ── the prompt-level sites: what the operator asked for with /embed ──────────────
+//
+// Retrieval on a USER PROMPT is opt-in, because a prompt is a much worse retrieval key than a file
+// path: a large share of turns are `continue`, `yes`, `now the other one`, and embedding those
+// returns noise with a confident score. The operator knows their intent; a cosine value guesses at
+// it. The FIRST prompt of a session is the exception — it states the task, which is the one moment
+// the query is reliably worth embedding.
+//
+// Lifetime is the TURN, not the session. The block is set before the loop and cleared after, so it
+// survives every round of that turn (where the plan forms) without pinning itself into the prefix
+// of every later turn, where the task has usually moved on.
+
+let pending: string | null = null;
+
+/** Hold a retrieved block for the turn about to run. */
+export function setPendingCorpus(block: string | null): void { pending = block; }
+
+/** Read it without consuming — the same turn spans many rounds. */
+export function pendingCorpus(): string | null { return pending; }
+
+export function clearPendingCorpus(): void { pending = null; }
+
+/**
+ * Retrieve for a user prompt, or return null when there is nothing useful to add.
+ *
+ * Short and anaphoric prompts are skipped outright: "continue" and "yes" carry no query, and a
+ * retrieval keyed on them is noise dressed as evidence.
+ */
+export async function corpusForPrompt(repoPath: string, prompt: string): Promise<string | null> {
+  const words = prompt.trim().split(/\s+/).filter(Boolean);
+  if (words.length < 3) return null;
+  const store = openStore(repoPath);
+  if (!store.exists() || store.totals().chunks === 0) return null;
+  const found = await corpusSearch(repoPath, prompt, 2);
+  if (/^No corpus|^Nothing in the corpus|^Query too short/.test(found)) return null;
+  return found;
+}

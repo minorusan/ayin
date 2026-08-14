@@ -685,6 +685,25 @@ ok(EM.cosine([2, 0], [8, 0]) === 1, 'magnitude is divided out — only DIRECTION
   vstore.endRun('v');
 }
 
+// ── prompt-level lookup: /embed, /embedthis, and the automatic first prompt ──────
+// A prompt is a far worse retrieval key than a file path — a large share of turns are `continue`
+// and `yes`, and embedding those returns noise with a confident score. Hence opt-in, with the
+// first prompt of a session as the one reliable exception.
+
+ok(await INJ.corpusForPrompt(IR, 'continue') === null, '"continue" carries no query — no lookup');
+ok(await INJ.corpusForPrompt(IR, 'yes') === null, '"yes" likewise');
+ok(await INJ.corpusForPrompt(IR, 'ok do it') === null, 'a two-word acknowledgement is not a question');
+ok(await INJ.corpusForPrompt(join(TMP, 'no-corpus-repo'), 'what does the widget do') === null,
+  'no corpus means no block, not an apology injected into the prompt');
+ok((await INJ.corpusForPrompt(IR, 'what is beta in this file')) !== null,
+  'a real question does retrieve');
+
+INJ.setPendingCorpus('BLOCK');
+ok(INJ.pendingCorpus() === 'BLOCK', 'the block survives being read — a turn spans many rounds');
+ok(INJ.pendingCorpus() === 'BLOCK', 'and reading it twice does not consume it');
+INJ.clearPendingCorpus();
+ok(INJ.pendingCorpus() === null, 'clearing at turn end keeps one turn\'s lookup out of the next');
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);

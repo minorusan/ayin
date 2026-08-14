@@ -23,6 +23,7 @@ const COMMANDS: SlashCommand[] = [
   { name: '/wipe',    description: 'Delete saved state — sessions (this dir) · /wipe all · artifacts · logs · transcripts. Asks first; never touches the live session' },
   { name: '/transcribe', description: 'Record EVERYTHING this session — prompts, raw responses, full tool results — to a JSON file. Big on purpose · /transcribe off' },
   { name: '/verbose', description: 'Full explanations instead of the default shortest-answer replies · /verbose off' },
+  { name: '/embed',   description: "Look this session's prompts up in the corpus (the first prompt is automatic) · /embedthis <q> for one" },
   { name: '/corpus',  description: 'Show what `ayin indulge` already answered about a file when it is read (default ON) · /corpus off' },
   { name: '/logcover', description: 'Heavy log coverage on every feature built while it is on · /logcover off' },
   { name: '/summary', description: 'Show session summary (Esc to close)' },

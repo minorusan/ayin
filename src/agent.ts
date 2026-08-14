@@ -36,6 +36,7 @@ import { transcribeAnswer, transcribePrompt, transcribeResponse, transcribeTool 
 import { getConfig, getConfigIfSet, getPrompt } from './prompts.js';
 import { getRules } from './rules.js';
 import { isLogCoverage, isVerbose } from './modes.js';
+import { pendingCorpus } from './indulge/inject.js';
 import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { extractSignals } from './tools/signals.js';
@@ -607,6 +608,13 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
   } else if (judgeVerdict?.confidence === 'low') {
     // Not "stop" — "here is what you are missing, go and get it".
     volatile += `\n\nProgress check: ${judgeVerdict.reasoning}\nThat is what is still missing — go and read it. Do not write a final answer yet.`;
+  }
+
+  // What the corpus knows about THIS prompt. In the volatile block, never the prefix: it changes
+  // every turn by definition, and the system message must stay byte-identical for the KV cache.
+  const corpus = pendingCorpus();
+  if (corpus) {
+    volatile += `\n\n<corpus>\n${corpus}\n</corpus>`;
   }
 
   // CTA tracking — remind the model of its deliverable if overdue

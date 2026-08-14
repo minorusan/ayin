@@ -1957,7 +1957,26 @@ bounding-box chunk while sharing almost no words with it. If nothing is embedded
 down, `corpus_search` silently falls back to the keyword path — the header says `[semantic]` or
 `[keyword]` so which one answered is never a guess.
 
-**Phase 3** injects retrieved chunks at named prompt sites. **Phase 3** injects retrieved
+#### Phase 3 — the prompt sites
+
+| | |
+|---|---|
+| **first prompt of a session** | automatic — it states the task, which is the one moment a prompt is reliably worth embedding |
+| `/embed` · `/embed off` | every prompt this session |
+| `/embedthis <question>` | one prompt only |
+
+A prompt is a much worse retrieval key than a file path: a large share of turns are `continue`,
+`yes`, `now the other one`, and embedding those returns noise with a confident score. The operator
+knows their intent; a cosine value guesses at it — so this is opt-in, with the first prompt as the
+exception. Prompts under three words are skipped outright.
+
+The block rides in the **volatile per-turn message** inside `<corpus>`, never the system prefix: it
+changes every turn by definition, and the prefix must stay byte-identical for the KV cache. Lifetime
+is the TURN — set before the loop, cleared after — so it survives every round (where the plan forms)
+without pinning one turn's lookup into the next, where the task has usually moved on.
+
+Shape follows `/plan` and `/qa` (bare toggle, `…this` one-shot) rather than inventing a third
+convention for the same idea. **Phase 3** injects retrieved
 chunks at named prompt sites. Neither is designed yet — Phase 1's chunks get read and judged by hand
 first, because a RAG is worth exactly what its chunks are worth.
 

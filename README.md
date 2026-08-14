@@ -603,6 +603,9 @@ code has changed since is labelled — `[corpus · STALE] answered 2026-08-14 on
 +12 −3 since` — because a stale note presented as current is worse than no note at all. `/corpus off`
 turns injection off.
 
+The first prompt of a session is looked up in the corpus automatically; `/embed` does it for every
+prompt, `/embedthis <question>` for one.
+
 ## Repo watcher — automatic post-commit code review
 
 ```bash
