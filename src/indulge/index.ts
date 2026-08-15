@@ -336,6 +336,15 @@ export async function runIndulge(argv: string[]): Promise<number> {
     // Chunks land from the first batch, an interrupted run leaves a corpus that already retrieves,
     // and the answer budget stops the whole loop instead of only its last stage.
     const BATCH = 12;
+    const runStart = Date.now();
+
+    /** `4h 12m` / `38m` / `45s` — the shortest form that is still unambiguous. */
+    const dur = (ms: number): string => {
+      const sec = Math.max(0, Math.round(ms / 1000));
+      if (sec < 90) return `${sec}s`;
+      const min = Math.round(sec / 60);
+      return min < 90 ? `${min}m` : `${Math.floor(min / 60)}h ${min % 60}m`;
+    };
     const depthByPath = new Map<string, number>();
     for (const f of store.files()) {
       const prev = depthByPath.get(f.path);
@@ -354,7 +363,9 @@ export async function runIndulge(argv: string[]): Promise<number> {
       const batch = ordered.slice(i, i + BATCH);
       const qr = await generateQuestions({
         store, repoPath, categories: args.categories, only: batch, onStatus: status, shouldStop,
-        onProgress: (done, total, current) => progress('questions', i + done, ordered.length, current),
+        // File position, NOT the inner step: `--status` renders done/total as files and derives its
+        // ETA from them, so mixing units there reported nonsense like 405/351.
+        onProgress: (_done, _total, current) => progress('questions', i, ordered.length, current),
       });
       q.generated += qr.generated; q.duplicates += qr.duplicates; q.skipped += qr.skipped;
       q.calls += qr.calls; q.targets += qr.targets; q.files += qr.files;
@@ -363,7 +374,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
       const ar = await answerQuestions({
         store, repoPath, only: batch, limit: Number.isFinite(budget) ? budget : undefined,
         deep: args.deep, onStatus: status, shouldStop,
-        onProgress: (done, total, current) => progress('answer', i + done, ordered.length, current),
+        onProgress: (done, total, current) => progress('answer', i, ordered.length, `${current} · ${done}/${total} in batch`),
       });
       a.attempted += ar.attempted; a.answered += ar.answered; a.failed += ar.failed;
       a.skipped += ar.skipped; a.rejectedCitations += ar.rejectedCitations;
@@ -371,10 +382,25 @@ export async function runIndulge(argv: string[]): Promise<number> {
       if (ar.stopped) { a.stopped = true; break; }
 
       // One line per batch, so a long run is legible while it runs rather than only at the end.
-      out(`  [${Math.min(i + BATCH, ordered.length)}/${ordered.length}] depth ${depthByPath.get(batch[0]) ?? '?'}`
+      // ETA against whichever limit BINDS FIRST — the answer budget or the file list. Reporting only
+      // one of them is how a run that was about to stop at file 35 of 351 looked like it had hours
+      // to go, and a progress line nobody can act on is the same as no progress line.
+      const filesDone = Math.min(i + BATCH, ordered.length);
+      const elapsed = Date.now() - runStart;
+      const perAnswer = a.answered > 0 ? elapsed / a.answered : 0;
+      const perFile = filesDone > 0 ? elapsed / filesDone : 0;
+      const byBudget = Number.isFinite(budget) && perAnswer > 0 ? budget * perAnswer : Infinity;
+      const byFiles = perFile > 0 ? (ordered.length - filesDone) * perFile : Infinity;
+      const eta = Math.min(byBudget, byFiles);
+      const bound = byBudget <= byFiles ? 'budget' : 'files';
+
+      out(`  [${filesDone}/${ordered.length}] depth ${depthByPath.get(batch[0]) ?? '?'}`
         + ` · +${qr.generated} question(s) · +${ar.answered} answered`
         + `${ar.failed ? ` · ${ar.failed} unproven` : ''}`
-        + `${Number.isFinite(budget) ? ` · ${Math.max(0, budget)} of budget left` : ''}`);
+        + `${Number.isFinite(budget) ? ` · ${Math.max(0, budget)} budget left` : ''}`
+        + ` · ${dur(elapsed)} elapsed`
+        + `${Number.isFinite(eta) ? ` · ~${dur(eta)} left (${bound})` : ''}`
+        + `${a.answered > 0 ? ` · ${(a.answered / (elapsed / 60000)).toFixed(1)}/min` : ''}`);
     }
 
     recordTool('indulge:questions', args.categories?.join(',') ?? 'all', JSON.stringify(q));
