@@ -724,7 +724,11 @@ export class IndulgeStore {
   totals(): Totals {
     const qs = this.questions();
     return {
-      files: this.files().length,
+      // UNIQUE PATHS, not rows. `files()` carries one row per (path, domain), so a file surfaced by
+      // two domains counted twice — `--status` said 454 files while the run's own loop said 351, for
+      // the same corpus, in the same tool. Two numbers for one thing is how a reader stops trusting
+      // either.
+      files: new Set(this.files().map((f) => f.path)).size,
       questions: qs.length,
       pending: qs.filter((q) => q.status === 'pending').length,
       answered: qs.filter((q) => q.status === 'answered').length,
