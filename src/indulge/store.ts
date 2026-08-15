@@ -140,6 +140,15 @@ export interface Chunk {
    */
   branch?: string;
   commit?: string;
+  /**
+   * Project-type facts, namespaced by the indulger that produced them (`ext.unity`, `ext.arduino`).
+   *
+   * Namespaced rather than flat because two packs will both want `references` and neither will know
+   * the other took it. The CORE above is required and validated; this bag is open on purpose — a
+   * Unity repo knows things about itself that no generic parser will ever derive, and baking those
+   * into the core would make the core a liar about every other project type.
+   */
+  ext?: Record<string, Record<string, unknown>>;
 }
 
 export interface RunRecord {

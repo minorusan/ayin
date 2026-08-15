@@ -37,6 +37,7 @@ import { exploreExecute } from '../tools/explore.js';
 import { toolLlm, toolPrompts, type ToolPrompts } from '../tools/runtime.js';
 import { ensureToolRuntime } from '../tool-wiring.js';
 import { resolveInRepo } from './discover.js';
+import { indulgersFor } from './hooks/registry.js';
 import { blobSha, chunkId, type Chunk, type Citation, type IndulgeStore, type QuestionRecord } from './store.js';
 
 // Drives the model and a tool directly, so it wires the runtime itself rather than trusting import
@@ -378,6 +379,17 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
       createdAt: new Date().toISOString(),
       sourceSha,
     };
+    // Project-type facts, computed here because THIS is the overnight job. An indulger that throws
+    // must cost its own facts, never the chunk that was already proved.
+    for (const ind of indulgersFor(repoPath)) {
+      try {
+        const facts = ind.onChunkCreated(chunk, { repoPath, file: q.file, source: '' });
+        if (facts) (chunk.ext ??= {})[ind.id] = facts;
+      } catch (err) {
+        onStatus?.(`indulger ${ind.id} failed on ${q.file}: ${String(err).slice(0, 100)}`);
+      }
+    }
+
     store.saveChunk(chunk);
     report.answered++;
     onStatus?.(`${q.file} · ${q.category} → ${built.citations.length} verified citation(s)`);

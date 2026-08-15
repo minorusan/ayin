@@ -3,7 +3,8 @@ import { READ_MAX_LINES, resolveAgainstCwd, suggestSimilarPaths } from '../lib.j
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, extname, join, relative, sep } from 'node:path';
 import { addPendingImage, isImagePath, preprocessImage } from '../../image.js';
-import { corpusBlockFor } from '../../indulge/inject.js';
+import { corpusBlockFor, chunksForFile } from '../../indulge/inject.js';
+import { attributeFile } from '../../indulge/attribution.js';
 
 export const tool: Tool = {
     name: 'read_file',
@@ -66,12 +67,20 @@ export const tool: Tool = {
       // Chunks are keyed by REPO-RELATIVE path; this tool takes an absolute one, so the lookup has
       // to be translated or it silently never matches.
       let corpus = '';
+      let attribution = '';
       try {
         const rel = relative(process.cwd(), resolved).split(sep).join('/');
         if (rel && !rel.startsWith('..')) {
           corpus = corpusBlockFor(process.cwd(), rel, { startLine: off + 1, endLine: lastShown }) ?? '';
+          // WHAT this file is, stated where the mistake happens. Plus the corpus count — a flat int
+          // the operator reads to decide whether this file deserves another indulge run. Shown even
+          // when zero: silence and "not covered" must not look the same.
+          attribution = attributeFile({
+            tool: 'read_file', repoPath: process.cwd(), file: rel,
+            source: lines.join('\n'), chunks: chunksForFile(process.cwd(), rel),
+          });
         }
-      } catch { corpus = ''; }
-      return `${header}${numbered}${footer}${corpus}`;
+      } catch { /* attribution never breaks the read it annotates */ }
+      return `${attribution}${header}${numbered}${footer}${corpus}`;
     },
   };

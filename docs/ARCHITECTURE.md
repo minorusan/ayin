@@ -1679,7 +1679,11 @@ its effective text, call sites, size and variable drift. The lesson that produce
 tightening the prose of `planGrounding.txt` saved ~800 characters; retrieving instead of dumping the
 `{{CATALOG}}` it wrapped saved ~8,100.
 
-## Retrieval
+## Retrieval — see [`INDULGE.md`](INDULGE.md)
+
+> **[`docs/INDULGE.md`](INDULGE.md) is the source of truth for the corpus** — its guarantees, the
+> coarse-to-fine retrieval order, staleness, portability, and the two project-type hooks. This
+> section is a summary; that document is the argument for why ayin is not a harness around a model.
 
 **Nothing is retrieved yet.** ayin still finds code the agentic way — `grep`, `find_files`,
 `read_file` and `explore`. The earlier retrieval surfaces (a grounded Q&A corpus generator,
@@ -1763,6 +1767,8 @@ Duplicate-checking is O(1) per append against an in-process id cache seeded from
 micro-optimisation: re-parsing the JSONL per append is quadratic, and measured at 175ms for 500
 questions but 51s for 8000 — a repo whose files × entities × 5 categories reach five figures would
 have spent the night on bookkeeping instead of answers.
+
+> Full rationale in [`INDULGE.md`](INDULGE.md).
 
 #### Stage 1 — discovery (`discover.ts`)
 

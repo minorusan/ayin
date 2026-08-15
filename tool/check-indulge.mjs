@@ -406,6 +406,70 @@ gs3.endRun('g3');
   ds.endRun('d');
 }
 
+// ── attribution + indulge hooks: project-type knowledge ─────────────────────────
+// Built after the agent decided a .cs file was a ScriptableObject. Not an instruction failure — it
+// pattern-matched a NAME that reads like a data asset and never checked the declaration. A sentence
+// in a preamble 40k tokens earlier does not reach that moment; a fact in the middle of the read does.
+{
+  const AT = await import(join(ROOT, 'dist/indulge/attribution.js'));
+  const UA = await import(join(ROOT, 'dist/indulge/attributors/unity.js'));
+  const UI = await import(join(ROOT, 'dist/indulge/indulgers/unity.js'));
+
+  const UP = join(TMP, 'unity-proj');
+  const wp = (rel2, body) => { mkdirSync(join(UP, dirname(rel2)), { recursive: true }); writeFileSync(join(UP, rel2), body); };
+  wp('ProjectSettings/ProjectVersion.txt', 'm_EditorVersion: 2022.3.0f1\n');
+  wp('Assets/Scripts/DynamicInAppOperation.cs', 'public class DynamicInAppOperation\n{\n  public string Sku;\n}\n');
+  wp('Assets/Scripts/DynamicInAppOperation.cs.meta', 'guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n');
+  wp('Assets/Scripts/RewardConfig.cs', 'using UnityEngine;\npublic class RewardConfig : ScriptableObject { }\n');
+  wp('Assets/Scripts/RewardConfig.cs.meta', 'guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n');
+  wp('Assets/Prefabs/R1.asset', 'm_Script: {guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}\n');
+  wp('Assets/Prefabs/R2.asset', 'm_Script: {guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}\n');
+
+  ok(UA.isUnityProject(UP) === true, 'a Unity project is detected by its own marker file');
+  ok(UA.isUnityProject(join(TMP, 'repo')) === false, 'a non-Unity repo gets no Unity attribution');
+
+  AT.resetAttributionSession();
+  const plain = AT.attributeFile({
+    tool: 'read_file', repoPath: UP, file: 'Assets/Scripts/DynamicInAppOperation.cs',
+    source: readFileSync(join(UP, 'Assets/Scripts/DynamicInAppOperation.cs'), 'utf-8'), chunks: [],
+  });
+  ok(/not a ScriptableObject/.test(plain),
+    'THE failure: a plain class with a data-sounding name is stated as not a ScriptableObject');
+  ok(/Unity project:/.test(plain), 'the session preamble rides along the first time');
+
+  const second = AT.attributeFile({
+    tool: 'read_file', repoPath: UP, file: 'Assets/Scripts/RewardConfig.cs',
+    source: readFileSync(join(UP, 'Assets/Scripts/RewardConfig.cs'), 'utf-8'), chunks: [],
+  });
+  ok(!/Unity project:/.test(second),
+    'and NEVER again — a preamble repeated per tool result is the thing this replaces');
+  ok(/a ScriptableObject/.test(second), 'a real ScriptableObject is named as one');
+
+  ok(/\[corpus\] 0 chunk/.test(second),
+    'the corpus count is shown even at zero — silence and "not covered" must not look the same');
+
+  ok(UA.baseTypesOf('public class A : B, IC { }', 'A').join(',') === 'B,IC', 'base types parse');
+  ok(UA.primaryTypeOf('class Other {}\nclass RewardConfig {}', 'x/RewardConfig.cs').name === 'RewardConfig',
+    'the type matching the FILE NAME wins — Unity requires them to match');
+
+  // the overnight half: GUID references are exact, never inferred
+  UI.clearAssetCache(); UI.clearIndulgerMemo();
+  const facts = UI.unityIndulger.onChunkCreated({}, { repoPath: UP, file: 'Assets/Scripts/RewardConfig.cs', source: '' });
+  ok(facts.referencedByTotal === 2 && facts.referencedBy.length === 2,
+    'GUID references are found exactly — a guid is present or it is not', JSON.stringify(facts.referencedBy));
+  ok(typeof facts.asOf === 'string',
+    'and stamped: a count taken tonight says nothing about a prefab added tomorrow');
+  ok(UI.unityIndulger.onChunkCreated({}, { repoPath: UP, file: 'x.ts', source: '' }) === null,
+    'a non-C# file gets no Unity facts');
+
+  // a broken pack costs its own output and nothing else
+  const R = await import(join(ROOT, 'dist/indulge/hooks/registry.js'));
+  R.setHooksForTest([{ id: 'boom', applies: () => true, attribute: () => { throw new Error('x'); } }], []);
+  const survived = AT.attributeFile({ tool: 'read_file', repoPath: UP, file: 'a.cs', source: '', chunks: [] });
+  ok(/\[corpus\]/.test(survived), 'a throwing attributor does not break the tool it annotates');
+  R.setHooksForTest([UA.unityAttributor], [UI.unityIndulger]);
+}
+
 // ── stage 2: generation bookkeeping — resume, caps and dedup, without a GPU ──────
 // These are the parts that decide whether a night's work is lost or repeated, and none of them
 // should need a model to prove. The `ask` seam exists for exactly this.
