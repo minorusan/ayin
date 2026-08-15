@@ -62,24 +62,6 @@ const NO_MODEL_NEEDED = new Set([
  */
 const ONBOARDED_KEY = 'onboardedAt';
 
-/**
- * The PREVIOUS name for the endpoint variable, deliberately not read any more.
- *
- * It was renamed because a line in a shell profile — written months earlier, for a machine that was not
- * this one — silently satisfied the setup gate, so ayin skipped the one moment where it explains itself
- * and dropped a brand-new install straight into the TUI. Honouring the old name "for compatibility" would
- * reproduce exactly that. It is reported instead, once, so nothing is mysterious: the variable is
- * visibly ignored rather than invisibly obeyed.
- */
-const LEGACY_URL_VAR = 'AYIN_LLM_URL';
-
-function legacyVarNotice(): string {
-  const legacy = (process.env[LEGACY_URL_VAR] ?? '').trim();
-  if (!legacy || (process.env.AYIN_MODEL_URL ?? '').trim()) return '';
-  return `\n  note: ${LEGACY_URL_VAR} is set but NO LONGER READ — the variable is AYIN_MODEL_URL now.\n`
-    + `        Update your shell profile, or choose an endpoint below and ayin will remember it.\n`;
-}
-
 function isOnboarded(): boolean {
   return Boolean(getConfigString(ONBOARDED_KEY));
 }
@@ -383,8 +365,6 @@ export async function preflight(): Promise<void> {
     // the operator is about to read may be describing code that is not running.
     const stale = staleBuildWarning();
     if (stale) process.stderr.write(stale);
-    const legacy = legacyVarNotice();
-    if (legacy) process.stderr.write(legacy);
 
     if (NO_MODEL_NEEDED.has(process.argv[2] ?? '')) return;
 

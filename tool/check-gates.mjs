@@ -286,8 +286,13 @@ console.log('\nayin refuses to start without a model');
   // into the TUI having explained nothing.
   ok(/if \(onboarded && state\.ok\) return;/.test(pf),
     'the gate returns only when a model ANSWERS *and* onboarding was completed once');
-  ok(/const LEGACY_URL_VAR = 'AYIN_LLM_URL'/.test(pf) && !/process\.env\[LEGACY_URL_VAR\][\s\S]{0,80}return \{/.test(pf),
-    'the old endpoint variable is reported, never honoured — honouring it would recreate the bug');
+  // The load-bearing half is that AYIN_LLM_URL is never READ. It was also announced on every start,
+  // which the operator vetoed as noise — it fired on `--status` and every other invocation, forever,
+  // for a variable in a shell profile. Announcing it was never the safety property; not honouring it
+  // is, because honouring it silently is what let a stale profile line skip first-run setup.
+  ok(!/AYIN_LLM_URL/.test(pf),
+    'the old endpoint variable is not read ANYWHERE in the gate — honouring it would recreate the bug');
+  ok(/AYIN_MODEL_URL/.test(pf), 'and the current variable is the one consulted');
   ok(/markOnboarded\(/.test(pf) && (pf.match(/markOnboarded\(/g) || []).length >= 5,
     'every path that settles on a model records that onboarding happened', String((pf.match(/markOnboarded\(/g) || []).length));
   ok(/const p = await probeEndpoint\(endpoint\)/.test(pf) && /const p = await probeOllama\(url\)/.test(pf),

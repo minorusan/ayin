@@ -24,15 +24,29 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getConfigString } from '../prompts.js';
+import { llmBaseUrl } from '../connection.js';
 import { domainsOf } from './inject.js';
 import type { Chunk, IndulgeStore } from './store.js';
 
 const DEFAULT_MODEL = 'nomic-embed-text';
 
 /** Same endpoint the ollama provider uses — one place to point at a model server, not two. */
+/**
+ * Where embeddings are asked for — the SAME endpoint everything else uses, not the model port.
+ *
+ * This used to fall back to `127.0.0.1:11434`, reaching around whatever serves the model to poke
+ * Ollama's own port directly. On a machine that talks to a remote endpoint there is nothing on that
+ * port, so `--embed` failed with `fetch failed` while generation had been working all night — and
+ * the failure was the design working, not a misconfiguration to fix by pointing it somewhere.
+ *
+ * For a plain Ollama install this changes nothing: the configured endpoint IS Ollama, and Ollama
+ * serves `/api/embeddings`. For a gateway it means embeddings queue and get attributed like every
+ * other call instead of jumping the queue. `AYIN_EMBED_URL` stays as the escape hatch for a separate
+ * embedding server.
+ */
 function embedUrl(): string {
-  const url = process.env.AYIN_EMBED_URL || process.env.AYIN_OLLAMA_URL || getConfigString('ollamaUrl');
-  return (url || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+  const url = process.env.AYIN_EMBED_URL || llmBaseUrl();
+  return url.replace(/\/+$/, '');
 }
 
 export function embedModel(): string {
