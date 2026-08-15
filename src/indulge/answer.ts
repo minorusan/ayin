@@ -66,6 +66,8 @@ const MAX_CONTEXT_CHARS = 50_000;
 const MAX_NEIGHBOURS = 6;
 
 export interface AnswerOptions {
+  /** Only questions about these files. The interleaved runner answers a batch as soon as it exists. */
+  only?: string[];
   store: IndulgeStore;
   repoPath: string;
   /**
@@ -320,7 +322,8 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
     const prev = depthOf.get(f.path);
     if (prev === undefined || f.depth < prev) depthOf.set(f.path, f.depth);
   }
-  const pending = store.pendingQuestions().sort((a, b) => {
+  const only = opts.only ? new Set(opts.only) : null;
+  const pending = store.pendingQuestions().filter((q) => !only || only.has(q.file)).sort((a, b) => {
     const d = (depthOf.get(a.file) ?? 99) - (depthOf.get(b.file) ?? 99);
     return d !== 0 ? d : a.file.localeCompare(b.file);
   });

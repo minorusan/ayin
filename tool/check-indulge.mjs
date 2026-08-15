@@ -998,6 +998,65 @@ rmSync(TMP, { recursive: true, force: true });
     tight.map((e) => e.kind).join(','));
 }
 
+// ── generation is ONE call per (file, category), not per (entity, category) ──────
+//
+// The old shape asked once per TARGET per category and carried the whole source file in every one.
+// A real run printed `1139 file(s) -> up to 5802 generation calls`: the same file re-sent up to
+// twenty-six times for twenty-six short questions, ten hours of GPU, and — because generation was a
+// hard barrier before answering — ZERO chunks to show for it. It also scaled on target count, which
+// the C# extractor fix had just multiplied sixfold.
+{
+  const dir = mkdtempSync(join(tmpdir(), 'ayin-batch-'));
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'Thing.cs'), [
+    'public class Thing', '{', '    public void A() { }', '    public void B() { }',
+    '    public int C { get; }', '}',
+  ].join('\n'));
+  const st = S.openStore(dir);
+  st.addFile({ path: 'src/Thing.cs', domain: 'd', depth: 0, why: 'seed' });
+
+  let calls = 0;
+  const seen = [];
+  const ask = async (p) => {
+    calls++; seen.push(p);
+    return JSON.stringify({ questions: [
+      { target: 'class Thing', q: ['What invariant does Thing hold across A and B?'] },
+      { target: 'method Thing.A', q: ['What must be true before A() may run twice?'] },
+    ] });
+  };
+  const r = await Q.generateQuestions({ store: st, repoPath: dir, categories: ['gotchas', 'connections'], ask });
+  ok(calls === 2,
+    'two categories over a multi-target file cost TWO calls, not one per target per category',
+    `${calls} call(s) for ${r.targets} target-slots`);
+  ok(r.generated >= 2, 'the batched JSON reply yields questions for several targets', String(r.generated));
+  ok(seen[0].includes('- class Thing') && seen[0].includes('- method Thing.A'),
+    'every target is listed in ONE prompt, so the source is sent once per category');
+
+  // Empty answers must be remembered, or they are re-asked at full file cost forever.
+  const before = calls;
+  const r2 = await Q.generateQuestions({ store: st, repoPath: dir, categories: ['gotchas', 'connections'], ask });
+  ok(calls === before && r2.calls === 0,
+    'a resumed batch asks NOTHING — including targets the model had nothing to say about',
+    `${calls - before} extra call(s)`);
+  ok(st.askedKeys().size >= 3,
+    'the asked-set is persisted, so "considered and produced nothing" survives a restart',
+    String(st.askedKeys().size));
+
+  // A model that ignores the JSON contract must not cost a file's questions.
+  const st2 = S.openStore(mkdtempSync(join(tmpdir(), 'ayin-batch2-')));
+  writeFileSync(join(dir, 'src', 'Thing.cs'), 'public class Thing\n{\n    public void A() { }\n}');
+  st2.addFile({ path: 'src/Thing.cs', domain: 'd', depth: 0, why: 'seed' });
+  const loose = await Q.generateQuestions({
+    store: st2, repoPath: dir, categories: ['gotchas'],
+    ask: async () => '- What ordering does A() assume?\n- What breaks if A() runs twice?\n',
+  });
+  ok(loose.generated > 0,
+    'a plain-text reply still yields questions — a JSON contract with a local model is a hint, not a guarantee',
+    String(loose.generated));
+
+  rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 

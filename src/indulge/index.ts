@@ -321,25 +321,67 @@ export async function runIndulge(argv: string[]): Promise<number> {
       return 0;
     }
 
-    // ── stage 2 ────────────────────────────────────────────────────────────────
-    out();
-    out('[questions]');
-    const q = await generateQuestions({
-      store, repoPath, categories: args.categories, onStatus: status, shouldStop,
-      onProgress: (done, total, current) => progress('questions', done, total, current),
-    });
-    recordTool('indulge:questions', args.categories?.join(',') ?? 'all', JSON.stringify(q));
-    out(`  ${q.generated} new question(s)` +
-      `${q.duplicates ? `, ${q.duplicates} already known` : ''}${q.skipped ? `, ${q.skipped} skipped (already generated)` : ''}`);
+    // ── stages 2 + 3, INTERLEAVED ──────────────────────────────────────────────
+    //
+    // These used to be two barriers: generate every question for every file, THEN answer. Measured
+    // on a real run — 1139 files, 5802 generation calls — that meant TEN HOURS holding the GPU with
+    // ZERO chunks written, because not one answer had been reached. Stopping produced nothing usable
+    // and `--max-questions` bounded only the tail, so the cap did not shorten the run at all.
+    //
+    // Resumability was never the problem: every question was on disk. INCREMENTAL VALUE was. A run
+    // that cannot be stopped for a usable half is a run that has to be babysat to the end.
+    //
+    // So: files in DEPTH ORDER (seeds first — that ordering is why a capped run describes the thing
+    // asked about rather than its neighbours), a batch at a time, generate then answer then move on.
+    // Chunks land from the first batch, an interrupted run leaves a corpus that already retrieves,
+    // and the answer budget stops the whole loop instead of only its last stage.
+    const BATCH = 12;
+    const depthByPath = new Map<string, number>();
+    for (const f of store.files()) {
+      const prev = depthByPath.get(f.path);
+      if (prev === undefined || f.depth < prev) depthByPath.set(f.path, f.depth);
+    }
+    const ordered = [...depthByPath.keys()].sort((a, b) =>
+      (depthByPath.get(a) ?? 99) - (depthByPath.get(b) ?? 99) || a.localeCompare(b));
 
-    // ── stage 3 ────────────────────────────────────────────────────────────────
     out();
-    out('[answers]');
-    const a = await answerQuestions({
-      store, repoPath, limit: args.maxQuestions, deep: args.deep, onStatus: status, shouldStop,
-      onProgress: (done, total, current) => progress('answer', done, total, current),
-    });
+    out(`[questions + answers]  ${ordered.length} file(s), ${BATCH} at a time, seeds first`);
+    const q = { generated: 0, duplicates: 0, skipped: 0, calls: 0, targets: 0, files: 0, stopped: false };
+    const a = { attempted: 0, answered: 0, failed: 0, skipped: 0, rejectedCitations: 0, stopped: false };
+    let budget = args.maxQuestions ?? Infinity;
+
+    for (let i = 0; i < ordered.length && budget > 0 && !shouldStop(); i += BATCH) {
+      const batch = ordered.slice(i, i + BATCH);
+      const qr = await generateQuestions({
+        store, repoPath, categories: args.categories, only: batch, onStatus: status, shouldStop,
+        onProgress: (done, total, current) => progress('questions', i + done, ordered.length, current),
+      });
+      q.generated += qr.generated; q.duplicates += qr.duplicates; q.skipped += qr.skipped;
+      q.calls += qr.calls; q.targets += qr.targets; q.files += qr.files;
+      if (qr.stopped) { q.stopped = true; break; }
+
+      const ar = await answerQuestions({
+        store, repoPath, only: batch, limit: Number.isFinite(budget) ? budget : undefined,
+        deep: args.deep, onStatus: status, shouldStop,
+        onProgress: (done, total, current) => progress('answer', i + done, ordered.length, current),
+      });
+      a.attempted += ar.attempted; a.answered += ar.answered; a.failed += ar.failed;
+      a.skipped += ar.skipped; a.rejectedCitations += ar.rejectedCitations;
+      budget -= ar.answered + ar.failed;
+      if (ar.stopped) { a.stopped = true; break; }
+
+      // One line per batch, so a long run is legible while it runs rather than only at the end.
+      out(`  [${Math.min(i + BATCH, ordered.length)}/${ordered.length}] depth ${depthByPath.get(batch[0]) ?? '?'}`
+        + ` · +${qr.generated} question(s) · +${ar.answered} answered`
+        + `${ar.failed ? ` · ${ar.failed} unproven` : ''}`
+        + `${Number.isFinite(budget) ? ` · ${Math.max(0, budget)} of budget left` : ''}`);
+    }
+
+    recordTool('indulge:questions', args.categories?.join(',') ?? 'all', JSON.stringify(q));
     recordTool('indulge:answer', `limit=${args.maxQuestions ?? 'none'}`, JSON.stringify(a));
+    out();
+    out(`  ${q.generated} new question(s)`
+      + `${q.duplicates ? `, ${q.duplicates} already known` : ''}${q.skipped ? `, ${q.skipped} skipped (already generated)` : ''}`);
     out(`  ${a.answered} answered · ${a.failed} unproven (not stored) · ${a.rejectedCitations} citation(s) rejected`);
 
     // ── the deliverable ────────────────────────────────────────────────────────

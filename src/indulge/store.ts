@@ -380,6 +380,7 @@ export class IndulgeStore {
   private readonly manifestFile: string;
   private readonly filesFile: string;
   private readonly questionsFile: string;
+  private readonly askedFile: string;
   private readonly chunksDir: string;
   private readonly progressFile: string;
   private readonly lockFile: string;
@@ -405,6 +406,7 @@ export class IndulgeStore {
     this.manifestFile = join(this.dir, 'manifest.json');
     this.filesFile = join(this.dir, 'files.jsonl');
     this.questionsFile = join(this.dir, 'questions.jsonl');
+    this.askedFile = join(this.dir, 'asked.jsonl');
     this.chunksDir = join(this.dir, 'chunks');
     this.progressFile = join(this.dir, 'progress.json');
     this.lockFile = join(this.dir, 'run.lock');
@@ -508,7 +510,7 @@ export class IndulgeStore {
     for (const r of m.runs) if (r.status === 'running') r.status = 'interrupted';
 
     if (opts.restart) {
-      for (const p of [this.filesFile, this.questionsFile, this.progressFile]) {
+      for (const p of [this.filesFile, this.questionsFile, this.askedFile, this.progressFile]) {
         try { if (existsSync(p)) unlinkSync(p); } catch { /* best effort */ }
       }
       try { rmSync(this.chunksDir, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -595,6 +597,41 @@ export class IndulgeStore {
     known.add(rec.id);
     return true;
   }
+
+  /**
+   * Record that a (file, entity, category) was ASKED — regardless of whether it yielded anything.
+   *
+   * Without this, "considered and produced nothing" is indistinguishable from "never asked", because
+   * the resume set was derived from stored QUESTIONS. A target the model rightly had nothing to say
+   * about was therefore re-asked on every future run, at the cost of the whole file in the prompt,
+   * forever. Deriving resume from questions alone cannot express a legitimate empty answer.
+   *
+   * Kept as its own append-only log rather than folded into questions.jsonl: it is a different fact
+   * with a different lifetime, and a reader of the corpus should not have to filter phantom rows out
+   * of the question list to count questions.
+   */
+  markAsked(file: string, entity: Entity | null, category: Category): void {
+    this.ensure();
+    const key = `${file}|${entity ? `${entity.kind}:${entity.name}` : ''}|${category}`;
+    if (this.askedCache?.has(key)) return;
+    appendFileSync(this.askedFile, JSON.stringify({ file, entity, category, at: now() }) + '\n');
+    this.askedCache?.add(key);
+  }
+
+  /** Every (file, entity, category) already put to the model, as `file|kind:name|category`. */
+  askedKeys(): ReadonlySet<string> {
+    if (!this.askedCache) {
+      this.askedCache = new Set(
+        readJsonl(this.askedFile).map((r) => {
+          const e = r.entity as { kind?: string; name?: string } | null;
+          return `${String(r.file ?? '')}|${e ? `${e.kind}:${e.name}` : ''}|${String(r.category ?? '')}`;
+        }),
+      );
+    }
+    return this.askedCache;
+  }
+
+  private askedCache: Set<string> | null = null;
 
   /** The live id cache, built from disk on first use. Private — callers get a read-only view. */
   private knownIds(): Set<string> {
