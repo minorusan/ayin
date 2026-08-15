@@ -163,6 +163,14 @@ export interface RunRecord {
   questions: number;
   chunks: number;
   failed: number;
+  /**
+   * The `--max-questions` this run was given, when it was given one.
+   *
+   * Recorded so `--status` can report an ETA against the limit that actually BINDS. Without it,
+   * status could only project against the file list and reported ~49h for a run that had about half
+   * an hour of budget left — the third number in this tool to mislead by measuring the wrong thing.
+   */
+  answerBudget?: number;
 }
 
 export interface Manifest {
@@ -504,7 +512,7 @@ export class IndulgeStore {
    * `restart` discards the corpus (files, questions, chunks, progress) but keeps the run history,
    * because "how many times has this been rebuilt, and when" is the audit trail.
    */
-  beginRun(opts: { runId: string; domains: string[]; headSha: string; restart?: boolean }): RunRecord {
+  beginRun(opts: { runId: string; domains: string[]; headSha: string; restart?: boolean; answerBudget?: number }): RunRecord {
     this.acquireLock(opts.runId);
     const m = this.manifest();
     for (const r of m.runs) if (r.status === 'running') r.status = 'interrupted';
@@ -528,6 +536,7 @@ export class IndulgeStore {
       questions: 0,
       chunks: 0,
       failed: 0,
+      answerBudget: opts.answerBudget,
     };
     m.version = STORE_VERSION;
     m.repoKey = this.key;

@@ -118,10 +118,25 @@ function printStatus(repoPath: string): number {
   out(`corpus  ${store.dir}`);
   out(`files ${t.files} · questions ${t.questions} (${t.answered} answered, ${t.failed} failed, ${t.pending} pending) · chunks ${t.chunks}`);
   if (p) {
+    // ETA against whichever limit BINDS FIRST, and say which — the same rule the in-run batch line
+    // follows. Projecting against the FILE list alone reported ~49h for a run with about half an
+    // hour of answer budget left, which is worse than printing nothing: it is a number that invites
+    // a decision, and the decision it invites is wrong.
     const elapsed = Date.now() - Date.parse(p.startedAt);
-    const rate = p.done > 0 ? elapsed / p.done : 0;
-    const eta = rate && p.total > p.done ? ` · eta ~${hhmm(rate * (p.total - p.done))}` : '';
-    out(`stage   ${p.stage} ${p.done}/${p.total}${eta}`);
+    const answered = t.answered + t.failed;
+    const run = store.manifest().runs.find((r) => r.status === 'running');
+    const budgetLeft = run?.answerBudget !== undefined ? Math.max(0, run.answerBudget - answered) : Infinity;
+
+    const perFile = p.done > 0 ? elapsed / p.done : 0;
+    const perAnswer = answered > 0 ? elapsed / answered : 0;
+    const byFiles = perFile && p.total > p.done ? perFile * (p.total - p.done) : Infinity;
+    const byBudget = perAnswer && Number.isFinite(budgetLeft) ? perAnswer * budgetLeft : Infinity;
+    const eta = Math.min(byFiles, byBudget);
+    const bound = byBudget <= byFiles ? 'budget' : 'files';
+
+    out(`stage   ${p.stage} ${p.done}/${p.total}`
+      + `${Number.isFinite(eta) ? ` · eta ~${hhmm(eta)} (${bound})` : ''}`
+      + `${Number.isFinite(budgetLeft) ? ` · ${budgetLeft} of budget left` : ''}`);
     out(`current ${p.current}`);
   }
   if (holder) {
@@ -257,7 +272,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
   const runId = `run-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   const headSha = '';
   try {
-    store.beginRun({ runId, domains: args.domains, headSha, restart: args.restart });
+    store.beginRun({ runId, domains: args.domains, headSha, restart: args.restart, answerBudget: args.maxQuestions });
   } catch (err) {
     if (err instanceof StoreLockedError) {
       out(String(err.message));
