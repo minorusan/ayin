@@ -101,6 +101,21 @@ export const csharp: SurfaceLanguage = {
     let current: DeclaredType | null = null;
     let depth = 0;
     let typeDepth = -1;
+    // Has the type's BODY actually opened yet? Load-bearing for Allman brace style, which is the
+    // Microsoft/Unity standard and what real C# looks like:
+    //
+    //     public class Foo          <- DECL seen here, depth is still 1
+    //     {                         <- the brace is on the NEXT line
+    //         public void Bar()     <- members live at depth 2
+    //
+    // `typeDepth` is recorded at the DECL line, before that brace is counted. Without this flag the
+    // end-of-type check (`depth <= typeDepth`) fires on the declaration line ITSELF and clears
+    // `current` immediately, so every member is skipped — silently, with no error and a plausible
+    // result: the type is still reported, just with an empty member list. Measured on a real project:
+    // `GameFlowManager` yielded the file and the class and NOTHING else, and a struct with eight
+    // public fields produced two targets. K&R style (`class Foo {`) happened to work, which is why
+    // this survived.
+    let entered = false;
     for (const raw of source.split('\n')) {
       const line = raw.replace(/\/\/.*$/, '');
       const decl = DECL.exec(line);
@@ -109,6 +124,17 @@ export const csharp: SurfaceLanguage = {
         current = { name: decl.groups.name, kind, members: [] };
         types.push(current);
         typeDepth = depth;
+        entered = false;
+      } else if (current && depth === typeDepth + 1 && current.kind === 'enum') {
+        // Enum members BEFORE the general member rule, not after it. `Klondike,` is a bare
+        // identifier: MEMBER needs `<type> <name> <tail>` and cannot match it, so the enum branch
+        // being an `else if` after MEMBER made it unreachable for any enum whose body opens on its
+        // own line — every enum in a real project. `RewardType.cs`, whose values decide a live
+        // ticket, therefore had no surface at all and indulged to zero questions.
+        const name = line.trim().replace(/[,=].*$/, '').trim();
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+          current.members.push({ name, kind: 'field', visibility: 'public', sig: line.trim() });
+        }
       } else if (current && depth === typeDepth + 1) {
         const m = MEMBER.exec(line);
         if (m?.groups && m.groups.name !== current.name) {
@@ -121,13 +147,10 @@ export const csharp: SurfaceLanguage = {
           const vis: Visibility = current.kind === 'interface' ? 'public' : visibility(m.groups.vis);
           current.members.push({ name: m.groups.name, kind, visibility: vis, sig: line.trim() });
         }
-      } else if (current && /^\s*[A-Z][A-Za-z0-9_]*\s*(,|=|$)/.test(line) && current.kind === 'enum') {
-        // enum members carry no visibility keyword; they are the enum's public surface
-        const name = line.trim().replace(/[,=].*$/, '').trim();
-        if (name) current.members.push({ name, kind: 'field', visibility: 'public' });
       }
       depth += (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length;
-      if (current && depth <= typeDepth) { current = null; typeDepth = -1; }
+      if (current && depth > typeDepth) entered = true;
+      if (current && entered && depth <= typeDepth) { current = null; typeDepth = -1; entered = false; }
     }
     return types;
   },

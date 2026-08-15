@@ -920,6 +920,84 @@ INJ.clearPendingCorpus();
 ok(INJ.pendingCorpus() === null, 'clearing at turn end keeps one turn\'s lookup out of the next');
 
 rmSync(TMP, { recursive: true, force: true });
+// ── C# surface: the brace style that silently emptied every member list ──────────
+//
+// Allman braces are the Microsoft/Unity standard and what real C# looks like. `surfaceOf` recorded
+// `typeDepth` at the DECLARATION line — before the body's brace, which sits on the NEXT line — so the
+// end-of-type check fired on the declaration itself and cleared the current type immediately. Every
+// member was dropped, with no error and a perfectly plausible result: the type still reported, just
+// with an empty member list. Measured on a real project: a 700-line manager yielded the file and the
+// class and nothing else; a struct with eight public fields produced two targets; every enum produced
+// none, including the one whose values decide a live ticket.
+{
+  const cs = (await import(join(ROOT, 'dist/entangle/languages/csharp.js'))).default
+    ?? (await import(join(ROOT, 'dist/entangle/languages/csharp.js'))).csharp;
+  const allman = [
+    'namespace Ninja.Managers',
+    '{',
+    '    public class FlowManager : IFlowManager',
+    '    {',
+    '        private readonly int _hidden;',
+    '        public int Score { get; set; }',
+    '        public void Start(int seed) { }',
+    '        public readonly string RoomId;',
+    '    }',
+    '',
+    '    public enum DeckKind',
+    '    {',
+    '        Bottom,',
+    '        Ace = 3,',
+    '    }',
+    '}',
+  ].join('\n');
+  const types = cs.surfaceOf(allman);
+  const flow = types.find((t) => t.name === 'FlowManager');
+  ok(!!flow, 'the Allman-braced type is found');
+  const names = (flow?.members ?? []).map((m) => m.name);
+  ok(names.includes('Start'), 'a METHOD inside an Allman-braced type is extracted', names.join(','));
+  ok(names.includes('Score'), 'a PROPERTY is extracted');
+  ok(names.includes('RoomId'), 'a public FIELD is extracted');
+  // surfaceOf reports every member WITH its visibility; filtering to public is the consumer's job
+  // (targetsFor does it). entangle needs the private ones, so dropping them here would break it.
+  ok((flow?.members ?? []).find((m) => m.name === '_hidden')?.visibility === 'private',
+    'a private field is reported as private rather than omitted — the consumer filters, not the parser');
+
+  const deck = types.find((t) => t.name === 'DeckKind');
+  ok((deck?.members ?? []).map((m) => m.name).join(',') === 'Bottom,Ace',
+    'ENUM members are extracted — the enum rule must be checked BEFORE the general member rule, which cannot match a bare identifier',
+    (deck?.members ?? []).map((m) => m.name).join(','));
+
+  // K&R must keep working — it is the style that accidentally worked before.
+  const knr = 'public class Foo {\n    public void Bar() { }\n}';
+  ok((cs.surfaceOf(knr)[0]?.members ?? []).some((m) => m.name === 'Bar'),
+    'K&R braces still extract members');
+}
+
+// ── targetsFor: behaviour before data, and fields are surface ────────────────────
+{
+  const { targetsFor } = await import(join(ROOT, 'dist/indulge/questions.js'));
+  const src = [
+    'public class Thing',
+    '{',
+    '    public string Name;',
+    '    public int Id;',
+    '    public void Act() { }',
+    '    public bool Ready { get; }',
+    '}',
+  ].join('\n');
+  const t = targetsFor('Thing.cs', src, 12).filter(Boolean);
+  const kinds = t.map((e) => e.kind);
+  ok(kinds.includes('field'),
+    'public FIELDS are asked about — a readonly struct IS its fields, and an enum is nothing else');
+  ok(kinds.indexOf('method') < kinds.indexOf('field'),
+    'behaviour outranks data: with a small entity budget, whatever sorts first is all that gets asked',
+    kinds.join(','));
+  const tight = targetsFor('Thing.cs', src, 2).filter(Boolean);
+  ok(tight.length <= 3 && tight.some((e) => e.kind === 'method'),
+    'a tight budget spends itself on the method, not on the first field in source order',
+    tight.map((e) => e.kind).join(','));
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 

@@ -54,7 +54,7 @@ export const CATEGORIES: Category[] = ['git', 'dependencies', 'connections', 'fu
 
 /** A named thing inside a file. `kind: 'file'` means the question is about the file as a whole. */
 export interface Entity {
-  kind: 'file' | 'class' | 'method' | 'property' | 'function' | 'type';
+  kind: 'file' | 'class' | 'method' | 'property' | 'field' | 'function' | 'type';
   name: string;
   file: string;
 }

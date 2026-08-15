@@ -86,14 +86,27 @@ export function targetsFor(file: string, source: string, maxEntities: number): A
   if (!lang) return out;
   let declared;
   try { declared = lang.surfaceOf(source); } catch { return out; }
+  // Types first, then their members ranked by KIND rather than by declaration order.
+  //
+  // The budget is small (2 entities at depth 2), so whatever comes first is all that gets asked
+  // about — and source order is alphabetical-by-accident, not importance. Behaviour outranks data:
+  // a method is where a bug lives, a field is what it operates on.
+  //
+  // Public FIELDS are included, where they used to be dropped as "covered by their type's
+  // questions". They are not. A `readonly struct` with eight public fields IS its fields, and an
+  // enum is nothing else — which is why `RewardType.cs`, whose values decide a live ticket, indulged
+  // to zero questions while a test-double file got thirty-six.
+  const RANK: Record<string, number> = { method: 0, property: 1, field: 2 };
   for (const t of declared) {
     if (out.length > maxEntities) break;
     out.push({ kind: t.kind === 'interface' ? 'type' : 'class', name: t.name, file });
-    for (const m of t.members ?? []) {
+    const members = (t.members ?? [])
+      .filter((m) => m.visibility === 'public')     // a private helper is not what tomorrow asks about
+      .filter((m) => m.kind !== 'event')            // an event's contract is its declaring type's
+      .sort((a, b) => (RANK[a.kind] ?? 3) - (RANK[b.kind] ?? 3));
+    for (const m of members) {
       if (out.length > maxEntities) break;
-      if (m.visibility !== 'public') continue; // a private helper is not what tomorrow asks about
-      const kind = m.kind === 'method' ? 'method' : m.kind === 'property' ? 'property' : null;
-      if (!kind) continue; // fields and events are covered by their type's questions
+      const kind = m.kind === 'method' ? 'method' : m.kind === 'property' ? 'property' : 'field';
       out.push({ kind, name: `${t.name}.${m.name}`, file });
     }
   }
