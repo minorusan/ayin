@@ -209,10 +209,14 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
     const budget = budgetFor(path);
     const targets = targetsFor(path, source, budget.entities);
     plan.push({ file: path, source, targets, perTarget: budget.perTarget });
-    total += targets.length * categories.length;
+    // Calls are per (FILE, category) now — targets ride along inside one prompt. Counting slots
+    // here would report `up to 336 generation calls` for twelve files that will cost thirty-six,
+    // and an inflated cost estimate is exactly the number that made the old per-target shape look
+    // like a fact of nature instead of a bug.
+    total += categories.length;
   }
   report.files = plan.length;
-  onStatus?.(`${plan.length} file(s) → up to ${total} generation calls`);
+  onStatus?.(`${plan.length} file(s) × ${categories.length} categor${categories.length === 1 ? 'y' : 'ies'} → up to ${total} generation call(s)`);
 
   let step = 0;
   for (const { file, source, targets, perTarget } of plan) {
