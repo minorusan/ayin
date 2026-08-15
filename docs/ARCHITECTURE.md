@@ -1480,6 +1480,29 @@ the fragment as the whole and reasons confidently from it. So every bound is sta
     separate, much larger project; it does not block this fix, since an investigation that stops
     looping within itself is worth having regardless of what it can remember between calls.
 
+## Commands and tricks are ONE list (`help.ts`)
+
+`src/help.ts` is the single source for every command, key binding, shell subcommand and trick, with
+three consumers: `/help` (all of it, grouped), the typing hint panel (`ui/widgets/hints.ts`, the `/…`
+entries by prefix) and the goal line (one random `tip` per launch).
+
+It exists because there were already three lists — the `case '/…'` labels in `app.ts` that decide
+what *runs*, the hint panel's own array that decides what is *offered*, and a hand-written run of
+`addMessage` calls in `/help` — and nothing kept them in step. `/diff` shipped with no hint entry;
+`!`, the shell passthrough, was in none of them. **A command the operator cannot discover may as well
+not have been built.**
+
+`check:help` asserts the drift in both directions: every `case` has an entry, and every entry is
+actually handled (a documented no-op is worse than an undocumented feature). Aliases and tool-owned
+commands are the two declared exceptions.
+
+**The launch tip.** Before a goal is set, the goal line is dead space, so it carries one tip —
+chosen once per process, in the row a goal will occupy the moment there is one. Stable for the life
+of the run, because that line repaints on every render and a tip that re-rolled mid-sentence would be
+unreadable. It appears on the default `both` view via a fallback: the OBJECTIVE card is empty with no
+goal, and without that fallback the tip would be invisible to everyone who has not set
+`AYIN_GOAL_VIEW`. It never enters the card itself — a tip in a bordered panel is shouting.
+
 ## `/diff` — see [`DIFF.md`](DIFF.md)
 
 `/diff` (and `ayin diff`) renders the working tree — staged, unstaged **and untracked** — as one

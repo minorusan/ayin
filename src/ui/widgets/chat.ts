@@ -13,6 +13,7 @@ import { screen, render } from '../screen.js';
 import { theme } from '../theme.js';
 import { ThinkingIndicator, type AgentState } from './thinking.js';
 import { getGoal, onGoalChange } from '../../goal.js';
+import { launchTip } from '../../help.js';
 
 /**
  * Indentation, in one place so the transcript has a consistent left rhythm.
@@ -107,9 +108,14 @@ export class ChatLog {
    *  is a surrogate pair, so String#length would over-count. */
   private goalLine(): string | null {
     const goal = getGoal();
-    if (!goal) return null;
+    // Before a goal is set the line is dead space, so it carries one tip instead — chosen once per
+    // launch, in the row the goal will occupy the moment there is one. This is the only place a
+    // feature nobody has typed a slash for can introduce itself. Only the LINE does this: a tip in
+    // the objective card or the per-turn watermark would be shouting, not offering.
+    const raw0 = goal ? `Goal: ${goal}` : (() => { const t = launchTip(); return t ? `Tip: ${t}` : ''; })();
+    if (!raw0) return null;
     const maxCols = Math.max(12, Number(screen.width ?? 80) - 3);
-    let raw = `Goal: ${goal}`;
+    let raw = raw0;
     if (raw.length > maxCols) raw = raw.slice(0, maxCols - 1) + '…';
     return ` {${theme.muted}-fg}${escapeBlessedTags(toItalic(raw))}{/}`;
   }
@@ -302,8 +308,14 @@ export class ChatLog {
     const view = this.goalView();
     const indicatorLine = this.indicator.line();
     const tail: string[] = [];
-    if (view === 'card' || view === 'both') tail.push(...this.goalCard());
-    else if (view === 'line') { const l = this.goalLine(); if (l) tail.push(l); }
+    // With no goal yet, the card renders nothing — so the tip line stands in for it under every
+    // view that would have shown a goal. Without this the tip is invisible on the default view,
+    // which is the only view almost anyone runs.
+    if (view === 'card' || view === 'both') {
+      const card = this.goalCard();
+      if (card.length) tail.push(...card);
+      else { const l = this.goalLine(); if (l) tail.push(l); }
+    } else if (view === 'line') { const l = this.goalLine(); if (l) tail.push(l); }
     if (indicatorLine) tail.push(` ${indicatorLine}`);
     if (tail.length) lines.push('', ...tail);
 

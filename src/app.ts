@@ -58,6 +58,7 @@ let embedNextTurn = false;
 /** The FIRST prompt states the task; later ones are refinements. Only the first is automatic. */
 let promptsThisSession = 0;
 import { getGoal, setGoal, clearGoal, refreshGoal } from './goal.js';
+import { SECTIONS, entriesInSection } from './help.js';
 import { runArduinoDiagram, formatArduinoDiagramOutcome } from './tools/arduino-diagram.js';
 import { runExplain, formatExplainOutcome as formatExplainReportOutcome } from './explain/index.js';
 import { readFileSync } from 'node:fs';
@@ -871,44 +872,28 @@ onInput(async (text: string) => {
         resetPromptsToDefaults();
         addMessage('system', 'Prompts restored to defaults ✓');
         return;
-      case '/help':
-        addMessage('system', '/goal <text> — set the session goal (shown in cursive above the chat); /goal clear to unset');
-        addMessage('system', '/model — popup: pick from the models the backend has installed (Enter reloads the GPU with it)');
-        addMessage('system', '/model <name|qwen|gemma> — switch straight away; a non-shared model stays booked until you /quit');
-        addMessage('system', '/lock — hold the model for this session (self-releases 10 min after you stop responding) · /unlock');
-        addMessage('system', '!<command> — runs it in your shell verbatim and shows the output in bold; the model never sees it (Esc cancels)');
-        addMessage('system', '/verbose — full explanations; without it, answers are as short as the question allows · /verbose off');
-        addMessage('system', '/embed — look this session\'s prompts up in the corpus (first prompt is automatic) · /embed off');
-        addMessage('system', '/embedthis <question> — corpus lookup for one prompt only');
-        addMessage('system', '/corpus — what indulge already answered is shown when a file is read (default ON) · /corpus off');
-        addMessage('system', '/logcover — heavy log coverage on every feature built while it is on · /logcover off');
-        addMessage('system', '/diff — working tree (staged + unstaged + untracked) as a reviewable HTML page · /diff <rev> to compare against one');
-        addMessage('system', '/summary — show session summary (Esc to close)');
-        addMessage('system', '/resume — list this directory\'s sessions (newest first) · /resume all for every directory');
-        addMessage('system', '/resume <n>|<id> — restore one by list number or id prefix; new turns append to its record');
-        addMessage('system', '/plan — toggle plan mode for the session (default OFF) · /planthis <text> — force it for one prompt only');
-        addMessage('system', '/qa — toggle the QA gate for the session (default OFF) · /qathis <message> — force it for one reply only');
-        addMessage('system', '/present — toggle the Presenter pass for the session (default OFF) · /presentthis <message> — force it for one reply only');
-        addMessage('system', '/arduino-explain — for an Arduino project in this dir: a validated wiring diagram per sketch (board + component rectangles, PUML+SVG), opened in VS Code');
-        addMessage('system', '/explain <feature> — the story of a feature in plain prose: history/authorship, lifecycle/bugs, composition, how it\'s wired up — grounded in explore + real git history + validated Jira tickets, opened in VS Code. Also runnable headless: ayin explain "<question>"');
-        addMessage('system', '/clear — clear chat');
-        addMessage('system', '/set llm-url <http://host:9100> — point ayin at the LLM endpoint (an adapter, or a backend). Env: AYIN_MODEL_URL');
-        addMessage('system', '/set llm-provider <ollama|direct|resource|auto> — ollama talks to a local runtime directly (tools declared natively); the others expect the HTTP contract (default: auto-detect)');
-        addMessage('system', '/set ollama-model <name> — which model the ollama provider asks for (default: whatever is loaded) · ollama-url, ollama-ctx');
-        // (`/set default-model` was removed in 1.0.210 — ayin no longer picks a model implicitly.)
-        addMessage('system', '/set update-registry <http://host:4873> — where `ayin update` looks (public npm is refused: "ayin" there is someone else)');
-        addMessage('system', '/model <gemma|qwen|auto> — the ADAPTER: how ayin formats tool calls. Its own list; it does not know or change what the endpoint serves');
-        addMessage('system', '/model openai — switch WHO answers to OpenAI (billed per token) · /model local — switch back');
-        addMessage('system', '/disentangle — release a bound design (the agent cannot: it would only switch its own gate off)');
-        addMessage('system', '/reset — restore default prompts');
-        addMessage('system', '/quit — exit');
-        // Tool-owned commands are listed from the registry, not hardcoded here: the registry is a
+      case '/help': {
+        // Rendered from src/help.ts — the ONE list. This block used to be a hand-written run of
+        // addMessage calls, which is how `!` ended up documented nowhere at all.
+        for (const section of SECTIONS) {
+          const entries = entriesInSection(section);
+          if (!entries.length) continue;
+          const width = Math.max(...entries.map((e) => e.name.length));
+          addMessage('system', `── ${section} ${'─'.repeat(Math.max(2, 46 - section.length))}`);
+          for (const e of entries) addMessage('system', `  ${e.name.padEnd(width)}  ${e.short}`);
+        }
+        // Tool-owned commands come from the registry, not from that list: the registry is a
         // directory, so an installed tool set can add commands this file has never heard of.
-        // Discovery is awaited because it otherwise happens on the first AGENT turn — `/help` as the very
-        // first thing typed would read an empty registry and throw.
+        // Awaited because discovery otherwise happens on the first AGENT turn — `/help` typed as the
+        // very first thing would read an empty registry and throw.
         await loadTools();
-        for (const t of slashTools()) addMessage('system', t.slash!.usage);
+        const tools = slashTools();
+        if (tools.length) {
+          addMessage('system', `── Tools ${'─'.repeat(41)}`);
+          for (const t of tools) addMessage('system', `  ${t.slash!.usage}`);
+        }
         return;
+      }
       default: {
         // Not a built-in command — a TOOL may claim it (Tool.slash). Running it here rather than
         // letting the model pick skips two full prompt-cost rounds whose only content is relaying text

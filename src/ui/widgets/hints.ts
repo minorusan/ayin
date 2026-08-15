@@ -9,29 +9,16 @@ import { HEADLESS, noopBox } from '../headless.js';
 import { screen } from '../screen.js';
 import { theme } from '../theme.js';
 import { relayout } from '../layout.js';
+import { slashEntries } from '../../help.js';
 
 export interface SlashCommand {
   name: string;
   description: string;
 }
 
-const COMMANDS: SlashCommand[] = [
-  { name: '/goal',    description: 'Set the session goal (shown in cursive above the chat) · /goal clear' },
-  { name: '/plan',    description: 'Force plan mode: survey → third-party API research → explore → a written ayin-plan-*.md, then execute it' },
-  { name: '/model',   description: 'Pick the served model (popup) · /model <name> to switch straight away' },
-  { name: '/lock',    description: 'Hold the model for this session — ⚿ in the bar; frees itself if this client dies · /unlock' },
-  { name: '/wipe',    description: 'Delete saved state — sessions (this dir) · /wipe all · artifacts · logs · transcripts. Asks first; never touches the live session' },
-  { name: '/transcribe', description: 'Record EVERYTHING this session — prompts, raw responses, full tool results — to a JSON file. Big on purpose · /transcribe off' },
-  { name: '/verbose', description: 'Full explanations instead of the default shortest-answer replies · /verbose off' },
-  { name: '/embed',   description: "Look this session's prompts up in the corpus (the first prompt is automatic) · /embedthis <q> for one" },
-  { name: '/corpus',  description: 'Show what `ayin indulge` already answered about a file when it is read (default ON) · /corpus off' },
-  { name: '/logcover', description: 'Heavy log coverage on every feature built while it is on · /logcover off' },
-  { name: '/summary', description: 'Show session summary (Esc to close)' },
-  { name: '/resume',  description: "This directory's past sessions — /resume <n> restores one · /resume all" },
-  { name: '/clear',   description: 'Clear chat' },
-  { name: '/help',    description: 'Show available commands' },
-  { name: '/quit',    description: 'Exit' },
-];
+// Derived from src/help.ts, never hand-maintained here. This array WAS a second list, and it
+// drifted: `/diff` shipped with no hint entry at all. One source, three consumers.
+const COMMANDS: SlashCommand[] = slashEntries().map(e => ({ name: e.name, description: e.short }));
 
 export function registerCommand(cmd: SlashCommand): void {
   if (!COMMANDS.find(c => c.name === cmd.name)) COMMANDS.push(cmd);
