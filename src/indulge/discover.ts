@@ -100,6 +100,17 @@ const DEFAULT_MAX_INDEX_FILES = 20000;
 const DEFAULT_MAX_FILES = 400;
 const DEFAULT_MAX_DEPTH = 3;
 
+/**
+ * How far past `maxFiles` a depth may run to FINISH itself.
+ *
+ * `maxFiles` bounds how deep the walk goes, not how much of a level it sees. Cutting mid-depth gives
+ * an arbitrary subset of one hop — measured on a real run, "depth 1" returned 27 of however many
+ * direct neighbours existed, chosen by iteration order. Depth is a claim about completeness: either
+ * a level is walked or it is not. So the cap is checked at the depth BOUNDARY, and this multiplier
+ * is the runaway guard for a single level that turns out to be enormous.
+ */
+const DEPTH_OVERRUN = 4;
+
 export interface DiscoverOptions {
   store: IndulgeStore;
   repoPath: string;
@@ -443,8 +454,10 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
   }
 
   const seen = new Set<string>();
+  // The ceiling a single depth may not cross even while completing itself.
+  const hardCeiling = maxFiles * DEPTH_OVERRUN;
   const write = (file: string, depth: number, why: string): boolean => {
-    if (seen.has(file) || report.added >= maxFiles) return false;
+    if (seen.has(file) || report.added >= hardCeiling) return false;
     seen.add(file);
     let sha = '';
     try { sha = blobSha(readFileSync(join(repoPath, file))); } catch { return false; }
@@ -506,9 +519,16 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
         }
       }
       onStatus?.(`depth ${depth}: +${report.byDepth[depth] ?? 0} file(s)`);
+      // Checked HERE, at the boundary: the level just walked is complete, and the cap decides only
+      // whether to go deeper. A depth that is half-walked is not a depth, it is a coin flip.
+      if (report.added >= hardCeiling) {
+        report.truncated = true;
+        onStatus?.(`hard ceiling ${hardCeiling} hit inside depth ${depth} — that level is INCOMPLETE`);
+        break;
+      }
       if (report.added >= maxFiles) {
         report.truncated = true;
-        onStatus?.(`file cap ${maxFiles} reached at depth ${depth} — the walk stopped early`);
+        onStatus?.(`${report.added} file(s) past the ${maxFiles} cap — depth ${depth} finished, not going deeper`);
         break;
       }
       frontier = next;

@@ -1789,6 +1789,13 @@ to it — a plausible edge that is simply false. `referencesOf` is deliberately 
 it answers entangle's question (which manifest unit does this cross), and a bare specifier names a
 package rather than a file.
 
+**`--max-files` bounds how DEEP the walk goes, not how much of a level it sees.** The cap is checked
+at the depth boundary: the level in progress finishes, and the cap decides only whether to start the
+next one. Cutting mid-depth returns an arbitrary subset of one hop chosen by iteration order —
+measured on a real run as "depth 1" giving 27 of however many direct neighbours existed. Depth is a
+claim about completeness; a half-walked level is not a depth, it is a coin flip. A single enormous
+level is still bounded by `DEPTH_OVERRUN` (4× the cap), and that case says INCOMPLETE out loud.
+
 **Popularity disqualifies a name.** A type mentioned by more than `MAX_MENTIONERS` (25) files is
 *ambient* and stops being an edge in either direction — `ILogger` named by 300 files says nothing
 about which of them belong to this feature; the popularity IS the proof that it does not

@@ -252,7 +252,13 @@ gs2.endRun('g2');
 const gs3 = S.openStore(G);
 gs3.beginRun({ runId: 'g3', domains: ['seed'], headSha: 'h', restart: true });
 const gr3 = await D.discoverDomain({ store: gs3, repoPath: G, domain: 'seed', maxDepth: 3, maxFiles: 2, seedsOverride: ['src/seed.ts'] });
-ok(gr3.truncated === true && gr3.added === 2, 'hitting the file cap sets truncated', JSON.stringify(gr3));
+// The cap decides how DEEP to go, never how much of a level is seen. Cutting mid-depth returns an
+// arbitrary subset of one hop chosen by iteration order — measured on a real run as "depth 1" giving
+// 27 of however many direct neighbours existed.
+ok(gr3.truncated === true, 'hitting the file cap sets truncated', JSON.stringify(gr3));
+ok(gr3.added >= 2, 'the depth in progress is FINISHED rather than cut mid-level', String(gr3.added));
+ok((gr3.byDepth[1] ?? 0) === 0 || gr3.added > 2,
+  'a completed depth is complete: the cap stops the NEXT one', JSON.stringify(gr3.byDepth));
 gs3.endRun('g3');
 
 // ── C#: a shared name is not a dependency ───────────────────────────────────────
