@@ -80,6 +80,11 @@ export const HELP: HelpEntry[] = [
     name: '/present', kind: 'command', section: 'Code',
     short: 'Presenter pass — a composed answer, with a diagram when it earns one · /presentthis <msg> for one reply',
   },
+  {
+    name: '/testrun', kind: 'command', section: 'Code',
+    short: 'Run the C# tests covering a domain — /testrun reward service · selection comes from the corpus',
+    tip: '/testrun <domain> runs only the tests covering it — the corpus decides which, not a guess.',
+  },
   { name: '/disentangle', kind: 'command', section: 'Code', short: 'Drop the entangle constraint for this session' },
   { name: '/arduino-explain', kind: 'command', section: 'Code', short: 'Explain an Arduino sketch and regenerate its diagram' },
 
@@ -165,6 +170,7 @@ export const HELP: HelpEntry[] = [
     name: 'ayin launch', kind: 'cli', section: 'From your shell',
     short: 'Open a terminal window at the front Finder/Explorer directory, running ayin. For a hotkey — see docs/LAUNCH.md',
   },
+  { name: 'ayin testrun', kind: 'cli', section: 'From your shell', short: 'ayin testrun "<domain>" · --list shows what would run without running it' },
   { name: 'ayin explain', kind: 'cli', section: 'From your shell', short: 'ayin explain "<question>" — prints the narrative and exits' },
   { name: 'ayin watch', kind: 'cli', section: 'From your shell', short: 'Repo watcher daemon — reviews what lands, resumes itself after a reboot' },
   { name: 'ayin -p', kind: 'cli', section: 'From your shell', short: 'Headless: ayin -p "<task>". Auto-approves writes and shell — run it on a tree you can revert' },

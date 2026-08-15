@@ -606,6 +606,22 @@ onInput(async (text: string) => {
         }
         return;
       }
+      case '/testrun': {
+        // Domain-scoped C# test run. Selection is deterministic (corpus → files → assemblies); the
+        // only interactive part is whether Unity may be quit. See src/testrun/.
+        const domains = text.slice('/testrun'.length).split(',').map((d) => d.trim()).filter(Boolean);
+        if (!domains.length) { addMessage('system', '/testrun <domains> — e.g. /testrun reward service'); return; }
+        try {
+          const { select, runSelection, formatReport } = await import('./testrun/index.js');
+          const selection = select(process.cwd(), domains);
+          addMessage('system', `testrun: ${selection.assemblies.length} assembly(ies) selected — running`);
+          const result = await runSelection(process.cwd(), selection);
+          addMessage('system', formatReport(result));
+        } catch (err) {
+          addMessage('system', `/testrun failed — ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
       case '/clear':
         clearChat();
         return;
@@ -1004,6 +1020,11 @@ async function main(): Promise<void> {
     // global hotkey to call — there is no terminal to inherit a cwd from when one fires. See launch.ts.
     const { runLaunch } = await import('./launch.js');
     process.exitCode = await runLaunch(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === 'testrun') {
+    const { runTestrunCli } = await import('./testrun/index.js');
+    process.exitCode = await runTestrunCli(process.argv.slice(3));
     return;
   }
   if (process.argv[2] === 'diff') {

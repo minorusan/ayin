@@ -1503,6 +1503,30 @@ unreadable. It appears on the default `both` view via a fallback: the OBJECTIVE 
 goal, and without that fallback the tip would be invisible to everyone who has not set
 `AYIN_GOAL_VIEW`. It never enters the card itself — a tip in a bordered panel is shouting.
 
+## `/testrun` — see [`TESTRUN.md`](TESTRUN.md)
+
+`/testrun <domains>` runs the C#/Unity tests covering a domain. Selection is fully deterministic —
+the corpus already records a domain on every chunk, a file's assembly is its nearest ancestor
+`.asmdef`, and a test assembly covers it for one of three reasons (`contains`, `references`,
+`named`). Running uses `Library/ScriptAssemblies` when current and Unity batch mode when not.
+
+Three things worth knowing here, argued in [`TESTRUN.md`](TESTRUN.md):
+
+- **Transitive references are excluded.** The first real run selected 25 of 26 test assemblies for
+  one file, because everything lives in one `Core` assembly every test references. An assembly
+  referenced by ≥30% of tests is **ambient** and proves nothing — the same rule `indulge` applies to
+  a type mentioned by 25+ files.
+- **Staleness refuses.** A DLL older than its sources tests code that no longer exists; a green light
+  over that is the one output worth refusing to produce.
+- **`NOT RUN` is never a pass.** An engine-coupled assembly that cannot load is reported and counted
+  separately, outside the totals.
+
+New delegate: **`ToolServices.confirm`** — the operator counterpart to `llm.ask`, so a tool can ask
+before touching something outside the repo. It returns `null` when there is nobody to ask (headless,
+`watch`, a scheduled run), and **null is a refusal, never a default yes**.
+
+Gate: `npm run check:testrun`.
+
 ## `/diff` — see [`DIFF.md`](DIFF.md)
 
 `/diff` (and `ayin diff`) renders the working tree — staged, unstaged **and untracked** — as one

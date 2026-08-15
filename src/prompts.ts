@@ -157,6 +157,9 @@ export const KNOWN_CONFIG_KEYS = [
   // `ayin launch`: the command that opens a terminal window, with {{SCRIPT}} for the launch script.
   // Every platform default is a guess about someone else's terminal — this is how they replace it.
   'terminalCommand',
+  // `/testrun`: where the NUnit console runner and the matching Unity Editor live. Both are
+  // machine-specific paths, so both are config with detection as the fallback.
+  'nunitConsole', 'unityPath',
 ];
 
 export function getConfigString(key: string): string | undefined {

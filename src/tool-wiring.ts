@@ -48,6 +48,30 @@ export function ensureToolRuntime(): void {
     // session has loaded it anyway. Reports stay in order: after the first call the module is cached and
     // the callbacks queue as microtasks.
     report: (message) => { void import('./ui.js').then((ui) => ui.addMessage('system', message)); },
+    /**
+     * The operator half of `llm.ask`. Lazy for the same reason as `report` — `dialog.js` reaches
+     * the blessed screen, and importing it eagerly would take the terminal just to wire a delegate.
+     *
+     * HEADLESS RETURNS NULL. `-p`, `ayin watch` and every scheduled run have nobody to answer, and a
+     * dialog there would either hang forever or, worse, fall through to a default. Null is a refusal
+     * the tool must report — never a silent yes. Same rule as the always-confirm git gate.
+     */
+    confirm: async (question, choices, opts) => {
+      const { HEADLESS } = await import('./ui/headless.js');
+      if (HEADLESS) return null;
+      const { showDialog } = await import('./dialog.js');
+      const picked = await showDialog(
+        question,
+        choices.map((c) => ({ label: c.label, sub: c.sub, danger: c.destructive })),
+        { subtitle: opts?.subtitle },
+      );
+      // showDialog resolves the INDEX, and -1 for Escape. Index 0 is a real answer, so this must be
+      // an explicit `< 0` test — `picked ? … : null` would turn "the operator chose the first
+      // option" into a refusal, silently, and only for the first option.
+      //
+      // A cancelled dialog and an unanswerable one are the same answer to the caller: no.
+      return picked < 0 || picked >= choices.length ? null : choices[picked].id;
+    },
     shell: {
       spawn: (command, opts) => spawnShell(command, opts) as unknown as ToolProcess,
       kill: (child, signal) => killTree(child as unknown as ChildProcess, signal as NodeJS.Signals | undefined),

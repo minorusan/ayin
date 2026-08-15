@@ -85,8 +85,30 @@ const result = await exploreExecute({ question: 'find the needle' });
 process.stdout.write(JSON.stringify({ result, ms: Date.now() - start }) + '\\n');
 `);
 
+/**
+ * The child must talk to THIS gate's stub server and nothing else.
+ *
+ * Two things had to be pinned, and neither was. `prompts.ts` resolves `~/.ayin-cli/prompts.json` at
+ * module load, so a child inheriting the real HOME reads the OPERATOR's settings — and this machine's
+ * had `llmProvider: ollama`, which selects the native provider, talks to Ollama directly and ignores
+ * AYIN_MODEL_URL completely. The gate then measured zero calls against its own server while the child
+ * happily got a real 27-second answer from a real model: every assertion about call counts silently
+ * meaningless, and the result depending on whose machine it ran on.
+ */
+function childEnv(p) {
+  return {
+    ...process.env,
+    HOME: mkdtempSync(join(tmpdir(), 'ayin-explore-home-')),
+    USERPROFILE: mkdtempSync(join(tmpdir(), 'ayin-explore-home-')),
+    AYIN_MODEL_URL: `http://127.0.0.1:${p}`,
+    AYIN_LLM_PROVIDER: 'direct',   // never the native path — it does not read AYIN_MODEL_URL
+    AYIN_QA: '0',
+    AYIN_PLAN: '0',
+  };
+}
+
 const child = spawn(process.execPath, [harness], {
-  env: { ...process.env, AYIN_MODEL_URL: `http://127.0.0.1:${port}`, AYIN_QA: '0', AYIN_PLAN: '0' },
+  env: childEnv(port),
   cwd: TMP,
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -144,7 +166,7 @@ console.log('\nexplore normal case (must still work — the fix must not break o
   const port2 = server2.address().port;
 
   const child2 = spawn(process.execPath, [harness], {
-    env: { ...process.env, AYIN_MODEL_URL: `http://127.0.0.1:${port2}`, AYIN_QA: '0', AYIN_PLAN: '0' },
+    env: childEnv(port2),
     cwd: TMP,
     stdio: ['ignore', 'pipe', 'pipe'],
   });

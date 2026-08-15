@@ -73,11 +73,33 @@ export interface ToolPrompts {
   ids(): string[];
 }
 
+/** One choice in a `confirm`. `destructive` is what the host may style, or refuse, differently. */
+export interface ToolChoice {
+  id: string;
+  label: string;
+  /** The cost of picking this, in the operator's terms — shown under the label. */
+  sub?: string;
+  destructive?: boolean;
+}
+
 export interface ToolServices {
   llm: ToolLlm;
   log: ToolLogger;
   /** Show the user something as the tool works. A host with no UI can drop it. */
   report(message: string): void;
+  /**
+   * ASK THE OPERATOR. The counterpart to `llm.ask`: same delegate shape, other party.
+   *
+   * A tool that reaches outside the repo — quitting an editor, deleting a build, restarting a
+   * service — must be able to ask before it does, without importing the host's UI. Returns the
+   * chosen `id`, or **null when there is nobody to ask**.
+   *
+   * NULL IS A REFUSAL, NEVER A DEFAULT YES. Headless (`-p`), `ayin watch` and any scheduled run have
+   * no answerer, and a tool that quits the operator's editor because a cron job could not be asked
+   * is the exact bug this signature exists to prevent. The host returns null; the tool reports why
+   * it stopped. Same rule the git gate follows.
+   */
+  confirm(question: string, choices: ToolChoice[], opts?: { subtitle?: string }): Promise<string | null>;
   shell: ToolShell;
   /** Open a produced artifact for the user. Resolves false when the host has no editor, or
    *  declined — tools report that as `opened: false`, so it must not be swallowed. */
@@ -134,6 +156,13 @@ export function toolReport(message: string): void {
 
 export function toolShell(): ToolShell {
   return require_().shell;
+}
+
+/** Ask the operator. Resolves null when there is nobody to ask — treat that as "no". */
+export function toolConfirm(
+  question: string, choices: ToolChoice[], opts?: { subtitle?: string },
+): Promise<string | null> {
+  return require_().confirm(question, choices, opts);
 }
 
 export function toolOpenInEditor(path: string): Promise<boolean> {
