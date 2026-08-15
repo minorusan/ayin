@@ -12,6 +12,7 @@ const NO_TUI_COMMANDS = new Set([
   'version', '--version', '-v',
   'explain',    // headless `ayin explain "<question>"` — prints the narrative, exits
   'indulge',    // overnight corpus build — runs for hours under nohup; must never open a TUI
+  'launch',     // opens a terminal window elsewhere and exits; taking this tty would be the wrong one
 ]);
 
 export const HEADLESS = process.argv.some(a => a === '-p' || a === '--prompt' || a === '--non-interactive')

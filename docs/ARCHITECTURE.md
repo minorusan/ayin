@@ -1480,6 +1480,25 @@ the fragment as the whole and reasons confidently from it. So every bound is sta
     separate, much larger project; it does not block this fix, since an investigation that stops
     looping within itself is worth having regardless of what it can remember between calls.
 
+## `ayin launch` — see [`LAUNCH.md`](LAUNCH.md)
+
+`ayin launch` opens a terminal window at the front file-manager directory and runs ayin in it. It is
+not a mode and not something to type: running `ayin` in a terminal already uses that terminal's
+directory. It exists for the hotkey case, where there is **no terminal** to inherit a cwd from.
+
+Two decisions worth knowing here, both argued in full in [`LAUNCH.md`](LAUNCH.md):
+
+- **ayin does not listen for the hotkey.** A global modifier double-tap needs an OS-level input tap
+  that sees every keystroke on the machine. The machine already has a daemon with that permission —
+  the trigger is theirs, the action is ours. It is kept out of `watch` for the same reason: that
+  daemon is per-repo and poll-only, a hotkey listener is machine-scoped.
+- **The shell is bash everywhere, the window is not portable.** The launch script has a bash shebang
+  (Windows resolves it through Git Bash, as `shell.ts` already does), while the opener is the
+  `terminalCommand` config template with `{{SCRIPT}}` — every platform default is a guess about
+  someone else's terminal.
+
+Gate: `npm run check:launch`.
+
 ## Repo watcher (`watch.ts`)
 
 `ayin watch --repo <path>` installs a `post-commit` hook and runs a foreground daemon;

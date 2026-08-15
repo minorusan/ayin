@@ -34,7 +34,13 @@ import { readOpenAiKey, writeOpenAiCredentials } from './tools/credentials/opena
 const OLLAMA_DEFAULT = 'http://127.0.0.1:11434';
 
 /** Commands that work with no model at all. */
-const NO_MODEL_NEEDED = new Set(['version', '--version', '-v', 'update', 'help', '--help', '-h']);
+const NO_MODEL_NEEDED = new Set([
+  'version', '--version', '-v', 'update', 'help', '--help', '-h',
+  // `launch` opens a terminal and exits — the ayin that starts INSIDE that window runs the gate
+  // itself. Gating the launcher too would fire the first-run onboarding into a window that is about
+  // to be replaced by `exec`, where nobody can answer it.
+  'launch',
+]);
 
 /**
  * ONBOARDING IS A DECISION THE OPERATOR MAKES ONCE — not a config value that happens to exist.

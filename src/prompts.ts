@@ -154,6 +154,9 @@ export const KNOWN_CONFIG_KEYS = [
   'embedModel',
   // Only honoured when the operator sets it — the round budget is otherwise unlimited (agent.ts).
   'maxToolRounds',
+  // `ayin launch`: the command that opens a terminal window, with {{SCRIPT}} for the launch script.
+  // Every platform default is a guess about someone else's terminal — this is how they replace it.
+  'terminalCommand',
 ];
 
 export function getConfigString(key: string): string | undefined {

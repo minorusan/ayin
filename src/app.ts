@@ -1000,6 +1000,13 @@ async function main(): Promise<void> {
     process.exitCode = await runIndulge(process.argv.slice(3));
     return;
   }
+  if (process.argv[2] === 'launch') {
+    // Opens a terminal window at the front Finder/Explorer directory and runs ayin in it. For a
+    // global hotkey to call — there is no terminal to inherit a cwd from when one fires. See launch.ts.
+    const { runLaunch } = await import('./launch.js');
+    process.exitCode = await runLaunch(process.argv.slice(3));
+    return;
+  }
   if (process.argv[2] === 'update') {
     // Self-update from the configured npm registry, whichever one this install points at.
     // No TUI: it's a plain command that prints and exits. See src/updater.ts.
