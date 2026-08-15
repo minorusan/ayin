@@ -40,6 +40,8 @@ const NO_MODEL_NEEDED = new Set([
   // itself. Gating the launcher too would fire the first-run onboarding into a window that is about
   // to be replaced by `exec`, where nobody can answer it.
   'launch',
+  // `diff` renders a page from git and opens it — git is the only dependency it has.
+  'diff',
 ]);
 
 /**

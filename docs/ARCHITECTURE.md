@@ -1480,6 +1480,25 @@ the fragment as the whole and reasons confidently from it. So every bound is sta
     separate, much larger project; it does not block this fix, since an investigation that stops
     looping within itself is worth having regardless of what it can remember between calls.
 
+## `/diff` — see [`DIFF.md`](DIFF.md)
+
+`/diff` (and `ayin diff`) renders the working tree — staged, unstaged **and untracked** — as one
+self-contained HTML page and opens it. Laid out in the order a diff is actually read: **triage**
+(sidebar with per-file weight and status), **filter** (extension chips, `.cs .asset .ts .js .py` on
+and everything else one click away), **read** (unified hunks with the changed token marked).
+
+Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`](DIFF.md):
+
+- **The hidden-file count is always on screen.** Filters that default to off can make a large diff
+  look small, and "my tree is fine" is the most expensive wrong conclusion this page could cause.
+- **Tracked changes spend the page's line budget first.** The first run against a real tree produced
+  a 48 MB page of generated `.js` from untracked build directories and none of the source; sorting by
+  size and truncating kept the noise. A tracked file is a change made on purpose — when something has
+  to be dropped, that decides which. Omitted files keep their row and their true counts.
+
+Gate: `npm run check:diff` — checks every count against `git diff --numstat`, and escaping against a
+file containing `</script>`.
+
 ## `ayin launch` — see [`LAUNCH.md`](LAUNCH.md)
 
 `ayin launch` opens a terminal window at the front file-manager directory and runs ayin in it. It is

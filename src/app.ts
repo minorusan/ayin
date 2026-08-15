@@ -592,6 +592,19 @@ onInput(async (text: string) => {
           : 'Log coverage OFF — normal logging.');
         return;
       }
+      case '/diff': {
+        // Working tree → a reviewable HTML page. An argument is any rev, so `/diff main` reviews a
+        // branch with the same page. See src/diff/.
+        const rev = text.slice('/diff'.length).trim() || 'HEAD';
+        try {
+          const { buildAndOpen, summarise } = await import('./diff/index.js');
+          const r = buildAndOpen(process.cwd(), rev);
+          addMessage('system', `${summarise(r)}${r.opened ? '' : '\n(could not open a browser — the path above is the page)'}`);
+        } catch (err) {
+          addMessage('system', `/diff failed — ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
       case '/clear':
         clearChat();
         return;
@@ -869,6 +882,7 @@ onInput(async (text: string) => {
         addMessage('system', '/embedthis <question> — corpus lookup for one prompt only');
         addMessage('system', '/corpus — what indulge already answered is shown when a file is read (default ON) · /corpus off');
         addMessage('system', '/logcover — heavy log coverage on every feature built while it is on · /logcover off');
+        addMessage('system', '/diff — working tree (staged + unstaged + untracked) as a reviewable HTML page · /diff <rev> to compare against one');
         addMessage('system', '/summary — show session summary (Esc to close)');
         addMessage('system', '/resume — list this directory\'s sessions (newest first) · /resume all for every directory');
         addMessage('system', '/resume <n>|<id> — restore one by list number or id prefix; new turns append to its record');
@@ -1005,6 +1019,12 @@ async function main(): Promise<void> {
     // global hotkey to call — there is no terminal to inherit a cwd from when one fires. See launch.ts.
     const { runLaunch } = await import('./launch.js');
     process.exitCode = await runLaunch(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === 'diff') {
+    // Same page as `/diff`, from a shell. No TUI, no model. See src/diff/.
+    const { runDiffCli } = await import('./diff/index.js');
+    process.exitCode = await runDiffCli(process.argv.slice(3));
     return;
   }
   if (process.argv[2] === 'update') {
