@@ -34,6 +34,7 @@
 
 
 import { toolLlm, toolLog, toolShell, toolReport, toolPrompts, type ToolPrompts } from './runtime.js';
+import { NEVER_RECURSE } from './lib.js';
 
 /**
  * This tool's prompt namespace — `prompts/explore/*.txt`, materialized into the operator's local
@@ -46,6 +47,13 @@ const explorePrompts = (): ToolPrompts => toolPrompts('explore');
 
 const MAX_ITERATIONS = 12;
 const COMMAND_TIMEOUT = 30_000;
+/**
+ * Context-expansion greps run AFTER the answer exists, so they get a fraction of the budget: a bonus
+ * that can add minutes to a finished investigation is not a bonus.
+ */
+const EXPAND_TIMEOUT = 8_000;
+/** How many commands one iteration may run. Exceeding it is REPORTED, never silently trimmed. */
+const MAX_COMMANDS_PER_ITERATION = 2;
 const MAX_COMMAND_OUTPUT = 8000;
 const MAX_ANSWER_LENGTH = 8000;
 
@@ -85,30 +93,33 @@ async function expandContext(answer: string, cwd: string): Promise<string> {
 
   const prioritized = allPatterns.slice(0, 8);
 
-  const results: string[] = [];
-  for (const pattern of prioritized) {
+  // CONCURRENT, and on a SHORT leash. These run AFTER the answer is already in hand — they are a
+  // bonus, not the result — and they used to run one after another on the 30s command timeout, so
+  // eight identifiers could add four minutes to a finished investigation. Nothing here reads a
+  // previous result, so there was never a reason to wait.
+  const settled = await Promise.all(prioritized.map(async (pattern) => {
     try {
       // No --include filter: search every file type; grep -I skips binaries.
-      // But DO skip vendor/build dirs — on a JS/Rust/Python repo they'd drown the 8-line
-      // budget in third-party matches and can stall a big tree toward the 30s timeout.
+      // Vendor/build dirs are pruned with the SAME list the grep tool uses — two searches disagreeing
+      // about what the repo contains is its own bug, and this list used to miss Unity's Library/,
+      // which is gigabytes of import cache walked once per identifier.
       // The identifier is single-quoted: it comes from a regex over model prose, and an unquoted `$`
       // or backtick in a double-quoted shell string is code, not data.
+      const prune = NEVER_RECURSE.map((d) => `--exclude-dir='${d}'`).join(' ');
       const { text: output } = await execCommand(
-        `grep -rnIE --exclude-dir={.git,node_modules,'dist*','*.bak*',build,vendor,target,.venv,__pycache__} -- '${pattern.replace(/'/g, "'\\''")}' . 2>/dev/null | head -8`,
+        `grep -rnIE ${prune} -- '${pattern.replace(/'/g, "'\\''")}' . 2>/dev/null | head -8`,
         cwd,
+        EXPAND_TIMEOUT,
       );
-      if (output && output !== '(no output)' && output.length > 10) {
-        // Filter to just file:line entries, skip the file we already found
-        const lines = output.split('\n')
-          .filter(l => l.includes(':') && !l.includes('(no output)'))
-          .slice(0, 5);
-        if (lines.length > 0) {
-          results.push(`"${pattern}" found in:\n${lines.join('\n')}`);
-        }
-      }
-    } catch { /* skip failed greps */ }
-  }
+      if (!output || output === '(no output)' || output.length <= 10) return '';
+      const lines = output.split('\n')
+        .filter(l => l.includes(':') && !l.includes('(no output)'))
+        .slice(0, 5);
+      return lines.length ? `"${pattern}" found in:\n${lines.join('\n')}` : '';
+    } catch { return ''; } // one failed grep must not lose the other seven
+  }));
 
+  const results = settled.filter(Boolean);
   if (results.length === 0) return '';
   return results.join('\n\n');
 }
@@ -133,7 +144,7 @@ const COMMAND_HARD_CAP = 64_000;
  * And output accumulated without a ceiling, so one `cat` of a big file was buffered whole before being
  * trimmed for the prompt.
  */
-function execCommand(command: string, cwd: string): Promise<CmdResult> {
+function execCommand(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT): Promise<CmdResult> {
   return new Promise((resolve) => {
     const child = toolShell().spawn(command, { cwd });
 
@@ -162,7 +173,7 @@ function execCommand(command: string, cwd: string): Promise<CmdResult> {
     const timer = setTimeout(() => {
       toolShell().kill(child);
       settle(true); // keep whatever it printed — partial evidence beats none
-    }, COMMAND_TIMEOUT);
+    }, timeoutMs);
 
     child.on('close', () => settle(false));
     child.on('error', () => settle(false, '(command failed to start)'));
@@ -174,6 +185,21 @@ interface ExploreIteration {
   commands: string[];
   confidence: number;
   answer?: string;
+  /** Suggestions beyond the per-iteration cap. Reported to the model, never dropped in silence. */
+  dropped?: number;
+}
+
+/**
+ * A committed answer, or nothing.
+ *
+ * The main exit already required `length > 20` before treating a reply as the result; the three bail
+ * paths returned `bestIteration.answer` with no such check, so a two-word non-answer could escape
+ * through a timeout or a repeat-streak while the same text would have been rejected on the happy
+ * path. One definition, used by every exit.
+ */
+function committedAnswer(it: ExploreIteration | null): string | undefined {
+  const a = it?.answer?.trim();
+  return a && a.length > 20 ? a : undefined;
 }
 
 interface HistoryEntry {
@@ -274,18 +300,46 @@ function buildPrompt(
  */
 const DIGEST_PER_COMMAND = 1200;
 
-function historyDigest(history: HistoryEntry[]): string {
+/** One command's real output, kept for the whole investigation. See `Findings` below. */
+export interface Finding { cmd: string; out: string }
+
+/** Total digest budget. Bounded so the fallback answer cannot itself blow the caller's window. */
+const DIGEST_TOTAL = 6000;
+
+/**
+ * The findings digest — every command's REAL output, for the whole investigation.
+ *
+ * IT USED TO READ `history`, WHICH FORGETS. `history` is capped at 4 steps for context size, so on a
+ * 12-iteration investigation the digest — the thing returned when the model never commits an answer —
+ * contained only the last four steps. A grep that struck gold at iteration 2 was gone by the time the
+ * fallback ran. That is the same amnesia this file's header describes fixing for REPEATS (with
+ * `spent`); the digest was still reading the forgetful record.
+ *
+ * `Findings` is accumulated separately and never shrinks, exactly like `spent`.
+ *
+ * RANKED, because a digest is evidence and not a transcript. Output carrying `path:line:` is a
+ * located fact; a bare directory listing is not, and one `ls -la` of a project root was measured
+ * filling the digest at the moment the caller needed two lines of C#. File:line chunks go first, and
+ * the budget is spent on them.
+ */
+function digestFrom(findings: readonly Finding[]): string {
+  const scored = findings.map((f) => ({
+    ...f,
+    // A line like `src/x.ts:42:` — the shape of a located fact.
+    hits: (f.out.match(/^[^\s:]+:\d+:/gm) ?? []).length,
+  }));
+  scored.sort((a, b) => (b.hits > 0 ? 1 : 0) - (a.hits > 0 ? 1 : 0));
+
   const chunks: string[] = [];
-  for (const h of history) {
-    for (let j = 0; j < h.commands.length; j++) {
-      const out = (h.results[j] || '').trim();
-      if (out && out !== '(no output)' && out.length > 3) {
-        const clipped = out.length > DIGEST_PER_COMMAND
-          ? `${out.slice(0, DIGEST_PER_COMMAND)}\n…(+${out.length - DIGEST_PER_COMMAND} chars from this command)`
-          : out;
-        chunks.push(`$ ${h.commands[j]}\n${clipped}`);
-      }
-    }
+  let spentChars = 0;
+  for (const f of scored) {
+    if (spentChars >= DIGEST_TOTAL) break;
+    const room = Math.min(DIGEST_PER_COMMAND, DIGEST_TOTAL - spentChars);
+    const clipped = f.out.length > room
+      ? `${f.out.slice(0, room)}\n…(+${f.out.length - room} chars from this command)`
+      : f.out;
+    chunks.push(`$ ${f.cmd}\n${clipped}`);
+    spentChars += clipped.length;
   }
   return chunks.join('\n\n');
 }
@@ -345,7 +399,11 @@ function parseResponse(raw: string): ExploreIteration {
     const parsed = JSON.parse(cleaned);
     return {
       reasoning: String(parsed.reasoning || ''),
-      commands: Array.isArray(parsed.commands) ? parsed.commands.slice(0, 2).map(String) : [],
+      commands: Array.isArray(parsed.commands) ? parsed.commands.slice(0, MAX_COMMANDS_PER_ITERATION).map(String) : [],
+      // How many were DROPPED, so the loop can say so. Trimming four suggestions to two in silence
+      // meant the model proposed the other two again next iteration — they were never run, so `spent`
+      // did not know them — which is a slow-motion version of the loop `spent` exists to stop.
+      dropped: Array.isArray(parsed.commands) ? Math.max(0, parsed.commands.length - MAX_COMMANDS_PER_ITERATION) : 0,
       confidence: parseFloat(parsed.confidence) || 0,
       answer: parsed.answer && parsed.answer !== null ? String(parsed.answer) : undefined,
     };
@@ -459,6 +517,10 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   // 12-iteration loop with 4-step memory repeats by construction. `spent` never forgets: every command
   // ever run this investigation, keyed by its normalised text, for the FULL 12 iterations.
   const spent = new Map<string, SpentCommand>();
+  // Every command's REAL output, for the whole investigation — never trimmed like `history` is, for
+  // the same reason `spent` isn't: the fallback digest is built from this, and a digest assembled
+  // from a 4-step window silently drops whatever the first eight iterations found. See digestFrom().
+  const findings: Finding[] = [];
   let bestIteration: ExploreIteration | null = null;
   let emptyStreak = 0; // consecutive iterations where every command returned nothing → bail early
   let repeatStreak = 0; // consecutive iterations where EVERY suggested command was already spent
@@ -524,7 +586,7 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     // (grep/read outputs) rather than the model's meta-reasoning, which is useless to the caller.
     if (iteration.commands.length === 0) {
       toolLog().warn('explore_stuck', { iteration: String(i + 1) });
-      const digest = historyDigest(history);
+      const digest = digestFrom(findings);
       if (digest) return capAnswer(`Found (from the searches run so far):\n\n${digest}`);
       return iteration.reasoning || 'Investigation inconclusive: no commands suggested.';
     }
@@ -533,6 +595,12 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     // WITHOUT spawning a shell — re-running `grep -rn foo .` a fourth time costs a process and 30s of
     // timeout budget to learn nothing the model wasn't already told in `spent`.
     const results: string[] = [];
+    // NO SILENT CAPS. Extra suggestions are refused out loud, so the model knows to re-propose the
+    // one it cares about rather than assuming all four ran.
+    if (iteration.dropped) {
+      results.push(`(only the first ${MAX_COMMANDS_PER_ITERATION} commands were run — ${iteration.dropped} more were NOT. Re-suggest the one you still need.)`);
+      toolLog().info('explore_commands_capped', { dropped: String(iteration.dropped), iter: String(i + 1) });
+    }
     let anyData = false;
     let anyNewCommand = false;
     for (const cmd of iteration.commands) {
@@ -569,6 +637,8 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
         trimmed += `\n[TIMED OUT after ${COMMAND_TIMEOUT / 1000}s and was killed: this output is PARTIAL and the search never finished. Narrow the path or the pattern and run it again.]`;
       }
       results.push(trimmed);
+      // Kept for the digest even after `history` forgets this step.
+      if (!empty) findings.push({ cmd, out: trimmed });
     }
 
     // Repeat-guard: every suggested command was something already spent — the model is circling with
@@ -578,10 +648,15 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     if (repeatStreak >= 2) {
       toolLog().warn('explore_repeat_streak_bail', { iteration: String(i + 1) });
       toolReport(`  → explore: circling on commands already run, stopping.`);
-      const digest = historyDigest(history);
-      return bestIteration?.answer
-        || (digest && capAnswer(`Found (from the searches run so far):\n\n${digest}`))
-        || `Explore is circling on the same searches for: "${question}" — stopped after ${i + 1} rounds. What was found: ${[...spent.keys()].slice(0, 8).join('; ')}`;
+      const digest = digestFrom(findings);
+      // SAY WHY IT STOPPED, not just what it found. The digest used to carry the "(already run…)"
+      // refusal lines by accident — it was assembled from the narrative history, which recorded them
+      // — so the reason survived as a side effect. Now the digest is real evidence only, and the
+      // reason has to be stated deliberately: a caller handed partial findings with no explanation
+      // reads them as the complete answer.
+      return committedAnswer(bestIteration)
+        || (digest && capAnswer(`Stopped after ${i + 1} rounds: circling on searches already run.\nFound so far:\n\n${digest}`))
+        || `Explore is circling on the same searches for: "${question}" — stopped after ${i + 1} rounds. What was already run: ${[...spent.keys()].slice(0, 8).join('; ')}`;
     }
 
     // Stuck-guard: if commands keep returning nothing, don't burn all 12 iterations.
@@ -589,9 +664,9 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     if (emptyStreak >= 3) {
       toolLog().warn('explore_empty_streak_bail', { iteration: String(i + 1) });
       toolReport(`  → explore: 3 empty searches in a row, stopping. Try a broader question or check the path.`);
-      const digest = historyDigest(history);
-      return bestIteration?.answer
-        || (digest && capAnswer(`Found (from the searches run so far):\n\n${digest}`))
+      const digest = digestFrom(findings);
+      return committedAnswer(bestIteration)
+        || (digest && capAnswer(`Stopped after ${i + 1} rounds: three searches in a row returned nothing.\nFound so far:\n\n${digest}`))
         || `Explore could not find anything for: "${question}". Searched ${i + 1} times, all commands returned no data. The symbol/file may not exist here, or the working directory (${cwd}) may be wrong.`;
     }
 
@@ -607,7 +682,7 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     // looping to 12. Confidence-gated so a legitimately progressing investigation (rising
     // confidence, about to commit an answer) is not cut off at iteration 4.
     if (i + 1 >= digestCommitAt && iteration.confidence < 0.6) {
-      const digest = historyDigest(history);
+      const digest = digestFrom(findings);
       if (digest.length > 200) {
         toolLog().info('explore_commit_digest', { iteration: String(i + 1), bytes: String(digest.length) });
         toolReport(`  → have data, committing it (model kept re-searching)`);
@@ -623,8 +698,9 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
 
   // Max iterations reached — prefer a committed answer, else the real command data gathered.
   toolLog().warn('explore_max_iterations', { bestConfidence: String(bestIteration?.confidence ?? 0) });
-  if (bestIteration?.answer) return capAnswer(bestIteration.answer);
-  const digest = historyDigest(history);
+  const committed = committedAnswer(bestIteration);
+  if (committed) return capAnswer(committed);
+  const digest = digestFrom(findings);
   if (digest) return capAnswer(`Found (from the searches run so far):\n\n${digest}`);
   return capAnswer(bestIteration?.reasoning || 'Reached max iterations with no findings.');
 }
