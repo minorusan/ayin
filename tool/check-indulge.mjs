@@ -40,6 +40,7 @@ const ok = (cond, label, extra = '') => {
 };
 
 const S = await import(join(ROOT, 'dist/indulge/store.js'));
+const prompts = await import(join(ROOT, 'dist/prompts.js'));
 
 mkdirSync(join(REPO, 'src'), { recursive: true });
 writeFileSync(join(REPO, 'src/A.cs'), 'class A {\n  void Ingest() {}\n}\n');
@@ -1359,6 +1360,28 @@ rmSync(TMP, { recursive: true, force: true });
 
   if (saveEnv === undefined) delete process.env.AYIN_LLM_PROVIDER; else process.env.AYIN_LLM_PROVIDER = saveEnv;
   rmSync(dir, { recursive: true, force: true });
+}
+
+// ── indulge's provider is separable from the agent's ────────────────────────────
+//
+// A build is hours of a model reading source; a chat turn is seconds. Those are different jobs, and
+// an operator legitimately wants the corpus on a hosted model for the window and the reasoning while
+// the interactive agent stays on the card in the room at no cost per token. One global choice means
+// picking which of the two to make worse.
+{
+  const ix = readFileSync(join(ROOT, 'src/indulge/index.ts'), 'utf-8');
+  ok(/case '--provider': args\.provider = value\(\); break;/.test(ix), '--provider is a flag on the build');
+  ok(/getConfigString\('indulgeProvider'\)/.test(ix), 'and indulgeProvider persists it');
+  ok(/process\.env\.AYIN_LLM_PROVIDER = want;/.test(ix),
+    'applied via the env this process reads, so select.ts AND budget.ts both see it');
+
+  // Order matters: it must land before anything resolves a provider or computes a budget.
+  const applyAt = ix.indexOf('const forced = applyProviderOverride');
+  const statusAt = ix.indexOf('if (args.status) return printStatus');
+  ok(applyAt > 0 && applyAt < statusAt,
+    'the override is applied before any command path runs, not after one has already resolved');
+
+  ok(prompts.KNOWN_CONFIG_KEYS.includes('indulgeProvider'), 'indulgeProvider is a known config key');
 }
 
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');

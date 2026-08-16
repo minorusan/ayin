@@ -396,3 +396,26 @@ Three properties the batch keeps:
 
 `--deep` and `--investigate` are excluded: those run an explore loop per question and do not share a
 prompt.
+
+### The build's provider is separate from the agent's
+
+```
+/set indulge-provider openai      # once
+ayin indulge --provider openai    # or per run
+```
+
+A build is hours of a model reading source; a chat turn is seconds. Those are different jobs, and an
+operator legitimately wants the corpus on a hosted model — for the window and the reasoning — while
+the interactive agent keeps answering on the card in the room at no cost per token. One global choice
+means picking which of the two to make worse.
+
+The override is applied by setting the environment variable **this process** reads, before any
+command path runs. `indulge` is its own process, and both `llm/select.ts` and `indulge/budget.ts`
+consult the env first — so the same setting picks the provider *and* widens the source window, with
+nothing to keep in sync.
+
+It says so when it takes effect:
+
+```
+provider: openai (this build only — the interactive agent is unchanged)
+```

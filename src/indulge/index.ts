@@ -15,6 +15,7 @@
  * presses Ctrl+C twice means it.
  */
 
+import { getConfigString } from '../prompts.js';
 import { cpSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { acquireLlm, type LlmHold } from '../llm/authority.js';
@@ -39,6 +40,8 @@ export interface IndulgeArgs {
   restart: boolean;
   /** `--search "<question>"` — query the corpus and print what it would hand the model. */
   search?: string;
+  /** Run THIS build on a different provider than the interactive agent. */
+  provider?: string;
   qa?: boolean;
   qaRules?: boolean;
   fix?: boolean;
@@ -72,6 +75,7 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--status': args.status = true; break;
       case '--report': args.report = true; break;
       case '--search': case '--ask': args.search = value(); break;
+      case '--provider': args.provider = value(); break;
       case '--qa': args.qa = true; break;
       case '--qa-rules': args.qa = true; args.qaRules = true; break;
       case '--fix': case '--fixembed': args.fix = true; break;
@@ -101,6 +105,7 @@ const USAGE = [
   '',
   '  ayin indulge --embed         vectorise the corpus for semantic search (CPU, no GPU needed)',
   '  ayin indulge --search "<q>"  ask the corpus what it knows — exactly what the agent would be handed',
+  '  ayin indulge --provider openai   build on OpenAI while the interactive agent stays local',
   '  ayin indulge --qa            audit the corpus: rules first (free), then the model in batches',
   '  ayin indulge --qa-rules      the free half only — no model, instant',
   '  ayin indulge --fix           re-answer what the audit rejected, then re-embed what changed',
@@ -364,6 +369,26 @@ function importCorpus(repoPath: string, from: string): number {
   return 0;
 }
 
+/**
+ * Which provider builds the corpus — separately from the one the agent talks to.
+ *
+ * A build is hours of a model reading source; a chat turn is seconds. Those are different jobs and
+ * an operator legitimately wants them on different machines: the corpus on a hosted model for the
+ * window and the reasoning, the interactive agent on the card in the room, at no cost per token.
+ * Forcing one global choice means picking which of the two to make worse.
+ *
+ * Applied by setting the env var this process will read, rather than by threading a provider through
+ * every call site: `indulge` IS its own process, `llm/select.ts` and `indulge/budget.ts` both consult
+ * the env first, and a variable set before either is imported reaches both — including the context
+ * budget, so choosing OpenAI here also widens the window without a second setting.
+ */
+function applyProviderOverride(explicit?: string): string | null {
+  const want = (explicit || getConfigString('indulgeProvider') || '').trim().toLowerCase();
+  if (!want) return null;
+  process.env.AYIN_LLM_PROVIDER = want;
+  return want;
+}
+
 export async function runIndulge(argv: string[]): Promise<number> {
   // Help first: asking for help must never be answered with "unknown flag: --help".
   if (argv.includes('--help') || argv.includes('-h')) { out(USAGE); return 0; }
@@ -373,8 +398,12 @@ export async function runIndulge(argv: string[]): Promise<number> {
   const repoPath = resolve(args.repoPath);
   if (!existsSync(repoPath)) { out(`No such directory: ${repoPath}`); return 2; }
 
+  // Before ANY provider is resolved or budget computed — both read the env first.
+  const forced = applyProviderOverride(args.provider);
+
   if (args.status) return printStatus(repoPath);
   if (args.search !== undefined) return searchCorpus(repoPath, args.search);
+  if (forced) out(`provider: ${forced} (this build only — the interactive agent is unchanged)`);
   if (args.qa) return runQaPass(repoPath, args);
   if (args.fix) return runFixPass(repoPath, args);
   if (args.importFrom) return importCorpus(repoPath, args.importFrom);
