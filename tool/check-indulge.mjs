@@ -1605,6 +1605,33 @@ rmSync(TMP, { recursive: true, force: true });
   rmSync(dir, { recursive: true, force: true });
 }
 
+// ── --retry-failed: a question that failed for a BUG is still a good question ────
+//
+// On a real run 285 questions failed and 273 of them were "answer carried no citation" — the answer
+// path was asking for citations in a shape the model would not emit. That is a bug in the asking,
+// and every one of those questions was still good. Recovering them by rebuilding would have meant
+// re-answering fifteen hundred to save two hundred and seventy-three, on a metered API.
+{
+  const ix = readFileSync(join(ROOT, 'src/indulge/index.ts'), 'utf-8');
+  ok(/case '--retry-failed': args\.retryFailed = true; break;/.test(ix), '--retry-failed is a flag');
+  const fn = ix.slice(ix.indexOf('async function runRetryFailed'), ix.indexOf('async function runQaPass'));
+  ok(/q\.status === 'failed'/.test(fn), 'it selects the failed questions');
+  ok(/setQuestionStatus\(q\.id, 'pending'/.test(fn),
+    'and re-queues them rather than deleting or rewriting anything — a status change is an append');
+  ok(!/deleteChunk/.test(fn),
+    'existing chunks are untouched: a retry can only add, never take away what already proved itself');
+  ok(/failed question\(s\)/.test(fn) && /note/.test(fn),
+    'and it PRINTS why they failed before retrying — a retry that hides the reason invites retrying a real failure forever');
+
+  const st = S.openStore(mkdtempSync(join(tmpdir(), 'ayin-retry-')));
+  st.beginRun({ runId: 'r', domains: ['d'], headSha: 'h' });
+  st.addQuestion({ id: 'f1', file: 'a.cs', entity: null, category: 'gotchas', text: 'Why does a.cs guard on null there?' });
+  st.setQuestionStatus('f1', 'failed', 'answer carried no citation');
+  ok(st.questions().find((q) => q.id === 'f1').status === 'failed', 'a failed question stays failed on its own');
+  ok(st.pendingQuestions().length === 0,
+    'and a normal run will NOT pick it up — which is why recovering it needed its own path');
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 

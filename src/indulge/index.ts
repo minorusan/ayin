@@ -43,6 +43,8 @@ export interface IndulgeArgs {
   search?: string;
   /** Run THIS build on a different provider than the interactive agent. */
   provider?: string;
+  /** Flip `failed` questions back to `pending` so a fixed answer path can retry them. */
+  retryFailed?: boolean;
   qa?: boolean;
   qaRules?: boolean;
   fix?: boolean;
@@ -77,6 +79,7 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--report': args.report = true; break;
       case '--search': case '--ask': args.search = value(); break;
       case '--provider': args.provider = value(); break;
+      case '--retry-failed': args.retryFailed = true; break;
       case '--qa': args.qa = true; break;
       case '--qa-rules': args.qa = true; args.qaRules = true; break;
       case '--fix': case '--fixembed': args.fix = true; break;
@@ -118,6 +121,7 @@ const USAGE = [
   '  ayin indulge --embed         vectorise the corpus for semantic search (CPU, no GPU needed)',
   '  ayin indulge --search "<q>"  ask the corpus what it knows — exactly what the agent would be handed',
   '  ayin indulge --provider openai   build on OpenAI while the interactive agent stays local',
+  '  ayin indulge --retry-failed  re-queue questions that failed, then answer them',
   '  ayin indulge --qa            audit the corpus: rules first (free), then the model in batches',
   '  ayin indulge --qa-rules      the free half only — no model, instant',
   '  ayin indulge --fix           re-answer what the audit rejected, then re-embed what changed',
@@ -138,6 +142,65 @@ const hhmm = (ms: number): string => {
 };
 
 /** The morning check: one command that says whether it is alive and how far it got. */
+/**
+ * `--retry-failed` — put failed questions back in the queue and answer them.
+ *
+ * A question fails for two very different reasons, and only one of them is about the question. On a
+ * real run 285 failed and **273 of them were "answer carried no citation"** — the answer path was
+ * asking for citations in a shape the model would not emit. That is a bug in the asking, and every
+ * one of those questions is still good.
+ *
+ * Recovering them by rebuilding the corpus would have meant re-answering fifteen hundred questions
+ * to save two hundred and seventy-three, on a metered API. The questions are already on disk; only
+ * their status says otherwise.
+ *
+ * Nothing is destroyed: a status change is an append, the existing chunks are untouched, and a
+ * question that fails again simply fails again.
+ */
+async function runRetryFailed(repoPath: string, args: IndulgeArgs): Promise<number> {
+  const store = openStore(repoPath);
+  if (!store.exists()) { out(`No corpus for ${resolve(repoPath)} yet.`); return 2; }
+  const failed = store.questions().filter((q) => q.status === 'failed');
+  if (!failed.length) { out('Nothing failed — nothing to retry.'); return 0; }
+
+  const why = new Map<string, number>();
+  for (const q of failed) why.set(q.note ?? '(no reason recorded)', (why.get(q.note ?? '(no reason recorded)') ?? 0) + 1);
+  out(`${failed.length} failed question(s):`);
+  for (const [note, n] of [...why.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)) {
+    out(`  ${String(n).padStart(5)}  ${note}`);
+  }
+
+  for (const q of failed) store.setQuestionStatus(q.id, 'pending', 're-queued by --retry-failed');
+
+  let stopping = false;
+  process.on('SIGINT', () => { stopping = true; out('\nstopping after the current batch — the rest stay pending'); });
+  await initSession();
+  recordPrompt(`ayin indulge --retry-failed --repoPath ${repoPath}`);
+  const started = Date.now();
+  let lastLine = 0;
+  const a = await answerQuestions({
+    store, repoPath: resolve(repoPath), limit: args.maxQuestions, shouldStop: () => stopping,
+    onStatus: (n) => out(`  ${n}`),
+    onProgress: (done, total, current) => {
+      store.setProgress({ runId: 'retry', stage: 'answer', done, total, current, startedAt: new Date(started).toISOString() });
+      const nowMs = Date.now();
+      if (nowMs - lastLine < 3000 && done < total) return;
+      lastLine = nowMs;
+      const el = (nowMs - started) / 1000;
+      const rate = done > 0 ? done / el : 0;
+      out(`  ${done}/${total} · ${Math.round(el)}s elapsed${rate > 0 && done < total ? ` · ~${Math.round((total - done) / rate)}s left` : ''}`);
+    },
+  });
+  out();
+  out(`${a.answered} answered · ${a.failed} still unproven · ${a.rejectedCitations} citation(s) rejected`);
+  recordAnswer(`indulge --retry-failed · ${a.answered} answered · ${a.failed} still unproven`);
+
+  const { embedCorpus } = await import('./embed.js');
+  const e = await embedCorpus({ store, onStatus: (n) => out(`  ${n}`) });
+  out(`  ${e.embedded} newly embedded · ${e.skipped} already had vectors`);
+  return 0;
+}
+
 /**
  * `--qa` — audit what is already stored. See indulge/qa.ts for why it is two passes.
  */
@@ -417,6 +480,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
   if (args.status) return printStatus(repoPath);
   if (args.search !== undefined) return searchCorpus(repoPath, args.search);
   if (forced) out(`provider: ${forced} (this build only — the interactive agent is unchanged)`);
+  if (args.retryFailed) return runRetryFailed(repoPath, args);
   if (args.qa) return runQaPass(repoPath, args);
   if (args.fix) return runFixPass(repoPath, args);
   if (args.importFrom) return importCorpus(repoPath, args.importFrom);
