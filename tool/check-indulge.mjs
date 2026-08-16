@@ -1476,6 +1476,51 @@ rmSync(TMP, { recursive: true, force: true });
     'a domain named after a ticket rather than a folder gets no help — honest, because nothing is called that');
 }
 
+// ── categories are ANY string, like domains ─────────────────────────────────────
+//
+// They were a closed union of five. That made the useful ones tunable and every other one
+// impossible — an operator wanting questions about thread safety had no way to ask — and a typo
+// (`states`) parsed as a category and then died deep in generation on a missing prompt file, after
+// discovery had already spent minutes and model calls.
+{
+  ok(Q.humanise('whyIsDevGae') === 'why is dev gae',
+    'a camelCase angle is humanised before the model sees it, not handed over as an identifier',
+    Q.humanise('whyIsDevGae'));
+  ok(Q.humanise('thread-safety') === 'thread safety', 'and kebab-case too');
+
+  const dir = mkdtempSync(join(tmpdir(), 'ayin-freecat-'));
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'W.cs'), 'public class W\n{\n    public void Run() { }\n}\n');
+  const st = S.openStore(dir);
+  st.beginRun({ runId: 'r', domains: ['d'], headSha: 'h' });
+  st.addFile({ path: 'src/W.cs', domain: 'd', depth: 0, why: 'seed' });
+
+  let prompt = '';
+  const r = await Q.generateQuestions({
+    store: st, repoPath: dir, categories: ['whyIsDevGae'],
+    ask: async (p) => {
+      prompt = p;
+      return JSON.stringify({ questions: [{ target: 'class W', q: ['What did Run assume that no longer holds?'] }] });
+    },
+  });
+  ok(r.generated === 1, 'an invented category generates questions like any other', JSON.stringify({ generated: r.generated }));
+  ok(/why is dev gae/i.test(prompt),
+    'and the angle reaches the prompt in words — the model is told what to ask from, not given an identifier');
+  ok(st.questions()[0].category === 'whyIsDevGae',
+    'the chunk records the angle EXACTLY as the operator wrote it, so retrieval can find it again');
+
+  // A shipped category still uses its own tuned prompt, not the generic frame.
+  let tuned = '';
+  await Q.generateQuestions({
+    store: st, repoPath: dir, categories: ['gotchas'],
+    ask: async (p) => { tuned = p; return '{"questions":[]}'; },
+  });
+  ok(!/Ask from ONE angle only/.test(tuned),
+    'a shipped category keeps its tuned FOCUS prompt rather than falling back to the generic frame');
+
+  rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 

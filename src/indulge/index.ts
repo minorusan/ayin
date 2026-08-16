@@ -88,14 +88,14 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--max-files': args.maxFiles = num(value(), 'max-files'); break;
       case '--max-questions': args.maxQuestions = num(value(), 'max-questions'); break;
       case '--categories': {
-        // VALIDATED HERE, against the real list. An unknown name used to parse fine and then throw
-        // deep in generation — `prompt "indulge/categoryStates" not found` — AFTER discovery had
-        // already spent minutes and model calls. A typo in an argument must cost the argument, not
-        // the run.
+        // ANY angle, like domains. The five that ship carry tuned prompts; anything else gets a
+        // generic frame naming it. What is still refused is a name that cannot be a prompt id or a
+        // corpus field — that fails later, in a place with no useful error.
         const want = value().split(',').map((c) => c.trim()).filter(Boolean);
-        const bad = want.filter((c) => !(CATEGORIES as string[]).includes(c));
+        const bad = want.filter((c) => !/^[A-Za-z][A-Za-z0-9_-]{1,39}$/.test(c));
         if (bad.length) {
-          errors.push(`unknown categor${bad.length > 1 ? 'ies' : 'y'}: ${bad.join(', ')} — valid: ${CATEGORIES.join(', ')}`);
+          errors.push(`unusable categor${bad.length > 1 ? 'ies' : 'y'}: ${bad.join(', ')}`
+            + ' — letters, digits, - and _ only, starting with a letter, up to 40 characters');
         }
         args.categories = want as Category[];
         break;
@@ -127,7 +127,8 @@ const USAGE = [
   '  --depth N                    reference-walk depth (default 3)',
   '  --max-files N                cap discovered files per domain',
   '  --max-questions N            cap answers this run',
-  '  --categories a,b             git,dependencies,connections,functionality,gotchas',
+  '  --categories a,b             ANY angle. Tuned ones: git,dependencies,connections,functionality,gotchas',
+  '                               anything else works too — "threadSafety", "migrationRisk" — the angle is named to the model',
 ].join('\n');
 
 const hhmm = (ms: number): string => {

@@ -1,0 +1,5 @@
+Ask from ONE angle only: **{{ANGLE}}**.
+
+Work out for yourself what that angle means for code, then ask what someone approaching this file
+from it would need answered. A question that would sit equally well under any other angle belongs to
+none — if this angle has nothing to say about a target, say nothing for it.

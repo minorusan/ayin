@@ -48,7 +48,22 @@ const LOCK_STALE_MS = 10 * 60 * 1000;
 export type Stage = 'idle' | 'discover' | 'questions' | 'answer' | 'report';
 export type QuestionStatus = 'pending' | 'answered' | 'failed';
 export type RunStatus = 'running' | 'finished' | 'interrupted';
-export type Category = 'git' | 'dependencies' | 'connections' | 'functionality' | 'gotchas';
+/**
+ * An angle to ask from — ANY string the operator chooses, not a closed set.
+ *
+ * It was a union of five. That made the useful ones tunable and every other one impossible: an
+ * operator who wants questions about, say, thread safety or migration risk had no way to ask for
+ * them, and a typo (`states`) parsed as a category and then died deep in generation on a missing
+ * prompt file. Domains were already free-form and nobody wanted them otherwise.
+ *
+ * The five that ship keep their own tuned FOCUS prompts, which the operator can edit. Anything else
+ * gets a generic frame naming the angle and leaving the model to work out what it means — the same
+ * bargain discovery already makes with a domain name.
+ *
+ * `git` remains special in the ANSWER stage, where it is grounded in git output rather than source.
+ * That is a property of how it is answered, not a restriction on what may be asked.
+ */
+export type Category = string;
 
 export const CATEGORIES: Category[] = ['git', 'dependencies', 'connections', 'functionality', 'gotchas'];
 

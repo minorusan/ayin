@@ -275,7 +275,7 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
         const prompt = indulgePrompts().get('questionBatchMulti', {
           FILE: file,
           MAX: String(perTarget),
-          ANGLES: [...wantedByCat.keys()].map((c) => `- ${c}: ${indulgePrompts().get(categoryPrompt(c)).replace(/\s+/g, ' ').slice(0, 400)}`).join('\n'),
+          ANGLES: [...wantedByCat.keys()].map((c) => `- ${c}: ${categoryFocus(c).replace(/\s+/g, ' ').slice(0, 400)}`).join('\n'),
           TARGETS: allTargets.map((e) => `- ${label(e)}`).join('\n'),
           SOURCE: shown,
         });
@@ -328,7 +328,7 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
       onProgress?.(step, total, `${file} · ${wanted.length} target(s) · ${category}`);
       const prompt = indulgePrompts().get('questionBatch', {
         FILE: file,
-        FOCUS: indulgePrompts().get(categoryPrompt(category)),
+        FOCUS: categoryFocus(category),
         MAX: String(perTarget),
         TARGETS: wanted.map((e) => `- ${label(e)}`).join('\n'),
         SOURCE: shown,
@@ -472,7 +472,27 @@ export function parseQuestionBatch(
   return out;
 }
 
-/** The prompt id carrying a category's focus. One short, tunable file each. */
-function categoryPrompt(category: Category): string {
-  return `category${category.charAt(0).toUpperCase()}${category.slice(1)}`;
+/**
+ * The FOCUS text for a category.
+ *
+ * A shipped category has its own tuned prompt file, which is the operator's main surface for
+ * changing what a corpus asks about. Anything else — and anything is allowed — gets the generic
+ * frame with the angle's name filled in, humanised first so `whyIsDevGae` reads as `why is dev gae`
+ * rather than as an identifier the model has to decode before it can use it.
+ */
+function categoryFocus(category: Category): string {
+  const id = `category${category.charAt(0).toUpperCase()}${category.slice(1)}`;
+  const bundle = indulgePrompts();
+  if (bundle.has(id)) return bundle.get(id);
+  return bundle.get('categoryFreeform', { ANGLE: humanise(category) });
+}
+
+/** `whyIsDevGae` / `why-is-dev-gae` → `why is dev gae`. */
+export function humanise(name: string): string {
+  return name
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }

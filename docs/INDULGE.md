@@ -419,3 +419,32 @@ It says so when it takes effect:
 ```
 provider: openai (this build only — the interactive agent is unchanged)
 ```
+
+---
+
+## Categories are angles, and you invent them
+
+```
+--categories gotchas,connections            the tuned ones
+--categories threadSafety,migrationRisk     anything you want
+```
+
+They were a closed set of five. That made the useful ones tunable and every other one impossible —
+an operator wanting questions about thread safety had no way to ask — and a typo (`states`) parsed
+as a category, ran the whole discovery stage, then died on a missing prompt file.
+
+Now they are free-form, exactly like domains. The five that ship
+(`git dependencies connections functionality gotchas`) keep their own FOCUS prompt files, which are
+the main surface for changing what a corpus asks about. **Anything else gets a generic frame naming
+the angle** and leaving the model to work out what it means — the same bargain discovery already
+makes with a domain name.
+
+The name is humanised before the model sees it: `whyIsDevGae` becomes *"why is dev gae"*, because an
+identifier is something to decode before it can be used. The chunk records the angle **exactly as you
+wrote it**, so retrieval finds it again under that name.
+
+Two things are still refused, and both fail at the argument rather than mid-run: a name that cannot be
+a prompt id or a corpus field (letters, digits, `-`, `_`, starting with a letter, ≤40 chars).
+
+`git` remains special in the **answer** stage, where it is grounded in git output rather than source.
+That is a property of how it is answered, not a restriction on what may be asked.
