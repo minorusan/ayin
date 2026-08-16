@@ -96,3 +96,18 @@ export function answerBatchSize(): number {
   const spare = contextTokens() * (1 - SOURCE_SHARE);
   return Math.max(1, Math.min(24, Math.floor(spare / 1500)));
 }
+
+/**
+ * How many CATEGORIES ride in one question-generation call.
+ *
+ * Generation is one call per (file, category), and on a real run that was 1,053 calls against ~35
+ * for all the answering combined — 30× everything else. The source is identical across categories
+ * for a given file, so on a window with room they go together and the file is sent once.
+ *
+ * Kept at 1 on a small window deliberately. Each category carries its own FOCUS prompt, and stacking
+ * several framings beside the source in a 16k context is how you get questions that belong to no
+ * category in particular. The merge is a big-window optimisation, not a better idea.
+ */
+export function categoryBatchSize(): number {
+  return contextTokens() >= 60_000 ? 4 : 1;
+}

@@ -27,13 +27,17 @@
 import { log } from '../log.js';
 import type { LlmMessage, ModelDialect, ParseAllResult, ParsedToolCall } from './types.js';
 import { GemmaDialect } from './dialects/gemma.js';
+import { NativeToolDialect } from './dialects/native.js';
 import { QwenDialect } from './dialects/qwen.js';
 import { narrateWait } from '../wait-narrator.js';
 import { llmProvider } from './select.js';
 
 // Registered dialects, in match-priority order. The first whose matches() returns
 // true for the active model wins; DEFAULT is used until the model id is known.
-const DIALECTS: ModelDialect[] = [new QwenDialect(), new GemmaDialect()];
+// FIRST, because it is the most specific match and the only one whose absence was a bug: without it
+// an OpenAI model fell through to the gemma fallback and was told, in prose, to emit XML tool calls
+// that its API was already carrying natively.
+const DIALECTS: ModelDialect[] = [new NativeToolDialect(), new QwenDialect(), new GemmaDialect()];
 const DEFAULT: ModelDialect = DIALECTS[DIALECTS.length - 1]; // gemma — used until the model id is known
 
 let cachedModelId = '';

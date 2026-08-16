@@ -26,7 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { languageFor } from '../entangle/index.js';
-import { singleFileBudgetChars } from './budget.js';
+import { categoryBatchSize, singleFileBudgetChars } from './budget.js';
 import { toolLlm, toolPrompts, type ToolPrompts } from '../tools/runtime.js';
 import { ensureToolRuntime } from '../tool-wiring.js';
 import { CATEGORIES, questionId, type Category, type Entity, type IndulgeStore } from './store.js';
@@ -243,9 +243,77 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
     // already ten-hour stage rather than shortening it. Per (file, category) is proportional to
     // FILES, which is the number the operator actually controls.
     //
-    // Category stays a separate call rather than being folded in too: each one carries its own FOCUS
-    // prompt, those prompts are the operator's main tuning surface, and merging them would put
-    // several conflicting framings in one context for a model that has to hold the source as well.
+    // CATEGORIES RIDE TOGETHER when the window has room. Generation was one call per (file,
+    // category) — 1,053 calls on a real run against ~35 for all the answering combined, 30x
+    // everything else. The source is identical across categories for one file, so on a big window it
+    // is sent once and every angle asked at the same time.
+    //
+    // Still one-at-a-time on a small window, deliberately: each category carries its own FOCUS
+    // prompt, and stacking several framings beside the source in 16k is how you get questions that
+    // belong to no category in particular. This is a big-window optimisation, not a better idea.
+    const catBatch = categoryBatchSize();
+    if (catBatch > 1 && categories.length > 1) {
+      for (let ci = 0; ci < categories.length; ci += catBatch) {
+        const angles = categories.slice(ci, ci + catBatch);
+        step++;
+        if (shouldStop?.()) { report.stopped = true; onStatus?.('stop requested — leaving the rest for the next run'); return report; }
+        if ((perFile.get(file) ?? 0) >= maxPerFile) { report.skipped++; continue; }
+
+        // Per (target, category) resume, unchanged — an angle already done for a target is dropped
+        // from the ask rather than the whole batch being re-run.
+        const wantedByCat = new Map<Category, Array<Entity | null>>();
+        for (const cat of angles) {
+          const w = targets.filter((e) => !done.has(`${file}|${entityKeyOf(e)}|${cat}`));
+          if (w.length) wantedByCat.set(cat, w);
+        }
+        if (!wantedByCat.size) { report.skipped++; continue; }
+
+        const allTargets = [...new Set([...wantedByCat.values()].flat())];
+        report.targets += allTargets.length;
+        onProgress?.(step, total, `${file} · ${allTargets.length} target(s) × ${wantedByCat.size} angle(s)`);
+
+        const prompt = indulgePrompts().get('questionBatchMulti', {
+          FILE: file,
+          MAX: String(perTarget),
+          ANGLES: [...wantedByCat.keys()].map((c) => `- ${c}: ${indulgePrompts().get(categoryPrompt(c)).replace(/\s+/g, ' ').slice(0, 400)}`).join('\n'),
+          TARGETS: allTargets.map((e) => `- ${label(e)}`).join('\n'),
+          SOURCE: shown,
+        });
+        let reply: string;
+        try {
+          reply = opts.ask ? await opts.ask(prompt) : await toolLlm().ask([{ role: 'user', content: prompt }]);
+        } catch (err) {
+          onStatus?.(`generation failed on ${file}: ${String(err).slice(0, 120)}`);
+          continue;
+        }
+        report.calls++;
+
+        const parsed = parseQuestionBatchMulti(reply, allTargets, [...wantedByCat.keys()], perTarget);
+        for (const [cat, wanted] of wantedByCat) {
+          for (const [entity, texts] of parsed.get(cat) ?? []) {
+            for (const text of texts) {
+              if ((perFile.get(file) ?? 0) >= maxPerFile) break;
+              const id = questionId(text, file, entity);
+              if (store.addQuestion({ id, file, entity, category: cat, text })) {
+                report.generated++;
+                perFile.set(file, (perFile.get(file) ?? 0) + 1);
+              } else {
+                report.duplicates++;
+              }
+            }
+          }
+          // Every target in the ask is done, answered or not — "nothing worth asking" is a real
+          // answer and must not be re-asked forever at the price of the whole file.
+          for (const e of wanted) {
+            done.add(`${file}|${entityKeyOf(e)}|${cat}`);
+            store.markAsked(file, e, cat);
+          }
+        }
+      }
+      onStatus?.(`${file}: ${perFile.get(file) ?? 0} question(s)`);
+      continue;
+    }
+
     for (const category of categories) {
       report.targets += targets.length;
       step++;
@@ -320,6 +388,42 @@ const entityKeyOf = (e: Entity | null): string => (e ? `${e.kind}:${e.name}` : '
  * to the file as a whole — a question filed against the wrong target is still a true question about
  * this file, whereas discarding it is a hole in the corpus.
  */
+/**
+ * Parse a MULTI-ANGLE reply: `angle` (the category) alongside `target`.
+ *
+ * Same positional pair scan as the single-category parser, for the same two reasons learned from a
+ * real corpus — duplicate keys are valid JSON and silently keep only the last, and a truncated reply
+ * must yield what it completed rather than nothing.
+ *
+ * An entry naming an angle that was not asked for is DROPPED rather than reassigned. Filing a
+ * question under a category nobody requested puts it in a corpus slice the operator did not choose to
+ * build, where it will be retrieved as if they had.
+ */
+export function parseQuestionBatchMulti(
+  reply: string, targets: Array<Entity | null>, categories: Category[], maxPerTarget: number,
+): Map<Category, Map<Entity | null, string[]>> {
+  const out = new Map<Category, Map<Entity | null, string[]>>();
+  const byLabel = new Map(targets.map((t) => [label(t).toLowerCase(), t]));
+  const byAngle = new Map(categories.map((c) => [c.toLowerCase(), c]));
+  const fileTarget = targets.includes(null) ? null : targets[0] ?? null;
+
+  const re = /"angle"\s*:\s*"([^"]*)"\s*,\s*"target"\s*:\s*"([^"]*)"\s*,\s*"q"\s*:\s*(\[[^\]]*\])/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(reply))) {
+    const cat = byAngle.get(m[1].toLowerCase().trim());
+    if (!cat) continue;
+    const entity = byLabel.get(m[2].toLowerCase().trim()) ?? fileTarget;
+    let texts: string[];
+    try { texts = (JSON.parse(m[3]) as unknown[]).map(String); } catch { continue; }
+    const clean = texts.map(cleanQuestion).filter(Boolean).slice(0, maxPerTarget);
+    if (!clean.length) continue;
+    const perCat = out.get(cat) ?? new Map<Entity | null, string[]>();
+    perCat.set(entity, [...(perCat.get(entity) ?? []), ...clean].slice(0, maxPerTarget));
+    out.set(cat, perCat);
+  }
+  return out;
+}
+
 export function parseQuestionBatch(
   reply: string, targets: Array<Entity | null>, maxPerTarget: number,
 ): Map<Entity | null, string[]> {

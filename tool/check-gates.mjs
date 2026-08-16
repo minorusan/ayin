@@ -2085,5 +2085,35 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
   ok(!/\{bold\}[^{]*\{bold\}/.test(joined), 'no doubled/corrupted tags from wrapping already-tagged text');
 }
 
+// ── a model whose API carries tool schemas must not be TOLD to write them in prose ──
+//
+// DIALECTS held only qwen and gemma, gemma being the fallback, so an OpenAI model resolved to the
+// GEMMA dialect and had gemma's XML tool-call instructions injected into its system prompt — while
+// providers/openai.ts was declaring the same tools natively. Told two contradictory contracts, a good
+// instruction-follower used the one written in prose: it replied `<function=grep><parameter=…>` in a
+// loop that had declared no tools and merely wanted JSON. The reply parsed as nothing and the
+// iteration, billed per token, was discarded.
+{
+  const mgr = await import(join(REPO, 'dist/llm/manager.js'));
+  const { NativeToolDialect } = await import(join(REPO, 'dist/llm/dialects/native.js'));
+  const native = new NativeToolDialect();
+
+  for (const id of ['gpt-4.1', 'gpt-4.1-mini', 'gpt-5', 'gpt-5-mini', 'o3', 'chatgpt-4o-latest']) {
+    ok(native.matches(id), `${id} resolves to the native dialect, not the gemma fallback`);
+  }
+  for (const id of ['gemma4:26b', 'qwen3.6:27b', 'qwen2.5-coder:32b']) {
+    ok(!native.matches(id), `${id} is left to its own dialect`);
+  }
+
+  ok(native.toolCallInstructions() === '',
+    'the native dialect injects NO tool-call prose — the schema travels in the request, and describing it again is a second contradictory contract');
+
+  const mgrSrc = readFileSync(join(REPO, 'src/llm/manager.ts'), 'utf-8');
+  const order = mgrSrc.slice(mgrSrc.indexOf('const DIALECTS'), mgrSrc.indexOf('const DEFAULT'));
+  ok(order.indexOf('NativeToolDialect') < order.indexOf('QwenDialect'),
+    'and it is matched FIRST, so nothing falls through to a text-tool-calling fallback');
+  ok(mgr.adapterNames().includes('native'), 'the dialect is registered and selectable by name');
+}
+
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

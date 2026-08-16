@@ -279,57 +279,10 @@ function historyDigest(history: HistoryEntry[]): string {
   return chunks.join('\n\n');
 }
 
-/**
- * Recover the commands from a reply that came back as a TOOL CALL instead of JSON.
- *
- * Measured on GPT-4.1: a function-calling model reads "run grep" as a tool call and emits its own
- * call syntax — `<function=grep><parameter=pattern>…`. Nothing is wrong with the model; it is being
- * asked to describe a tool invocation in prose, which is the one thing a tool-trained model is
- * built not to do.
- *
- * The prompt now forbids it, but a prompt is a request. This turns the reply into the command it
- * meant rather than burning the iteration — a wasted iteration on a hosted model is a wasted
- * iteration the operator paid for.
- */
-function recoverToolCall(raw: string): string[] {
-  const out: string[] = [];
-  // <function=NAME> … <parameter=KEY> VALUE </parameter>
-  for (const call of raw.matchAll(/<function=([a-z_]+)>([\s\S]*?)(?:<\/function>|$)/gi)) {
-    const name = call[1].toLowerCase();
-    const params = new Map<string, string>();
-    for (const p of call[2].matchAll(/<parameter=([a-z_]+)>\s*([\s\S]*?)\s*(?:<\/parameter>|$)/gi)) {
-      params.set(p[1].toLowerCase(), p[2].trim());
-    }
-    const pattern = params.get('pattern') || params.get('query') || params.get('q') || '';
-    const path = params.get('path') || '.';
-    const include = params.get('include') || params.get('glob') || '';
-    if (name === 'grep' && pattern) {
-      out.push(`grep -rnI --exclude-dir={.git,node_modules,'dist*','*.bak*',build,vendor,target}`
-        + `${params.get('ignore_case') === 'true' ? ' -i' : ''}`
-        + `${include ? ` --include='${include}'` : ''} '${pattern.replace(/'/g, "'\\''")}' ${path}`);
-    } else if ((name === 'find' || name === 'glob') && (pattern || include)) {
-      out.push(`find ${path} -name '${(pattern || include).replace(/'/g, "'\\''")}' -not -path '*/node_modules/*'`);
-    } else if ((name === 'read' || name === 'read_file' || name === 'cat') && (params.get('path') || pattern)) {
-      out.push(`cat ${params.get('path') || pattern}`);
-    }
-  }
-  return out;
-}
-
 function parseResponse(raw: string): ExploreIteration {
   let cleaned = raw.trim();
 
-  // A tool-shaped reply, salvaged into the commands it meant. Checked BEFORE the JSON path, because
-  // such a reply contains no JSON at all and would otherwise cost the whole iteration.
-  if (/<function=/i.test(cleaned) && !cleaned.trimStart().startsWith('{')) {
-    const commands = recoverToolCall(cleaned);
-    if (commands.length) {
-      return {
-        reasoning: 'recovered a tool-call reply into shell commands',
-        commands, answer: '', confidence: 0.3,
-      };
-    }
-  }
+
 
   // Strip markdown fences
   if (cleaned.startsWith('```')) {

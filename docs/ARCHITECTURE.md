@@ -355,6 +355,29 @@ dialect  ── toolCallInstructions (→ system prompt) · parse(raw) · render
 **Adding a model family** = implement `ModelDialect` (or extend `XmlToolCallDialect`) and
 register it in `manager.ts`'s `DIALECTS`. A few lines.
 
+### The `native` dialect — for APIs that carry the schema themselves
+
+`DIALECTS` held only qwen and gemma, gemma being the fallback, so **an OpenAI model resolved to the
+gemma dialect** and had gemma's XML tool-call instructions injected into its system prompt — while
+`providers/openai.ts` was declaring the same tools *natively*. The model was told two contradictory
+contracts at once and, being a good instruction follower, used the one written in prose: it replied
+`<function=grep><parameter=pattern>…` inside a loop that had declared no tools and merely wanted JSON
+back. That reply parsed as nothing and the iteration — billed per token — was discarded.
+
+`NativeToolDialect` matches `gpt-*`, `o3`/`o4`, `chatgpt-*` and is registered **first**, so nothing
+falls through to a text-tool-calling fallback. Its `toolCallInstructions()` returns **empty on
+purpose**: the schema travels in the request, and describing it again in prose is not redundancy, it
+is a second contract the model has no way to rank against the first.
+
+`parse()` stays the lenient text parser, because the provider renders native `tool_calls` back into
+ayin's canonical text (`renderToolCalls`) so the rest of the loop remains model-agnostic — and it
+still catches a model that emits the text form anyway.
+
+**The fix belongs here and nowhere else.** The first attempt put a `<function=…>` recovery inside
+`explore.ts`, which would have left every other consumer — the agent loop, indulge, plan, QA — to
+discover the same failure separately. One dialect serves all of them; that is what the abstraction is
+for.
+
 ## Agent loop (`agent.ts`)
 
 1. User input → added to the conversation window + rolling summary.

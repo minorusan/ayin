@@ -192,11 +192,9 @@ console.log('\nexplore normal case (must still work — the fix must not break o
 // `<function=grep><parameter=pattern>…`. Nothing is wrong with the model; it is being asked to
 // describe a tool invocation in prose, which is exactly what a tool-trained model is built not to do.
 {
-  const EX = await import(join(REPO, 'dist/tools/explore.js'));
   const src = readFileSync(join(REPO, 'src/tools/explore.ts'), 'utf-8');
-  ok(/function recoverToolCall/.test(src), 'a tool-shaped reply is recovered rather than discarded');
-  ok(src.indexOf('recoverToolCall(cleaned)') < src.indexOf("cleaned.indexOf('{')"),
-    'and recovery is tried BEFORE the JSON path — such a reply contains no JSON to find');
+  ok(!/recoverToolCall/.test(src),
+    'explore does NOT carry its own tool-call workaround — the dialect layer exists for exactly this, and one fix there serves every consumer');
 
   const sys = readFileSync(join(REPO, 'prompts/explore/investigatorSystem.txt'), 'utf-8');
   ok(/NEVER emit a tool call/i.test(sys),

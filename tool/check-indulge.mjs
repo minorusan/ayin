@@ -1384,6 +1384,57 @@ rmSync(TMP, { recursive: true, force: true });
   ok(prompts.KNOWN_CONFIG_KEYS.includes('indulgeProvider'), 'indulgeProvider is a known config key');
 }
 
+// ── generation batches CATEGORIES on a big window — 30x the rest of the run ──────
+{
+  const B = await import(join(ROOT, 'dist/indulge/budget.js'));
+  const save = process.env.AYIN_LLM_PROVIDER;
+
+  process.env.AYIN_LLM_PROVIDER = 'ollama';
+  process.env.AYIN_OLLAMA_CTX = '16384';
+  ok(B.categoryBatchSize() === 1,
+    'a small window keeps one category per call — stacking framings beside the source there yields questions belonging to no category');
+
+  process.env.AYIN_LLM_PROVIDER = 'openai';
+  ok(B.categoryBatchSize() > 1, 'a big window asks every angle at once', String(B.categoryBatchSize()));
+
+  const dir = mkdtempSync(join(tmpdir(), 'ayin-catb-'));
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'T.cs'), 'public class T\n{\n    public void Go() { }\n}\n');
+  const st = S.openStore(dir);
+  st.beginRun({ runId: 'r', domains: ['d'], headSha: 'h' });
+  st.addFile({ path: 'src/T.cs', domain: 'd', depth: 0, why: 'seed' });
+
+  let calls = 0;
+  let prompt = '';
+  const r = await Q.generateQuestions({
+    store: st, repoPath: dir, categories: ['gotchas', 'connections'],
+    ask: async (p) => {
+      calls++; prompt = p;
+      return JSON.stringify({ questions: [
+        { angle: 'gotchas', target: 'class T', q: ['What breaks if Go runs twice in one frame?'] },
+        { angle: 'connections', target: 'class T', q: ['Who calls Go, and what do they assume about it?'] },
+        { angle: 'invented', target: 'class T', q: ['Should this be refactored into a service?'] },
+      ] });
+    },
+  });
+  ok(calls === 1, 'two categories over one file cost ONE call, not two', `${calls} call(s)`);
+  ok(prompt.split('public class T').length === 2, 'and the source appears once, not once per angle');
+  const cats = st.questions().map((q) => q.category).sort();
+  ok(cats.join(',') === 'connections,gotchas',
+    'each question lands under the angle it was written for', cats.join(','));
+  ok(!cats.includes('invented'),
+    'an angle nobody asked for is DROPPED — filing it would build a corpus slice the operator never chose');
+
+  // Resume still works per (file, entity, category), not per batch.
+  const before = calls;
+  await Q.generateQuestions({ store: st, repoPath: dir, categories: ['gotchas', 'connections'], ask: async () => { calls++; return '{}'; } });
+  ok(calls === before, 'a resumed multi-angle batch asks nothing', `${calls - before} extra call(s)`);
+
+  if (save === undefined) delete process.env.AYIN_LLM_PROVIDER; else process.env.AYIN_LLM_PROVIDER = save;
+  delete process.env.AYIN_OLLAMA_CTX;
+  rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 
