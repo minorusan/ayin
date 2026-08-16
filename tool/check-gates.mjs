@@ -2115,5 +2115,30 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
   ok(mgr.adapterNames().includes('native'), 'the dialect is registered and selectable by name');
 }
 
+// ── a SUB-LOOP must not be handed tools it was told it does not have ────────────
+//
+// `llmChat` declared the whole tool catalogue on every call to a native provider. `explore` sends
+// "you have no tools, reply with JSON" — and ayin declared `grep`, `read_file` and the rest through
+// the API on the same request. GPT-4.1 did the correct thing with a real tool it had genuinely been
+// given: it called it. renderToolCalls turned that into ayin's XML, which arrived inside explore's
+// reply as `<function=grep><parameter=pattern>…` and parsed as nothing.
+//
+// The model was never confused. It was handed a tool and used it.
+{
+  const wiring = readFileSync(join(REPO, 'src/tool-wiring.ts'), 'utf-8');
+  ok(/llmChat\(messages as Parameters<typeof llmChat>\[0\], \{ declareTools: false \}\)/.test(wiring),
+    'the TOOL-facing ask declares no tools — everything reaching the model through it wants prose or JSON back');
+
+  const mgr = readFileSync(join(REPO, 'src/llm/manager.ts'), 'utf-8');
+  ok(/opts\.declareTools !== false/.test(mgr),
+    'and the manager honours that, rather than declaring unconditionally to a native provider');
+  ok(/declareTools\?: boolean/.test(mgr), 'the option is part of the contract, not a private flag');
+
+  // The AGENT loop must still get them — this is the one caller that genuinely needs tools.
+  const agent = readFileSync(join(REPO, 'src/agent.ts'), 'utf-8');
+  ok(!/declareTools:\s*false/.test(agent),
+    'the agent loop still declares tools — it is the one caller that is actually calling them');
+}
+
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

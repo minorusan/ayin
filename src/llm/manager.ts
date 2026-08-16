@@ -238,15 +238,33 @@ function emitLlmCall(record: LlmCallRecord): void {
   }
 }
 
-export async function llmChat(messages: LlmMessage[]): Promise<string> {
+export interface LlmChatOptions {
+  /**
+   * Declare the tool catalogue to the model. TRUE for the agent loop; FALSE for anything asking the
+   * model a question and expecting an ANSWER.
+   *
+   * This defaulted to always-on, and against a native provider it was the whole bug. `explore` sends
+   * "you have no tools, reply with JSON" — and ayin declared `grep`, `read_file` and the rest through
+   * the API on the same request. GPT-4.1 did the correct thing with a real tool it had genuinely been
+   * given: it called it. `renderToolCalls` then turned that into ayin's XML text, which arrived in
+   * explore's reply as `<function=grep><parameter=pattern>…` and parsed as nothing.
+   *
+   * The model was never confused and never hallucinating. It was handed a tool and used it. A sub-loop
+   * that wants prose or JSON must not be declaring tools at all.
+   */
+  declareTools?: boolean;
+}
+
+export async function llmChat(messages: LlmMessage[], opts: LlmChatOptions = {}): Promise<string> {
   ensureRefreshed();
   // Declare the tools. A provider that can pass them to the runtime (providers/ollama.ts) gets native
   // tool-calling — the model emits the syntax it was trained on and the runtime parses it — while the
   // text-contract providers ignore the field and nothing changes for them.
   const provider = await llmProvider();
-  // Schemas go out ONLY to a provider that declares them; a text-contract provider would ignore the
-  // field, and sending it anyway invites exactly the double-declaration this mode exists to prevent.
-  const declared = (provider.tools ?? 'prompt') === 'native';
+  // Schemas go out ONLY to a provider that declares them AND to a caller that wants them; a text
+  // contract provider would ignore the field, and sending it anyway invites exactly the
+  // double-declaration this mode exists to prevent.
+  const declared = (provider.tools ?? 'prompt') === 'native' && opts.declareTools !== false;
   const tools = declared
     ? await (async () => {
         // Reached from any generate path, not only a turn, so it insists on discovery rather than

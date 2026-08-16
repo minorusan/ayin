@@ -30,9 +30,19 @@ export function ensureToolRuntime(): void {
       // Imported lazily, not at module scope: `llm/manager` imports the tool registry back (to declare
       // schemas to a native provider), and a top-level cycle leaves one side half-initialized
       // depending on which module the process loaded first.
+      /**
+       * A TOOL asking the model a question — never the agent loop.
+       *
+       * `declareTools: false` is load-bearing, not a tidy-up. Everything reaching the model through
+       * here (explore, indulge's question and answer passes, the QA audit, the connectors' inner
+       * loops) wants prose or JSON back and says so in its own prompt. Declaring the tool catalogue
+       * on those calls handed a native-tool model a real `grep` it could call — and GPT-4.1 did
+       * exactly that, correctly, which arrived as `<function=grep>` inside a reply that was supposed
+       * to be JSON and parsed as nothing.
+       */
       async ask(messages) {
         const { llmChat } = await import('./llm/manager.js');
-        return llmChat(messages as Parameters<typeof llmChat>[0]);
+        return llmChat(messages as Parameters<typeof llmChat>[0], { declareTools: false });
       },
     },
     log: {
