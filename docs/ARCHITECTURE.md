@@ -376,6 +376,30 @@ provider's dialect cannot survive a `/model` switch. `modelResolution()` exposes
 `/debug` manifest carries **`dialectSource`** — `matched the served model` / `chosen by the operator` /
 `FALLBACK — model never resolved` — so a manifest can never again state "gemma" without saying why.
 
+#### The context window is REPORTED, never invented
+
+Three numbers described one window and none of them agreed. The session meter said **65536** — a
+hardcoded fallback in `tokens.ts`, reached whenever the endpoint does not serve `/api/estimate`,
+which is almost always. The indulge budget said **16384** — `LOCAL_DEFAULT_TOKENS`, a default for the
+*ollama* provider on a session using the *resource* provider. The active preset actually granted
+**40000**, and the resource layer had been reporting it as `ctxSize` the whole time; nothing asked.
+
+An operator therefore watched a bar promising four times the room they had, while the runtime
+truncated the prompt in silence — and every budget derived from the window was sized for less than
+half of it (27,033 chars of source where 66,000 fit; 4 answers batched per call where 12 fit, so
+**3× the LLM calls** on a run measured in hours).
+
+`ProviderStatus` now carries an optional `contextTokens`. The resource provider reads it from the
+`llm status` op (one request, strictly more than the `{ok, model}` endpoint gave, falling back to that
+endpoint so a backend without the op does not read as down); the ollama provider reports the `num_ctx`
+it sets itself, where it is fact rather than estimate. `manager.ts` caches it from the same call that
+learns the model — they change together, and reading them from two places is how they drift — and
+exposes `activeContextTokens()`, which both `tokens.ts` and `indulge/budget.ts` now consume.
+
+**Zero means unknown, and no consumer may substitute a number of its own.** The status bar renders an
+unknown window as `12k/? tokens` rather than a percentage of an invented denominator: a meter that
+invents its scale is worse than no meter, because it gets consulted.
+
 ### The `native` dialect — for APIs that carry the schema themselves
 
 `DIALECTS` held only qwen and gemma, gemma being the fallback, so **an OpenAI model resolved to the

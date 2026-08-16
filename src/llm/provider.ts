@@ -71,6 +71,16 @@ export interface GenerateResult {
 export interface ProviderStatus {
   ok: boolean;
   model: string | null;
+  /**
+   * The context window the served model will actually be given, in tokens.
+   *
+   * Absent when the provider genuinely cannot know it — and ABSENT MUST NOT BE GUESSED AT by the
+   * consumer. The session meter used to fall back to a flat 65536 unrelated to anything, so an
+   * operator running a 16k preset watched a bar that said they had four times the room they had,
+   * while the runtime silently truncated the prompt. A meter that invents its own scale is worse
+   * than no meter: it is consulted, and it is wrong.
+   */
+  contextTokens?: number;
 }
 
 // ── optional: the model catalog ──────────────────────────────────────

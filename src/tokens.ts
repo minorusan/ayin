@@ -10,6 +10,7 @@
 
 import { log } from './log.js';
 import { llmBaseUrl } from './connection.js';
+import { activeContextTokens } from './llm/manager.js';
 
 export interface TokenEstimate {
   promptTokens: number;
@@ -55,9 +56,19 @@ export async function estimateTokens(
     log('DEBUG', 'token_estimate_fallback', { error: String(err) });
   }
 
-  // Fallback: rough estimate, use cached context window if known.
+  // Fallback: rough estimate on the char count — but the WINDOW is never guessed.
+  //
+  // This used to fall back to a hardcoded 65536, belonging to no model and no setting. Almost nothing serves
+  // `/api/estimate`, so that branch was the normal path, and the meter reported 65536 for every
+  // session regardless of the preset: an operator on a 16k window watched a bar promising four times
+  // the room they had while the runtime truncated the prompt in silence. The meter was not merely
+  // uninformative, it was consulted and wrong.
+  //
+  // The provider knows — the resource layer reports the active preset's `ctxSize`, and the ollama
+  // provider sets `num_ctx` itself. `activeContextTokens()` is that number, and 0 means genuinely
+  // unknown, which the caller must render as unknown rather than backfill.
   const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
-  const cw = knownContextWindow || 65536;
+  const cw = knownContextWindow || activeContextTokens();
   const est: TokenEstimate = {
     promptTokens: Math.ceil(totalChars / 4),
     contextWindow: cw,

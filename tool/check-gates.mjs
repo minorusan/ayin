@@ -2265,5 +2265,45 @@ console.log('\nmodel resolution');
     'the debug manifest distinguishes a MATCHED dialect from a fallen-back one');
 }
 
+// ── the context window is REPORTED, never invented ────────────────────────────
+//
+// Three numbers described one window and none agreed: the status bar said 65536 (a hardcoded
+// fallback belonging to no model), the indulge budget said 16384 (a local default for a provider
+// that was not in use), and the resource layer had been reporting the true 40000 all along. The
+// operator watched a meter promising four times the room they had while the runtime truncated in
+// silence — and every budget derived from it was sized for a window less than half the real one.
+console.log('\ncontext window');
+{
+  const tokSrc = readFileSync(join(REPO, 'src/tokens.ts'), 'utf-8');
+  ok(!/\|\|\s*65536/.test(tokSrc), 'the meter no longer invents a 65536 window');
+  ok(/activeContextTokens\(\)/.test(tokSrc), 'it asks the provider-reported window instead');
+
+  const budgetSrc = readFileSync(join(REPO, 'src/indulge/budget.ts'), 'utf-8');
+  ok(/const reported = activeContextTokens\(\);\s*\n\s*if \(reported > 0\) return reported;/.test(budgetSrc),
+    'the budget PREFERS the reported window over the local ollama setting');
+
+  // 0 must mean unknown all the way to the glass, or the fix just moves the lie.
+  const statusSrc = readFileSync(join(REPO, 'src/ui/widgets/status.ts'), 'utf-8');
+  ok((statusSrc.match(/!\(this\.state\.tokens\.total > 0\)/g) ?? []).length >= 2,
+    'an unknown window renders as unknown in BOTH status renderings, never as a percentage of zero');
+
+  // The provider port must be able to carry it, and the resource provider must actually read it.
+  const portSrc = readFileSync(join(REPO, 'src/llm/provider.ts'), 'utf-8');
+  ok(/contextTokens\?: number;/.test(portSrc), 'ProviderStatus can carry the window');
+  const resSrc = readFileSync(join(REPO, 'src/llm/providers/resource.ts'), 'utf-8');
+  ok(/ctxSize/.test(resSrc) && /status: resourceStatus,/.test(resSrc),
+    'the resource provider reads ctxSize from the resource op rather than the {ok,model} endpoint');
+  ok(/return httpStatus\(\);/.test(resSrc),
+    'and falls back to the plain contract, so a backend without the op does not read as down');
+
+  const ollamaSrc = readFileSync(join(REPO, 'src/llm/providers/ollama.ts'), 'utf-8');
+  ok(/contextTokens: numCtx\(\)/.test(ollamaSrc),
+    'the ollama provider reports the num_ctx it sets itself — there it is fact, not estimate');
+
+  const mgrCtx = readFileSync(join(REPO, 'src/llm/manager.ts'), 'utf-8');
+  ok(/cachedContextTokens = 0; \/\/ a different provider/.test(mgrCtx),
+    'switching provider forgets the window, so the old provider\'s number cannot survive the switch');
+}
+
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

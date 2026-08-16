@@ -20,6 +20,7 @@
  */
 
 import { getConfigString } from '../prompts.js';
+import { activeContextTokens } from '../llm/manager.js';
 
 /**
  * Characters per token, for code.
@@ -49,9 +50,19 @@ export function generatingOnOpenAi(): boolean {
   return p === 'openai';
 }
 
-/** The context window, in tokens, of whatever will read the next prompt. */
+/**
+ * The context window, in tokens, of whatever will read the next prompt.
+ *
+ * PREFERS WHAT THE PROVIDER REPORTS. `AYIN_OLLAMA_CTX` / `ollamaCtx` describe the *ollama* provider's
+ * own request, and on a resource-layer backend they describe nothing at all — the window there is set
+ * by the active preset, which the operator changes without touching any ayin config. Reading only the
+ * local setting meant this returned 16384 while the preset granted 40000: every budget derived from
+ * it was sized for a window less than half the real one, and the operator had no way to tell.
+ */
 export function contextTokens(): number {
   if (generatingOnOpenAi()) return OPENAI_CONTEXT_TOKENS;
+  const reported = activeContextTokens();
+  if (reported > 0) return reported;
   const raw = process.env.AYIN_OLLAMA_CTX || getConfigString('ollamaCtx');
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : LOCAL_DEFAULT_TOKENS;

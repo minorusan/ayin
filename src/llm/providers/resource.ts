@@ -28,6 +28,7 @@ import { llmBaseUrl } from '../../connection.js';
 import { log } from '../../log.js';
 import type {
   AcquireOptions, AcquireResult, AuthorityInfo, LlmEvent, LlmProvider, LlmTelemetry, ModelCatalog,
+  ProviderStatus,
 } from '../provider.js';
 import { httpGenerate, httpStatus } from './direct.js';
 
@@ -146,6 +147,32 @@ interface WireCatalog {
   sharedModel?: string;
   coderModel?: string;
   models?: ModelCatalog['models'];
+  /** The window the ACTIVE preset grants — the resource layer is authoritative about this. */
+  ctxSize?: number;
+}
+
+/**
+ * Status through the RESOURCE op rather than the plain `/api/status`.
+ *
+ * One request, strictly more information: the generic endpoint answers `{ok, model}` and nothing
+ * else, while the resource layer also reports `ctxSize` — the window the active preset actually
+ * grants. That number existed all along and ayin never asked for it, so the session meter fell back
+ * to a hardcoded 65536 while the operator ran a 16k preset.
+ *
+ * Falls back to the plain contract when the op is unavailable: this doubles as the liveness probe,
+ * and a backend that predates the op must not read as "down".
+ */
+async function resourceStatus(): Promise<ProviderStatus> {
+  const s = await resourceOp('llm', 'status', {}, 4_000).catch(() => null) as WireCatalog | null;
+  if (s?.activeModel) {
+    const ctx = Number(s.ctxSize);
+    return {
+      ok: true,
+      model: s.activeModel,
+      ...(Number.isFinite(ctx) && ctx > 0 ? { contextTokens: ctx } : {}),
+    };
+  }
+  return httpStatus();
 }
 
 /** Used only when the backend predates the `models` read op — a `status` read still tells us the
@@ -262,7 +289,7 @@ export function createResourceProvider(): LlmProvider {
     // Generation and liveness are the same tiny HTTP contract — the resource layer arbitrates who
     // may generate and on which model, it does not replace the endpoint.
     generate: httpGenerate,
-    status: httpStatus,
+    status: resourceStatus,
     models,
     setModel,
     acquire,

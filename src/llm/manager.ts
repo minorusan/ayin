@@ -65,6 +65,19 @@ let modelRefreshInFlight = false;
 let modelGiveUpWarned = false;
 
 /**
+ * The window the served model will actually be given, in tokens — 0 until a provider reports one.
+ *
+ * ZERO MEANS UNKNOWN, and every consumer must treat it that way rather than substituting a number of
+ * its own. `tokens.ts` used to fall back to a flat 65536, so an operator on a 16k preset read a meter
+ * claiming four times the room they had while the runtime truncated the prompt in silence. The
+ * resource layer had been reporting the true `ctxSize` the whole time; nothing asked it.
+ */
+let cachedContextTokens = 0;
+
+/** The served model's context window in tokens, or 0 when no provider has reported one. */
+export function activeContextTokens(): number { return cachedContextTokens; }
+
+/**
  * An adapter chosen by the OPERATOR, overriding what the model id suggests.
  *
  * ayin does not own the model on a shared host — another process may be serving whatever it likes, and
@@ -152,6 +165,7 @@ function ensureRefreshed(): void {
  */
 export function resetModelResolution(): void {
   cachedModelId = '';
+  cachedContextTokens = 0; // a different provider grants a different window; never carry the old one
   cachedDialect = adapterOverride ? cachedDialect : DEFAULT;
   modelAttempts = 0;
   modelLastAttemptAt = 0;
@@ -188,6 +202,14 @@ export async function refreshActiveModel(): Promise<void> {
       log('INFO', 'tool_declaration_mode', { provider: provider.name, mode });
     }
     const s = await provider.status();
+    // Learned from the SAME call that learns the model, because it changes with it: a preset swap
+    // changes the model and the window together, and reading them from two places is how they drift.
+    // Recorded even when the model id is unchanged — the operator can raise the window without
+    // touching the model, and the meter must follow.
+    if (typeof s.contextTokens === 'number' && s.contextTokens > 0 && s.contextTokens !== cachedContextTokens) {
+      log('INFO', 'llm_context_window', { tokens: String(s.contextTokens), was: String(cachedContextTokens || 0) });
+      cachedContextTokens = s.contextTokens;
+    }
     const modelId = s.ok ? String(s.model ?? '') : '';
     if (!modelId || modelId === cachedModelId) return;
     cachedModelId = modelId;

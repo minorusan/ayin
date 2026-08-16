@@ -262,7 +262,9 @@ export function createOllamaProvider(): LlmProvider {
         const res = await fetch(`${baseUrl()}/api/tags`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
         if (!res.ok) return { ok: false, model: null };
         const model = await resolveModel();
-        return { ok: true, model: model || null };
+        // `num_ctx` is what THIS provider puts on every request (see the generate call), so it is not
+        // an estimate here — it is the window, and the meter may state it as fact.
+        return { ok: true, model: model || null, contextTokens: numCtx() };
       } catch {
         return { ok: false, model: null };
       }

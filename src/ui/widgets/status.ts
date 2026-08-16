@@ -132,6 +132,10 @@ export class StatusBar {
 
   tokensDisplay(): string {
     if (!this.state.tokens) return 'tokens: unknown';
+    // NO WINDOW REPORTED → say so. A percentage needs a denominator, and inventing one is what this
+    // bar did for its whole life: a flat 65536 that matched no model and no setting, so a 16k session
+    // read as 25% full when it was already overflowing. `used` is still real and still worth showing.
+    if (!(this.state.tokens.total > 0)) return `${formatTokens(this.state.tokens.used)} tokens / window unknown`;
     const pct = Math.round((this.state.tokens.used / this.state.tokens.total) * 100);
     return `${formatTokens(this.state.tokens.used)} / ${formatTokens(this.state.tokens.total)} tokens (${pct}%)`;
   }
@@ -191,9 +195,15 @@ export class StatusBar {
     }
 
     if (this.state.tokens) {
-      const pct = Math.round((this.state.tokens.used / this.state.tokens.total) * 100);
-      const color = pct > 80 ? theme.err : pct > 60 ? theme.warn : theme.ok;
-      parts.push(`{${color}-fg}${formatTokens(this.state.tokens.used)}/${formatTokens(this.state.tokens.total)} tokens{/}`);
+      // An unknown window gets no percentage and no colour scale — see tokensDisplay(). The `?`
+      // is the honest denominator: it prompts the question the invented 65536 suppressed.
+      if (!(this.state.tokens.total > 0)) {
+        parts.push(`{${theme.warn}-fg}${formatTokens(this.state.tokens.used)}/? tokens{/}`);
+      } else {
+        const pct = Math.round((this.state.tokens.used / this.state.tokens.total) * 100);
+        const color = pct > 80 ? theme.err : pct > 60 ? theme.warn : theme.ok;
+        parts.push(`{${color}-fg}${formatTokens(this.state.tokens.used)}/${formatTokens(this.state.tokens.total)} tokens{/}`);
+      }
     }
 
     if (this.state.llm) {
