@@ -1546,6 +1546,65 @@ rmSync(TMP, { recursive: true, force: true });
     'both flags go through the one parser, so they cannot drift apart again');
 }
 
+// ── citations are a STRUCTURED field, verified by the same gate ─────────────────
+//
+// The batch prompt first asked for `CITE: path:1-5` lines embedded in a JSON string value — escaped
+// newlines inside a value, an awkward shape for a model emitting JSON, and it simply dropped them.
+// Unproven answers went from 3% of a run to 19%: three hundred answers thrown away for want of a
+// format, each one paid for.
+{
+  const dir = mkdtempSync(join(tmpdir(), 'ayin-cite-'));
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'C.cs'), 'class C\n{\n    public int Score;\n    public void Add() { }\n}\n');
+  const st = S.openStore(dir);
+  st.beginRun({ runId: 'r', domains: ['d'], headSha: 'h' });
+  st.addFile({ path: 'src/C.cs', domain: 'd', depth: 0, why: 'seed' });
+  const mkq = (id) => st.addQuestion({ id, file: 'src/C.cs', entity: null, category: 'gotchas', text: `What does ${id} guarantee about Score?` });
+
+  const saveEnv = process.env.AYIN_LLM_PROVIDER;
+  process.env.AYIN_LLM_PROVIDER = 'openai';
+
+  mkq('s1'); mkq('s2');
+  const structured = await AN.answerQuestions({
+    store: st, repoPath: dir,
+    ask: async (p) => JSON.stringify({ answers: [...p.matchAll(/id: (s\d)/g)].map((m) => ({
+      id: m[1], a: 'Score is mutated only through Add, never assigned directly.',
+      cite: [{ path: 'src/C.cs', from: 3, to: 4 }],
+    })) }),
+  });
+  ok(structured.answered === 2,
+    'a structured cite array proves an answer — the shape a JSON-emitting model writes naturally',
+    JSON.stringify({ answered: structured.answered, failed: structured.failed }));
+
+  // The older CITE-line form still counts: a model giving a correct answer in the previous shape
+  // should not lose it to pedantry.
+  for (const c of st.chunks()) st.deleteChunk(c.chunkId);
+  st.setQuestionStatus('s1', 'pending'); st.setQuestionStatus('s2', 'pending');
+  const lines = await AN.answerQuestions({
+    store: st, repoPath: dir,
+    ask: async (p) => JSON.stringify({ answers: [...p.matchAll(/id: (s\d)/g)].map((m) => ({
+      id: m[1], a: 'Score is mutated only through Add.\nCITE: src/C.cs:3-4',
+    })) }),
+  });
+  ok(lines.answered === 2, 'CITE lines still parse when a model writes them anyway');
+
+  // A fabricated range is still refused — same gate, different notation.
+  for (const c of st.chunks()) st.deleteChunk(c.chunkId);
+  st.setQuestionStatus('s1', 'pending'); st.setQuestionStatus('s2', 'pending');
+  const bogus = await AN.answerQuestions({
+    store: st, repoPath: dir,
+    ask: async (p) => JSON.stringify({ answers: [...p.matchAll(/id: (s\d)/g)].map((m) => ({
+      id: m[1], a: 'Claims something.', cite: [{ path: 'src/C.cs', from: 900, to: 999 }],
+    })) }),
+  });
+  ok(bogus.answered === 0 && bogus.failed === 2,
+    'a structured citation past the end of the file is REFUSED — easier to emit is not easier to get away with',
+    JSON.stringify({ answered: bogus.answered, failed: bogus.failed }));
+
+  if (saveEnv === undefined) delete process.env.AYIN_LLM_PROVIDER; else process.env.AYIN_LLM_PROVIDER = saveEnv;
+  rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 

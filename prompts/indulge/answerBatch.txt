@@ -1,15 +1,7 @@
 You are writing a code corpus. Below is the source, then several questions about it. Answer every
 one from the source shown — nothing else exists for this purpose.
 
-Each answer states facts that will still be true next month, and cites the lines it rests on.
-
-A citation is a line of its own, in the answer, exactly:
-
-    CITE: <path>:<startLine>-<endLine>
-
-Every answer needs at least one. An answer you cannot cite is one you must not give: reply to that
-question with NOTHING KNOWN instead. That is a real answer and costs nothing; a plausible answer with
-no proof is the one outcome worth avoiding, because later nobody can tell it from a true one.
+Each answer states facts that will still be true next month, and names the lines it rests on.
 
 SOURCES:
 {{SOURCES}}
@@ -19,4 +11,16 @@ QUESTIONS about {{FILE}}:
 
 Reply with JSON only, no prose and no code fence. One entry per question id, in any order:
 
-{"answers":[{"id":"<the id, exactly as given>","a":"<the answer, CITE lines included>"}]}
+{"answers":[
+  {"id":"<the id, exactly as given>",
+   "a":"<the answer, one paragraph, no line breaks>",
+   "cite":[{"path":"<path exactly as shown above>","from":<first line>,"to":<last line>}]}
+]}
+
+`cite` is not optional and must not be empty. An answer you cannot point at specific lines for is one
+you must not give — set `"a"` to `NOTHING KNOWN` and `"cite"` to `[]` instead. That is a real answer
+and costs nothing. A plausible answer with no proof is the one outcome worth avoiding, because later
+nobody can tell it from a true one.
+
+Write the answer, then check each line range you cited actually says what you claimed. A range that
+does not is worse than no answer.

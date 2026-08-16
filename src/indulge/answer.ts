@@ -467,6 +467,26 @@ function domainsOfFile(store: IndulgeStore, file: string): string[] {
  * A question the model omits, or answers unciteably, simply gets no entry — the caller marks it
  * failed and it stays pending for another run. One bad answer never costs the batch.
  */
+/**
+ * Verify a `cite: [{path, from, to}]` array, by exactly the rules `verifyCitations` applies to CITE
+ * lines: the path resolves inside the repo, the range is sane, and it is not the whole file.
+ *
+ * Same gate, different notation. A structured citation is easier for a model to emit correctly; it is
+ * not easier to get away with.
+ */
+function citationsFromJson(repoPath: string, raw: string): { citations: Citation[]; rejected: number } {
+  let rows: Array<{ path?: string; from?: number; to?: number }>;
+  try { rows = JSON.parse(raw) as typeof rows; } catch { return { citations: [], rejected: 0 }; }
+  if (!Array.isArray(rows)) return { citations: [], rejected: 0 };
+  // Rendered back into the canonical text form so ONE verifier decides what counts as proof — two
+  // implementations of "is this citation real" is how one of them quietly becomes laxer.
+  const asLines = rows
+    .filter((r) => r && typeof r.path === 'string')
+    .map((r) => `CITE: ${r.path}:${Number(r.from) || 0}-${Number(r.to) || 0}`)
+    .join('\n');
+  return verifyCitations(repoPath, asLines);
+}
+
 async function buildAnswerBatch(
   opts: AnswerOptions, repoPath: string, file: string, questions: QuestionRecord[],
 ): Promise<Map<string, { answer: string; citations: Citation[]; rejected: number }>> {
@@ -487,8 +507,14 @@ async function buildAnswerBatch(
   // Pairs scanned positionally, for the reasons the question parser learned the hard way: duplicate
   // keys are valid JSON and silently keep only the last, and a truncated reply must yield what it
   // completed rather than nothing.
+  //
+  // CITATIONS ARE A STRUCTURED FIELD, not `CITE:` lines inside the answer string. The first version
+  // asked for those lines embedded in a JSON string, which meant escaped newlines inside a value —
+  // an awkward shape for a model emitting JSON, and it simply dropped them: unproven answers went
+  // from 3% of a run to 19%, three hundred answers thrown away for want of a format. `path/from/to`
+  // is the shape the model is already writing everything else in.
   const known = new Set(questions.map((q) => q.id));
-  const pair = /"id"\s*:\s*"([^"]+)"\s*,\s*"a"\s*:\s*("(?:[^"\\]|\\.)*")/g;
+  const pair = /"id"\s*:\s*"([^"]+)"\s*,\s*"a"\s*:\s*("(?:[^"\\]|\\.)*")\s*(?:,\s*"cite"\s*:\s*(\[[\s\S]*?\]))?/g;
   let m: RegExpExecArray | null;
   while ((m = pair.exec(reply))) {
     const id = m[1].trim();
@@ -496,7 +522,11 @@ async function buildAnswerBatch(
     let text: string;
     try { text = JSON.parse(m[2]) as string; } catch { continue; }
     if (/NOTHING KNOWN/i.test(text)) continue;   // a real answer, and it stores nothing
-    const v = verifyCitations(repoPath, text);
+
+    // Structured first; the CITE-line form still parses, because a model that writes them anyway is
+    // giving a correct answer in the older shape and dropping it would be pedantry.
+    const structured = m[3] ? citationsFromJson(repoPath, m[3]) : null;
+    const v = structured && structured.citations.length ? structured : verifyCitations(repoPath, text);
     out.set(id, { answer: stripCitations(text), citations: v.citations, rejected: v.rejected });
   }
   return out;
