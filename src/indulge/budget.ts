@@ -1,0 +1,80 @@
+/**
+ * indulge/budget.ts — how much source a prompt may carry, derived from the model that will read it.
+ *
+ * This was two constants: 50,000 characters of sources per answer and 12,000 per question frame.
+ * Both were wrong in both directions at once, which is what a constant does when the provider is a
+ * setting.
+ *
+ * AGAINST A 16k LOCAL MODEL, 50,000 characters is roughly 14k tokens BEFORE the instructions and
+ * with nothing left for the reply. The runtime does not error on that — it truncates, silently, from
+ * whichever end it likes, so the model answers about sources it was never shown and the citation
+ * gate then rejects it for claims it could not prove. Measured: answers took ~45s each against a
+ * 16k-context model, prompt-processing-bound, on prompts that partly did not fit.
+ *
+ * AGAINST OPENAI it is the opposite waste: a 128k window filled to 11%, so a question whose answer
+ * lives two files away gets neither file.
+ *
+ * So the budget follows the model. Chars rather than tokens because every producer here is
+ * concatenating source text and a tokenizer call per candidate file would cost more than the slack
+ * this approximation leaves.
+ */
+
+import { getConfigString } from '../prompts.js';
+
+/**
+ * Characters per token, for code.
+ *
+ * Deliberately pessimistic: 3.0 rather than the ~3.8 English averages, because source is dense in
+ * punctuation and identifiers that split into several tokens each. Guessing high here means
+ * overflowing the window, which fails silently — guessing low only wastes a little room.
+ */
+const CHARS_PER_TOKEN = 3.0;
+
+/**
+ * Share of the window the sources may occupy.
+ *
+ * The rest is the instructions, the question, and — the part that is easy to forget — the model's own
+ * reply, which comes out of the same window on a local runtime.
+ */
+const SOURCE_SHARE = 0.55;
+
+/** What OpenAI models here can actually hold. Conservative: the smallest of the ones worth using. */
+const OPENAI_CONTEXT_TOKENS = 128_000;
+/** Local default, matching providers/ollama.ts. Overridden by AYIN_OLLAMA_CTX / config. */
+const LOCAL_DEFAULT_TOKENS = 16_384;
+
+/** True when generation is going to OpenAI rather than a self-hosted endpoint. */
+export function generatingOnOpenAi(): boolean {
+  const p = (process.env.AYIN_LLM_PROVIDER || getConfigString('llmProvider') || '').toLowerCase();
+  return p === 'openai';
+}
+
+/** The context window, in tokens, of whatever will read the next prompt. */
+export function contextTokens(): number {
+  if (generatingOnOpenAi()) return OPENAI_CONTEXT_TOKENS;
+  const raw = process.env.AYIN_OLLAMA_CTX || getConfigString('ollamaCtx');
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : LOCAL_DEFAULT_TOKENS;
+}
+
+/**
+ * Characters of SOURCE a prompt may carry.
+ *
+ * Capped at 300k regardless of window: past that the limit stops being the model and starts being
+ * the reader — a prompt nobody can audit, and a retrieval step that has stopped retrieving and
+ * started dumping the repo.
+ */
+export function sourceBudgetChars(): number {
+  return Math.min(300_000, Math.floor(contextTokens() * CHARS_PER_TOKEN * SOURCE_SHARE));
+}
+
+/**
+ * Characters of ONE file a question-generation prompt may carry.
+ *
+ * Smaller than the answer budget on purpose: generation shows a single file and asks what is worth
+ * asking about it, so a file too large to fit is a file whose questions should come from its shape
+ * rather than its every line.
+ */
+export function singleFileBudgetChars(): number {
+  return Math.max(4_000, Math.floor(sourceBudgetChars() * 0.45));
+}

@@ -315,3 +315,49 @@ This exists because it was learned the expensive way. The first `--fix` read eve
 all 196 of their chunks and rewrote all their question statuses **before answering one** — and the
 audit's verdicts lived on the chunks it had just deleted, so the next run reported "nothing
 rejected". An interruption one answer in cost 195 chunks and the entire audit.
+
+---
+
+## Speed: the provider, and the window
+
+### Embeddings
+
+```
+/set embed-model text-embedding-3-small     # → OpenAI, batched
+/set embed-model nomic-embed-text           # → the configured endpoint (default)
+```
+
+The service is **inferred from the model name** rather than configured separately: asking OpenAI for
+`nomic-embed-text` is an error and asking a local endpoint for `text-embedding-3-small` is a
+different one, so one setting that can be wrong beats two that can contradict.
+
+**Batching is the whole speed story, and it belongs to the API rather than the model.** OpenAI's
+`input` takes an array, so 847 chunks are nine requests instead of 847 round trips. A single-prompt
+endpoint gets a batch size of 1 — raising it there would silently embed only the first of each batch.
+
+Vectors are model-bound: switching means re-embedding, and the report tells you how many exist from
+another model rather than mixing them.
+
+### The context window
+
+The source budget is **derived from the model that will read the prompt**, not a constant:
+
+| provider | window | source budget |
+|---|---|---|
+| local @16k | 16,384 | 27,033 chars |
+| local @64k | 65,536 | 108,134 chars |
+| OpenAI | 128,000 | 211,200 chars |
+
+It used to be a flat **50,000 characters**, which is wrong in both directions at once. Against a
+16k-context model that is ~14k tokens *before* the instructions and with nothing left for the reply —
+and a runtime does not error on that, it **truncates silently**, so the model answers about sources
+it was never shown and the citation gate then rejects it for claims it could not prove. Against
+OpenAI the same number fills 11% of the window, so a question whose answer lives two files away gets
+neither file.
+
+Capped at 300k regardless. Past that the limit stops being the model and becomes the reader: a prompt
+nobody can audit, and a retrieval step that has stopped retrieving and started dumping the repo.
+
+**Running the whole build on OpenAI** is `AYIN_LLM_PROVIDER=openai ayin indulge …` — the budget
+follows automatically, so a corpus built by a larger reasoning model also gets the window to reason
+in.

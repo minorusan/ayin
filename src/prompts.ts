@@ -152,6 +152,8 @@ export const KNOWN_CONFIG_KEYS = [
   // Embedding model for corpus vectors (indulge/embed.ts). Vectors are only comparable to others
   // from the SAME model, so changing this means re-embedding the corpus.
   'embedModel',
+  // Which service embeds. Normally inferred from embedModel; set only to override that.
+  'embedProvider',
   // Only honoured when the operator sets it — the round budget is otherwise unlimited (agent.ts).
   'maxToolRounds',
   // `ayin launch`: the command that opens a terminal window, with {{SCRIPT}} for the launch script.

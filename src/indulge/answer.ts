@@ -29,6 +29,7 @@
  * re-answers it when it has — that is what makes "ask indulge again" an expansion, not a restart.
  */
 
+import { sourceBudgetChars } from './budget.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -61,7 +62,15 @@ const MAX_SOURCE_LINES = 400;
  * it costs the VRAM holding model layers, and 10 spilled layers ran ~7x slower. ~50k characters is
  * roughly 12-13k tokens, leaving room for the question, the instructions and the answer.
  */
-const MAX_CONTEXT_CHARS = 50_000;
+/**
+ * DERIVED from the model that will read the prompt — see indulge/budget.ts.
+ *
+ * Was a flat 50,000, which is ~14k tokens before the instructions: against a 16k-context model every
+ * answer prompt overflowed and was silently truncated, so the model answered about sources it never
+ * saw and the citation gate then rejected it for claims it could not prove. Against OpenAI the same
+ * number filled 11% of the window.
+ */
+const contextChars = (): number => sourceBudgetChars();
 /** Neighbour files fed alongside the one the question is about. */
 const MAX_NEIGHBOURS = 6;
 
@@ -196,7 +205,7 @@ export function contextFilesFor(store: IndulgeStore, file: string): string[] {
  * Anything dropped is announced. A silently clipped file reads as the whole file, and the model
  * cites line numbers that do not exist in what it was shown.
  */
-export function buildSources(repoPath: string, files: string[], budget = MAX_CONTEXT_CHARS): string {
+export function buildSources(repoPath: string, files: string[], budget = contextChars()): string {
   const blocks: string[] = [];
   let used = 0;
   const skipped: string[] = [];

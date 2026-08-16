@@ -26,6 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { languageFor } from '../entangle/index.js';
+import { singleFileBudgetChars } from './budget.js';
 import { toolLlm, toolPrompts, type ToolPrompts } from '../tools/runtime.js';
 import { ensureToolRuntime } from '../tool-wiring.js';
 import { CATEGORIES, questionId, type Category, type Entity, type IndulgeStore } from './store.js';
@@ -42,7 +43,8 @@ const DEFAULT_MAX_ENTITIES = 12;
 
 /** How much of a file the model is shown. Clipping is ANNOUNCED — a silently truncated file reads as
  *  the whole thing, and the model then writes questions about code it was never given. */
-const MAX_SOURCE_CHARS = 12000;
+/** DERIVED from the reading model — see indulge/budget.ts. Was a flat 12000. */
+const maxSourceChars = (): number => singleFileBudgetChars();
 
 /** A question shorter than this is not a question. */
 const MIN_QUESTION_CHARS = 12;
@@ -224,9 +226,10 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
 
   let step = 0;
   for (const { file, source, targets, perTarget } of plan) {
-    const clipped = source.length > MAX_SOURCE_CHARS;
+    const cap = maxSourceChars();
+    const clipped = source.length > cap;
     const shown = clipped
-      ? `${source.slice(0, MAX_SOURCE_CHARS)}\n… (file clipped at ${MAX_SOURCE_CHARS} of ${source.length} characters)`
+      ? `${source.slice(0, cap)}\n… (file clipped at ${cap} of ${source.length} characters)`
       : source;
 
     // ONE CALL PER (FILE, CATEGORY) — not per (entity, category).

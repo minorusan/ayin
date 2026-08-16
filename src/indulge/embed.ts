@@ -53,6 +53,54 @@ export function embedModel(): string {
   return process.env.AYIN_EMBED_MODEL || getConfigString('embedModel') || DEFAULT_MODEL;
 }
 
+/**
+ * Which service embeds. Inferred from the MODEL NAME, overridable.
+ *
+ * Inferred rather than configured separately because the two cannot disagree usefully: asking
+ * OpenAI for `nomic-embed-text` is an error, and asking a local endpoint for `text-embedding-3-small`
+ * is a different one. One setting that can be wrong beats two that can contradict.
+ */
+export function embedProvider(): 'openai' | 'endpoint' {
+  const explicit = (process.env.AYIN_EMBED_PROVIDER || getConfigString('embedProvider') || '').toLowerCase();
+  if (explicit === 'openai' || explicit === 'endpoint') return explicit;
+  return /^text-embedding-/.test(embedModel()) ? 'openai' : 'endpoint';
+}
+
+/**
+ * How many texts go in one request.
+ *
+ * This is the entire speed story, and it is a property of the API rather than of the model. OpenAI's
+ * `input` takes an ARRAY, so 847 chunks are nine requests instead of 847 round trips — and the local
+ * path is one-at-a-time on CPU, which is what made `--embed` feel hung. A local endpoint gets 1
+ * because `/api/embeddings` takes a single prompt; raising it there would silently embed only the
+ * first of each batch.
+ */
+export function embedBatchSize(): number {
+  return embedProvider() === 'openai' ? 96 : 1;
+}
+
+/**
+ * One request, N texts, N vectors back — in the SAME ORDER.
+ *
+ * Order is the contract. OpenAI returns `data[]` carrying an `index`, and it is sorted by it here
+ * rather than trusted: a vector attached to the wrong chunk is undetectable afterwards. Every
+ * distance in the corpus would be subtly wrong, nothing would error, and retrieval would just
+ * quietly return the wrong neighbours forever.
+ */
+export async function embedBatch(texts: string[], model = embedModel()): Promise<number[][]> {
+  if (!texts.length) return [];
+  if (embedProvider() !== 'openai') {
+    const out: number[][] = [];
+    for (const t of texts) out.push(await embedText(t, model));
+    return out;
+  }
+  // Through the OpenAI PROVIDER, not a hand-rolled fetch. That module owns the key, the client and
+  // the safe rendering of SDK errors; duplicating the call here would re-implement all three, and a
+  // build gate rejects a second api.openai.com caller on sight for exactly that reason.
+  const { openAiEmbed } = await import('../llm/providers/openai.js');
+  return openAiEmbed(texts, model);
+}
+
 export interface VectorRecord {
   chunkId: string;
   domains: string[];
@@ -130,28 +178,48 @@ export async function embedCorpus(opts: {
   onStatus?.(`${chunks.length} chunk(s), ${done.size} already embedded with ${model}`
     + (foreign ? ` · ${foreign} from another model (ignored)` : ''));
 
-  let i = 0;
-  for (const c of chunks) {
-    i++;
+  // BATCHED. Was one request per chunk, which on a local CPU model meant 847 sequential round trips
+  // and a command that looked hung for minutes. Batch size is a property of the API, not the model:
+  // OpenAI takes an array (nine requests instead of 847), a single-prompt endpoint takes one.
+  const todo = chunks.filter((c) => !done.has(c.chunkId));
+  report.skipped = chunks.length - todo.length;
+  const size = opts.embed ? 1 : embedBatchSize();   // an injected embedder is per-text by contract
+  let processed = 0;
+
+  for (let i = 0; i < todo.length; i += size) {
     if (shouldStop?.()) { report.stopped = true; onStatus?.('stop requested — the rest stay unembedded'); break; }
-    if (done.has(c.chunkId)) { report.skipped++; continue; }
-    onProgress?.(i, chunks.length, c.entity?.file || c.files[0] || c.chunkId);
+    const batch = todo.slice(i, i + size);
+    onProgress?.(processed, todo.length, batch[0].entity?.file || batch[0].files[0] || batch[0].chunkId);
+
     try {
       // Question AND answer: the question is what a query echoes, the answer is what makes two
       // differently-worded questions about the same thing land near each other.
-      const vector = await embed(`${c.question}\n\n${c.answer}`);
-      const rec: VectorRecord = { chunkId: c.chunkId, domains: domainsOf(c), model, dim: vector.length, vector };
-      appendFileSync(vectorsPath(store), JSON.stringify(rec) + '\n');
-      report.embedded++;
+      const texts = batch.map((c) => `${c.question}\n\n${c.answer}`);
+      const vectors = opts.embed
+        ? [await opts.embed(texts[0])]
+        : await embedBatch(texts, model);
+
+      // Positional pairing, so a short reply cannot silently attach vectors to the wrong chunks.
+      if (vectors.length !== batch.length) throw new Error(`got ${vectors.length} vector(s) for ${batch.length} chunk(s)`);
+      for (let k = 0; k < batch.length; k++) {
+        const rec: VectorRecord = {
+          chunkId: batch[k].chunkId, domains: domainsOf(batch[k]), model,
+          dim: vectors[k].length, vector: vectors[k],
+        };
+        appendFileSync(vectorsPath(store), JSON.stringify(rec) + '\n');
+        report.embedded++;
+      }
     } catch (err) {
-      report.failed++;
-      onStatus?.(`failed on ${c.chunkId.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`);
-      // A model that is down fails every chunk; stop rather than logging thousands of lines.
-      if (report.failed >= 3 && report.embedded === 0) {
+      report.failed += batch.length;
+      onStatus?.(`failed on ${batch.length} chunk(s) at ${batch[0].chunkId.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`);
+      // A dead endpoint fails everything; stop rather than logging hundreds of identical lines.
+      if (report.failed >= 3 * size && report.embedded === 0) {
         onStatus?.('embedding endpoint is not answering — stopping');
         break;
       }
     }
+    processed += batch.length;
+    onProgress?.(processed, todo.length, batch[batch.length - 1].entity?.file ?? '');
   }
   return report;
 }

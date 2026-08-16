@@ -895,8 +895,14 @@ ok(EM.cosine([2, 0], [8, 0]) === 1, 'magnitude is divided out — only DIRECTION
     're-running embeds nothing — resumable, like every other stage');
   ok(EM.loadVectors(vstore)[0].model === EM.embedModel(),
     'every vector records the model that produced it — a vector is only comparable to its own kind');
+  // A stop only means something when there is work left, so give it one.
+  vstore.saveChunk({
+    chunkId: 'v2', questionId: 'q2', repoKey: vstore.key, domains: ['d'], question: 'Q2', answer: 'A2',
+    files: ['f.ts'], citations: [{ path: 'f.ts', startLine: 1, endLine: 1, sha: 'x' }], entity: null,
+    category: 'functionality', model: 'm', createdAt: '2026-08-14T00:00:00Z', sourceSha: 'x',
+  });
   const stopped = await EM.embedCorpus({ store: vstore, shouldStop: () => true, embed: async () => [1] });
-  ok(stopped.stopped === true, 'a kill lands between chunks');
+  ok(stopped.stopped === true, 'a kill lands between batches, leaving the rest unembedded');
   vstore.endRun('v');
 }
 
@@ -1234,6 +1240,64 @@ rmSync(TMP, { recursive: true, force: true });
     'and REFUSES to delete when the snapshot failed — an unrecoverable delete is not done on the assumption the copy worked');
 
   rmSync(dir, { recursive: true, force: true });
+}
+
+// ── embedding: the provider is inferred, and batching is where the speed is ──────
+{
+  const EM = await import(join(ROOT, 'dist/indulge/embed.js'));
+  const prev = process.env.AYIN_EMBED_MODEL;
+
+  process.env.AYIN_EMBED_MODEL = 'nomic-embed-text';
+  ok(EM.embedProvider() === 'endpoint', 'a local model name routes to the configured endpoint');
+  ok(EM.embedBatchSize() === 1,
+    'and asks for ONE text per request — /api/embeddings takes a single prompt, so a larger batch would silently embed only the first');
+
+  process.env.AYIN_EMBED_MODEL = 'text-embedding-3-small';
+  ok(EM.embedProvider() === 'openai', 'a text-embedding-* name routes to OpenAI without a second setting to contradict it');
+  ok(EM.embedBatchSize() > 1,
+    'and batches — 847 chunks become a handful of requests instead of 847 round trips', String(EM.embedBatchSize()));
+
+  process.env.AYIN_EMBED_PROVIDER = 'endpoint';
+  ok(EM.embedProvider() === 'endpoint', 'an explicit provider overrides the inference');
+  delete process.env.AYIN_EMBED_PROVIDER;
+
+  if (prev === undefined) delete process.env.AYIN_EMBED_MODEL; else process.env.AYIN_EMBED_MODEL = prev;
+}
+
+// ── the context budget follows the MODEL, not a constant ────────────────────────
+//
+// It was a flat 50,000 characters of sources per answer. Against a 16k-context model that is ~14k
+// tokens BEFORE the instructions and with nothing left for the reply — the runtime does not error,
+// it truncates silently, so the model answers about sources it never saw and the citation gate then
+// rejects it for claims it could not prove. Against OpenAI the same number fills 11% of the window.
+{
+  const B = await import(join(ROOT, 'dist/indulge/budget.js'));
+  const save = { p: process.env.AYIN_LLM_PROVIDER, c: process.env.AYIN_OLLAMA_CTX };
+
+  process.env.AYIN_LLM_PROVIDER = 'ollama';
+  process.env.AYIN_OLLAMA_CTX = '16384';
+  const small = B.sourceBudgetChars();
+  ok(small < 16384 * 3.0,
+    'a 16k window budgets FEWER chars than the window can hold — the old flat 50k was nearly double it',
+    `${small} chars for 16384 tokens`);
+  ok(small > 10_000, 'but still enough to carry a real file', String(small));
+
+  process.env.AYIN_OLLAMA_CTX = '65536';
+  ok(B.sourceBudgetChars() > small * 3,
+    'a bigger local window is actually used, instead of leaving it idle');
+
+  process.env.AYIN_LLM_PROVIDER = 'openai';
+  ok(B.generatingOnOpenAi(), 'the provider is read from where the agent already reads it');
+  const big = B.sourceBudgetChars();
+  ok(big > 150_000, 'OpenAI gets a budget its window can hold', String(big));
+  ok(big <= 300_000,
+    'and is capped anyway — past that the limit is the READER, and retrieval has become a repo dump');
+
+  ok(B.singleFileBudgetChars() < B.sourceBudgetChars(),
+    'one file for question-generation is budgeted below the whole answer context');
+
+  if (save.p === undefined) delete process.env.AYIN_LLM_PROVIDER; else process.env.AYIN_LLM_PROVIDER = save.p;
+  if (save.c === undefined) delete process.env.AYIN_OLLAMA_CTX; else process.env.AYIN_OLLAMA_CTX = save.c;
 }
 
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');

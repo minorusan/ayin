@@ -62,6 +62,37 @@ function client(key: string): OpenAI {
 }
 
 /**
+ * Embeddings, through the SAME client as generation.
+ *
+ * Here rather than in `indulge/embed.ts` because this module is the ONE place that holds the key,
+ * constructs the client, and renders SDK errors safely — a hand-rolled `fetch` to api.openai.com
+ * elsewhere re-implements all three, and the gate rejects one on sight for exactly that reason.
+ *
+ * ORDER IS THE CONTRACT. The API returns `data[]` carrying an `index`; it is sorted by it here
+ * rather than trusted, because a vector attached to the wrong chunk is undetectable afterwards —
+ * every distance in the corpus would be subtly wrong, nothing would error, and retrieval would
+ * quietly return the wrong neighbours forever.
+ */
+export async function openAiEmbed(texts: string[], embedModel: string): Promise<number[][]> {
+  if (!texts.length) return [];
+  const key = openAiKey();
+  if (!key) throw new Error(openAiSetupHint());
+  try {
+    const res = await client(key).embeddings.create({ model: embedModel, input: texts });
+    const rows = res.data.slice().sort((a, b) => a.index - b.index);
+    if (rows.length !== texts.length) {
+      throw new Error(`OpenAI returned ${rows.length} vector(s) for ${texts.length} input(s)`);
+    }
+    return rows.map((r) => {
+      if (!Array.isArray(r.embedding) || !r.embedding.length) throw new Error('OpenAI returned an empty vector');
+      return r.embedding as number[];
+    });
+  } catch (err) {
+    throw new Error(describe(err));
+  }
+}
+
+/**
  * An SDK error, made safe to show. `APIError` carries the status and the API's own message, which is
  * what an operator needs ("insufficient_quota", "model not found") — but it is rendered here rather
  * than thrown raw so nothing in it can carry the request headers, and therefore the key.
