@@ -352,8 +352,22 @@ dialect  ── toolCallInstructions (→ system prompt) · parse(raw) · render
   refreshed at startup in headless and lazily otherwise) and selects the first dialect whose
   `matches()` is true (default: gemma). Every LLM call in ayin routes through here.
 
+- **`dialects/glimmer.ts`** — Muse Glimmer's **ATEM** format, which shares nothing with the XML base:
+  `<atem:function_calls><atem:invoke name="x"><atem:parameter name="k">v</atem:parameter></atem:invoke></atem:function_calls>`,
+  turns routed by ` to=<recipient><|message|>` and closed with `<|eot|>`/`<|eom|>`, results framed as
+  `<tool_output>`. Every token is taken from Ollama 0.32's reference implementation
+  (`model/parsers/glimmer.go`, `model/renderers/glimmer.go`) rather than from an observed reply, and
+  the instruction text is near-verbatim from the renderer because that is what the model was trained
+  against.
+
+  It is needed **only on the prompt-declared path**. `providers/ollama.ts` sends a `tools` array, so
+  Ollama's own parser extracts the calls (`toolMode: 'native'`) and ayin never sees ATEM. The resource
+  gateway forwards no tools array — and `glimmer.go` bails out of tool extraction on
+  `len(p.tools) == 0` — so the markup survives into the reply text and something must read it.
+
 **Adding a model family** = implement `ModelDialect` (or extend `XmlToolCallDialect`) and
-register it in `manager.ts`'s `DIALECTS`. A few lines.
+register it in `manager.ts`'s `DIALECTS`. A few lines. Insert **before** `GemmaDialect`: `DEFAULT` is
+derived from the last entry, so appending would silently change the fallback for every unmatched model.
 
 #### Resolution is RETRIED until it lands
 
@@ -2693,7 +2707,7 @@ src/
 ├── llm/
 │   ├── manager.ts      active-model resolution + dialect selection; all LLM calls route here
 │   ├── types.ts        ModelDialect interface
-│   └── dialects/       xml.ts (shared base) · gemma.ts · qwen.ts
+│   └── dialects/       xml.ts (shared base) · gemma.ts · qwen.ts · glimmer.ts (ATEM) · native.ts
 ├── connection.ts       transport: the configured endpoint + OpenAI fallback; AYIN_MODEL_URL resolver
 ├── parser.ts           lenient tool-call parser (multi-format)
 ├── shell.ts            cross-platform shell: /bin/bash (POSIX) · Git Bash/cmd (Windows) + killTree

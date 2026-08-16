@@ -38,6 +38,29 @@ export function shq(s: string): string {
  *  complete is how it concludes "that is everything" and stops looking. */
 export const GREP_LIMIT = 50;
 export const FIND_LIMIT = 30;
+
+/**
+ * Directories a code search must never WANDER INTO. Shared by `grep` and `find_files`, because two
+ * search tools disagreeing about what the repo contains is its own bug.
+ *
+ * WATCHED IT HAPPEN. On a Unity repo, `grep pattern .` returned `.git/COMMIT_EDITMSG`,
+ * `.git/packed-refs` and `.git/info/refs` among its first six hits — three of the model's opening
+ * facts were git plumbing. Not merely noise: `COMMIT_EDITMSG` and the `*_MSG` files are PROSE ABOUT
+ * CODE, frequently code that has since changed or been deleted, and it arrives looking exactly like a
+ * source match. Same class of evidence as a stale corpus note, and just as hard to argue with later.
+ *
+ * The rest is flat waste: the result cap gets spent on plumbing, and Unity's `Library/` is gigabytes
+ * of imported artifacts no question is ever about.
+ *
+ * An EXPLICIT path still wins. These prune what a search recurses INTO, never the directory it was
+ * pointed at, so `path=Library` searches Library exactly as before — "do not wander in", not "you may
+ * not look here".
+ */
+export const NEVER_RECURSE = [
+  '.git', 'node_modules',
+  'Library', 'Temp', 'obj', 'Logs', // Unity: imported artifacts and build scratch
+  'dist', 'build', 'out', '.next', 'coverage', '__pycache__', '.venv', 'vendor',
+];
 /** Lines per read_file call. Without a cap the tool returned the whole file and the 16 KB window cut
  *  it silently — the one failure mode that makes a model confidently wrong about code it 'read'. */
 export const READ_MAX_LINES = 800;

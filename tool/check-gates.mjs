@@ -2305,5 +2305,61 @@ console.log('\ncontext window');
     'switching provider forgets the window, so the old provider\'s number cannot survive the switch');
 }
 
+// ── the Glimmer (ATEM) dialect ────────────────────────────────────────────────
+//
+// Muse Glimmer speaks none of the three formats ayin knew. Every fixture below is taken from
+// Ollama's OWN reference tests (model/parsers/glimmer_test.go), not from an observed reply: a
+// dialect inferred from one sample is a dialect that breaks on the second.
+console.log('\nglimmer dialect (ATEM)');
+{
+  const { GlimmerDialect } = await import(`file://${join(DIST, 'llm/dialects/glimmer.js')}`);
+  const d = new GlimmerDialect();
+
+  ok(d.matches('muse-glimmer:30b-q4_K_M') && d.matches('muse-glimmer:30b'), 'matches the real tags');
+  ok(!d.matches('qwen3-coder:30b') && !d.matches('gemma4:26b'), 'and steals neither qwen nor gemma');
+
+  // The reference test's own final-answer shape.
+  const ans = d.parse(' to=user<|message|>Hello');
+  ok(ans.text === 'Hello' && ans.toolCalls.length === 0, 'a routed final answer yields clean text');
+
+  const call = d.parse(` to=read<|message|><atem:function_calls>
+<atem:invoke name="read">
+<atem:parameter name="path">src/main.ts</atem:parameter>
+</atem:invoke>
+</atem:function_calls>`);
+  ok(call.toolCalls.length === 1 && call.toolCalls[0].name === 'read', 'an ATEM invoke parses');
+  ok(call.toolCalls[0]?.params.path === 'src/main.ts', 'with its parameter');
+  ok(call.text === '', 'and no wrapper markup leaks to the user');
+
+  // Namespaced calls: the renderer tells the model to invoke bare when there is no namespace, and
+  // ayin's tool names are globally unique — so a namespaced name must still resolve.
+  const ns = d.parse('<atem:function_calls><atem:invoke name="some_tool.grep"><atem:parameter name="pattern">x</atem:parameter></atem:invoke></atem:function_calls>');
+  ok(ns.toolCalls[0]?.name === 'grep', 'a namespaced invoke resolves to the bare tool name');
+
+  // THE ONE THAT BREAKS EDITING IF WRONG. An old_str is data: its indentation is the thing that
+  // makes str_replace match. Trimming it here would reproduce today's failed-edit bug by another route.
+  const ws = d.parse(`<atem:function_calls><atem:invoke name="str_replace"><atem:parameter name="old_str">    if (x) {
+        return 1;
+    }</atem:parameter></atem:invoke></atem:function_calls>`);
+  ok((ws.toolCalls[0]?.params.old_str ?? '').startsWith('    if (x) {'), 'leading indentation in a value is PRESERVED');
+
+  // The renderer states the output is not valid XML and is regex-parsed — so `<` in a value is legal.
+  const lt = d.parse('<atem:function_calls><atem:invoke name="write_file"><atem:parameter name="content">if (a < b) {}</atem:parameter></atem:invoke></atem:function_calls>');
+  ok(lt.toolCalls[0]?.params.content === 'if (a < b) {}', 'a value containing < survives');
+
+  ok(!/<\|/.test(d.parse(' to=user<|message|>Done.<|eot|>').text), 'control tokens never reach the user');
+
+  const rt = d.parse(d.renderToolCall({ name: 'str_replace', params: { old_str: '  a\n  b' } }));
+  ok(rt.toolCalls[0]?.params.old_str === '  a\n  b', 'render → parse round-trips an indented value');
+
+  ok(/tool_output/.test(d.renderToolResult('x')), 'results framed as <tool_output>, per the renderer');
+
+  // Registered, and gemma must remain the LAST entry — manager.ts derives DEFAULT from the tail.
+  const mgrSrc = readFileSync(join(REPO, 'src/llm/manager.ts'), 'utf-8');
+  ok(/new GlimmerDialect\(\)/.test(mgrSrc), 'registered in DIALECTS');
+  ok(/new GlimmerDialect\(\), new GemmaDialect\(\)\]/.test(mgrSrc),
+    'and inserted BEFORE gemma, which must stay the fallback DEFAULT');
+}
+
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

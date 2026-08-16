@@ -5,6 +5,28 @@ import { join } from 'node:path';
 
 const CWD = process.cwd();
 
+/**
+ * Directories a code search must never descend into.
+ *
+ * WATCHED IT HAPPEN. On a Unity repo, `grep pattern .` returned `.git/COMMIT_EDITMSG`,
+ * `.git/packed-refs` and `.git/info/refs` among its first six hits — three of the model's opening
+ * facts were git plumbing. That is not merely noise: `COMMIT_EDITMSG` and the various `*_MSG` files
+ * are PROSE ABOUT CODE, often code that has since changed or been deleted, and it arrives looking
+ * exactly like a source match. It is the same class of evidence as a stale corpus note.
+ *
+ * The cost is also flat waste: the result cap is spent on plumbing, and `Library/` on a Unity project
+ * is gigabytes of imported artifacts that no question is ever about.
+ *
+ * An EXPLICIT path still wins — `--exclude-dir` prunes directories grep would recurse INTO, not the
+ * one it was pointed at, so `path=Library` searches Library exactly as before. The rule is "do not
+ * wander into these", never "you may not look here".
+ */
+const NEVER_RECURSE = [
+  '.git', 'node_modules',
+  'Library', 'Temp', 'obj', 'Logs', // Unity: imported artifacts and build scratch
+  'dist', 'build', 'out', '.next', 'coverage', '__pycache__', '.venv', 'vendor',
+];
+
 export const tool: Tool = {
     name: 'grep',
     description: 'Search file contents. The pattern is an EXTENDED regex — alternation (a|b), ?, +, () all work. Returns matching lines with file paths and line numbers.',
@@ -34,6 +56,7 @@ export const tool: Tool = {
       if (boolParam(params.ignore_case)) flags.push('-i');
       if (ctxLines > 0 && !filesOnly) flags.push(`-C${ctxLines}`);
       const inc = params.include ? ` --include=${shq(String(params.include))}` : '';
+      const prune = NEVER_RECURSE.map((d) => ` --exclude-dir=${shq(d)}`).join('');
       // With -C, most returned lines are context, so a flat 50-line cap would show ~8 matches and call
       // it the limit. The cap scales with the context requested; the label below says what was counted.
       const cap = filesOnly ? FIND_LIMIT : ctxLines > 0 ? GREP_LIMIT * (1 + ctxLines) : GREP_LIMIT;
@@ -42,7 +65,7 @@ export const tool: Tool = {
         // `--include` MUST precede `--`: after the terminator grep reads every argument as a file
         // operand, so the filter became a missing filename ("grep: --include=*.cs: No such file")
         // and quietly stopped filtering. Caught by watching a real run, not by the build.
-        `grep ${flags.join(' ')}${inc} -- ${shq(String(params.pattern))} ${shq(String(params.path))} | head -${cap + 1}`,
+        `grep ${flags.join(' ')}${inc}${prune} -- ${shq(String(params.pattern))} ${shq(String(params.path))} | head -${cap + 1}`,
         { cwd: CWD },
       );
       const lines = out === '(no output)' ? [] : out.split('\n').filter((l) => l.trim());
