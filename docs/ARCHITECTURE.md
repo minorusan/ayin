@@ -439,6 +439,22 @@ the faulty method and its caller, and the critic (armed at ≥ 2 facts) never ra
 A miss (`0 matches`, an error) is deliberately not evidence — otherwise the judge is lied to in the
 other direction.
 
+**A truncated reply still carries its answer.** `explore` asks its sub-model for JSON
+(`{reasoning, commands, confidence, answer}`), and generation is sometimes cut off mid-object. The old
+fallback handed the **whole raw object back as `answer`** — so the caller received a blob whose
+`reasoning` and `commands` fields read "still searching", concluded explore had found nothing, and
+moved on. Measured: explore had located the bug on its second iteration, written the file, the line
+and the expression into `answer`, and all of it was buried in a wrapper the caller never unpacked;
+six further steps went into rediscovering it.
+
+`salvageAnswer()` now mines the `answer` field out of the raw text before anything is discarded —
+scanning rather than repairing, because a truncated object cannot be parsed by definition while its
+string value is readable long before the object closes. If nothing is salvageable the result carries
+**no answer at all** rather than the wrapper: a caller cannot tell a finding from a scratchpad, and a
+plausible non-answer costs more than an honest miss. The fallback digest also clips each command at
+`DIGEST_PER_COMMAND` — a bare `ls` of a project root is 380 lines of mode bits, measured filling the
+digest at the moment the caller needed to hold two lines of C#.
+
 **`AYIN_UNCHAINED=1` — the measurement switch.** Runs the loop without the judge and without the write
 critic. Both were added to compensate for a weaker setup, and several of the failures they compensate
 for turned out to be in the tools rather than the model, so whether they still earn their cost is an

@@ -266,17 +266,62 @@ function buildPrompt(
  * found data but never committed it to the "answer" field (qwen sometimes stalls at low
  * confidence). Returns the real greps/reads so the caller gets usable data, not meta-reasoning.
  */
+/**
+ * Per-command budget in the digest. A bare `ls` of a project root is 380 entries of mode bits and
+ * timestamps — measured filling the whole digest, and through it the caller's window, at the moment
+ * the caller needed to hold two lines of C#. The digest exists to carry FINDINGS back; one command's
+ * output must not be able to crowd out every other command's.
+ */
+const DIGEST_PER_COMMAND = 1200;
+
 function historyDigest(history: HistoryEntry[]): string {
   const chunks: string[] = [];
   for (const h of history) {
     for (let j = 0; j < h.commands.length; j++) {
       const out = (h.results[j] || '').trim();
       if (out && out !== '(no output)' && out.length > 3) {
-        chunks.push(`$ ${h.commands[j]}\n${out}`);
+        const clipped = out.length > DIGEST_PER_COMMAND
+          ? `${out.slice(0, DIGEST_PER_COMMAND)}\n…(+${out.length - DIGEST_PER_COMMAND} chars from this command)`
+          : out;
+        chunks.push(`$ ${h.commands[j]}\n${clipped}`);
       }
     }
   }
   return chunks.join('\n\n');
+}
+
+/**
+ * Pull the `answer` out of a reply whose JSON did not parse — usually because generation was cut off
+ * mid-object.
+ *
+ * THIS IS WHERE A REAL ANSWER WAS LOST. Measured: explore located the bug on its second iteration and
+ * put it in `answer` — the file, the line, the expression. The reply was truncated, `JSON.parse`
+ * threw, and the whole raw object was handed back to the caller as if the BLOB were the finding. The
+ * agent read a wrapper whose `reasoning` and `commands` fields said "still searching", concluded
+ * explore had nothing, and went on to spend six more steps rediscovering it.
+ *
+ * So a malformed reply is mined for the one field worth having before anything is discarded. Scans
+ * the raw string rather than repairing the JSON: a truncated object cannot be parsed by definition,
+ * and the value is readable long before the object is closed.
+ */
+export function salvageAnswer(raw: string): string | undefined {
+  const key = /"answer"\s*:\s*"/.exec(raw);
+  if (!key) return undefined;
+  let out = '';
+  for (let i = key.index + key[0].length; i < raw.length; i++) {
+    const c = raw[i];
+    if (c === '\\') {
+      const next = raw[i + 1];
+      if (next === undefined) break;                       // truncated mid-escape — keep what we have
+      out += next === 'n' ? '\n' : next === 't' ? '\t' : next === 'r' ? '' : next;
+      i++;
+      continue;
+    }
+    if (c === '"') break;                                   // the string closed properly
+    out += c;
+  }
+  const trimmed = out.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function parseResponse(raw: string): ExploreIteration {
@@ -305,12 +350,20 @@ function parseResponse(raw: string): ExploreIteration {
       answer: parsed.answer && parsed.answer !== null ? String(parsed.answer) : undefined,
     };
   } catch {
-    // If JSON parse fails, treat whole response as a stuck/abort signal
+    // A malformed reply is usually a TRUNCATED one, and the `answer` it was part-way through writing
+    // is the whole point of the call. Mine it out before discarding anything.
+    const salvaged = salvageAnswer(cleaned);
+    if (salvaged) {
+      return { reasoning: 'Recovered the answer from a truncated JSON reply', commands: [], confidence: 0.5, answer: salvaged };
+    }
+    // NOTHING SALVAGEABLE → this is not an answer, and must not be returned as one. Handing the raw
+    // object back as `answer` is what made a wrapper look like a finding: the caller cannot tell a
+    // result from the model's scratchpad, and a plausible non-answer costs more than an honest miss.
     return {
       reasoning: 'Failed to parse JSON response',
       commands: [],
       confidence: 0,
-      answer: cleaned.length > 0 ? cleaned : undefined,
+      answer: undefined,
     };
   }
 }

@@ -202,5 +202,39 @@ console.log('\nexplore normal case (must still work — the fix must not break o
   ok(/"commands" array/.test(sys), 'and says where commands actually go');
 }
 
+// ── a truncated reply still carries its answer; a wrapper is never a finding ──
+//
+// Measured on a real session: explore located the bug on its second iteration and wrote it into
+// `answer` — file, line, expression. Generation was cut off mid-object, `JSON.parse` threw, and the
+// old fallback handed the WHOLE RAW OBJECT back as `answer`. The caller saw a blob whose `reasoning`
+// and `commands` fields said "still searching", concluded explore had nothing, and spent six more
+// steps rediscovering what it had already been given.
+{
+  const e = await import(`file://${join(REPO, 'dist/tools/explore.js')}`);
+
+  // The exact shape that was lost: pretty-printed, truncated mid-`answer`.
+  const truncated = '{\n  "reasoning": "still looking",\n  "commands": ["grep -n GetTimeBonus ."],\n'
+    + '  "confidence": 0.7,\n  "answer": "File: GameManager.cs\\nLines 230-232:\\n    private int '
+    + 'GetTimeBonus() => (int)(timeLeft / TIME_START * _scoreCount);';
+  const got = e.salvageAnswer(truncated);
+  ok(got !== undefined && /GetTimeBonus/.test(got) && /_scoreCount/.test(got),
+    'the answer is mined out of a reply truncated mid-object');
+  ok(got !== undefined && !/"reasoning"|"commands"|"confidence"/.test(got),
+    'and carries none of the wrapper the caller would have had to parse');
+  ok(/\n/.test(got ?? ''), 'escaped newlines are decoded, so the caller gets readable code');
+
+  // A properly closed string stops at its own quote, never swallowing the rest of the object.
+  const closed = '{"answer": "the finding", "confidence": 0.9}';
+  ok(e.salvageAnswer(closed) === 'the finding', 'a closed answer string ends at its quote');
+  ok(e.salvageAnswer('{"reasoning": "no answer field here"}') === undefined,
+    'no answer field → nothing salvaged, rather than something invented');
+
+  const src = readFileSync(join(REPO, 'src/tools/explore.ts'), 'utf-8');
+  ok(/answer: undefined,/.test(src),
+    'an unsalvageable parse failure returns NO answer — a wrapper must never be presented as a finding');
+  ok(/DIGEST_PER_COMMAND/.test(src),
+    'and one command\'s output cannot crowd the digest — a bare `ls` of a project root was filling it');
+}
+
 console.log(fails === 0 ? '\nexplore check: ok' : `\nexplore check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);
