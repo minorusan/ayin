@@ -1072,6 +1072,40 @@ rmSync(TMP, { recursive: true, force: true });
     'it prints what corpus_search returns verbatim — the same block the model would be handed, not a summary of it');
 }
 
+// ── the batch parser, against shapes a REAL corpus produced ──────────────────────
+//
+// Found by reading a live corpus over the beacon rather than by reasoning: 2% of stored "questions"
+// were the raw JSON reply, each one then costing a full answer call to produce a chunk whose
+// question is unreadable — and one entry showed the quieter failure, duplicate keys in a single
+// object, where JSON.parse keeps the last and every earlier target's questions vanish silently.
+{
+  const T = [null, { kind: 'class', name: 'Hook', file: 'f.cs' }, { kind: 'method', name: 'Hook.Release', file: 'f.cs' }];
+  const names = (m) => [...m.keys()].map((e) => (e ? e.name : '(file)')).sort().join(',');
+
+  const dup = '{"questions":[{"target":"the file as a whole","q":["What invariant does this file hold across releases?"]'
+    + ',"target":"class Hook","q":["Why is this sealed and what forces direct construction?"]}]}';
+  ok(names(Q.parseQuestionBatch(dup, T, 4)) === '(file),Hook',
+    'duplicate keys in ONE object keep BOTH targets — JSON.parse keeps only the last, losing the rest silently',
+    names(Q.parseQuestionBatch(dup, T, 4)));
+
+  const cut = '{"questions":[{"target":"class Hook","q":["Why is this class sealed rather than open?"]}'
+    + ',{"target":"method Hook.Release","q":["What happens if Release is call';
+  ok(Q.parseQuestionBatch(cut, T, 4).size === 1,
+    'a reply truncated mid-array keeps the complete pairs instead of losing the whole file');
+
+  ok(Q.parseQuestionBatch('{"questions": [ garbage ', T, 4).size === 0,
+    'a malformed JSON reply stores NOTHING — filing the raw blob as a question is what poisoned 2% of a real corpus');
+  ok(Q.parseQuestionBatch('[ {"nope": 1} ]', T, 4).size === 0,
+    'and the same for a JSON array with no pairs in it');
+
+  ok(Q.parseQuestionBatch('- What ordering does Release assume?\n- What breaks if it runs twice?', T, 4).size === 1,
+    'a plain line-format reply still works — the JSON contract is a hint, not a guarantee');
+
+  const essay = JSON.stringify({ questions: [{ target: 'the file as a whole', q: ['x'.repeat(400)] }] });
+  ok(Q.parseQuestionBatch(essay, T, 4).size === 0,
+    'an essay-length question is dropped — it costs a full answer call and nobody reads it back');
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 

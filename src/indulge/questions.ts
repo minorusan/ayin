@@ -127,6 +127,9 @@ export function targetsFor(file: string, source: string, maxEntities: number): A
  * Shared by both parsers: JSON output arrives cleaner but still carries stray numbering and quoting,
  * and having one cleaner means a rule added for one shape protects the other.
  */
+/** Longer than this and it is an essay, not a question — and it costs a full answer call either way. */
+const MAX_QUESTION_CHARS = 320;
+
 export function cleanQuestion(raw: string): string {
   const line = raw.trim()
     .replace(/^[-*•]\s+/, '')          // bullet
@@ -136,6 +139,7 @@ export function cleanQuestion(raw: string): string {
   if (!line || line.toUpperCase() === 'NONE') return '';
   if (line.length < MIN_QUESTION_CHARS) return '';
   if (/^(here are|questions?:|okay|sure\b)/i.test(line)) return ''; // preamble, not a question
+  if (line.length > MAX_QUESTION_CHARS) return '';
   return line;
 }
 
@@ -318,32 +322,46 @@ export function parseQuestionBatch(
 ): Map<Entity | null, string[]> {
   const out = new Map<Entity | null, string[]>();
   const byLabel = new Map(targets.map((t) => [label(t).toLowerCase(), t]));
+  const fileTarget = targets.includes(null) ? null : targets[0] ?? null;
 
-  // A fence is the single most common deviation; strip it before anything else.
-  const body = reply.replace(/^\s*```(?:json)?\s*/i, '').replace(/```\s*$/, '');
-  const start = body.indexOf('{');
-  const end = body.lastIndexOf('}');
-  if (start >= 0 && end > start) {
-    try {
-      const parsed = JSON.parse(body.slice(start, end + 1)) as { questions?: Array<{ target?: string; q?: unknown }> };
-      for (const row of parsed.questions ?? []) {
-        const key = String(row.target ?? '').toLowerCase().trim();
-        // An unrecognised label is attributed to the file rather than dropped: the model answered
-        // about this file either way, and `null` is a legitimate target.
-        const entity = byLabel.get(key) ?? (byLabel.has(key) ? null : (targets.includes(null) ? null : targets[0] ?? null));
-        const texts = (Array.isArray(row.q) ? row.q : [])
-          .map((x) => cleanQuestion(String(x)))
-          .filter(Boolean)
-          .slice(0, maxPerTarget);
-        if (!texts.length) continue;
-        out.set(entity, [...(out.get(entity) ?? []), ...texts].slice(0, maxPerTarget));
-      }
-      if (out.size) return out;
-    } catch { /* fall through to the line parser */ }
+  const add = (entity: Entity | null, texts: string[]): void => {
+    const clean = texts.map(cleanQuestion).filter(Boolean).slice(0, maxPerTarget);
+    if (!clean.length) return;
+    out.set(entity, [...(out.get(entity) ?? []), ...clean].slice(0, maxPerTarget));
+  };
+
+  // Pull each `"target": … "q": [ … ]` PAIR positionally, rather than JSON.parsing the whole reply.
+  //
+  // Two failures made whole-document parsing wrong, both seen in a real corpus:
+  //
+  //   DUPLICATE KEYS. Models emit `{"target":"a","q":[…],"target":"b","q":[…]}` — one object, two
+  //   pairs. That is valid JSON and `JSON.parse` keeps only the LAST, so every earlier target's
+  //   questions vanished with no error and no way to notice.
+  //
+  //   TRUNCATION. These questions run long; a reply that hits the output limit mid-array leaves
+  //   unbalanced brackets, `JSON.parse` throws, and the whole file's questions were lost — all or
+  //   nothing, for a reply that was mostly complete.
+  //
+  // Scanning pairs is immune to both: it takes every complete pair it finds and stops where the text
+  // stops.
+  const pair = /"target"\s*:\s*"([^"]*)"\s*,\s*"q"\s*:\s*(\[[^\]]*\])/g;
+  let m: RegExpExecArray | null;
+  while ((m = pair.exec(reply))) {
+    const key = m[1].toLowerCase().trim();
+    let texts: string[] = [];
+    try { texts = (JSON.parse(m[2]) as unknown[]).map(String); } catch { continue; }
+    add(byLabel.get(key) ?? fileTarget, texts);
   }
+  if (out.size) return out;
+
+  // No pairs at all. If it LOOKS like JSON, it is a malformed or truncated structured reply, and the
+  // line parser would file the raw blob as a question — measured at 2% of one real corpus, each one
+  // then costing a full answer call to produce a chunk whose question is unreadable. Storing nothing
+  // is strictly better: the triple stays un-asked and the next run retries it.
+  if (reply.trim().startsWith('{') || reply.trim().startsWith('[')) return out;
 
   const lines = parseQuestions(reply, maxPerTarget);
-  if (lines.length) out.set(targets.includes(null) ? null : targets[0] ?? null, lines);
+  if (lines.length) out.set(fileTarget, lines);
   return out;
 }
 
