@@ -257,6 +257,27 @@ ok(/URGENT: Round 13\/15/.test(capped), 'an explicitly capped run still warns as
     'and disabled on every way out — leaving it set hands paste markers to the NEXT program in that terminal');
 }
 
+// ── Esc Esc clears the prompt, and one Esc never does ──────────────────────────
+{
+  const appSrc = readFileSync(join(ROOT, 'src/app.ts'), 'utf-8');
+  const esc = appSrc.slice(appSrc.indexOf("if (key === 'escape')"), appSrc.indexOf("if (key === 'C-o')"));
+  ok(/const now = Date\.now\(\);[\s\S]*clearInput\(\)/.test(esc),
+    'a second Escape within the window clears the input');
+  ok(/DOUBLE_ESCAPE_MS/.test(appSrc), 'the window is a named constant, not a literal buried in a branch');
+
+  // Every action Escape can perform must RESET the window: closing the summary and hitting Escape
+  // again out of habit must not wipe a prompt that took a minute to type.
+  for (const action of ['closeArtifactsOverlay', 'closeSummaryOverlay', 'cancelBang', 'interruptAgent']) {
+    const line = esc.split('\n').find((l) => l.includes(action));
+    ok(line && /lastIdleEscapeAt = 0/.test(line),
+      `${action} resets the double-press window — the clear is reachable only from an idle Escape`, line?.trim());
+  }
+
+  const inputSrc = readFileSync(join(ROOT, 'src/ui/widgets/input.ts'), 'utf-8');
+  ok(/clearIfAny\(\): boolean/.test(inputSrc),
+    'the widget reports whether there WAS anything to clear, so a caller need not reach into the buffer');
+}
+
 rmSync(HOME, { recursive: true, force: true });
 console.log(fails ? `\nmodes check: ${fails} FAILURE(S)\n` : '\nmodes check: ok\n');
 process.exit(fails ? 1 : 0);

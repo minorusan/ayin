@@ -20,7 +20,7 @@ ensureToolRuntime();
 import {
   screen, addMessage, setStatus, setAgentStatus, clearChat,
   onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
-  showAlert, setStickyAlert, clearStickyAlert, registerCommand, formatShellForChat,
+  showAlert, setStickyAlert, clearStickyAlert, registerCommand, formatShellForChat, clearInput,
 } from './ui.js';
 import { isTranscribing, startTranscript, stopTranscript, transcriptPath, transcriptSize, flush as flushTranscript } from './transcript.js';
 import { executeWipe, humanBytes, planWipe, wipeOverview, type WipeScope } from './wipe.js';
@@ -221,15 +221,35 @@ function closeArtifactsOverlay(): void {
 
 // ── Global key handler (works even while agent is busy) ─────────────
 
+/** How close two Escapes must be to count as one gesture. */
+const DOUBLE_ESCAPE_MS = 600;
+let lastIdleEscapeAt = 0;
+
 if (!HEADLESS) {
   onGlobalKey((key) => {
     if (key === 'escape') {
-      if (artifactsOverlay) { closeArtifactsOverlay(); return; }
-      if (summaryOverlay) { closeSummaryOverlay(); return; }
+      // Escape has a job before it has this one. Anything it actually DID also resets the
+      // double-press window: closing the summary and then hitting Escape again out of habit must not
+      // wipe a prompt that took a minute to type. The clear is only ever reachable from an Escape
+      // that had nothing else to do.
+      if (artifactsOverlay) { closeArtifactsOverlay(); lastIdleEscapeAt = 0; return; }
+      if (summaryOverlay) { closeSummaryOverlay(); lastIdleEscapeAt = 0; return; }
       // A `!` command owns the foreground while it runs, so it gets the interrupt first — otherwise
       // `!npm run build` would be uncancellable and the UI would sit there until the timeout.
-      if (bangRunning()) { cancelBang(); return; }
-      if (busy) { interruptAgent(); return; }
+      if (bangRunning()) { cancelBang(); lastIdleEscapeAt = 0; return; }
+      if (busy) { interruptAgent(); lastIdleEscapeAt = 0; return; }
+
+      // Nothing to close, cancel or interrupt — so this Escape is free to mean "clear what I typed",
+      // on the second press. One press does nothing on purpose: a single stray Escape is the most
+      // likely keystroke in the terminal, and losing a typed prompt to one would be unforgivable.
+      const now = Date.now();
+      if (now - lastIdleEscapeAt < DOUBLE_ESCAPE_MS) {
+        lastIdleEscapeAt = 0;
+        clearInput();
+      } else {
+        lastIdleEscapeAt = now;
+      }
+      return;
     }
     if (key === 'C-o') {
       if (!artifactsOverlay && !summaryOverlay) showArtifactsOverlay();

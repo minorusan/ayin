@@ -112,6 +112,16 @@ export class InputBar {
     this.redraw();
   }
 
+  /** Clear, and say whether there was anything to clear. */
+  clearIfAny(): boolean {
+    if (!this.buffer) return false;
+    this.buffer = '';
+    this.cursor = 0;
+    this.redraw();
+    this.onChange('');
+    return true;
+  }
+
   getHeight(): number {
     return Number(this.wrapper.height ?? MIN_HEIGHT);
   }

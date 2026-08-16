@@ -165,7 +165,13 @@ export const HELP: HelpEntry[] = [
     tip: 'Ctrl+O opens the FULL output of every tool call, not the summary in the chat. ←/→ to page.',
   },
   { name: 'Ctrl+S', kind: 'key', section: 'Keys', short: 'Session summary' },
-  { name: 'Esc', kind: 'key', section: 'Keys', short: 'Close an overlay · cancel a running ! command' },
+  { name: 'Esc', kind: 'key', section: 'Keys', short: 'Close an overlay · cancel a running ! command · interrupt the agent' },
+  {
+    name: 'Esc Esc', kind: 'key', section: 'Keys',
+    short: 'Clear what you have typed — only when Escape had nothing else to do',
+    tip: 'Esc Esc clears the prompt. One press never does, so a stray Escape cannot eat what you typed.',
+  },
+  { name: 'Alt+Enter', kind: 'key', section: 'Keys', short: 'Newline without submitting (also Ctrl+J) — a paste keeps its own newlines' },
   { name: 'Ctrl+C', kind: 'key', section: 'Keys', short: 'Quit' },
   { name: 'PgUp / PgDn', kind: 'key', section: 'Keys', short: 'Scroll an open overlay' },
 

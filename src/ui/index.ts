@@ -118,6 +118,14 @@ export function getTokensDisplay(): string {
   return status.tokensDisplay();
 }
 
+/**
+ * Clear whatever is typed. Returns false when there was nothing to clear, so a caller can tell a
+ * clear from a no-op without reaching into the widget.
+ */
+export function clearInput(): boolean {
+  return input.clearIfAny();
+}
+
 export function focusInput(): void {
   input.focus();
 }
