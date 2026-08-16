@@ -39,6 +39,9 @@ export interface IndulgeArgs {
   restart: boolean;
   /** `--search "<question>"` — query the corpus and print what it would hand the model. */
   search?: string;
+  qa?: boolean;
+  qaRules?: boolean;
+  fix?: boolean;
   embedOnly: boolean;
   deep: boolean;
   importFrom?: string;
@@ -69,6 +72,9 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--status': args.status = true; break;
       case '--report': args.report = true; break;
       case '--search': case '--ask': args.search = value(); break;
+      case '--qa': args.qa = true; break;
+      case '--qa-rules': args.qa = true; args.qaRules = true; break;
+      case '--fix': case '--fixembed': args.fix = true; break;
       case '--dry-run': args.dryRun = true; break;
       case '--restart': args.restart = true; break;
       case '--import': args.importFrom = value(); break;
@@ -95,6 +101,9 @@ const USAGE = [
   '',
   '  ayin indulge --embed         vectorise the corpus for semantic search (CPU, no GPU needed)',
   '  ayin indulge --search "<q>"  ask the corpus what it knows — exactly what the agent would be handed',
+  '  ayin indulge --qa            audit the corpus: rules first (free), then the model in batches',
+  '  ayin indulge --qa-rules      the free half only — no model, instant',
+  '  ayin indulge --fix           re-answer what the audit rejected, then re-embed what changed',
   '',
   '  --import <dir>               install a corpus built elsewhere (nuk overnight -> laptop)',
   '  --deep                       full explore investigation per question (~8x slower, more thorough)',
@@ -111,6 +120,90 @@ const hhmm = (ms: number): string => {
 };
 
 /** The morning check: one command that says whether it is alive and how far it got. */
+/**
+ * `--qa` — audit what is already stored. See indulge/qa.ts for why it is two passes.
+ */
+async function runQaPass(repoPath: string, args: IndulgeArgs): Promise<number> {
+  const store = openStore(repoPath);
+  if (!store.exists()) { out(`No corpus for ${resolve(repoPath)} yet.`); return 2; }
+  let stopping = false;
+  process.on('SIGINT', () => { stopping = true; out('\nstopping — verdicts already written are kept'); });
+  const { runQa, formatQaReport } = await import('./qa.js');
+  const started = Date.now();
+  let lastLine = 0;
+  const r = await runQa({
+    store, rulesOnly: args.qaRules, limit: args.maxQuestions, shouldStop: () => stopping,
+    onStatus: (n) => out(`  ${n}`),
+    onProgress: (done, total) => {
+      const nowMs = Date.now();
+      if (nowMs - lastLine < 3000 && done < total) return;
+      lastLine = nowMs;
+      const el = (nowMs - started) / 1000;
+      const rate = done > 0 ? done / el : 0;
+      out(`  ${done}/${total} audited · ${Math.round(el)}s elapsed`
+        + `${rate > 0 ? ` · ~${Math.round((total - done) / rate)}s left` : ''}`);
+    },
+  });
+  out();
+  out(formatQaReport(r));
+  return 0;
+}
+
+/**
+ * `--fix` — act on the audit, then re-embed what changed.
+ *
+ * A reject is repaired according to WHAT was wrong, because the two failures need opposite
+ * treatment. A bad QUESTION cannot be answered better — it is dropped and its question marked
+ * failed, so nothing re-answers it at full price. A bad ANSWER to a good question is re-queued: the
+ * question returns to `pending` and the normal answer path redoes it, with the same citation gate.
+ *
+ * Embedding runs last and only over what is missing a vector, so a fix costs one embed per repaired
+ * chunk rather than a re-embed of the corpus.
+ */
+async function runFixPass(repoPath: string, args: IndulgeArgs): Promise<number> {
+  const store = openStore(repoPath);
+  if (!store.exists()) { out(`No corpus for ${resolve(repoPath)} yet.`); return 2; }
+  const rejects = store.chunks().filter((c) => c.qa?.verdict === 'reject');
+  if (!rejects.length) { out('Nothing rejected — run `ayin indulge --qa` first.'); return 0; }
+
+  // A question that was itself the problem must not come back. Everything else is worth re-asking.
+  const QUESTION_FAULTS = new Set(['question is a JSON blob', 'no question', 'question is an essay']);
+  let dropped = 0, requeued = 0;
+  const files = new Set<string>();
+  for (const c of rejects) {
+    store.deleteChunk(c.chunkId);
+    if (QUESTION_FAULTS.has(c.qa?.why ?? '')) {
+      store.setQuestionStatus(c.questionId, 'failed', `dropped by audit: ${c.qa?.why}`);
+      dropped++;
+    } else {
+      store.setQuestionStatus(c.questionId, 'pending', `re-queued by audit: ${c.qa?.why}`);
+      requeued++;
+      if (c.entity?.file) files.add(c.entity.file);
+    }
+  }
+  out(`${rejects.length} rejected chunk(s): ${dropped} dropped (bad question), ${requeued} re-queued for a new answer`);
+
+  if (requeued) {
+    let stopping = false;
+    process.on('SIGINT', () => { stopping = true; out('\nstopping after the current answer…'); });
+    await initSession();
+    recordPrompt(`ayin indulge --fix --repoPath ${repoPath}`);
+    const a = await answerQuestions({
+      store, repoPath: resolve(repoPath), only: [...files], limit: args.maxQuestions,
+      onStatus: (n) => out(`  ${n}`), shouldStop: () => stopping,
+      onProgress: (done, total, current) => store.setProgress({
+        runId: 'fix', stage: 'answer', done, total, current, startedAt: new Date().toISOString(),
+      }),
+    });
+    out(`  ${a.answered} re-answered · ${a.failed} unproven (not stored)`);
+  }
+
+  const { embedCorpus } = await import('./embed.js');
+  const e = await embedCorpus({ store, onStatus: (n) => out(`  ${n}`) });
+  out(`  ${e.embedded} newly embedded · ${e.skipped} already had vectors`);
+  return 0;
+}
+
 /**
  * `--search "<question>"` — what the corpus would hand the agent, printed verbatim.
  *
@@ -244,6 +337,8 @@ export async function runIndulge(argv: string[]): Promise<number> {
 
   if (args.status) return printStatus(repoPath);
   if (args.search !== undefined) return searchCorpus(repoPath, args.search);
+  if (args.qa) return runQaPass(repoPath, args);
+  if (args.fix) return runFixPass(repoPath, args);
   if (args.importFrom) return importCorpus(repoPath, args.importFrom);
 
   if (args.embedOnly) {
@@ -253,11 +348,29 @@ export async function runIndulge(argv: string[]): Promise<number> {
     process.on('SIGINT', () => { stopping = true; out('\nstopping after the current chunk…'); });
     const embedSession = await initSession();
     recordPrompt(`ayin indulge --embed --repoPath ${repoPath}`);
+    // Progress on the TERMINAL, not only in the status file. This sat silent for minutes: the
+    // progress callback wrote where `--status` reads and nowhere the operator was looking, so a
+    // working process was indistinguishable from a hung one. Throttled to a line every few seconds —
+    // per-chunk would scroll 847 lines past faster than anyone can read them.
+    const embedStart = Date.now();
+    let lastLine = 0;
     const r = await embedCorpus({
       store, onStatus: (n) => out(`  ${n}`), shouldStop: () => stopping,
-      onProgress: (done, total, current) => store.setProgress({
-        runId: 'embed', stage: 'answer', done, total, current, startedAt: new Date().toISOString(),
-      }),
+      onProgress: (done, total, current) => {
+        store.setProgress({
+          runId: 'embed', stage: 'answer', done, total, current,
+          startedAt: new Date(embedStart).toISOString(),
+        });
+        const nowMs = Date.now();
+        if (nowMs - lastLine < 3000 && done < total) return;
+        lastLine = nowMs;
+        const elapsed = nowMs - embedStart;
+        const rate = done > 0 ? done / (elapsed / 1000) : 0;
+        const left = rate > 0 ? (total - done) / rate : 0;
+        out(`  ${done}/${total} embedded · ${Math.round(elapsed / 1000)}s elapsed`
+          + `${rate > 0 ? ` · ${rate.toFixed(1)}/s` : ''}`
+          + `${left > 0 && done < total ? ` · ~${Math.round(left)}s left` : ''}`);
+      },
     });
     out(`${r.embedded} embedded · ${r.skipped} already done · ${r.failed} failed` + (r.foreign ? ` · ${r.foreign} from another model` : ''));
     recordAnswer(`indulge --embed · ${r.embedded} embedded · ${r.skipped} already done · ${r.failed} failed · model ${r.model}`);

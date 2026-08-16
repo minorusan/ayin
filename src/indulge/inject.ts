@@ -67,9 +67,10 @@ export interface LineRange { startLine: number; endLine: number }
  * answer about a file is not the one about the part you are looking at.
  */
 export function chunksForFile(repoPath: string, file: string, range?: LineRange): Chunk[] {
+  // Same rule as corpusSearch: an audited-out chunk is not shown when a file is read either.
   const store = openStore(repoPath);
   if (!store.exists()) return [];
-  const hits = store.chunks().filter((c) =>
+  const hits = store.chunks().filter((c) => c.qa?.verdict !== 'reject').filter((c) =>
     c.entity?.file === file || c.files.includes(file) || c.citations.some((x) => x.path === file));
   return hits.sort((a, b) => {
     const ov = overlapWith(b, file, range) - overlapWith(a, file, range);
@@ -148,7 +149,10 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
   // An exact symbol or file match is not "probably relevant" — it is the thing that was asked
   // about, and it costs no model. Chunks carrying a matched name become the candidate set;
   // everything else is out of the race rather than merely out-ranked.
-  const all = store.chunks();
+  // Rejected chunks never reach a prompt. The audit's whole purpose is that a chunk it condemned
+  // stops being retrieved — leaving them in and merely marking them would mean the corpus still
+  // hands the agent something already judged not worth reading.
+  const all = store.chunks().filter((c) => c.qa?.verdict !== 'reject');
   const named = lookupNames(buildLexicon(all), query);
 
   // Only a STRONG name match may restrict the field. Measured: "how does it figure out where the

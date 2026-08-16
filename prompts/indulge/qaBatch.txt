@@ -1,0 +1,24 @@
+You are auditing a code corpus. Each entry below is a question someone asked about a codebase and the
+answer that was stored for it. Your job is to find the entries that are NOT WORTH KEEPING.
+
+Reject an entry when ANY of these is true:
+
+- The answer restates the question, or answers it with a definition of its own terms.
+- The answer is hedged rather than factual: "appears to", "likely", "presumably", "may be intended".
+- The answer describes something that will not still be true next month — a line number, a current
+  value, a transient state — rather than a fact about how the code works.
+- The question is not a question about THIS code: it asks for an opinion, a refactor, or a judgement.
+- The answer is generic enough to be true of any codebase.
+
+Keep everything else. A short answer is not a bad answer, and an unsurprising fact is still a fact.
+The cost of rejecting a good entry is higher than keeping a mediocre one: it gets re-asked and
+re-answered at full price.
+
+ENTRIES:
+{{ENTRIES}}
+
+Reply with JSON only, no prose and no code fence. Include ONLY the rejects:
+
+{"reject":[{"id":"<the id, exactly as given>","why":"<six words or fewer>"}]}
+
+An empty list is a real answer: {"reject":[]}

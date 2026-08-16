@@ -121,6 +121,14 @@ export interface Chunk {
   domain?: string;
   question: string;
   answer: string;
+  /**
+   * The audit's verdict (`indulge --qa`), when one has been taken.
+   *
+   * Written onto the chunk rather than kept in a side file, and REVERSIBLE: nothing is deleted by an
+   * audit. `--fix` decides what to do about a reject, and an audit that destroyed its evidence could
+   * not be re-run with better criteria. Absent means "never judged", which is different from "ok".
+   */
+  qa?: { verdict: 'ok' | 'reject'; why?: string; by: 'rule' | 'model'; at: string };
   files: string[];
   citations: Citation[];
   entity: Entity | null;
@@ -691,6 +699,18 @@ export class IndulgeStore {
    * resumed run would be a citation-less answer that looks answered. Callers verify citations
    * BEFORE calling this; a chunk that reaches disk is one whose proof resolved.
    */
+  /** Record an audit verdict on a chunk, in place. Absent verdict means never judged. */
+  setChunkQa(chunkId: string, qa: { verdict: 'ok' | 'reject'; why?: string; by: 'rule' | 'model' }): void {
+    const chunk = this.readChunk(chunkId);
+    if (!chunk) return;
+    this.saveChunk({ ...chunk, qa: { ...qa, at: now() } });
+  }
+
+  /** Remove a chunk entirely — used by `--fix` after its question has been re-queued. */
+  deleteChunk(chunkId: string): void {
+    try { rmSync(join(this.chunksDir, `${chunkId}.json`), { force: true }); } catch { /* already gone */ }
+  }
+
   saveChunk(chunk: Chunk): void {
     this.ensure();
     writeAtomic(join(this.chunksDir, `${chunk.chunkId}.json`), JSON.stringify(chunk, null, 2) + '\n');

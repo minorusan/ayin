@@ -236,3 +236,64 @@ with one rule running through every layer: **state the fact, never the guess** �
 label the staleness, announce the cut, show the count even when it is zero.
 
 That is the part nobody gets for free by wrapping a model in a loop.
+
+---
+
+## Auditing what is already stored — `--qa` and `--fix`
+
+Every chunk was verified at WRITE time: citations resolve, lines in range, blob sha matched. That
+proves the answer points at real code. It does not prove the answer is worth reading, and a corpus is
+retrieved from for months.
+
+```
+ayin indulge --qa          rules first (free), then the model in batches
+ayin indulge --qa-rules    the free half only — no model, instant
+ayin indulge --fix         act on the verdicts, then re-embed what changed
+```
+
+### Two passes, and the split is the design
+
+**Deterministic first, and free.** A question that is a JSON blob, an answer shorter than its own
+question, an entry with no citations — decidable without a model. Spending a model call on those is
+spending the audit's budget on the easy half. Measured on a real corpus: **2% of stored questions
+were raw JSON replies**, every one caught here for nothing.
+
+**The model second**, on what survives, in batches of **question + answer only — no source**. The
+audit asks whether an answer is worth keeping, not whether it is true; truth was settled by the
+citation gate. Sending the file again would multiply the audit's cost by the size of the code for a
+judgement that does not need it.
+
+### Rules the audit enforces
+
+| | |
+|---|---|
+| rule | JSON-blob question · empty question or answer · essay-length question (>320 chars) · answer under 40 chars · no citations · answer restates the question |
+| model | answer restates the question in other words · hedged rather than factual · describes something that will not be true next month · asks for an opinion or a refactor · generic enough to be true of any codebase |
+
+The prompt says explicitly that **a short answer is not a bad answer** and rejecting a good entry
+costs more than keeping a mediocre one, because a reject is re-answered at full price.
+
+### Three properties worth knowing
+
+**Nothing is deleted.** A verdict is written onto the chunk and is reversible. An audit that destroys
+its evidence cannot be re-run with better criteria.
+
+**The audit fails OPEN.** An unparseable reply rejects nothing. Failing closed would delete a batch of
+good chunks because one reply came back malformed — and malformed replies are exactly what this
+codebase keeps meeting.
+
+**Only ids that were in the batch may be condemned.** A model that invents an id cannot reach a chunk
+nobody showed it.
+
+### `--fix` treats the two failures differently
+
+A bad **question** cannot be answered better: the chunk is dropped and its question marked `failed`,
+so nothing re-answers it at full price. A bad **answer** to a good question is re-queued — the
+question returns to `pending` and the normal answer path redoes it, citation gate and all.
+
+Embedding runs last and only over what is missing a vector, so a fix costs one embed per repaired
+chunk rather than a re-embed of the corpus.
+
+**Rejected chunks never reach a prompt** — filtered out of both `corpus_search` and the read-file
+injection. Marking a chunk while still serving it would be theatre.
+

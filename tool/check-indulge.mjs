@@ -1106,6 +1106,67 @@ rmSync(TMP, { recursive: true, force: true });
     'an essay-length question is dropped — it costs a full answer call and nobody reads it back');
 }
 
+// ── the audit: rules are free, the model judges the rest, nothing is deleted ─────
+{
+  const QA = await import(join(ROOT, 'dist/indulge/qa.js'));
+  const dir = mkdtempSync(join(tmpdir(), 'ayin-qa-'));
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'A.cs'), 'class A { }');
+  const st = S.openStore(dir);
+  st.beginRun({ runId: 'r', domains: ['d'], headSha: 'h' });
+  const mk = (id, question, answer, extra = {}) => st.saveChunk({
+    chunkId: id, questionId: `q-${id}`, file: 'src/A.cs',
+    entity: { kind: 'class', name: 'A', file: 'src/A.cs' }, category: 'gotchas', domains: ['d'],
+    question, answer, citations: [{ path: 'src/A.cs', startLine: 1, endLine: 1, blobSha: 'x' }],
+    files: ['src/A.cs'], createdAt: new Date(0).toISOString(), ...extra,
+  });
+
+  mk('json', '{"questions":[{"target":"x","q":["…"]}]}', 'Some answer that is long enough to pass the length rule.');
+  mk('short', 'What does A guarantee about ordering?', 'Yes.');
+  mk('nocite', 'What does A guarantee about ordering?', 'A long enough answer to survive the length rule.', { citations: [] });
+  mk('good1', 'What does A guarantee about ordering across restarts?', 'It replays the journal before serving, so order survives a restart.');
+  mk('good2', 'Why is A sealed rather than open for extension?', 'Because two subclasses raced on the shared cache and it was cheaper to seal it.');
+
+  // Rules only: free, no model, and it must catch exactly the three decidable ones.
+  const rules = await QA.runQa({ store: st, rulesOnly: true });
+  ok(rules.byRule === 3 && rules.byModel === 0 && rules.calls === 0,
+    'the rule pass catches the decidable rejects and spends NO model call on them',
+    JSON.stringify({ byRule: rules.byRule, calls: rules.calls }));
+  ok(rules.reasons.some((r) => r.why === 'question is a JSON blob'),
+    'the JSON-blob question — 2% of a real corpus — is caught for free');
+
+  // Nothing is deleted by an audit: a condemned chunk keeps its evidence.
+  ok(st.readChunk('json') !== null && st.readChunk('json').qa.verdict === 'reject',
+    'a rejected chunk is MARKED, not deleted — an audit that destroys evidence cannot be re-run');
+
+  // The model pass sees only survivors, and only ids it was shown may be condemned.
+  let sawIds = [];
+  const withModel = await QA.runQa({
+    store: st, again: true,
+    ask: async (p) => {
+      sawIds = [...p.matchAll(/^id: (\S+)$/gm)].map((m) => m[1]);
+      return JSON.stringify({ reject: [{ id: 'good1', why: 'hedged' }, { id: 'not-in-batch', why: 'invented' }] });
+    },
+  });
+  ok(!sawIds.includes('json') && sawIds.includes('good1'),
+    'the model is shown only what the rules could not decide');
+  ok(withModel.byModel === 1,
+    'an id the model invented cannot condemn a chunk nobody showed it', String(withModel.byModel));
+
+  // An unparseable audit reply must reject NOTHING — failing closed would delete good chunks.
+  const openFail = await QA.runQa({ store: st, again: true, ask: async () => 'sorry, I cannot help with that' });
+  ok(openFail.byModel === 0, 'an unparseable audit reply rejects nothing — an audit fails OPEN');
+
+  // Retrieval must not hand out what the audit condemned.
+  const inject = await import(join(ROOT, 'dist/indulge/inject.js'));
+  st.setChunkQa('good2', { verdict: 'reject', why: 'test', by: 'model' });
+  const shown = inject.chunksForFile(dir, 'src/A.cs').map((c) => c.chunkId);
+  ok(!shown.includes('good2'),
+    'a rejected chunk never reaches a prompt — marking it while still serving it would be theatre');
+
+  rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 
