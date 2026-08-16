@@ -16,7 +16,7 @@
 
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -183,6 +183,25 @@ console.log('\nexplore normal case (must still work — the fix must not break o
   let parsed2 = null;
   try { parsed2 = JSON.parse(stdout2.trim().split('\n').pop() ?? ''); } catch { /* leave null */ }
   ok(!!parsed2?.result?.includes('found in target.txt'), 'the real answer is returned, not a repeat-guard message', parsed2?.result?.slice(0, 120));
+}
+
+// ── a tool-trained model answers with a TOOL CALL; recover it, don't burn the turn ──
+//
+// Measured on GPT-4.1: the explore loop asks for shell commands inside a JSON field, and a
+// function-calling model reads "run grep" as a tool call and emits its own syntax —
+// `<function=grep><parameter=pattern>…`. Nothing is wrong with the model; it is being asked to
+// describe a tool invocation in prose, which is exactly what a tool-trained model is built not to do.
+{
+  const EX = await import(join(REPO, 'dist/tools/explore.js'));
+  const src = readFileSync(join(REPO, 'src/tools/explore.ts'), 'utf-8');
+  ok(/function recoverToolCall/.test(src), 'a tool-shaped reply is recovered rather than discarded');
+  ok(src.indexOf('recoverToolCall(cleaned)') < src.indexOf("cleaned.indexOf('{')"),
+    'and recovery is tried BEFORE the JSON path — such a reply contains no JSON to find');
+
+  const sys = readFileSync(join(REPO, 'prompts/explore/investigatorSystem.txt'), 'utf-8');
+  ok(/NEVER emit a tool call/i.test(sys),
+    'the system prompt forbids tool calls explicitly — one line saying "only JSON" is not a contract a function-calling model holds');
+  ok(/"commands" array/.test(sys), 'and says where commands actually go');
 }
 
 console.log(fails === 0 ? '\nexplore check: ok' : `\nexplore check: ${fails} FAILED`);
