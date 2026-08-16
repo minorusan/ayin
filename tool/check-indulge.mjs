@@ -22,10 +22,10 @@
 // which grabs the terminal and leaves escape codes behind when the process exits.
 if (!process.argv.includes('-p')) process.argv.push('-p');
 
-import { appendFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { hostname, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -1192,6 +1192,48 @@ rmSync(TMP, { recursive: true, force: true });
   const k2 = S.chunkId('repo', 'f.cs', { kind: 'class', name: 'A', file: 'f.cs' }, 'gotchas', 'q1');
   ok(k === k2,
     're-answering the same question writes the SAME chunk id — the replacement overwrites atomically, which is why no delete is needed');
+}
+
+// ── a corpus is a NIGHT ON A SHARED CARD: never destroyed without a copy ─────────
+{
+  const dir = mkdtempSync(join(tmpdir(), 'ayin-snap-'));
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'A.cs'), 'class A { }');
+  const st = S.openStore(dir);
+  st.beginRun({ runId: 'r1', domains: ['d'], headSha: 'h' });
+  st.addFile({ path: 'src/A.cs', domain: 'd', depth: 0, why: 'seed' });
+  st.saveChunk({
+    chunkId: 'keepme', questionId: 'q', file: 'src/A.cs', entity: null, category: 'gotchas',
+    domains: ['d'], question: 'What does A guarantee?', answer: 'It guarantees ordering across restarts.',
+    citations: [{ path: 'src/A.cs', startLine: 1, endLine: 1, blobSha: 'x' }], files: ['src/A.cs'],
+    createdAt: new Date(0).toISOString(),
+  });
+  ok(st.chunks().length === 1, 'a corpus exists before the restart');
+  st.endRun('r1', 'finished');   // release the run lock before starting another in-process
+
+  // --restart discards everything. It must copy first, unasked.
+  st.beginRun({ runId: 'r2', domains: ['d'], headSha: 'h', restart: true });
+  ok(st.chunks().length === 0, '--restart really does discard the corpus');
+  ok(typeof st.lastSnapshot === 'string' && st.lastSnapshot.length > 0,
+    '--restart snapshots FIRST, automatically — a backup the operator must remember does not exist at 3am',
+    String(st.lastSnapshot));
+  const saved = JSON.parse(readFileSync(join(st.lastSnapshot, 'chunks', 'keepme.json'), 'utf-8'));
+  ok(saved.chunkId === 'keepme', 'and the discarded chunk is readable in the snapshot');
+
+  // Snapshots are pruned, because the point is surviving a mistake, not archiving every one.
+  for (let i = 0; i < 5; i++) st.snapshot(`t${i}`);
+  const parent = dirname(st.dir);
+  const backups = readdirSync(parent).filter((n) => n.startsWith(`${basename(st.dir)}.bak-`));
+  ok(backups.length <= 4, 'old snapshots are pruned rather than accumulating forever', String(backups.length));
+
+  // --fix must refuse to delete when the copy failed.
+  const fixSrc = readFileSync(join(ROOT, 'src/indulge/index.ts'), 'utf-8');
+  const fix = fixSrc.slice(fixSrc.indexOf('async function runFixPass'), fixSrc.indexOf('function printStatus'));
+  ok(/const backup = store\.snapshot\('fix'\);/.test(fix), '--fix snapshots before the loop');
+  ok(/if \(!backup\) \{ unchanged\+\+; continue; \}/.test(fix),
+    'and REFUSES to delete when the snapshot failed — an unrecoverable delete is not done on the assumption the copy worked');
+
+  rmSync(dir, { recursive: true, force: true });
 }
 
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');

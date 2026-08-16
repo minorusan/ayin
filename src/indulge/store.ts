@@ -31,12 +31,12 @@
  */
 
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync,
+  appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { homedir, hostname } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { writeAtomic } from '../prompts-service.js';
 
 /** Bumped when the on-disk shape changes incompatibly; a mismatched store is reported, not guessed at. */
@@ -526,6 +526,10 @@ export class IndulgeStore {
     for (const r of m.runs) if (r.status === 'running') r.status = 'interrupted';
 
     if (opts.restart) {
+      // A restart throws away every answered question and every chunk — hours of a shared GPU. The
+      // snapshot is not optional and not a flag: the operator typing --restart means "rebuild", not
+      // "make last night unrecoverable".
+      this.lastSnapshot = this.snapshot('restart');
       for (const p of [this.filesFile, this.questionsFile, this.askedFile, this.progressFile]) {
         try { if (existsSync(p)) unlinkSync(p); } catch { /* best effort */ }
       }
@@ -650,6 +654,9 @@ export class IndulgeStore {
 
   private askedCache: Set<string> | null = null;
 
+  /** Where the most recent automatic snapshot landed, so the caller can SAY so. */
+  lastSnapshot: string | null = null;
+
   /** The live id cache, built from disk on first use. Private — callers get a read-only view. */
   private knownIds(): Set<string> {
     if (!this.idCache) this.idCache = new Set(this.questions().map((q) => q.id));
@@ -704,6 +711,43 @@ export class IndulgeStore {
     const chunk = this.readChunk(chunkId);
     if (!chunk) return;
     this.saveChunk({ ...chunk, qa: { ...qa, at: now() } });
+  }
+
+  /**
+   * Copy the whole corpus aside before anything destroys part of it.
+   *
+   * A corpus is not a file, it is a NIGHT ON A SHARED CARD. `--restart` unlinks every record and
+   * removes the chunk directory; `--fix` deletes chunks whose questions cannot be repaired. Both are
+   * correct operations and both are unrecoverable, and the operator learns which one they meant
+   * afterwards.
+   *
+   * Automatic, in the same code path as the destruction — a backup a human has to remember is a
+   * backup that does not exist at 3am. Best-effort: a snapshot that fails must not block the work,
+   * but it is reported so nobody believes they have one when they do not.
+   */
+  snapshot(reason: string): string | null {
+    if (!existsSync(this.dir)) return null;
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '');
+    const dest = `${this.dir}.bak-${stamp}-${reason.replace(/[^a-z0-9]+/gi, '')}`;
+    try {
+      cpSync(this.dir, dest, { recursive: true });
+      this.pruneSnapshots();
+      return dest;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Keep the newest few. The point is surviving a mistake, not archiving every one. */
+  private pruneSnapshots(KEEP = 3): void {
+    try {
+      const parent = dirname(this.dir);
+      const mine = `${this.key}.bak-`;
+      const backups = readdirSync(parent).filter((n) => n.startsWith(mine)).sort().reverse();
+      for (const old of backups.slice(KEEP)) {
+        try { rmSync(join(parent, old), { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    } catch { /* no parent, nothing to prune */ }
   }
 
   /** Remove a chunk entirely — used by `--fix` after its question has been re-queued. */

@@ -166,6 +166,12 @@ async function runFixPass(repoPath: string, args: IndulgeArgs): Promise<number> 
   const rejects = store.chunks().filter((c) => c.qa?.verdict === 'reject');
   if (!rejects.length) { out('Nothing rejected — run `ayin indulge --qa` first.'); return 0; }
 
+  // One snapshot before the loop, not per item: `--fix` deletes chunks whose questions cannot be
+  // repaired, and a corpus is a night on a shared card. Automatic and unconditional — a backup the
+  // operator has to ask for is a backup that does not exist when it is needed.
+  const backup = store.snapshot('fix');
+  out(backup ? `backup: ${backup}` : 'WARNING: could not write a backup — nothing will be deleted this run');
+
   let stopping = false;
   process.on('SIGINT', () => { stopping = true; out('\nstopping after the current chunk — everything repaired so far is kept'); });
   await initSession();
@@ -197,6 +203,9 @@ async function runFixPass(repoPath: string, args: IndulgeArgs): Promise<number> 
 
     if (QUESTION_FAULTS.has(c.qa?.why ?? '')) {
       // Nothing can replace it, so this one really is a delete. Per item, so an interrupt costs one.
+      // Refused outright when the backup failed: an unrecoverable delete of an expensive artifact is
+      // not something to do on the assumption that the copy probably worked.
+      if (!backup) { unchanged++; continue; }
       store.setQuestionStatus(c.questionId, 'failed', `dropped by audit: ${c.qa?.why}`);
       store.deleteChunk(c.chunkId);
       dropped++;
@@ -442,6 +451,11 @@ export async function runIndulge(argv: string[]): Promise<number> {
   const headSha = '';
   try {
     store.beginRun({ runId, domains: args.domains, headSha, restart: args.restart, answerBudget: args.maxQuestions });
+    if (args.restart) {
+      out(store.lastSnapshot
+        ? `--restart: the previous corpus was copied to ${store.lastSnapshot}`
+        : '--restart: WARNING — the previous corpus could not be backed up, and has been discarded');
+    }
   } catch (err) {
     if (err instanceof StoreLockedError) {
       out(String(err.message));

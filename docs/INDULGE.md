@@ -297,3 +297,21 @@ chunk rather than a re-embed of the corpus.
 **Rejected chunks never reach a prompt** — filtered out of both `corpus_search` and the read-file
 injection. Marking a chunk while still serving it would be theatre.
 
+### A corpus is a night on a shared card
+
+Every destructive path snapshots first, automatically, in the same code path — `--restart` before it
+discards, `--fix` before its first delete. Not a flag and not a reminder: a backup the operator has
+to remember is a backup that does not exist at 3am.
+
+```
+--restart: the previous corpus was copied to <dir>.bak-20260816T0639-restart
+```
+
+The last three are kept and older ones pruned; the point is surviving a mistake, not archiving every
+one. **If the snapshot fails, `--fix` refuses to delete** and says so — an unrecoverable delete of
+something that cost a night is not done on the assumption that the copy probably worked.
+
+This exists because it was learned the expensive way. The first `--fix` read every reject, deleted
+all 196 of their chunks and rewrote all their question statuses **before answering one** — and the
+audit's verdicts lived on the chunks it had just deleted, so the next run reported "nothing
+rejected". An interruption one answer in cost 195 chunks and the entire audit.
