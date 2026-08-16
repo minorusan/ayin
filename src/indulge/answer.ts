@@ -68,6 +68,8 @@ const MAX_NEIGHBOURS = 6;
 export interface AnswerOptions {
   /** Only questions about these files. The interleaved runner answers a batch as soon as it exists. */
   only?: string[];
+  /** Only these exact questions — how `--fix` repairs one chunk at a time, atomically. */
+  questionIds?: string[];
   store: IndulgeStore;
   repoPath: string;
   /**
@@ -323,7 +325,10 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
     if (prev === undefined || f.depth < prev) depthOf.set(f.path, f.depth);
   }
   const only = opts.only ? new Set(opts.only) : null;
-  const pending = store.pendingQuestions().filter((q) => !only || only.has(q.file)).sort((a, b) => {
+  const ids = opts.questionIds ? new Set(opts.questionIds) : null;
+  const pending = store.pendingQuestions()
+    .filter((q) => (!only || only.has(q.file)) && (!ids || ids.has(q.id)))
+    .sort((a, b) => {
     const d = (depthOf.get(a.file) ?? 99) - (depthOf.get(b.file) ?? 99);
     return d !== 0 ? d : a.file.localeCompare(b.file);
   });

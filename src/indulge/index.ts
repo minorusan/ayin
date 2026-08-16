@@ -166,37 +166,66 @@ async function runFixPass(repoPath: string, args: IndulgeArgs): Promise<number> 
   const rejects = store.chunks().filter((c) => c.qa?.verdict === 'reject');
   if (!rejects.length) { out('Nothing rejected — run `ayin indulge --qa` first.'); return 0; }
 
-  // A question that was itself the problem must not come back. Everything else is worth re-asking.
+  let stopping = false;
+  process.on('SIGINT', () => { stopping = true; out('\nstopping after the current chunk — everything repaired so far is kept'); });
+  await initSession();
+  recordPrompt(`ayin indulge --fix --repoPath ${repoPath}`);
+
+  // ONE CHUNK AT A TIME, AND NOTHING IS DESTROYED BEFORE ITS REPLACEMENT EXISTS.
+  //
+  // The first version read every reject, then deleted all their chunks and rewrote all their
+  // question statuses BEFORE answering anything. Interrupted after one answer, that left 195 chunks
+  // gone, their questions pending, and — because the verdicts lived on the deleted chunks — no
+  // record that an audit had ever run. `--fix` then reported "nothing rejected". Maximum damage from
+  // the earliest possible interruption, which is the exact inverse of what an interruptible job
+  // should do.
+  //
+  // The deletion was never needed. `chunkId` is derived from (repo, file, entity, category,
+  // questionId), so re-answering the SAME question writes the SAME id — the new chunk replaces the
+  // old atomically, and the stale verdict goes with it. A bad answer therefore costs no deletion at
+  // all: set the question pending, answer it, and either it improved or the old chunk is still
+  // there. Only a bad QUESTION is deleted, because there is nothing to replace it with.
   const QUESTION_FAULTS = new Set(['question is a JSON blob', 'no question', 'question is an essay']);
-  let dropped = 0, requeued = 0;
-  const files = new Set<string>();
+  const budget = args.maxQuestions ?? Infinity;
+  let dropped = 0, repaired = 0, unchanged = 0, done = 0;
+  const started = Date.now();
+  let lastLine = 0;
+
   for (const c of rejects) {
-    store.deleteChunk(c.chunkId);
+    if (stopping || repaired >= budget) break;
+    done++;
+
     if (QUESTION_FAULTS.has(c.qa?.why ?? '')) {
+      // Nothing can replace it, so this one really is a delete. Per item, so an interrupt costs one.
       store.setQuestionStatus(c.questionId, 'failed', `dropped by audit: ${c.qa?.why}`);
+      store.deleteChunk(c.chunkId);
       dropped++;
     } else {
       store.setQuestionStatus(c.questionId, 'pending', `re-queued by audit: ${c.qa?.why}`);
-      requeued++;
-      if (c.entity?.file) files.add(c.entity.file);
+      const a = await answerQuestions({
+        store, repoPath: resolve(repoPath), questionIds: [c.questionId], limit: 1,
+        shouldStop: () => stopping,
+      });
+      if (a.answered > 0) repaired++;
+      else unchanged++;   // the old chunk is untouched and still retrievable
+    }
+
+    const nowMs = Date.now();
+    if (nowMs - lastLine > 3000 || done === rejects.length) {
+      lastLine = nowMs;
+      const el = (nowMs - started) / 1000;
+      const rate = done / Math.max(el, 0.001);
+      out(`  ${done}/${rejects.length} · ${repaired} repaired · ${dropped} dropped · ${unchanged} unchanged`
+        + ` · ${Math.round(el)}s elapsed`
+        + `${rate > 0 && done < rejects.length ? ` · ~${Math.round((rejects.length - done) / rate)}s left` : ''}`);
     }
   }
-  out(`${rejects.length} rejected chunk(s): ${dropped} dropped (bad question), ${requeued} re-queued for a new answer`);
 
-  if (requeued) {
-    let stopping = false;
-    process.on('SIGINT', () => { stopping = true; out('\nstopping after the current answer…'); });
-    await initSession();
-    recordPrompt(`ayin indulge --fix --repoPath ${repoPath}`);
-    const a = await answerQuestions({
-      store, repoPath: resolve(repoPath), only: [...files], limit: args.maxQuestions,
-      onStatus: (n) => out(`  ${n}`), shouldStop: () => stopping,
-      onProgress: (done, total, current) => store.setProgress({
-        runId: 'fix', stage: 'answer', done, total, current, startedAt: new Date().toISOString(),
-      }),
-    });
-    out(`  ${a.answered} re-answered · ${a.failed} unproven (not stored)`);
-  }
+  out();
+  out(`${done} of ${rejects.length} handled · ${repaired} re-answered · ${dropped} dropped (bad question)`
+    + `${unchanged ? ` · ${unchanged} left as they were (the new answer proved nothing)` : ''}`
+    + `${stopping ? ' · stopped early — re-run to continue' : ''}`);
+  recordAnswer(`indulge --fix · ${repaired} repaired · ${dropped} dropped · ${unchanged} unchanged`);
 
   const { embedCorpus } = await import('./embed.js');
   const e = await embedCorpus({ store, onStatus: (n) => out(`  ${n}`) });

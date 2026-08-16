@@ -1167,6 +1167,33 @@ rmSync(TMP, { recursive: true, force: true });
   rmSync(dir, { recursive: true, force: true });
 }
 
+// ── --fix must never destroy before its replacement exists ───────────────────────
+//
+// The first version read every reject, deleted ALL their chunks and rewrote ALL their question
+// statuses BEFORE answering anything. Interrupted after one answer it left 195 chunks gone, their
+// questions pending, and no record an audit had run — because the verdicts lived on the chunks it
+// had just deleted. Maximum damage from the earliest possible interruption.
+{
+  const src = readFileSync(join(ROOT, 'src/indulge/index.ts'), 'utf-8');
+  const fix = src.slice(src.indexOf('async function runFixPass'), src.indexOf('function printStatus'));
+  ok(/for \(const c of rejects\) \{/.test(fix), '--fix walks rejects ONE AT A TIME');
+  ok(/if \(stopping \|\| repaired >= budget\) break;/.test(fix),
+    'and checks for a stop between items, so an interrupt costs at most the current one');
+  // The delete must be reachable only inside the question-fault branch.
+  const deleteIdx = fix.indexOf('store.deleteChunk');
+  const faultIdx = fix.indexOf('QUESTION_FAULTS.has');
+  ok(faultIdx >= 0 && deleteIdx > faultIdx && deleteIdx < fix.indexOf('} else {'),
+    'the ONLY delete is for a bad QUESTION — a bad answer is overwritten in place, never deleted');
+  ok(/questionIds: \[c\.questionId\], limit: 1/.test(fix),
+    'each repair answers exactly its own question, so a failure cannot strand a batch');
+
+  // chunkId determinism is what makes the no-delete repair correct.
+  const k = S.chunkId('repo', 'f.cs', { kind: 'class', name: 'A', file: 'f.cs' }, 'gotchas', 'q1');
+  const k2 = S.chunkId('repo', 'f.cs', { kind: 'class', name: 'A', file: 'f.cs' }, 'gotchas', 'q1');
+  ok(k === k2,
+    're-answering the same question writes the SAME chunk id — the replacement overwrites atomically, which is why no delete is needed');
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 
