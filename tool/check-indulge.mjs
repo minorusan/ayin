@@ -1521,6 +1521,31 @@ rmSync(TMP, { recursive: true, force: true });
   rmSync(dir, { recursive: true, force: true });
 }
 
+// ── --domains and --categories take the SAME shape ─────────────────────────────
+//
+// They did not: domains took a quoted comma string and categories an unquoted one, so one idea had
+// two spellings and neither was the array shape they were specced as.
+{
+  const { parseList } = await import(join(ROOT, 'dist/indulge/args.js'));
+  const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+  ok(eq(parseList('["reward service","game modes"]'), ['reward service', 'game modes']),
+    'a JSON array parses, spaces and all — the shape a caller reasonably writes');
+  ok(eq(parseList('["gotchas","connections"]'), ['gotchas', 'connections']),
+    'and categories take exactly the same shape as domains');
+  ok(eq(parseList('reward service,game modes'), ['reward service', 'game modes']),
+    'the comma form still works — it is in shell histories and every example written so far');
+  ok(eq(parseList("['a','b']"), ['a', 'b']), 'single quotes survive the shell and still parse');
+  ok(eq(parseList('[ "a" , "b" ]'), ['a', 'b']), 'whitespace inside the array is ignored');
+  ok(eq(parseList('single'), ['single']), 'one bare value is a one-item list');
+  ok(eq(parseList('["broken", '), ['broken']),
+    'a MALFORMED array strips its brackets rather than yielding an item called `["broken`, which would become a domain matching nothing');
+
+  const ix = readFileSync(join(ROOT, 'src/indulge/index.ts'), 'utf-8');
+  ok((ix.match(/parseList\(value\(\)\)/g) ?? []).length >= 2,
+    'both flags go through the one parser, so they cannot drift apart again');
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 

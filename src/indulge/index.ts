@@ -16,6 +16,7 @@
  */
 
 import { getConfigString } from '../prompts.js';
+import { parseList } from './args.js';
 import { cpSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { acquireLlm, type LlmHold } from '../llm/authority.js';
@@ -71,7 +72,7 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
     switch (flag) {
       case '--repoPath': case '--repo': args.repoPath = value(); break;
       case '--domains': case '--domain':
-        args.domains = value().split(',').map((d) => d.trim()).filter(Boolean); break;
+        args.domains = parseList(value()); break;
       case '--status': args.status = true; break;
       case '--report': args.report = true; break;
       case '--search': case '--ask': args.search = value(); break;
@@ -91,7 +92,7 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
         // ANY angle, like domains. The five that ship carry tuned prompts; anything else gets a
         // generic frame naming it. What is still refused is a name that cannot be a prompt id or a
         // corpus field — that fails later, in a place with no useful error.
-        const want = value().split(',').map((c) => c.trim()).filter(Boolean);
+        const want = parseList(value());
         const bad = want.filter((c) => !/^[A-Za-z][A-Za-z0-9_-]{1,39}$/.test(c));
         if (bad.length) {
           errors.push(`unusable categor${bad.length > 1 ? 'ies' : 'y'}: ${bad.join(', ')}`
@@ -127,8 +128,8 @@ const USAGE = [
   '  --depth N                    reference-walk depth (default 3)',
   '  --max-files N                cap discovered files per domain',
   '  --max-questions N            cap answers this run',
-  '  --categories a,b             ANY angle. Tuned ones: git,dependencies,connections,functionality,gotchas',
-  '                               anything else works too — "threadSafety", "migrationRisk" — the angle is named to the model',
+  '  --categories \'["a","b"]\'     ANY angle. Tuned: git,dependencies,connections,functionality,gotchas',
+  '                               anything else works too — "threadSafety" — the angle is named to the model',
 ].join('\n');
 
 const hhmm = (ms: number): string => {
