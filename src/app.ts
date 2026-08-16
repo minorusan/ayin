@@ -738,11 +738,19 @@ onInput(async (text: string) => {
           addMessage('system', 'Use `/openai sk-…` — it verifies the key with OpenAI, then saves it to ~/.ayin-cli/openai.env (0600), and keeps it out of your shell history and the model\'s context.');
           return;
         }
+        // Kebab → camel, then SNAP to the canonical key case-insensitively.
+        //
+        // The mechanical conversion is not enough on its own: `openai-model` becomes `openaiModel`
+        // while the code reads `openAiModel`, so the natural name for a real setting stored a dead
+        // key and warned about it. Writing another hand-map entry would fix that one and leave the
+        // next; matching the known list ignoring case fixes the whole class, including keys added
+        // later. The hand-map stays only for names that are not a case difference at all.
         const keyMap: Record<string, string> = {
           'llm-url': 'llmUrl',
           'update-registry': 'updateRegistry', 'llm-provider': 'llmProvider',
         };
-        const configKey = keyMap[key] ?? key.replace(/-([a-z])/g, (_m, c: string) => c.toUpperCase());
+        const camel = keyMap[key] ?? key.replace(/-([a-z])/g, (_m, c: string) => c.toUpperCase());
+        const configKey = KNOWN_CONFIG_KEYS.find((k) => k.toLowerCase() === camel.toLowerCase()) ?? camel;
         setConfigValue(configKey, value);
         addMessage(
           'system',

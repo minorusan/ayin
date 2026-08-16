@@ -41,6 +41,7 @@ const writeConfig = (config) => {
 };
 
 const modes = await import(join(ROOT, 'dist/modes.js'));
+const prompts = await import(join(ROOT, 'dist/prompts.js'));
 const agent = await import(join(ROOT, 'dist/agent.js'));
 const tools = await import(join(ROOT, 'dist/tools.js'));
 await tools.loadTools();
@@ -104,6 +105,26 @@ ok(!/URGENT|round\(s\) left|converge/i.test(unlimited),
 
 const capped = volatileText(12, 15);
 ok(/URGENT: Round 13\/15/.test(capped), 'an explicitly capped run still warns as it runs out');
+
+// ── /set must not store a dead key that differs only in case ────────────────────
+//
+// `openai-model` converts mechanically to `openaiModel` while the code reads `openAiModel`, so the
+// natural name for a real setting stored a key nobody reads and said so — correct, and useless. A
+// hand-map entry would fix that one name and leave the next; snapping to the known list ignoring
+// case fixes the class, including keys added later.
+{
+  const appSrc = readFileSync(join(ROOT, 'src/app.ts'), 'utf-8');
+  ok(/KNOWN_CONFIG_KEYS\.find\(\(k\) => k\.toLowerCase\(\) === camel\.toLowerCase\(\)\)/.test(appSrc),
+    '/set snaps a converted key to the canonical spelling, case-insensitively');
+  const snap = (kebab) => {
+    const camel = kebab.replace(/-([a-z])/g, (_m, c) => c.toUpperCase());
+    return prompts.KNOWN_CONFIG_KEYS.find((k) => k.toLowerCase() === camel.toLowerCase()) ?? camel;
+  };
+  ok(snap('openai-model') === 'openAiModel', 'openai-model reaches openAiModel', snap('openai-model'));
+  ok(snap('embed-model') === 'embedModel', 'and the ones that already worked still do');
+  ok(snap('nunit-console') === 'nunitConsole', 'as do the newer ones');
+  ok(snap('made-up-key') === 'madeUpKey', 'an unknown key still stores, and still warns');
+}
 
 rmSync(HOME, { recursive: true, force: true });
 console.log(fails ? `\nmodes check: ${fails} FAILURE(S)\n` : '\nmodes check: ok\n');
