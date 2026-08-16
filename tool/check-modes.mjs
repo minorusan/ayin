@@ -278,6 +278,44 @@ ok(/URGENT: Round 13\/15/.test(capped), 'an explicitly capped run still warns as
     'the widget reports whether there WAS anything to clear, so a caller need not reach into the buffer');
 }
 
+// ── "the fix is to locate X" is not a fix ───────────────────────────────────────
+//
+// A small fast model ends its turn with the SHAPE of an answer — *the fix is to locate the method
+// that adds the bonus* — which hands the work back while sounding finished. The loop cannot tell it
+// from a result: "here is my plan" and "here is my answer" are identical to a check that only asks
+// whether a tool was called.
+{
+  const D = await import(join(ROOT, 'dist/deferral.js'));
+  const defers = (t, work = false) => D.looksLikeDeferral(t, work);
+
+  ok(defers('The fix is to locate the method that adds the time bonus and change it there.'),
+    'a reply naming what to LOOK FOR is caught');
+  ok(defers('You should investigate the scoring path and check where the multiplier is applied.'),
+    'as is handing it back as a suggestion');
+  ok(defers('Further investigation is needed to determine which handler owns this behaviour.'),
+    'and the passive form');
+
+  // The false positives matter more than the catches: nagging a good answer trains the operator to
+  // ignore the nudge, and then it protects nothing.
+  ok(!defers('The fix is at SolitaireStreakBrain.cs:130 — AddFlatScore writes BaseActions.'),
+    'a reply carrying a FILE and a LINE is a result, whatever else it says');
+  ok(!defers('```csharp\nvar x = 1;\n```\nThat is the change.'), 'so is one carrying code');
+  ok(!defers('Line 436 also sets the baseline; you should check it.'),
+    'and a caveat NEXT TO a finding is a caveat, not a dodge');
+  ok(!defers('The fix is to locate the caller.', true),
+    'a turn that actually ran a tool has done something — its closing suggestion is not slacking');
+  ok(!defers('Yes.'), 'a short reply is too short to be a diagnosis either way');
+
+  // Bounded: a guard that can loop is worse than the behaviour it corrects.
+  const agentSrc = readFileSync(join(ROOT, 'src/agent.ts'), 'utf-8');
+  ok(/deferralNudges < 1 && looksLikeDeferral/.test(agentSrc),
+    'ONE nudge, then the answer is accepted regardless — genuine uncertainty must be able to say so');
+  ok(/toolsRunThisTurn\+\+/.test(agentSrc), 'and "did this turn do anything" is counted, not guessed');
+
+  ok(/say exactly that and say what blocked you/.test(D.DEFERRAL_NUDGE),
+    'the nudge leaves a legal way out — a model with no way to say "I could not" will invent work instead');
+}
+
 rmSync(HOME, { recursive: true, force: true });
 console.log(fails ? `\nmodes check: ${fails} FAILURE(S)\n` : '\nmodes check: ok\n');
 process.exit(fails ? 1 : 0);

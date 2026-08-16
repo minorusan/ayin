@@ -28,6 +28,7 @@ import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLE
 import { theme } from './ui/theme.js';
 import { log } from './log.js';
 import { hasFinalMarker, stripFinalMarker } from './final-marker.js';
+import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
 import { checkPermission } from './permissions.js';
 import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
 import { recordPrompt, recordTool, recordAnswer } from './session-record.js';
@@ -891,6 +892,11 @@ async function runAgentTurn(userInput: string): Promise<void> {
   /** How many times a text-only turn may be refused because the entangled design is unsatisfied. */
   let adoptionNudges = 0;
   let continueNudges = 0;
+  let deferralNudges = 0;
+  // Did this turn actually DO anything? A turn that ran a tool has produced something the operator
+  // did not have; its closing "you should also check X" is a caveat, not a dodge.
+  let toolsRunThisTurn = 0;
+  const touchedAnythingThisTurn = (): boolean => toolsRunThisTurn > 0;
   /** How much the design had absorbed at the last nudge, so progress can clear the stall counter. */
   let lastImplemented = -1;
   roundLoop: for (let round = 0; round < maxRounds; round++) {
@@ -1010,6 +1016,18 @@ async function runAgentTurn(userInput: string): Promise<void> {
           + `IF YOU ARE NOT FINISHED: take the next concrete step now, rather than describing it.`);
         continue;
       }
+      // A final answer that only says WHAT TO LOOK FOR is not an answer. One nudge, then accepted
+      // regardless — an answer that is genuinely uncertain must be able to say so, and a guard that
+      // can loop is worse than the behaviour it corrects. See src/deferral.ts.
+      if (deferralNudges < 1 && looksLikeDeferral(parsed.text ?? response, touchedAnythingThisTurn())) {
+        deferralNudges++;
+        log('INFO', 'deferral_nudge', { round: String(round) });
+        pushToWindow('assistant', response);
+        pushMessage('assistant', response);
+        pushToWindow('user', DEFERRAL_NUDGE);
+        continue;
+      }
+
       const response_ = stripFinalMarker(response);
 
       // ENTANGLED: a text-only turn is not an ANSWER while the design still has unimplemented types.
@@ -1446,6 +1464,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
       addMessage('tool', formatToolResultForChat(name, result, Date.now() - toolStarted));
       // Artifact tracking for the QA gate. `bash`-driven changes are caught separately by the
       // gate's git snapshot — this covers the tools whose target is known from the call itself.
+      toolsRunThisTurn++;
       if ((name === 'write_file' || name === 'str_replace') && params.path) qaNoteTouched(params.path);
       if (name === 'write_file') {
         // Track CTA delivery — if the write target matches the CTA, mark as delivered
