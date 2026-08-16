@@ -19,7 +19,7 @@
  * nobody can open is a bundle nobody reads.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, platform, release, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { currentLogFile } from './log.js';
@@ -77,6 +77,8 @@ export interface BundleFacts {
 
 export interface BundleResult {
   dir: string;
+  /** The stable address — same bundle, no timestamp to know. */
+  latest: string;
   files: string[];
   bytes: number;
   omitted: string[];
@@ -148,10 +150,43 @@ export function writeDebugBundle(dir: string, facts: BundleFacts): BundleResult 
     omitted.length ? `Not written this time (nothing to write): ${omitted.join(', ')}.` : '',
   ].join('\n'));
 
+  // ── the STABLE copy ────────────────────────────────────────────────────────────
+  //
+  // A bundle in a timestamped directory is only reachable by someone who has been TOLD the stamp —
+  // which is the whole problem this was built to end. `latest/` is the same bundle at an address a
+  // reader can hold: it survives an update, a restart, and a session that has moved on, so "look at
+  // my debug output" is a complete instruction rather than the first half of one.
+  //
+  // Copied rather than symlinked: a reader's allow-list is a path test, and a link is exactly the
+  // sort of thing that resolves to somewhere the test rejects. This module has already made that
+  // mistake twice.
+  const latest = join(dir, 'latest');
+  try {
+    mkdirSync(latest, { recursive: true });
+    for (const f of files) copyFileSync(join(out, f), join(latest, f));
+  } catch { /* the timestamped copy is the one that matters */ }
+
+  pruneOldBundles(dir);
+
   const bytes = files.reduce((n, f) => {
     try { return n + statSync(join(out, f)).size; } catch { return n; }
   }, 0);
-  return { dir: out, files, bytes, omitted };
+  return { dir: out, latest, files, bytes, omitted };
+}
+
+/**
+ * Keep the newest few timestamped bundles; `latest/` is never pruned.
+ *
+ * Bounded because these accumulate in a shared temp directory, and unbounded growth in /tmp is
+ * somebody else's disk-full at three in the morning.
+ */
+function pruneOldBundles(dir: string, keep = 5): void {
+  try {
+    const mine = readdirSync(dir).filter((n) => n.startsWith('ayin-debug-')).sort().reverse();
+    for (const old of mine.slice(keep)) {
+      try { rmSync(join(dir, old), { recursive: true, force: true }); } catch { /* raced */ }
+    }
+  } catch { /* nothing to prune */ }
 }
 
 /**

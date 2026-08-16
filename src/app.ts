@@ -631,7 +631,8 @@ onInput(async (text: string) => {
             cwd: process.cwd(),
             sessionId: (await import('./session-store.js')).getSessionId(),
           });
-          addMessage('system', `debug bundle → ${r.dir}`);
+          addMessage('system', `debug bundle → ${r.latest}   (stable — same bundle, no timestamp to quote)`);
+          addMessage('system', `  history: ${r.dir}`);
           addMessage('system', `  ${r.files.join(', ')} · ${Math.round(r.bytes / 1024)} KB`
             + (r.omitted.length ? ` · nothing to write for: ${r.omitted.join(', ')}` : ''));
           addMessage('system', '  secrets are redacted by name — safe to hand to someone else');
@@ -1091,7 +1092,7 @@ async function main(): Promise<void> {
       version: getVersion(), provider: 'unresolved', model: 'unresolved', dialect: 'unresolved',
       contextTokens: contextTokens(), cwd: process.cwd(), sessionId: null,
     });
-    process.stdout.write(`${r.dir}\n${r.files.join(', ')} · ${Math.round(r.bytes / 1024)} KB\n`);
+    process.stdout.write(`${r.latest}\n${r.dir}\n${r.files.join(', ')} · ${Math.round(r.bytes / 1024)} KB\n`);
     return;
   }
   if (process.argv[2] === 'diff') {

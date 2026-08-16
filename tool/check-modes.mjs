@@ -16,7 +16,7 @@
  *      prints, and it is the kind of nonsense a model will happily reason about.
  */
 
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -233,9 +233,15 @@ ok(/URGENT: Round 13\/15/.test(capped), 'an explicitly capped run still warns as
     'environment variable NAMES are recorded, never their values — which of them is a key depends on the shell');
   ok(!JSON.stringify(manifest).includes('sk-secret'), 'and nothing key-shaped leaks through the manifest either');
 
+  ok(existsSync(join(r.latest, 'manifest.json')),
+    'the bundle is ALSO at a stable `latest/` — a path someone has to be TOLD is not reachable, which was the whole problem');
+  ok(readFileSync(join(r.latest, 'config.json'), 'utf-8') === readFileSync(join(r.dir, 'config.json'), 'utf-8'),
+    'and it is the same bundle, not a summary of it');
   ok(!/var\/folders/.test(DB.defaultBundleDir()),
     'the default bundle location is reachable by a helper — os.tmpdir() on macOS is a per-user /var/folders path a beacon cannot read',
     DB.defaultBundleDir());
+  ok(process.platform !== 'darwin' || DB.defaultBundleDir().startsWith('/private/tmp'),
+    'on macOS it is the CANONICAL path — an allow-list is a string prefix, so /tmp fails even though it resolves to the same place');
 
   rmSync(dest, { recursive: true, force: true });
 }
