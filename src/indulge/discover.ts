@@ -144,6 +144,38 @@ export interface DiscoverReport {
 /** Repo-relative, POSIX separators — the form every record and citation uses. */
 const rel = (repoPath: string, abs: string): string => relative(repoPath, abs).split(sep).join('/');
 
+/** Below this, explore is treated as having failed to find the domain and paths are matched directly. */
+const MIN_SEEDS = 6;
+
+/**
+ * Files whose PATH contains the domain's words RUN TOGETHER — `solitaire streak` → `solitairestreak`,
+ * matching `Codebase/GameModes/SolitaireStreak/…`.
+ *
+ * Deterministic and unhallucinable: the file is on disk or it is not. It exists because explore is
+ * wrong often — on a real run it named 22 candidates for one domain of which 14 did not exist,
+ * leaving two seeds.
+ *
+ * CONCATENATION ONLY, and that narrowness is the point. The first version required each word
+ * separately with common ones ("service", "manager") dropped as noise, and matched **67 files** for
+ * "reward service" — `RewardAdsState.cs`, `CheckAlbumClaimableRewardsOperation.cs` — because it had
+ * quietly reduced to "anything with reward in the path". Sixty-seven loose seeds are worse than two
+ * good ones: every seed is a night of questions about it.
+ *
+ * So this adds files only when the operator named a domain the way the tree is actually laid out, and
+ * silently adds nothing otherwise. A domain named after a Jira ticket rather than a folder gets no
+ * help from here, which is honest — nothing in the code is called that.
+ */
+function seedsByPathWords(repoPath: string, domain: string, limit: number): string[] {
+  const joined = domain.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (joined.length < 6) return [];
+  const out: string[] = [];
+  for (const rel of walkSources(repoPath, 20000).files) {
+    if (rel.toLowerCase().replace(/[^a-z0-9]/g, '').includes(joined)) out.push(rel);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 /**
  * Resolve a model-named path against the repo, or return null.
  *
@@ -445,6 +477,27 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
     onStatus?.(`${report.skippedNonSource.length} named path(s) are not source and were skipped`
       + ` (${report.skippedNonSource.slice(0, 3).join(', ')}${report.skippedNonSource.length > 3 ? ', …' : ''})`);
   }
+
+  // ── deterministic top-up: the domain's own words, matched against PATHS ─────────
+  //
+  // Explore names paths from what it read, and it is wrong a lot: on a real run it named 22
+  // candidates for "reward service" of which 14 did not exist, leaving TWO seeds — and named nothing
+  // at all for "mission widgets" in a repo containing `GameModes/Widgets/ProgressWidgetController.cs`.
+  //
+  // A path match cannot hallucinate: the file is on disk or it is not. It is a weaker signal than
+  // reading the code, which is why it runs SECOND and only tops up — but a domain the operator named
+  // after a folder should never come back empty because a model failed to connect the words to it.
+  if (!opts.seedsOverride && seeds.length < MIN_SEEDS) {
+    const before = seeds.length;
+    for (const p of seedsByPathWords(repoPath, domain, MIN_SEEDS * 3)) {
+      if (seeds.length >= MIN_SEEDS * 3) break;
+      if (!seeds.includes(p)) seeds.push(p);
+    }
+    if (seeds.length > before) {
+      onStatus?.(`${seeds.length - before} more seed(s) from path names — explore verified only ${before}`);
+    }
+  }
+
   report.seeds = seeds.length;
 
   // The whole point of the module: nothing matched, so nothing is written and the run says so.

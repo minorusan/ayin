@@ -27,7 +27,7 @@ import { writeReport } from './report.js';
 import { recordAnswer, recordPrompt, recordTool } from '../session-record.js';
 import { initSession } from '../session-store.js';
 import { assessChunk } from './staleness.js';
-import { openStore, StoreLockedError, type Category, type Manifest, type Stage } from './store.js';
+import { CATEGORIES, openStore, StoreLockedError, type Category, type Manifest, type Stage } from './store.js';
 
 const out = (line = ''): void => { process.stdout.write(`${line}\n`); };
 
@@ -87,8 +87,19 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--depth': args.maxDepth = num(value(), 'depth'); break;
       case '--max-files': args.maxFiles = num(value(), 'max-files'); break;
       case '--max-questions': args.maxQuestions = num(value(), 'max-questions'); break;
-      case '--categories':
-        args.categories = value().split(',').map((c) => c.trim()).filter(Boolean) as Category[]; break;
+      case '--categories': {
+        // VALIDATED HERE, against the real list. An unknown name used to parse fine and then throw
+        // deep in generation — `prompt "indulge/categoryStates" not found` — AFTER discovery had
+        // already spent minutes and model calls. A typo in an argument must cost the argument, not
+        // the run.
+        const want = value().split(',').map((c) => c.trim()).filter(Boolean);
+        const bad = want.filter((c) => !(CATEGORIES as string[]).includes(c));
+        if (bad.length) {
+          errors.push(`unknown categor${bad.length > 1 ? 'ies' : 'y'}: ${bad.join(', ')} — valid: ${CATEGORIES.join(', ')}`);
+        }
+        args.categories = want as Category[];
+        break;
+      }
       default: errors.push(`unknown flag: ${flag}`);
     }
   }

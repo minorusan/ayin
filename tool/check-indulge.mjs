@@ -1435,6 +1435,47 @@ rmSync(TMP, { recursive: true, force: true });
   rmSync(dir, { recursive: true, force: true });
 }
 
+// ── seeds: a deterministic top-up when explore comes back thin ──────────────────
+//
+// On a real run explore named 22 candidate paths for one domain of which 14 DID NOT EXIST, leaving
+// two seeds. A path match cannot hallucinate — the file is on disk or it is not.
+//
+// The first version required each word separately with common ones dropped as noise, and matched 67
+// files for "reward service" because it had quietly reduced to "anything with reward in the path".
+// Sixty-seven loose seeds are worse than two good ones: every seed is a night of questions about it.
+{
+  const ix = readFileSync(join(ROOT, 'src/indulge/discover.ts'), 'utf-8');
+  ok(/const joined = domain\.toLowerCase\(\)\.replace/.test(ix),
+    'the top-up matches the domain words RUN TOGETHER, not each word separately');
+  ok(!/STOP\s*=/.test(ix),
+    'and drops no words as noise — dropping "service" is what turned it into "anything with reward in it"');
+  ok(/if \(joined\.length < 6\) return \[\];/.test(ix),
+    'a very short domain matches nothing rather than half the tree');
+  ok(/seeds\.length < MIN_SEEDS/.test(ix),
+    'it runs only when explore came back THIN — reading the code is the stronger signal and goes first');
+
+  // The real shape, on real paths.
+  const match = (domain, paths) => {
+    const j = domain.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (j.length < 6) return [];
+    return paths.filter((p) => p.toLowerCase().replace(/[^a-z0-9]/g, '').includes(j));
+  };
+  const tree = [
+    'Assets/Games/Shared/Codebase/GameModes/SolitaireStreak/SolitaireStreakBrain.cs',
+    'Assets/Games/Shared/Codebase/GameModes/Rewards/RewardService.cs',
+    'Assets/Games/Shared/Codebase/GameModes/Rewards/IRewardService.cs',
+    'Assets/Scripts/Managers/AppsflyerRewardService.cs',
+    'Assets/Games/SolitaireGame/Scripts/Model/Enum/RewardAdsState.cs',
+    'Assets/Games/SolitaireGame/Scripts/GameModes/Widgets/ProgressWidgetController.cs',
+  ];
+  ok(match('solitaire streak', tree).length === 1, 'solitaire streak reaches SolitaireStreak/');
+  ok(match('reward service', tree).length === 3,
+    'reward service reaches the three RewardService files and NOT RewardAdsState',
+    String(match('reward service', tree).length));
+  ok(match('mission widgets', tree).length === 0,
+    'a domain named after a ticket rather than a folder gets no help — honest, because nothing is called that');
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 
