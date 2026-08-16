@@ -22,6 +22,30 @@ export const screen: blessed.Widgets.Screen = HEADLESS
   ? noopScreen
   : blessed.screen({ smartCSR: true, title: 'ayin', fullUnicode: true });
 
+/**
+ * BRACKETED PASTE. Tells the terminal that this program handles a paste itself.
+ *
+ * Two things follow. The terminal stops warning ("are you sure you want to paste 3 lines?") — that
+ * warning exists precisely because a program that has NOT said this will treat the newlines as
+ * Enter, which is exactly what ayin used to do. And the paste arrives wrapped in markers, so it is
+ * distinguishable from typing.
+ *
+ * Enabled unconditionally rather than behind a setting: a program that cannot take a multi-line
+ * paste is not a program anyone wants to configure, and the markers are stripped defensively at the
+ * input either way, so the worst case of a terminal that ignores this is no change at all.
+ */
+if (!HEADLESS) {
+  try {
+    process.stdout.write('\x1b[?2004h');
+    const off = (): void => { try { process.stdout.write('\x1b[?2004l'); } catch { /* terminal gone */ } };
+    // On every way out, including the ones nobody plans for: leaving the mode set would have the
+    // NEXT program in that terminal receive paste markers it does not understand.
+    process.on('exit', off);
+    process.on('SIGINT', off);
+    process.on('SIGTERM', off);
+  } catch { /* a terminal that refuses the sequence is not worth an exception */ }
+}
+
 export function render(): void {
   screen.render();
 }

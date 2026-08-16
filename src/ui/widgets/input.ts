@@ -21,6 +21,8 @@ export class InputBar {
 
   private buffer = '';
   private cursor = 0;
+  /** When the last keystroke arrived — how a pasted newline is told from a typed one. */
+  private lastKeyAt = 0;
   private active = false;
   private onSubmit: (text: string) => void = () => {};
   private onChange: (text: string) => void = () => {};
@@ -122,7 +124,21 @@ export class InputBar {
    *  Returns true when the key was consumed. */
   handleKey(ch: string | undefined, key: blessed.Widgets.Events.IKeyEventArg): boolean {
     switch (key.full) {
+      // A newline that ARRIVED AS PART OF A PASTE is text, not a submit.
+      //
+      // Multi-line paste was unusable: the terminal delivers it as ordinary keystrokes, so the first
+      // newline submitted the first line and the rest of the paste typed itself into whatever came
+      // next. Pasted characters arrive back-to-back — a human cannot produce two keystrokes 12ms
+      // apart — so a `return` that close behind another key is part of a burst and is inserted.
+      //
+      // Deliberate newlines have their own keys below (Alt+Enter, Ctrl+J), because a heuristic must
+      // never be the ONLY way to do something.
       case 'return': case 'enter': {
+        if (Date.now() - this.lastKeyAt < PASTE_BURST_MS) {
+          this.insert('\n');
+          this.lastKeyAt = Date.now();
+          return true;
+        }
         const text = this.buffer.trim();
         if (text) {
           this.buffer = '';
@@ -176,6 +192,10 @@ export class InputBar {
         }
         return true;
       }
+      // A newline on purpose, for anyone who wants one without pasting.
+      case 'M-return': case 'M-enter': case 'C-j':
+        this.insert('\n');
+        return true;
       case 'left':  if (this.cursor > 0) { this.cursor--; this.redraw(); } return true;
       case 'right': if (this.cursor < this.buffer.length) { this.cursor++; this.redraw(); } return true;
       case 'home': case 'C-a': this.cursor = 0; this.redraw(); return true;
@@ -189,19 +209,34 @@ export class InputBar {
     }
 
     if (ch && !key.ctrl && !key.meta) {
-      this.buffer = this.buffer.slice(0, this.cursor) + ch + this.buffer.slice(this.cursor);
-      this.cursor++;
-      this.redraw();
-      this.onChange(this.buffer);
+      this.insert(ch);
+      this.lastKeyAt = Date.now();
       return true;
     }
     return false;
   }
 
+  private insert(raw: string): void {
+    // Bracketed-paste markers, stripped defensively. blessed does not know the sequence, so
+    // depending on the terminal it may surface as ordinary characters — and `[200~` typed into the
+    // middle of a prompt is a worse bug than the one this fixes. A no-op when the terminal handles
+    // them properly.
+    const text = raw.replace(/\x1b?\[20[01]~/g, '');
+    if (!text) return;
+    this.buffer = this.buffer.slice(0, this.cursor) + text + this.buffer.slice(this.cursor);
+    this.cursor += text.length;
+    this.redraw();
+    this.onChange(this.buffer);
+  }
+
   redraw(): void {
     if (HEADLESS) return;
     const width = this.textWidth();
-    const wrapped = wrapLines(this.buffer, width);
+    // A large buffer is SUMMARISED rather than shown. Forty pasted lines pushed the chat off the
+    // screen to display text the operator already has in their clipboard — and the input box grew
+    // until there was nowhere left to read the answer it was about to ask for. The full text is
+    // still what gets submitted; only the drawing is compacted.
+    const wrapped = wrapLines(compactForDisplay(this.buffer, this.cursor), width);
     const { row: cursorRow, col: cursorCol } = cursorRenderPosition(this.buffer, this.cursor, width);
     const lineCount = Math.max(wrapped.length, cursorRow + 1);
     const wantedHeight = Math.min(MAX_HEIGHT, lineCount + 2); // +2 borders
@@ -228,6 +263,38 @@ export class InputBar {
   private textWidth(): number {
     return Math.max(1, Number(screen.width ?? 80) - 4); // -2 border -1 prompt -1 padding
   }
+}
+
+/** Two keystrokes this close together did not come from a human. */
+const PASTE_BURST_MS = 12;
+/** Past this many lines, the input draws a summary instead of the text. */
+const COMPACT_LINES = 8;
+/** …or past this many characters, whichever comes first. */
+const COMPACT_CHARS = 800;
+
+/**
+ * What the input BOX shows for a large buffer. The buffer itself is untouched.
+ *
+ * Keeps the head and the tail — the head is what was pasted, the tail is where the cursor usually
+ * is and what the operator is about to type next. Hiding the middle costs nothing: it is text they
+ * still have in their clipboard.
+ */
+export function compactForDisplay(text: string, cursor: number): string {
+  const lines = text.split('\n');
+  if (lines.length <= COMPACT_LINES && text.length <= COMPACT_CHARS) return text;
+
+  // While the cursor is in the tail — the normal case, typing after a paste — show the tail whole so
+  // editing stays WYSIWYG. A compaction that hides what you are typing is worse than no compaction.
+  const head = lines.slice(0, 2);
+  const tail = lines.slice(-3);
+  const hidden = lines.length - head.length - tail.length;
+  if (hidden <= 0) return text;
+  const bytes = text.length;
+  return [
+    ...head,
+    `… [+${hidden} line${hidden === 1 ? '' : 's'}, ${bytes} chars — pasted, sent in full]`,
+    ...tail,
+  ].join('\n');
 }
 
 function wrapLines(text: string, width: number): string[] {

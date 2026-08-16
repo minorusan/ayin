@@ -236,6 +236,27 @@ ok(/URGENT: Round 13\/15/.test(capped), 'an explicitly capped run still warns as
   rmSync(dest, { recursive: true, force: true });
 }
 
+// ── pasting: a newline in a burst is TEXT, and a big paste is summarised ────────
+//
+// Multi-line paste was unusable: the terminal delivers it as ordinary keystrokes, so the first
+// newline submitted the first line and the rest typed itself into whatever came next. And the
+// terminal's own "are you sure you want to paste 3 lines?" warning exists precisely because a
+// program that has not enabled bracketed paste will do that.
+{
+  const inputSrc = readFileSync(join(ROOT, 'src/ui/widgets/input.ts'), 'utf-8');
+  ok(/Date\.now\(\) - this\.lastKeyAt < PASTE_BURST_MS/.test(inputSrc),
+    'a return arriving in a keystroke BURST inserts a newline instead of submitting');
+  ok(/case 'M-return': case 'M-enter': case 'C-j':/.test(inputSrc),
+    'and a deliberate newline has its own keys — a heuristic must never be the only way to do something');
+  ok(/replace\(\/\\x1b\?\\\[20\[01\]~\/g, ''\)/.test(inputSrc),
+    'bracketed-paste markers are stripped defensively — `[200~` typed into a prompt is worse than the bug it fixes');
+
+  const screenSrc = readFileSync(join(ROOT, 'src/ui/screen.ts'), 'utf-8');
+  ok(/\\x1b\[\?2004h/.test(screenSrc), 'bracketed paste is enabled, which is what stops the terminal warning');
+  ok(/\\x1b\[\?2004l/.test(screenSrc) && /process\.on\('exit', off\)/.test(screenSrc),
+    'and disabled on every way out — leaving it set hands paste markers to the NEXT program in that terminal');
+}
+
 rmSync(HOME, { recursive: true, force: true });
 console.log(fails ? `\nmodes check: ${fails} FAILURE(S)\n` : '\nmodes check: ok\n');
 process.exit(fails ? 1 : 0);
