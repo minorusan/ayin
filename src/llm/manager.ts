@@ -281,7 +281,36 @@ export async function llmChat(messages: LlmMessage[], opts: LlmChatOptions = {})
   const promptChars = messages.reduce((n, m) => n + m.content.length, 0);
   const started = Date.now();
   try {
-    const reply = await narrateWait('thinking', async () => (await provider.generate(messages, tools ? { tools } : undefined)).content);
+    let reply = await narrateWait('thinking', async () => (await provider.generate(messages, tools ? { tools } : undefined)).content);
+
+    // A TOOL-TRAINED MODEL ANSWERS WITH A TOOL CALL EVEN WHEN IT HAS NONE.
+    //
+    // `declareTools: false` stops ayin from HANDING it tools; it cannot stop the model from reaching
+    // for one. qwen3-coder emits `<function=grep><parameter=…>` for "find the files that…" because
+    // that is what it was trained to do, and the sub-loop that asked — explore, indulge, the QA
+    // audit — wanted JSON and gets something that parses to nothing. The iteration is then thrown
+    // away, which on a metered model is an iteration the operator paid for.
+    //
+    // Handled HERE rather than in each caller: the dialect layer is what knows how a model formats a
+    // tool call, and one fix serves explore, indulge, plan, QA and every connector. A patch in
+    // explore would have left the others to meet this separately and solve it separately — which is
+    // exactly what happened before, and had to be reverted.
+    //
+    // ONE retry, then whatever comes back is returned. A guard that can loop is worse than the
+    // behaviour it corrects, and a model that insists twice is telling you something the loop should
+    // surface rather than hide.
+    if (!declared && activeDialect().parse(reply).toolCalls.length > 0) {
+      log('INFO', 'tool_call_without_tools', { model: cachedModelId, dialect: activeDialect().id });
+      const retry = await narrateWait('thinking', async () => (await provider.generate([
+        ...messages,
+        { role: 'assistant', content: reply },
+        { role: 'user', content:
+          'This request declared no tools and there is nothing to call — a tool call cannot be run '
+          + 'and is discarded. Answer directly, in exactly the format the instructions asked for. '
+          + 'If you need something you would have used a tool for, say what and why instead.' },
+      ], undefined)).content);
+      if (retry.trim()) reply = retry;
+    }
     emitLlmCall({
       model: cachedModelId, promptChars, replyChars: reply.length,
       ms: Date.now() - started, toolMode: declared ? 'native' : 'prompt',

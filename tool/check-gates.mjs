@@ -2140,5 +2140,33 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
     'the agent loop still declares tools — it is the one caller that is actually calling them');
 }
 
+// ── a tool-trained model answers with a tool call even when it has none ────────
+//
+// `declareTools: false` stops ayin HANDING a model tools; it cannot stop the model reaching for one.
+// qwen3-coder emits `<function=grep><parameter=…>` for "find the files that…" because that is what
+// it was trained to do — and the sub-loop that asked wanted JSON, so the reply parses to nothing and
+// the iteration is discarded. On a metered model that is an iteration the operator paid for.
+{
+  const mgrSrc = readFileSync(join(REPO, 'src/llm/manager.ts'), 'utf-8');
+  ok(/if \(!declared && activeDialect\(\)\.parse\(reply\)\.toolCalls\.length > 0\)/.test(mgrSrc),
+    'a reply that IS a tool call, when none were declared, is detected through the dialect');
+  ok(/declared no tools and there is nothing to call/.test(mgrSrc),
+    'and the retry tells the model why, rather than repeating the original instruction louder');
+  ok(/say what and why instead/.test(mgrSrc),
+    'with a legal way out — a model that needed the tool must be able to SAY so rather than invent an answer');
+
+  // Bounded, and only for callers that said they have no tools.
+  // Bounded slice from the guard itself — anchoring the end on a symbol name finds the IMPORT.
+  const guardAt = mgrSrc.indexOf('if (!declared && activeDialect()');
+  const guard = mgrSrc.slice(guardAt, guardAt + 1400);
+  ok(!/while|for \(/.test(guard), 'ONE retry — a guard that can loop is worse than the behaviour it corrects');
+  ok(/if \(retry\.trim\(\)\) reply = retry;/.test(guard),
+    'and an EMPTY retry keeps the original — replacing a bad reply with nothing is not an improvement');
+
+  // The agent loop must be untouched: there, a tool call is the point.
+  ok(/const declared = \(provider\.tools \?\? 'prompt'\) === 'native' && opts\.declareTools !== false;/.test(mgrSrc),
+    'the guard is gated on `declared`, so the agent loop — which is genuinely calling tools — never sees it');
+}
+
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);
