@@ -126,6 +126,29 @@ ok(/URGENT: Round 13\/15/.test(capped), 'an explicitly capped run still warns as
   ok(snap('made-up-key') === 'madeUpKey', 'an unknown key still stores, and still warns');
 }
 
+// ── choosing OpenAI must OUTLIVE the process that chose it ──────────────────────
+//
+// `setProviderOverride('openai')` is a module variable, so `/model openai` used to last exactly as
+// long as that TUI — and `ayin indulge`, `ayin explain`, `ayin watch` and the next TUI are all
+// different processes. The operator picked a provider and then had to keep saying so on every
+// command line, which is not a choice, it is a reminder.
+{
+  const mp = readFileSync(join(ROOT, 'src/model-picker.ts'), 'utf-8');
+  ok(/setConfigValue\('llmProvider', 'openai'\)/.test(mp),
+    'choosing OpenAI persists llmProvider, so a later process honours it without being told again');
+  ok(/setConfigValue\('llmProvider', ''\)/.test(mp),
+    'and going back to local persists too — a choice only one direction remembers is worse than neither');
+
+  // select.ts must actually read it, and an empty value must fall through rather than pin a provider.
+  const sel = readFileSync(join(ROOT, 'src/llm/select.ts'), 'utf-8');
+  ok(/getConfigString\('llmProvider'\)/.test(sel), 'and resolution reads that config key');
+
+  // budget.ts scales the context window off the same fact — it must read config, not only env.
+  const bud = readFileSync(join(ROOT, 'src/indulge/budget.ts'), 'utf-8');
+  ok(/getConfigString\('llmProvider'\)/.test(bud),
+    'the indulge context budget reads the persisted provider too, so a saved choice widens the window');
+}
+
 rmSync(HOME, { recursive: true, force: true });
 console.log(fails ? `\nmodes check: ${fails} FAILURE(S)\n` : '\nmodes check: ok\n');
 process.exit(fails ? 1 : 0);

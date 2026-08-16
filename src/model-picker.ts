@@ -33,6 +33,7 @@
 
 import { addMessage, setAgentStatus } from './ui.js';
 import { showDialog, type DialogOption } from './dialog.js';
+import { setConfigValue } from './prompts.js';
 import { acquireLlm, type LlmHold } from './llm/authority.js';
 import { llmProvider, llmProviderName, setProviderOverride, providerOverrideName, resetProviderResolution } from './llm/select.js';
 import { openAiKey, openAiModel } from './llm/providers/openai.js';
@@ -387,8 +388,13 @@ async function handleProviderChoice(want: string): Promise<boolean> {
       addMessage('system', 'OpenAI is unreachable or rejected the key — staying on the local provider. Re-check with /openai.');
       return true;
     }
+    // PERSIST it. The override is a module variable, so choosing OpenAI here used to last exactly
+    // as long as this process — and `ayin indulge`, `ayin explain`, `ayin watch` and the next TUI
+    // are all different processes. The operator picks a provider once; every later invocation has to
+    // honour that without being told again on the command line.
+    setConfigValue('llmProvider', 'openai');
     await refreshActiveModel();
-    addMessage('system', `Now on OpenAI (${status.model || openAiModel()}) — billed per token. /model local to go back.`);
+    addMessage('system', `Now on OpenAI (${status.model || openAiModel()}) — billed per token, for this and every later run. /model local to go back.`);
     return true;
   }
 
@@ -412,6 +418,9 @@ async function handleProviderChoice(want: string): Promise<boolean> {
       return true;
     }
     setProviderOverride(null);
+    // Persisted too, symmetrically: a choice that only one direction remembers is worse than one
+    // neither remembers, because "go back to local" would silently last one process.
+    setConfigValue('llmProvider', '');
     resetProviderResolution(); // config may have changed; re-decide instead of reusing the boot answer
     const after = (await llmProvider()).name;
     await refreshActiveModel();
