@@ -192,6 +192,50 @@ ok(/URGENT: Round 13\/15/.test(capped), 'an explicitly capped run still warns as
   writeConfig({});
 }
 
+// ── /debug: a bundle someone else can read, with nothing in it they should not ──
+//
+// Diagnosing a run has meant pasting fragments of terminal into a chat and guessing from them —
+// which over one day produced three wrong diagnoses before the real cause turned up in a number
+// nobody had pasted. The evidence exists; it is scattered across files with unguessable names in a
+// home directory nothing else can reach.
+{
+  const DB = await import(join(ROOT, 'dist/debug-bundle.js'));
+  const dest = mkdtempSync(join(tmpdir(), 'ayin-dbg-'));
+  mkdirSync(join(HOME, '.ayin-cli'), { recursive: true });
+  writeFileSync(join(HOME, '.ayin-cli', 'prompts.json'), JSON.stringify({ config: {
+    openAiKey: 'sk-secretsecretsecret', jiraToken: 'jira-abc', sentryToken: 'sent-xyz',
+    llmProvider: 'ollama', embedModel: 'nomic-embed-text', maxToolRounds: 10,
+  } }));
+
+  const r = DB.writeDebugBundle(dest, {
+    version: '1.0.0', provider: 'ollama', model: 'qwen3.6:27b', dialect: 'qwen',
+    contextTokens: 16384, cwd: '/repo', sessionId: 'abc',
+  });
+  ok(r.files.includes('manifest.json') && r.files.includes('timings.json') && r.files.includes('README.md'),
+    'the bundle carries the facts, the timings and a README saying what each file is', r.files.join(','));
+
+  const cfg = readFileSync(join(r.dir, 'config.json'), 'utf-8');
+  for (const secret of ['sk-secretsecretsecret', 'jira-abc', 'sent-xyz']) {
+    ok(!cfg.includes(secret),
+      `${secret.slice(0, 8)}… never reaches the bundle — it is written to be read by SOMETHING ELSE`);
+  }
+  ok(/redacted — 21 chars/.test(cfg),
+    'a redacted value keeps its LENGTH, which is what tells you whether the key you think is set is set');
+  ok(cfg.includes('nomic-embed-text') && cfg.includes('ollama'),
+    'and everything that is not a secret survives — a bundle that redacts the settings is useless');
+
+  const readme = readFileSync(join(r.dir, 'README.md'), 'utf-8');
+  ok(/Secrets/.test(readme) && /NOT here/.test(readme),
+    'the README states what was withheld — a reader must not have to guess whether something is missing or absent');
+
+  const manifest = JSON.parse(readFileSync(join(r.dir, 'manifest.json'), 'utf-8'));
+  ok(Array.isArray(manifest.ayinEnvNames),
+    'environment variable NAMES are recorded, never their values — which of them is a key depends on the shell');
+  ok(!JSON.stringify(manifest).includes('sk-secret'), 'and nothing key-shaped leaks through the manifest either');
+
+  rmSync(dest, { recursive: true, force: true });
+}
+
 rmSync(HOME, { recursive: true, force: true });
 console.log(fails ? `\nmodes check: ${fails} FAILURE(S)\n` : '\nmodes check: ok\n');
 process.exit(fails ? 1 : 0);

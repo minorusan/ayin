@@ -43,6 +43,11 @@ mkdirSync(LOG_DIR, { recursive: true });
 
 const ts = new Date().toISOString().replace(/[:.]/g, '-');
 const LOG_FILE = join(LOG_DIR, `session-${ts}.log`);
+
+/** Where this process is logging — so a debug bundle can copy it without guessing the name. */
+export function currentLogFile(): string {
+  return LOG_FILE;
+}
 const startTime = Date.now();
 
 export type LogLevel = 'INFO' | 'WARN' | 'ERROR' | 'DEBUG';

@@ -28,6 +28,19 @@ const DEFAULT_LONG_MS = 120_000;
 
 let turn: PhaseTiming[] = [];
 
+/**
+ * Every long operation this PROCESS has seen, not just this turn.
+ *
+ * A debug bundle is usually collected after the fact — "it was slow twenty minutes ago" — and the
+ * turn tally is gone by then. Bounded so a long session cannot grow it without limit.
+ */
+const LONG_HISTORY_MAX = 200;
+const longHistory: Array<PhaseTiming & { at: string }> = [];
+
+export function longOperations(): ReadonlyArray<PhaseTiming & { at: string }> {
+  return longHistory;
+}
+
 export function longOperationMs(): number {
   return getConfig('longOperationMs', DEFAULT_LONG_MS);
 }
@@ -69,6 +82,8 @@ export async function timed<T>(
     if (ms >= longOperationMs()) {
       const line = `[LONG OPERATION] ${phase} — ${human(ms)}${detail ? ` · ${detail}` : ''}${failed ? ' · FAILED' : ''}`;
       log('WARN', 'long_operation', { phase, ms: String(ms), detail, failed: String(failed) });
+      longHistory.push({ phase, ms, detail: detail + (failed ? ' · FAILED' : ''), at: new Date().toISOString() });
+      if (longHistory.length > LONG_HISTORY_MAX) longHistory.shift();
       onLong?.(line);
     }
   }

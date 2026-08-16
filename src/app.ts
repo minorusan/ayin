@@ -593,6 +593,33 @@ onInput(async (text: string) => {
           : 'Log coverage OFF — normal logging.');
         return;
       }
+      case '/debug': {
+        // Everything needed to diagnose a session, in one directory something else can read. See
+        // src/debug-bundle.ts for what is deliberately left out, and why.
+        const dest = text.slice('/debug'.length).trim();
+        try {
+          const { writeDebugBundle, defaultBundleDir } = await import('./debug-bundle.js');
+          const { contextTokens } = await import('./indulge/budget.js');
+          const { llmProviderName } = await import('./llm/select.js');
+          const { activeAdapter } = await import('./llm/manager.js');
+          const r = writeDebugBundle(dest || defaultBundleDir(), {
+            version: getVersion(),
+            provider: llmProviderName(),
+            model: activeModelId() || 'unknown',
+            dialect: activeAdapter().id,
+            contextTokens: contextTokens(),
+            cwd: process.cwd(),
+            sessionId: (await import('./session-store.js')).getSessionId(),
+          });
+          addMessage('system', `debug bundle → ${r.dir}`);
+          addMessage('system', `  ${r.files.join(', ')} · ${Math.round(r.bytes / 1024)} KB`
+            + (r.omitted.length ? ` · nothing to write for: ${r.omitted.join(', ')}` : ''));
+          addMessage('system', '  secrets are redacted by name — safe to hand to someone else');
+        } catch (err) {
+          addMessage('system', `/debug failed — ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
       case '/diff': {
         // Working tree → a reviewable HTML page. An argument is any rev, so `/diff main` reviews a
         // branch with the same page. See src/diff/.
@@ -1033,6 +1060,18 @@ async function main(): Promise<void> {
   if (process.argv[2] === 'testrun') {
     const { runTestrunCli } = await import('./testrun/index.js');
     process.exitCode = await runTestrunCli(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === 'debug') {
+    // Same bundle, from a shell. A run that hung is often one nobody was sitting in front of.
+    const { writeDebugBundle, defaultBundleDir } = await import('./debug-bundle.js');
+    const { contextTokens } = await import('./indulge/budget.js');
+    const dest = process.argv[3] && !process.argv[3].startsWith('-') ? process.argv[3] : defaultBundleDir();
+    const r = writeDebugBundle(dest, {
+      version: getVersion(), provider: 'unresolved', model: 'unresolved', dialect: 'unresolved',
+      contextTokens: contextTokens(), cwd: process.cwd(), sessionId: null,
+    });
+    process.stdout.write(`${r.dir}\n${r.files.join(', ')} · ${Math.round(r.bytes / 1024)} KB\n`);
     return;
   }
   if (process.argv[2] === 'diff') {

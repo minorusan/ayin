@@ -125,6 +125,11 @@ export const HELP: HelpEntry[] = [
     short: "This directory's past sessions, newest first · /resume <n>|<id> restores one · /resume all for every directory",
     tip: '/resume brings back a past session in this directory — new turns append to its record.',
   },
+  {
+    name: '/debug', kind: 'command', section: 'Session',
+    short: '/debug [dir] — dump session, log, timings and REDACTED config somewhere another machine can read',
+    tip: '/debug <dir> writes everything needed to diagnose a session, with secrets stripped — hand it to someone.',
+  },
   { name: '/summary', kind: 'command', section: 'Session', short: 'Session summary (Esc closes) — same as Ctrl+S' },
   { name: '/clear', kind: 'command', section: 'Session', short: 'Clear the chat view (the session itself is untouched)' },
   { name: '/reset', kind: 'command', section: 'Session', short: 'Start over — new session, empty context' },
@@ -174,6 +179,7 @@ export const HELP: HelpEntry[] = [
   { name: 'ayin explain', kind: 'cli', section: 'From your shell', short: 'ayin explain "<question>" — prints the narrative and exits' },
   { name: 'ayin watch', kind: 'cli', section: 'From your shell', short: 'Repo watcher daemon — reviews what lands, resumes itself after a reboot' },
   { name: 'ayin -p', kind: 'cli', section: 'From your shell', short: 'Headless: ayin -p "<task>". Auto-approves writes and shell — run it on a tree you can revert' },
+  { name: 'ayin debug', kind: 'cli', section: 'From your shell', short: 'ayin debug [dir] — the same bundle without the TUI, for a run nobody was sitting in front of' },
   { name: 'ayin update', kind: 'cli', section: 'From your shell', short: 'Self-update from the configured registry' },
 ];
 

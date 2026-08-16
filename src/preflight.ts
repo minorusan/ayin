@@ -42,6 +42,8 @@ const NO_MODEL_NEEDED = new Set([
   'launch',
   // `diff` renders a page from git and opens it — git is the only dependency it has.
   'diff',
+  // `debug` copies files that already exist — it must work when nothing else does.
+  'debug',
   // `testrun` drives NUnit/Unity; the model is only consulted through the corpus, which is on disk.
   'testrun',
 ]);

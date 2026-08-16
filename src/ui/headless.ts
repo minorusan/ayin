@@ -14,6 +14,7 @@ const NO_TUI_COMMANDS = new Set([
   'indulge',    // overnight corpus build — runs for hours under nohup; must never open a TUI
   'launch',     // opens a terminal window elsewhere and exits; taking this tty would be the wrong one
   'diff',       // renders an HTML page and opens it; prints a path and exits
+  'debug',      // writes a bundle and prints its path
   'testrun',    // runs C# tests and prints a report
 ]);
 
