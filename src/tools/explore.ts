@@ -368,15 +368,72 @@ function parseResponse(raw: string): ExploreIteration {
   }
 }
 
+/**
+ * Read-only commands an investigation may run. DELIBERATELY SHORT.
+ *
+ * Everything tempting to add here can write or spawn: `awk` has `system()`, `sed` has `w`, `sort` has
+ * `-o`, `uniq` takes an output file as its second operand. A tool earns a place on this list by being
+ * unable to change anything, not by being useful.
+ */
 const ALLOWED_PREFIXES = [
   'ls', 'cat', 'head', 'tail', 'grep', 'find',
   'git show', 'git log', 'git blame', 'git branch', 'git grep',
-  'wc', 'echo',
+  'wc', 'echo', 'cut', 'tr',
 ];
 
-function isAllowed(cmd: string): boolean {
+/**
+ * Flags that turn a listed READ command into a write or an exec.
+ *
+ * `find` is the one that matters: `find . -delete` and `find . -exec rm {} +` both pass any prefix
+ * check and both destroy files. Found by writing the test, not by reading the code.
+ */
+const DANGEROUS_FLAGS = /(^|\s)-(delete|exec|execdir|ok|okdir|fls|fprint|fprintf|fprint0)(\s|$)/;
+
+/**
+ * Shell syntax that turns one command into two, or into a write.
+ *
+ * `$(…)` and backticks run a nested command; `>`/`>>` create or truncate a file; `<(…)` is process
+ * substitution; `&` backgrounds. None of these belong in a read-only investigation, and every one of
+ * them defeats a prefix check.
+ */
+const SHELL_ESCAPES = /\$\(|`|>|<\(|&(?!&)/;
+
+/** The separators a legitimate pipeline uses. Each SEGMENT is then validated on its own. */
+const PIPELINE_SPLIT = /\|\||&&|;|\|/;
+
+/**
+ * May this model-authored command run?
+ *
+ * THIS USED TO BE `trimmed.startsWith(prefix)` — a prefix test on a string that is then handed to
+ * `sh -lc`, which is not a check at all. Verified: `grep foo . ; echo INJECTED` passed, and the
+ * second command ran. `cat /etc/hostname | tee /tmp/x` passed. The list read like a sandbox and
+ * enforced nothing.
+ *
+ * That matters more here than in most places, because explore is the ONE tool whose inner commands
+ * never reach `checkPermission`: the agent loop gates `bash` per command, but it only ever sees
+ * `explore(question, context)`. So approving explore once approved every command it would ever
+ * invent — in headless, silently.
+ *
+ * The fix is to make the allow-list TRUE rather than to bolt a prompt onto a sub-loop. A pipeline is
+ * still allowed, because `grep -rn foo . | head -20` is exactly what an investigation should do — but
+ * EVERY segment must independently start with a read-only command, and anything that can spawn a
+ * nested command or write a file is refused outright.
+ *
+ * Deliberately not a permission prompt: explore runs many commands per investigation, and a gate that
+ * asks twelve times is a gate the operator turns off. Confinement beats consent here. If explore ever
+ * needs to MUTATE something, that is the point at which it must go through `checkPermission`.
+ */
+export function isAllowed(cmd: string): boolean {
   const trimmed = cmd.trim();
-  return ALLOWED_PREFIXES.some(prefix => trimmed.startsWith(prefix));
+  if (!trimmed) return false;
+  if (SHELL_ESCAPES.test(trimmed)) return false;
+  if (DANGEROUS_FLAGS.test(trimmed)) return false;
+  const segments = trimmed.split(PIPELINE_SPLIT);
+  return segments.every((seg) => {
+    const s = seg.trim();
+    if (!s) return false;
+    return ALLOWED_PREFIXES.some((prefix) => s === prefix || s.startsWith(`${prefix} `));
+  });
 }
 
 export async function exploreExecute(params: Record<string, string>): Promise<string> {

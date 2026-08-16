@@ -477,6 +477,23 @@ the faulty method and its caller, and the critic (armed at ≥ 2 facts) never ra
 A miss (`0 matches`, an error) is deliberately not evidence — otherwise the judge is lied to in the
 other direction.
 
+**explore's allow-list is confinement, and it has to be real.** explore is the one tool whose inner
+commands never reach `checkPermission` — the agent loop gates `bash` per command, but it only ever
+sees `explore(question, context)`. So approving explore once approved every command it would go on to
+invent, and in headless that happened silently.
+
+The guard was `trimmed.startsWith(prefix)` on a string then handed to `sh -lc`, which is not a check
+at all: `grep foo . ; echo INJECTED` passed, and the second command ran. Now a command is refused
+unless **every pipeline segment** independently starts with a read-only command, with no `$(…)`,
+backtick, `>`/`>>`, `<(…)` or `&`. Pipelines still work — `grep -rn x . | head -20` is what
+investigating looks like — and `find -delete`, `find -exec`, `sed -i`, `sort -o` are refused by flag.
+
+The allow-list is deliberately short: `awk` has `system()`, `sed` has `w`, `sort` has `-o`, `uniq`
+takes an output file. A command earns a place by being unable to change anything, not by being handy.
+**Confinement rather than consent** is the deliberate choice — a gate that prompts twelve times per
+investigation is a gate the operator switches off. If explore ever needs to MUTATE something, that is
+the point at which it must go through `checkPermission` instead.
+
 **A truncated reply still carries its answer.** `explore` asks its sub-model for JSON
 (`{reasoning, commands, confidence, answer}`), and generation is sometimes cut off mid-object. The old
 fallback handed the **whole raw object back as `answer`** — so the caller received a blob whose
