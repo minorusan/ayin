@@ -37,6 +37,8 @@ export interface IndulgeArgs {
   report: boolean;
   dryRun: boolean;
   restart: boolean;
+  /** `--search "<question>"` — query the corpus and print what it would hand the model. */
+  search?: string;
   embedOnly: boolean;
   deep: boolean;
   importFrom?: string;
@@ -66,6 +68,7 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
         args.domains = value().split(',').map((d) => d.trim()).filter(Boolean); break;
       case '--status': args.status = true; break;
       case '--report': args.report = true; break;
+      case '--search': case '--ask': args.search = value(); break;
       case '--dry-run': args.dryRun = true; break;
       case '--restart': args.restart = true; break;
       case '--import': args.importFrom = value(); break;
@@ -91,6 +94,7 @@ const USAGE = [
   '  ayin indulge --dry-run       discover only — file list + question estimate, spends nothing',
   '',
   '  ayin indulge --embed         vectorise the corpus for semantic search (CPU, no GPU needed)',
+  '  ayin indulge --search "<q>"  ask the corpus what it knows — exactly what the agent would be handed',
   '',
   '  --import <dir>               install a corpus built elsewhere (nuk overnight -> laptop)',
   '  --deep                       full explore investigation per question (~8x slower, more thorough)',
@@ -107,6 +111,28 @@ const hhmm = (ms: number): string => {
 };
 
 /** The morning check: one command that says whether it is alive and how far it got. */
+/**
+ * `--search "<question>"` — what the corpus would hand the agent, printed verbatim.
+ *
+ * The one thing a corpus cannot tell you from its totals is whether it ANSWERS anything. 847 chunks
+ * across 31 files is a number; whether the two that matter for today's ticket are among them is a
+ * different question, and the only honest way to settle it is to ask and read the reply.
+ *
+ * Prints the same block `corpus_search` returns — same ranking, same staleness labels, same
+ * citations — so what is on screen is exactly what the model would see, not a summary of it.
+ */
+async function searchCorpus(repoPath: string, query: string): Promise<number> {
+  if (!query.trim()) {
+    out('ayin indulge --search "<question>" — ask the corpus what it knows.');
+    return 2;
+  }
+  const store = openStore(repoPath);
+  if (!store.exists()) { out(`No corpus for ${resolve(repoPath)} yet.`); return 2; }
+  const { corpusSearch } = await import('./inject.js');
+  out(await corpusSearch(resolve(repoPath), query, 5));
+  return 0;
+}
+
 function printStatus(repoPath: string): number {
   const store = openStore(repoPath);
   if (!store.exists()) { out(`No corpus for ${resolve(repoPath)} yet.`); return 0; }
@@ -217,6 +243,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
   if (!existsSync(repoPath)) { out(`No such directory: ${repoPath}`); return 2; }
 
   if (args.status) return printStatus(repoPath);
+  if (args.search !== undefined) return searchCorpus(repoPath, args.search);
   if (args.importFrom) return importCorpus(repoPath, args.importFrom);
 
   if (args.embedOnly) {

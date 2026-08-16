@@ -367,6 +367,15 @@ export async function preflight(): Promise<void> {
     if (stale) process.stderr.write(stale);
 
     if (NO_MODEL_NEEDED.has(process.argv[2] ?? '')) return;
+    // `indulge` needs a model to BUILD a corpus, not to read one back. `--status`, `--report` and
+    // `--search` are pure reads of what is already on disk, and gating them behind a reachable model
+    // means the one moment you most want to interrogate a corpus — is it any good? does it answer
+    // today's question? — is the moment the tool refuses to speak to you.
+    //
+    // `--search` degrades on purpose when there is no embedding endpoint: the name and lexical passes
+    // still run, so it answers with what it can rather than nothing.
+    if (process.argv[2] === 'indulge'
+      && process.argv.some((a) => a === '--status' || a === '--report' || a === '--search' || a === '--ask')) return;
 
     const state = await checkModel();
     const onboarded = isOnboarded();

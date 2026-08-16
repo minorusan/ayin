@@ -1057,6 +1057,21 @@ rmSync(TMP, { recursive: true, force: true });
   rmSync(dir, { recursive: true, force: true });
 }
 
+// ── reading a corpus must not require a model ────────────────────────────────────
+//
+// `indulge` needs a model to BUILD a corpus, not to read one back. Gating `--status`, `--report` and
+// `--search` behind a reachable model meant the one moment you most want to interrogate a corpus —
+// is it any good, does it answer today's question — was the moment the tool refused to speak.
+{
+  const pf = readFileSync(join(ROOT, 'src/preflight.ts'), 'utf-8');
+  ok(/argv\[2\] === 'indulge'/.test(pf) && /'--search'/.test(pf) && /'--status'/.test(pf) && /'--report'/.test(pf),
+    'indulge --status/--report/--search skip the model gate — they are pure reads of what is on disk');
+  const ix = readFileSync(join(ROOT, 'src/indulge/index.ts'), 'utf-8');
+  ok(/case '--search': case '--ask':/.test(ix), '--search is parsed');
+  ok(/corpusSearch\(resolve\(repoPath\), query, 5\)/.test(ix),
+    'it prints what corpus_search returns verbatim — the same block the model would be handed, not a summary of it');
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 
