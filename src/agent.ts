@@ -13,6 +13,7 @@
  * This keeps context small and stable.
  */
 
+import { formatTurnTimings, resetTurnTimings, timed } from './timing.js';
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -824,7 +825,25 @@ async function runDiagram(userInput: string): Promise<void> {
   }
 }
 
+/**
+ * One turn, with its phases measured.
+ *
+ * The tally is printed from a `finally` so an INTERRUPTED or FAILED turn still says where its time
+ * went — those are the turns most worth measuring, and the ones a wrapper around the happy path
+ * loses. It stays silent unless the turn as a whole crossed the long-operation threshold: a marker
+ * that fires every turn is a marker nobody reads.
+ */
 export async function runAgent(userInput: string): Promise<void> {
+  resetTurnTimings();
+  try {
+    await runAgentTurn(userInput);
+  } finally {
+    const tally = formatTurnTimings();
+    if (tally) addMessage('system', tally);
+  }
+}
+
+async function runAgentTurn(userInput: string): Promise<void> {
   // Discovery, once. Idempotent, so every entry point can insist rather than assume.
   await loadTools();
   currentGoal = userInput;
@@ -890,7 +909,14 @@ export async function runAgent(userInput: string): Promise<void> {
 
     let response: string;
     try {
-      response = await llmChat(messages);
+      // Timed, and loudly. A ten-minute round used to be indistinguishable from a hung one: the
+      // status line says "Thinking…" for a model call, a tool run and a QA pass alike, so the only
+      // evidence was that ayin was slow — and "the model is slow" was the wrong answer three times in
+      // one day. Measured live during one of them: the GPU sat at 0% and the gateway queue was EMPTY
+      // while ayin had been "generating" for 10m38s. Nothing was slow. Nothing was running.
+      response = await timed('llm', `round ${round + 1} · ${activeModelId() || 'model'}`,
+        () => llmChat(messages),
+        (line) => { addMessage('system', line); showAlert('warn', line); });
     } catch (err) {
       setAgentStatus('');
       if (nudgeForQueuedMessage) {
@@ -1352,7 +1378,10 @@ export async function runAgent(userInput: string): Promise<void> {
       // explore and web_search need long timeouts — they do real work
       const BACKGROUND_TIMEOUT = (name === 'explore' || name === 'web_search') ? 600_000 : 20_000;
       const toolStarted = Date.now();
-      const toolPromise = tool.execute(params).catch(
+      // Tools are timed too: a ten-minute turn is as often one shell command that never returned as
+      // it is a slow model, and the status line cannot tell them apart.
+      const toolPromise = timed('tool', name, () => tool.execute(params),
+        (line) => { addMessage('system', line); }).catch(
         (err: unknown) => `Error: ${err instanceof Error ? err.message : String(err)}`,
       );
 

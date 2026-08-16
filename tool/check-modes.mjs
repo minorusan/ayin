@@ -149,6 +149,49 @@ ok(/URGENT: Round 13\/15/.test(capped), 'an explicitly capped run still warns as
     'the indulge context budget reads the persisted provider too, so a saved choice widens the window');
 }
 
+// ── [LONG OPERATION] — finding out WHICH ten minutes ───────────────────────────
+//
+// A ten-minute turn used to be indistinguishable from a hung one: the status line says "Thinking…"
+// for a model call, a tool run and a QA pass alike. Measured live during one such turn: the GPU sat
+// at 0% and the gateway queue was EMPTY while ayin had been "generating" for 10m38s. Nothing was
+// slow. Nothing was running.
+{
+  const T = await import(join(ROOT, 'dist/timing.js'));
+  T.resetTurnTimings();
+
+  ok(T.longOperationMs() === 120000, 'the threshold is two minutes by default', String(T.longOperationMs()));
+  ok(T.human(95000) === '1m 35s' && T.human(45000) === '45s', 'durations read as durations', T.human(95000));
+
+  let announced = [];
+  writeConfig({ longOperationMs: 30 });   // so the gate does not have to wait two minutes
+  await T.timed('llm', 'round 1', async () => { await new Promise((r) => setTimeout(r, 60)); return 1; },
+    (line) => announced.push(line));
+  ok(announced.length === 1 && /^\[LONG OPERATION\] llm/.test(announced[0]),
+    'a phase past the threshold announces itself, with its name', announced[0]);
+
+  // A phase that THREW is the most interesting measurement in the turn, and the one a naive wrapper loses.
+  announced = [];
+  let threw = false;
+  try {
+    await T.timed('tool', 'bash', async () => { await new Promise((r) => setTimeout(r, 60)); throw new Error('boom'); },
+      (line) => announced.push(line));
+  } catch { threw = true; }
+  ok(threw, 'the error still propagates — measuring must not swallow it');
+  ok(announced.length === 1 && /FAILED/.test(announced[0]),
+    'and a call that hung for minutes and THEN failed is reported as such', announced[0]);
+
+  // Fast phases stay silent: a marker that fires constantly is a marker nobody reads.
+  announced = [];
+  await T.timed('llm', 'quick', async () => 1, (line) => announced.push(line));
+  ok(announced.length === 0, 'a fast phase says nothing');
+
+  const tally = T.formatTurnTimings();
+  ok(tally && /where the turn went/.test(tally), 'the turn tally names where the time went');
+  ok(/llm ×2/.test(tally), 'grouped by phase — fourteen separate lines is the same data arranged so nobody reads it', tally);
+
+  writeConfig({});
+}
+
 rmSync(HOME, { recursive: true, force: true });
 console.log(fails ? `\nmodes check: ${fails} FAILURE(S)\n` : '\nmodes check: ok\n');
 process.exit(fails ? 1 : 0);

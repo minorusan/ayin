@@ -162,6 +162,8 @@ export const KNOWN_CONFIG_KEYS = [
   // `ayin launch`: the command that opens a terminal window, with {{SCRIPT}} for the launch script.
   // Every platform default is a guess about someone else's terminal — this is how they replace it.
   'terminalCommand',
+  // Anything past this many ms announces itself as [LONG OPERATION] (timing.ts). Default 120000.
+  'longOperationMs',
   // `/testrun`: where the NUnit console runner and the matching Unity Editor live. Both are
   // machine-specific paths, so both are config with detection as the fallback.
   'nunitConsole', 'unityPath',
