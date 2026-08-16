@@ -29,7 +29,7 @@
  * re-answers it when it has — that is what makes "ask indulge again" an expansion, not a restart.
  */
 
-import { sourceBudgetChars } from './budget.js';
+import { answerBatchSize, sourceBudgetChars } from './budget.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -344,9 +344,39 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
   const queue = opts.limit ? pending.slice(0, opts.limit) : pending;
   onStatus?.(`${pending.length} question(s) pending${opts.limit ? `, answering ${queue.length} this run` : ''}`);
 
+  // ── batch the DIRECT path, by file ─────────────────────────────────────────────
+  //
+  // Questions are already sorted by depth then file, so a run of consecutive same-file questions is
+  // exactly the set that shares sources. `deep`/`investigate` runs an explore loop per question and
+  // is deliberately excluded: those do not share a prompt.
+  const batchable = !opts.deep && !opts.investigate;
+  const batchSize = batchable ? answerBatchSize() : 1;
+  const precomputed = new Map<string, { answer: string; citations: Citation[]; rejected: number }>();
+  const batchedIds = new Set<string>();
+
+  const fillBatchFor = async (index: number): Promise<void> => {
+    if (!batchable || batchSize < 2) return;
+    const q0 = queue[index];
+    if (!q0 || batchedIds.has(q0.id) || q0.category === 'git') return;   // git answers come from git
+    const group: QuestionRecord[] = [];
+    for (let k = index; k < queue.length && group.length < batchSize; k++) {
+      const q = queue[k];
+      if (q.file !== q0.file || q.category === 'git') break;
+      if (store.hasChunk(chunkId(store.key, q.file, q.entity, q.category, q.id))) continue;
+      group.push(q);
+    }
+    if (group.length < 2) return;   // one question is not a batch; the single path is simpler
+    for (const q of group) batchedIds.add(q.id);
+    onStatus?.(`${q0.file}: asking ${group.length} question(s) in one call`);
+    const answers = await buildAnswerBatch(opts, repoPath, q0.file, group);
+    for (const [id, v] of answers) precomputed.set(id, v);
+  };
+
   let done = 0;
-  for (const q of queue) {
+  for (let qi = 0; qi < queue.length; qi++) {
+    const q = queue[qi];
     done++;
+    await fillBatchFor(qi);
     if (shouldStop?.()) { report.stopped = true; onStatus?.('stop requested — the rest stay pending'); return report; }
 
     const id = chunkId(store.key, q.file, q.entity, q.category, q.id);
@@ -362,7 +392,9 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
     onProgress?.(done, queue.length, `${q.file} · ${q.category}`);
     report.attempted++;
 
-    const built = await buildAnswer(opts, repoPath, q);
+    // A batched answer if this question was in one; otherwise the single-question path. A question
+    // the batch omitted falls through to `undefined` and is treated as unanswered — never as empty.
+    const built = precomputed.has(q.id) ? precomputed.get(q.id)! : await buildAnswer(opts, repoPath, q);
     if (!built) { store.setQuestionStatus(q.id, 'failed', 'no answer produced'); report.failed++; continue; }
     report.rejectedCitations += built.rejected;
 
@@ -418,6 +450,56 @@ export async function answerQuestions(opts: AnswerOptions): Promise<AnswerReport
 /** EVERY domain that surfaced this file — a file discovered under two domains belongs to both. */
 function domainsOfFile(store: IndulgeStore, file: string): string[] {
   return [...new Set(store.files().filter((f) => f.path === file).map((f) => f.domain).filter(Boolean))];
+}
+
+/**
+ * Answer SEVERAL questions about one file in a single call.
+ *
+ * The sources are identical for every question about the same file, so sending them once and asking
+ * ten questions costs one prompt instead of ten. This is where an overnight run's time actually
+ * went: 847 answers, each re-sending the same file, at 17–45s apiece. The model does the same work
+ * either way — it was being spoon-fed one bite at a time.
+ *
+ * Batch size comes from the window (indulge/budget.ts) because the binding limit is the REPLY: every
+ * answer shares one output budget, and a batch large enough to truncate its last answers is worse
+ * than no batching. At 16k that is 4 questions; on a 128k window, 24.
+ *
+ * A question the model omits, or answers unciteably, simply gets no entry — the caller marks it
+ * failed and it stays pending for another run. One bad answer never costs the batch.
+ */
+async function buildAnswerBatch(
+  opts: AnswerOptions, repoPath: string, file: string, questions: QuestionRecord[],
+): Promise<Map<string, { answer: string; citations: Citation[]; rejected: number }>> {
+  const out = new Map<string, { answer: string; citations: Citation[]; rejected: number }>();
+  const sources = buildSources(repoPath, contextFilesFor(opts.store, file));
+  if (!sources) return out;
+
+  const prompt = indulgePrompts().get('answerBatch', {
+    SOURCES: sources,
+    FILE: file,
+    QUESTIONS: questions.map((q) => `- id: ${q.id}\n  ${q.text}`).join('\n'),
+  });
+  let reply: string;
+  try {
+    reply = opts.ask ? await opts.ask(prompt) : await toolLlm().ask([{ role: 'user', content: prompt }]);
+  } catch { return out; }
+
+  // Pairs scanned positionally, for the reasons the question parser learned the hard way: duplicate
+  // keys are valid JSON and silently keep only the last, and a truncated reply must yield what it
+  // completed rather than nothing.
+  const known = new Set(questions.map((q) => q.id));
+  const pair = /"id"\s*:\s*"([^"]+)"\s*,\s*"a"\s*:\s*("(?:[^"\\]|\\.)*")/g;
+  let m: RegExpExecArray | null;
+  while ((m = pair.exec(reply))) {
+    const id = m[1].trim();
+    if (!known.has(id) || out.has(id)) continue;
+    let text: string;
+    try { text = JSON.parse(m[2]) as string; } catch { continue; }
+    if (/NOTHING KNOWN/i.test(text)) continue;   // a real answer, and it stores nothing
+    const v = verifyCitations(repoPath, text);
+    out.set(id, { answer: stripCitations(text), citations: v.citations, rejected: v.rejected });
+  }
+  return out;
 }
 
 async function buildAnswer(

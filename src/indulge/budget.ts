@@ -78,3 +78,21 @@ export function sourceBudgetChars(): number {
 export function singleFileBudgetChars(): number {
   return Math.max(4_000, Math.floor(sourceBudgetChars() * 0.45));
 }
+
+/**
+ * How many questions about ONE file go in a single answer call.
+ *
+ * This is where the night goes. Answering was one call per question, each re-sending the whole
+ * source: on a real run, 847 answers at 17–45s each. The sources are identical for every question
+ * about the same file, so sending them once and asking ten questions costs one prompt instead of ten
+ * — the model is doing the work either way, it was simply being spoon-fed one bite at a time.
+ *
+ * Scaled by window, because the limit is the REPLY: every answer in a batch comes out of the same
+ * output budget, and a batch large enough to truncate the last answers is worse than no batching at
+ * all. Roughly one question per 1.5k tokens of window above the sources, floored at 1 so a small
+ * local model keeps exactly today's behaviour.
+ */
+export function answerBatchSize(): number {
+  const spare = contextTokens() * (1 - SOURCE_SHARE);
+  return Math.max(1, Math.min(24, Math.floor(spare / 1500)));
+}

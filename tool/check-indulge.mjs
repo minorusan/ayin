@@ -1300,6 +1300,67 @@ rmSync(TMP, { recursive: true, force: true });
   if (save.c === undefined) delete process.env.AYIN_OLLAMA_CTX; else process.env.AYIN_OLLAMA_CTX = save.c;
 }
 
+// ── answering is BATCHED by file — where an overnight run's time actually went ───
+{
+  const dir = mkdtempSync(join(tmpdir(), 'ayin-abatch-'));
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'R.cs'), 'class R\n{\n    public void Apply() { }\n    public int Score;\n}\n');
+  const st = S.openStore(dir);
+  st.beginRun({ runId: 'r', domains: ['d'], headSha: 'h' });
+  st.addFile({ path: 'src/R.cs', domain: 'd', depth: 0, why: 'seed' });
+  const ids = [];
+  for (let i = 0; i < 4; i++) {
+    const id = `q${i}`;
+    ids.push(id);
+    st.addQuestion({ id, file: 'src/R.cs', entity: null, category: 'gotchas', text: `Question number ${i} about how R applies score?` });
+  }
+
+  const saveEnv = process.env.AYIN_LLM_PROVIDER;
+  process.env.AYIN_LLM_PROVIDER = 'openai';   // a window big enough to batch
+
+  let calls = 0;
+  const seen = [];
+  const r = await AN.answerQuestions({
+    store: st, repoPath: dir,
+    ask: async (p) => {
+      calls++; seen.push(p);
+      const asked = [...p.matchAll(/id: (q\d)/g)].map((m) => m[1]);
+      return JSON.stringify({ answers: asked.map((id) => ({
+        id, a: `R applies score through Apply, which mutates the public field.\nCITE: src/R.cs:3-3`,
+      })) });
+    },
+  });
+
+  ok(calls === 1, 'four questions about one file cost ONE call, not four', `${calls} call(s)`);
+  ok(r.answered === 4, 'and every one of them is answered', JSON.stringify({ answered: r.answered, failed: r.failed }));
+  ok(seen[0].split('src/R.cs').length > 1, 'the source appears once in that prompt, not once per question');
+  ok(st.chunks().length === 4, 'four chunks land, each with its own verified citation');
+
+  // A question the model omits must fail, never store an empty answer.
+  for (const id of ids) st.setQuestionStatus(id, 'pending');
+  for (const c of st.chunks()) st.deleteChunk(c.chunkId);
+  const partial = await AN.answerQuestions({
+    store: st, repoPath: dir,
+    ask: async () => JSON.stringify({ answers: [{ id: 'q0', a: 'Only this one.\nCITE: src/R.cs:3-3' }] }),
+  });
+  ok(partial.answered === 1 && partial.failed === 3,
+    'a question the batch omitted FAILS and stays pending — it is never stored as an empty answer',
+    JSON.stringify({ answered: partial.answered, failed: partial.failed }));
+
+  // NOTHING KNOWN is a real answer that stores nothing.
+  for (const id of ids) st.setQuestionStatus(id, 'pending');
+  for (const c of st.chunks()) st.deleteChunk(c.chunkId);
+  const nk = await AN.answerQuestions({
+    store: st, repoPath: dir,
+    ask: async (p) => JSON.stringify({ answers: [...p.matchAll(/id: (q\d)/g)].map((m) => ({ id: m[1], a: 'NOTHING KNOWN' })) }),
+  });
+  ok(nk.answered === 0 && st.chunks().length === 0,
+    'NOTHING KNOWN stores nothing — a plausible answer with no proof is the one outcome worth avoiding');
+
+  if (saveEnv === undefined) delete process.env.AYIN_LLM_PROVIDER; else process.env.AYIN_LLM_PROVIDER = saveEnv;
+  rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 

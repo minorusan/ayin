@@ -361,3 +361,38 @@ nobody can audit, and a retrieval step that has stopped retrieving and started d
 **Running the whole build on OpenAI** is `AYIN_LLM_PROVIDER=openai ayin indulge …` — the budget
 follows automatically, so a corpus built by a larger reasoning model also gets the window to reason
 in.
+
+### Building the corpus on OpenAI
+
+```
+AYIN_LLM_PROVIDER=openai ayin indulge --domains "…" --categories gotchas,connections
+```
+
+Everything scales off the window automatically:
+
+| | 16k local | 64k local | OpenAI 128k |
+|---|---|---|---|
+| source per answer | 27k chars | 108k chars | 211k chars |
+| one file for generation | 12k chars | 48k chars | 95k chars |
+| **questions per answer call** | **4** | **19** | **24** |
+
+**Answering is batched by file, and that is where an overnight run's time went.** It was one call per
+question, each re-sending the same source — 847 answers at 17–45s apiece. The sources are identical
+for every question about one file, so they are sent once and the questions asked together. The model
+does the same work either way; it was being spoon-fed one bite at a time.
+
+Batch size follows the window because the binding limit is the **reply**: every answer shares one
+output budget, and a batch large enough to truncate its last answers is worse than no batching. At
+16k that is four questions, so a small local model keeps close to today's behaviour rather than
+silently degrading.
+
+Three properties the batch keeps:
+
+- **A question the model omits FAILS** and stays pending. It is never stored as an empty answer.
+- **`NOTHING KNOWN` stores nothing.** A plausible answer with no proof is the one outcome worth
+  avoiding, because later nobody can tell it from a true one.
+- **Citations are verified per answer**, exactly as in the single path. Batching changed how many
+  questions ride in a prompt, not what it takes for a chunk to exist.
+
+`--deep` and `--investigate` are excluded: those run an explore loop per question and do not share a
+prompt.
