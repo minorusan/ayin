@@ -301,6 +301,10 @@ export async function llmChat(messages: LlmMessage[], opts: LlmChatOptions = {})
     // surface rather than hide.
     if (!declared && activeDialect().parse(reply).toolCalls.length > 0) {
       log('INFO', 'tool_call_without_tools', { model: cachedModelId, dialect: activeDialect().id });
+      // The raw text, on disk. This is the reply that settles "did the model emit that, or did ayin
+      // mangle it" — and it was previously kept nowhere unless /transcribe had been switched on
+      // beforehand, which nobody does before the bug they did not expect.
+      void import('../session-record.js').then((r) => r.recordRaw(0, `tool call with no tools declared · dialect ${activeDialect().id} · model ${cachedModelId || 'unknown'}`, reply));
       const retry = await narrateWait('thinking', async () => (await provider.generate([
         ...messages,
         { role: 'assistant', content: reply },

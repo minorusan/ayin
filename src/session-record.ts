@@ -24,7 +24,9 @@ type Event =
   | { kind: 'prompt'; text: string }
   | { kind: 'tool'; tool: string; params: string; result: string; backgrounded?: boolean }
   | { kind: 'answer'; text: string }
-  | { kind: 'qa'; verdict: string; pass: number; summary: string; issues: number };
+  | { kind: 'qa'; verdict: string; pass: number; summary: string; issues: number }
+  | { kind: 'timing'; phase: string; ms: number; detail: string }
+  | { kind: 'raw'; round: number; why: string; text: string };
 
 function record(ev: Event): void {
   try {
@@ -58,6 +60,29 @@ export function recordAnswer(text: string): void {
 /** One QA gate verdict — kept in the same record so a run's quality history is greppable. */
 export function recordQa(verdict: string, pass: number, summary: string, issues: number): void {
   record({ kind: 'qa', verdict, pass, summary: clip(summary), issues });
+}
+
+/**
+ * A phase that took long enough to be worth explaining later.
+ *
+ * On disk, in the session record, because the in-memory tally dies with the process — and a debug
+ * bundle is almost always collected AFTER the interesting run, often after an update restarted
+ * everything. "It was slow twenty minutes ago" has to survive twenty minutes.
+ */
+export function recordTiming(phase: string, ms: number, detail: string): void {
+  record({ kind: 'timing', phase, ms, detail });
+}
+
+/**
+ * The RAW model reply, before ayin parsed anything out of it.
+ *
+ * Recorded only when something notable happened to it, never on every round: this is the one text
+ * that settles "did the model emit that, or did ayin mangle it", and it was previously kept nowhere
+ * unless `/transcribe` had been switched on beforehand — which nobody does before the bug they did
+ * not expect.
+ */
+export function recordRaw(round: number, why: string, text: string): void {
+  record({ kind: 'raw', round, why, text: clip(text) });
 }
 
 /** Path of the current run's record file, or null if no session is established. */

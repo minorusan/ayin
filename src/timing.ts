@@ -84,6 +84,8 @@ export async function timed<T>(
       log('WARN', 'long_operation', { phase, ms: String(ms), detail, failed: String(failed) });
       longHistory.push({ phase, ms, detail: detail + (failed ? ' · FAILED' : ''), at: new Date().toISOString() });
       if (longHistory.length > LONG_HISTORY_MAX) longHistory.shift();
+      // …and on disk, because the array above dies with the process and a bundle is collected after.
+      void import('./session-record.js').then((r) => r.recordTiming(phase, ms, detail + (failed ? ' · FAILED' : '')));
       onLong?.(line);
     }
   }

@@ -326,6 +326,38 @@ ok(/URGENT: Round 13\/15/.test(capped), 'an explicitly capped run still warns as
     'the nudge leaves a legal way out — a model with no way to say "I could not" will invent work instead');
 }
 
+// ── the bundle must survive the restart that `ayin update` performs ────────────
+//
+// A bundle is collected AFTER the interesting run — usually after an update restarted everything.
+// The first version read only in-memory state, so a real bundle came back `phases: 0` and carried no
+// model text at all: the session record holds prompts, tools and answers, never the RAW reply, so
+// "did the model emit that or did ayin mangle it" was unanswerable unless /transcribe happened to
+// have been switched on before the bug nobody expected.
+{
+  const rec = readFileSync(join(ROOT, 'src/session-record.ts'), 'utf-8');
+  ok(/kind: 'timing'/.test(rec) && /kind: 'raw'/.test(rec),
+    'timings and raw replies have a home in the session record — already append-only, per-session, on disk');
+
+  const tim = readFileSync(join(ROOT, 'src/timing.ts'), 'utf-8');
+  ok(/recordTiming\(phase, ms/.test(tim),
+    'a long operation is written to disk as well as the in-memory tally, which dies with the process');
+
+  const dbg = readFileSync(join(ROOT, 'src/debug-bundle.ts'), 'utf-8');
+  ok(/thisSession: fromRecord\.timings/.test(dbg),
+    'the bundle reads the SESSION timings from the record, not just this process');
+  ok(/raw-replies\.md/.test(dbg), 'and ships the raw replies as their own file');
+
+  const mgr = readFileSync(join(ROOT, 'src/llm/manager.ts'), 'utf-8');
+  ok(/recordRaw\(0, `tool call with no tools declared/.test(mgr),
+    'a tool call emitted with no tools declared keeps its raw text — the exact case being chased');
+  const agent = readFileSync(join(ROOT, 'src/agent.ts'), 'utf-8');
+  ok(/recordRaw\(round, 'no tool call and no final marker'/.test(agent),
+    'so does a reply the harness could not classify');
+  ok(/recordRaw\(round, 'deferral/.test(agent), 'and a deferral');
+  ok(!/recordRaw\(round, 'every/.test(agent),
+    'but NOT every round — a record that doubles in size to hold text nobody reads is a record nobody keeps');
+}
+
 rmSync(HOME, { recursive: true, force: true });
 console.log(fails ? `\nmodes check: ${fails} FAILURE(S)\n` : '\nmodes check: ok\n');
 process.exit(fails ? 1 : 0);

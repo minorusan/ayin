@@ -31,7 +31,7 @@ import { hasFinalMarker, stripFinalMarker } from './final-marker.js';
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
 import { checkPermission } from './permissions.js';
 import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
-import { recordPrompt, recordTool, recordAnswer } from './session-record.js';
+import { recordPrompt, recordRaw, recordTool, recordAnswer } from './session-record.js';
 // The FULL record (opt-in, unclipped) runs alongside the clipped operating record above — see
 // transcript.ts for why both exist. Every call here is a no-op unless /transcribe is on.
 import { transcribeAnswer, transcribePrompt, transcribeResponse, transcribeTool } from './transcript.js';
@@ -1000,6 +1000,9 @@ async function runAgentTurn(userInput: string): Promise<void> {
       if (!hasFinalMarker(response) && markerWorthEnforcing() && !stopAwaitingOperator()
           && continueNudges < MAX_CONTINUE_NUDGES) {
         continueNudges++;
+        // A reply with no tool call AND no marker is one the harness could not classify. Keeping it
+        // is how "why did it stop there" is answerable tomorrow.
+        recordRaw(round, 'no tool call and no final marker', response);
         log('INFO', 'continue_nudge', {
           nudge: String(continueNudges), round: String(round), unmarkedFinals: String(unmarkedFinals),
         });
@@ -1021,6 +1024,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // can loop is worse than the behaviour it corrects. See src/deferral.ts.
       if (deferralNudges < 1 && looksLikeDeferral(parsed.text ?? response, touchedAnythingThisTurn())) {
         deferralNudges++;
+        recordRaw(round, 'deferral — named what to look for, not what was found', response);
         log('INFO', 'deferral_nudge', { round: String(round) });
         pushToWindow('assistant', response);
         pushMessage('assistant', response);

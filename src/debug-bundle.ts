@@ -112,10 +112,25 @@ export function writeDebugBundle(dir: string, facts: BundleFacts): BundleResult 
     ayinEnvNames: Object.keys(process.env).filter((k) => k.startsWith('AYIN_') || k === 'OPENAI_API_KEY'),
   }, null, 2) + '\n');
 
+  // From DISK first, memory second. The in-memory tally covers this process; the record covers the
+  // session — including every run before the update that restarted everything, which is when a
+  // bundle is usually collected.
+  const fromRecord = timingsFromRecord();
   put('timings.json', JSON.stringify({
-    thisTurn: turnTimings(),
-    longOperations: longOperations(),
+    thisProcess: { thisTurn: turnTimings(), longOperations: longOperations() },
+    thisSession: fromRecord.timings,
   }, null, 2) + '\n');
+  put('raw-replies.md', fromRecord.raws.length
+    ? [
+      '# Raw model replies, before ayin parsed them',
+      '',
+      'Recorded only where something notable happened to a reply — a tool call with no tools',
+      'declared, a reply the harness could not classify, a deferral. This is the text that settles',
+      '"did the model emit that, or did ayin mangle it".',
+      '',
+      ...fromRecord.raws.map((r) => `## round ${r.round} — ${r.why}\n\n\`\`\`\n${r.text}\n\`\`\`\n`),
+    ].join('\n')
+    : '');
 
   put('session.jsonl', tail(sessionRecordPath()));
   put('log.txt', tail(currentLogFile()));
@@ -134,6 +149,7 @@ export function writeDebugBundle(dir: string, facts: BundleFacts): BundleResult 
     `| manifest.json | version, provider, model, dialect, context size, platform |`,
     `| timings.json | this turn's phases, and every [LONG OPERATION] this process saw |`,
     `| session.jsonl | prompts, tool calls and answers, newest last (tailed) |`,
+    `| raw-replies.md | the model's text BEFORE parsing, where something notable happened to it |`,
     `| log.txt | the process log (tailed) |`,
     `| config.json | settings, **with every key-shaped value redacted** |`,
     ``,
@@ -172,6 +188,33 @@ export function writeDebugBundle(dir: string, facts: BundleFacts): BundleResult 
     try { return n + statSync(join(out, f)).size; } catch { return n; }
   }, 0);
   return { dir: out, latest, files, bytes, omitted };
+}
+
+/**
+ * Pull the persisted timings and raw replies back out of the session record.
+ *
+ * The record is already append-only, per-session and on disk — so nothing new needed a home, and
+ * everything here survives the restart that an `ayin update` performs.
+ */
+function timingsFromRecord(): {
+  timings: Array<{ phase: string; ms: number; detail: string; ts?: string }>;
+  raws: Array<{ round: number; why: string; text: string }>;
+} {
+  const out = { timings: [] as Array<{ phase: string; ms: number; detail: string; ts?: string }>, raws: [] as Array<{ round: number; why: string; text: string }> };
+  const path = sessionRecordPath();
+  if (!path || !existsSync(path)) return out;
+  try {
+    for (const line of readFileSync(path, 'utf-8').split('\n')) {
+      if (!line.startsWith('{')) continue;
+      let ev: Record<string, unknown>;
+      try { ev = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+      if (ev.kind === 'timing') out.timings.push({ phase: String(ev.phase), ms: Number(ev.ms), detail: String(ev.detail), ts: ev.ts as string });
+      else if (ev.kind === 'raw') out.raws.push({ round: Number(ev.round), why: String(ev.why), text: String(ev.text) });
+    }
+  } catch { /* a partial read beats none */ }
+  // Newest last is how they were written; the newest few are what a diagnosis wants.
+  out.raws = out.raws.slice(-10);
+  return out;
 }
 
 /**
