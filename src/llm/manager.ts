@@ -42,7 +42,27 @@ const DEFAULT: ModelDialect = DIALECTS[DIALECTS.length - 1]; // gemma — used u
 
 let cachedModelId = '';
 let cachedDialect: ModelDialect = DEFAULT;
-let refreshKicked = false;
+
+/**
+ * RESOLUTION IS RETRIED UNTIL IT LANDS. It used to be attempted exactly once per process, and the
+ * latch was set BEFORE the attempt — so a single missed `/api/status` (a backend still booting, an
+ * authority not yet held, a provider still provisional) pinned `cachedModelId` to `''` and the dialect
+ * to the gemma DEFAULT for the whole session, silently.
+ *
+ * That is not a cosmetic default. The dialect is HOW TOOL CALLS ARE FORMATTED, so an unresolved model
+ * id means a qwen model being taught gemma's convention on every round — measured in a real bundle as
+ * `"model": "unknown", "dialect": "gemma"` against a qwen3-coder endpoint, and the operator's evidence
+ * for it was a model that "emits `<function=`", which reads as a model quirk and is not one.
+ *
+ * Bounded, and it SAYS SO when it gives up: an endpoint that genuinely never reports a model is a real
+ * configuration, and guessing at it forever is its own bug. Roughly a minute of a booting backend.
+ */
+const MODEL_RETRY_MS = 5_000;
+const MODEL_MAX_ATTEMPTS = 12;
+let modelAttempts = 0;
+let modelLastAttemptAt = 0;
+let modelRefreshInFlight = false;
+let modelGiveUpWarned = false;
 
 /**
  * An adapter chosen by the OPERATOR, overriding what the model id suggests.
@@ -94,11 +114,58 @@ function pickDialect(modelId: string): ModelDialect {
   return DIALECTS.find(d => d.matches(modelId)) ?? DEFAULT;
 }
 
-/** Fire a one-time background model refresh on first use (best-effort). */
+/**
+ * Keep trying to learn the served model, in the background, until we know it.
+ *
+ * Called from `activeDialect()` — i.e. on the path of every LLM call — so the retry rides on work that
+ * was happening anyway and costs nothing on a session that resolved at boot. Never awaited: a status
+ * probe must not put latency in front of a generation.
+ */
 function ensureRefreshed(): void {
-  if (refreshKicked) return;
-  refreshKicked = true;
+  if (cachedModelId) return;                                   // resolved — nothing to chase
+  if (adapterOverride) return;                                 // the operator chose; the id is moot
+  if (modelRefreshInFlight) return;
+  if (Date.now() - modelLastAttemptAt < MODEL_RETRY_MS) return;
+  if (modelAttempts >= MODEL_MAX_ATTEMPTS) {
+    if (!modelGiveUpWarned) {
+      modelGiveUpWarned = true;
+      // The one thing that must not stay quiet. Driving the wrong dialect looks, from the outside,
+      // exactly like a model that is bad at tool calls.
+      log('WARN', 'llm_model_unresolved', {
+        attempts: String(modelAttempts),
+        dialect: cachedDialect.id,
+        hint: `the endpoint never reported a model id, so tool calls are being formatted for `
+          + `${cachedDialect.id} by fallback — set it explicitly with /model <adapter> if that is wrong`,
+      });
+    }
+    return;
+  }
   void refreshActiveModel();
+}
+
+/**
+ * Forget which model is served, so the next call re-learns it. Call whenever the PROVIDER changes.
+ *
+ * Without this, switching provider keeps the previous provider's model id — and therefore its dialect
+ * — whenever the new one does not report a model on the first ask. That is the same silent-wrong-
+ * dialect failure as the one-shot latch above, arriving through the switch instead of through boot.
+ */
+export function resetModelResolution(): void {
+  cachedModelId = '';
+  cachedDialect = adapterOverride ? cachedDialect : DEFAULT;
+  modelAttempts = 0;
+  modelLastAttemptAt = 0;
+  modelGiveUpWarned = false;
+}
+
+/** Whether the served model is still unknown, and how hard we have tried. For the status line, the
+ *  debug manifest, and anything else that would otherwise report a fallback as a fact. */
+export function modelResolution(): { resolved: boolean; attempts: number; gaveUp: boolean } {
+  return {
+    resolved: cachedModelId !== '',
+    attempts: modelAttempts,
+    gaveUp: modelAttempts >= MODEL_MAX_ATTEMPTS && cachedModelId === '',
+  };
 }
 
 /**
@@ -108,7 +175,11 @@ function ensureRefreshed(): void {
  * the served model.
  */
 export async function refreshActiveModel(): Promise<void> {
-  refreshKicked = true;
+  // Counted and stamped HERE, around the actual attempt — the old code latched on entry, which is
+  // what turned one unlucky probe into a session-long wrong dialect.
+  modelRefreshInFlight = true;
+  modelAttempts++;
+  modelLastAttemptAt = Date.now();
   try {
     const provider = await llmProvider();
     const mode = provider.tools ?? 'prompt';
@@ -125,7 +196,12 @@ export async function refreshActiveModel(): Promise<void> {
       log('INFO', 'llm_dialect_switch', { model: modelId, dialect: next.id });
     }
     cachedDialect = next;
-  } catch { /* unreachable backend — keep current dialect */ }
+    // Worth a line even when the dialect did not change: "resolved to gemma because the model IS
+    // gemma" and "still gemma because nothing answered" are the two states this whole retry exists to
+    // tell apart, and only one of them is fine.
+    log('INFO', 'llm_model_resolved', { model: modelId, dialect: next.id, attempts: String(modelAttempts) });
+  } catch { /* unreachable backend — keep current dialect, and ensureRefreshed will try again */ }
+  finally { modelRefreshInFlight = false; }
 }
 
 /** The dialect for the currently-active backend model (sync; uses the last refresh). */

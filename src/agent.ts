@@ -29,6 +29,7 @@ import { theme } from './ui/theme.js';
 import { log } from './log.js';
 import { hasFinalMarker, stripFinalMarker } from './final-marker.js';
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
+import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
 import { checkPermission } from './permissions.js';
 import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
 import { recordPrompt, recordRaw, recordTool, recordAnswer } from './session-record.js';
@@ -42,7 +43,7 @@ import { pendingCorpus } from './indulge/inject.js';
 import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { extractSignals } from './tools/signals.js';
-import { qaBeginTurn, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn, qaPreparedUnits } from './qa/index.js';
+import { qaBeginTurn, qaChangedFiles, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn, qaPreparedUnits } from './qa/index.js';
 import { regenerateTouchedDiagrams } from './arduino-diagram-regen.js';
 import { gateAdoption, nextBrief, implementedCount, stopAwaitingOperator } from './entangle/index.js';
 import { loadTools } from './tools.js';
@@ -860,6 +861,9 @@ async function runAgentTurn(userInput: string): Promise<void> {
   // QA gate: snapshot what was already dirty BEFORE this turn touches anything, so pre-existing
   // uncommitted work is never reviewed as if this turn produced it.
   qaBeginTurn();
+  // The edit ledger shares the QA gate's turn boundary but NOT its enable check: the fabrication
+  // guard it feeds is unconditional, and QA is session-off by default. See edit-truth.ts.
+  beginEditTurn();
   // No gate label may outlive the turn it described — a status bar still claiming `▣ QA 2/3` after
   // the answer landed is worse than no indicator at all.
   clearActivity();
@@ -893,6 +897,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
   let adoptionNudges = 0;
   let continueNudges = 0;
   let deferralNudges = 0;
+  let unwrittenClaimNudges = 0;
   // Did this turn actually DO anything? A turn that ran a tool has produced something the operator
   // did not have; its closing "you should also check X" is a caveat, not a dodge.
   let toolsRunThisTurn = 0;
@@ -1029,6 +1034,23 @@ async function runAgentTurn(userInput: string): Promise<void> {
         pushToWindow('assistant', response);
         pushMessage('assistant', response);
         pushToWindow('user', DEFERRAL_NUDGE);
+        continue;
+      }
+
+      // A final answer that REPORTS A CHANGE nobody made. The mirror of the deferral check above and
+      // the more dangerous of the two: a deferral is visibly unhelpful, while "Fixed by reordering
+      // the operations in Dispose()" reads exactly like a result and is acted on. Unconditional — the
+      // QA gate that would otherwise catch this is session-off by default AND declines on "nothing
+      // changed this turn", which is the very condition here. See edit-truth.ts.
+      if (unwrittenClaimNudges < 1
+          && claimsAnEditThatDoesNotExist(parsed.text ?? response, qaChangedFiles().length, toolsRunThisTurn)) {
+        unwrittenClaimNudges++;
+        recordRaw(round, 'claimed an edit with nothing written', response);
+        log('WARN', 'unwritten_claim', { round: String(round), attempts: String(editAttempts().length) });
+        addMessage('system', 'reported a change with nothing written — asking it to apply or retract');
+        pushToWindow('assistant', response);
+        pushMessage('assistant', response);
+        pushToWindow('user', getPrompt('unwrittenClaim', { ATTEMPTS: attemptsSummary() }));
         continue;
       }
 
@@ -1469,7 +1491,23 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // Artifact tracking for the QA gate. `bash`-driven changes are caught separately by the
       // gate's git snapshot — this covers the tools whose target is known from the call itself.
       toolsRunThisTurn++;
-      if ((name === 'write_file' || name === 'str_replace') && params.path) qaNoteTouched(params.path);
+      // ONLY ON SUCCESS. A failed `str_replace` used to be recorded as a file this turn changed, so a
+      // turn whose every edit bounced still reported one changed file — which is both a lie to the QA
+      // gate and the exact signal the fabrication guard reads. The ledger keeps the failures instead,
+      // where they are evidence rather than a phantom write. See edit-truth.ts.
+      let editMissNote = '';
+      if ((name === 'write_file' || name === 'str_replace') && params.path) {
+        if (noteEditAttempt(name, params.path, result)) qaNoteTouched(params.path);
+        else if (consecutiveMissesOn(params.path) >= 2) {
+          // Two misses on ONE file means the model is editing text it has not read, and a third guess
+          // costs another round to learn the same thing. Said at the tool result, where it can still
+          // act on it — by the final answer it has nothing left to fix.
+          editMissNote = `\n\n${consecutiveMissesOn(params.path)} edits in a row have missed in this file. `
+            + `Stop guessing old_str: read the exact lines first (read_file ${params.path} with offset), `
+            + `copy old_str from what comes back, then edit.`;
+          log('WARN', 'edit_repeated_miss', { tool: name, path: params.path, misses: String(consecutiveMissesOn(params.path)) });
+        }
+      }
       if (name === 'write_file') {
         // Track CTA delivery — if the write target matches the CTA, mark as delivered
         if (ctaTarget && !ctaDelivered && (params.path || '').includes(ctaTarget) && (params.content || '').length > 200) {
@@ -1496,7 +1534,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
 
       // The guard's note (a polling notice) rides along with the real result — the model gets the
       // information it asked for AND the rule about asking again, in the same message.
-      pushToWindow('user', renderToolResult(clipForWindow(result) + (guard.note ?? '')));
+      pushToWindow('user', renderToolResult(clipForWindow(result) + (guard.note ?? '') + editMissNote));
       pushMessage('assistant', `[tool: ${name}(${paramPreview})]`);
 
       // CTA just delivered — tell the model it's done. This prevents the

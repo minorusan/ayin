@@ -355,6 +355,27 @@ dialect  ── toolCallInstructions (→ system prompt) · parse(raw) · render
 **Adding a model family** = implement `ModelDialect` (or extend `XmlToolCallDialect`) and
 register it in `manager.ts`'s `DIALECTS`. A few lines.
 
+#### Resolution is RETRIED until it lands
+
+The dialect is how tool calls are formatted, so an unresolved model id is not a cosmetic default — it
+is a model being taught another family's syntax on every round.
+
+Resolution used to be attempted **once per process**, with the latch set *before* the attempt. One
+missed `/api/status` — a backend still booting, an authority not yet held, a provider still
+provisional — pinned `cachedModelId` to `''` and the dialect to the gemma DEFAULT for the whole
+session, silently. Measured in a real bundle as `"model": "unknown", "dialect": "gemma"` against a
+qwen3-coder endpoint; the operator's evidence was "the model emits `<function=`", which reads as a
+model quirk and is not one — `<function=` is exactly what the qwen dialect expects, and gemma's
+parser could not read it.
+
+Now `ensureRefreshed()` stops when resolution **succeeds**, not when it is first attempted: it re-asks
+on the LLM call path, every `MODEL_RETRY_MS` (5s), up to `MODEL_MAX_ATTEMPTS` (12) — and when it does
+give up it logs `llm_model_unresolved` naming the fallback dialect, because a fallback that is silent
+is the whole bug. `resetModelResolution()` clears the id whenever the **provider** changes, so the old
+provider's dialect cannot survive a `/model` switch. `modelResolution()` exposes the state, and the
+`/debug` manifest carries **`dialectSource`** — `matched the served model` / `chosen by the operator` /
+`FALLBACK — model never resolved` — so a manifest can never again state "gemma" without saying why.
+
 ### The `native` dialect — for APIs that carry the schema themselves
 
 `DIALECTS` held only qwen and gemma, gemma being the fallback, so **an OpenAI model resolved to the
@@ -504,6 +525,42 @@ three toggles are fully independent — see "Off by default: toggle + one-shot f
 | **Tool guard** | every tool call, always (not gated — this one has no toggle) | `tool-guard.ts` |
 | **Presenter pass** | the turn changed files **and** the final message reads like a completion report | `presenter/` |
 | **QA gate** | the turn changed files **and** the final message reads like a completion report | `qa/` |
+
+Two further checks sit on the answer itself. They are **unconditional** — no toggle, no model call —
+because each catches a way the loop mistakes a non-answer for an answer, and both cost a regex:
+
+| Check | Fires when | Module |
+|---|---|---|
+| **Deferral** | the final answer names what to LOOK FOR and carries no file, line or code | `deferral.ts` |
+| **Edit truth** | the final answer reports a change **and nothing was written this turn** | `edit-truth.ts` |
+
+### Edit truth — a reported change that does not exist
+
+The mirror of the deferral check, and the more dangerous of the two: a deferral is visibly unhelpful,
+while *"Fixed by reordering the operations in Dispose()"* reads exactly like a result and gets acted on.
+
+Measured (1.0.320, a real `/debug` bundle): 23 tools, three `str_replace` calls that all failed,
+nothing written, and a final answer naming a file the model had never attempted to edit. The text it
+reported was a paraphrase of an **indulge corpus chunk** injected into an earlier tool result — with
+the window exhausted and its live hypothesis dead, the model answered from the loudest thing in
+context rather than from the code.
+
+It is deliberately NOT in the QA gate, which is the natural home and would never have run: QA is
+session-off by default, and its own trigger declines with *"nothing changed this turn"* — precisely
+the condition that defines this failure.
+
+- **Zero files changed**, by `qaChangedFiles()` — tool-tracked writes ∪ the git dirty delta. The git
+  half is load-bearing: an edit made through `bash` is real and must exempt the turn.
+- **Completed aspect only.** "Fixed by…", "I updated…" fire; "the fix is to change X" does not.
+  Proposing a change is a legitimate answer.
+- **A tool must have run**, so a conversational turn is never accused of misreporting its own work.
+- **One nudge**, then the answer stands — a guard that can loop is worse than what it corrects.
+
+A related fix sits at the tool call itself: a failed `write_file`/`str_replace` no longer marks its
+path as a file this turn changed (it used to, so a turn whose every edit bounced still reported one
+changed file), and a **second consecutive miss on the same path** appends a re-read instruction to the
+tool result — editing text you have not read is the diagnosis, and a third guess only buys the same
+lesson a round later.
 
 ### Off by default: toggle + one-shot force
 
@@ -2607,6 +2664,9 @@ src/
 │                       arduino-{db,components-data,explain,diagram,toolchain}.ts
 │                       (toolchain.ts is the one place that knows arduino-cli and PWM pin maps)
 ├── tool-guard.ts       per-turn repeat/deny/poll policy: warn → BLOCK → say so in the system prompt
+├── deferral.ts         "the fix is to locate X" is not an answer — one nudge, no LLM
+├── edit-truth.ts       per-turn edit ledger: a REPORTED change with nothing written, and repeated
+│                       misses on one file. Unconditional (QA is opt-in and declines here)
 ├── activity.ts         the current named phase (PLAN / QA n/m) → thinking line + status-bar chip;
 │                       read by wait-narrator so a gate is never repainted as plain "thinking"
 ├── executors/          plan / QA / present, specialised PER PROJECT TYPE:

@@ -621,12 +621,15 @@ onInput(async (text: string) => {
           const { writeDebugBundle, defaultBundleDir } = await import('./debug-bundle.js');
           const { contextTokens } = await import('./indulge/budget.js');
           const { llmProviderName } = await import('./llm/select.js');
-          const { activeAdapter } = await import('./llm/manager.js');
+          const { activeAdapter, modelResolution } = await import('./llm/manager.js');
           const r = writeDebugBundle(dest || defaultBundleDir(), {
             version: getVersion(),
             provider: llmProviderName(),
             model: activeModelId() || 'unknown',
             dialect: activeAdapter().id,
+            dialectSource: activeAdapter().forced ? 'chosen by the operator'
+              : modelResolution().resolved ? 'matched the served model'
+                : 'FALLBACK — model never resolved',
             contextTokens: contextTokens(),
             cwd: process.cwd(),
             sessionId: (await import('./session-store.js')).getSessionId(),
@@ -1090,6 +1093,9 @@ async function main(): Promise<void> {
     const dest = process.argv[3] && !process.argv[3].startsWith('-') ? process.argv[3] : defaultBundleDir();
     const r = writeDebugBundle(dest, {
       version: getVersion(), provider: 'unresolved', model: 'unresolved', dialect: 'unresolved',
+      // This process never talked to a model, so nothing was matched or fallen back to — it is a
+      // separate `ayin debug` invocation reading the session the TUI left on disk.
+      dialectSource: 'FALLBACK — model never resolved',
       contextTokens: contextTokens(), cwd: process.cwd(), sessionId: null,
     });
     process.stdout.write(`${r.latest}\n${r.dir}\n${r.files.join(', ')} · ${Math.round(r.bytes / 1024)} KB\n`);

@@ -1,0 +1,16 @@
+You reported a change that does not exist. Nothing was written this turn — the working tree is unchanged.
+
+{{ATTEMPTS}}
+
+An `old_str` you did not just read is a guess, and three guesses at one file is the signal to go back
+and look. Do one of these now:
+
+- APPLY IT — read the exact lines with read_file (use offset; the reply says how to continue), copy
+  old_str from what came back, then edit. Confirm the tool returned no error.
+- OR CALL IT A PROPOSAL — give the file, the line, and the change as untested, and say you did not
+  apply it.
+
+A corpus note is not the code. Anything you took from an earlier pass, verify against the file before
+you report it.
+
+NEVER report an edit you did not make.

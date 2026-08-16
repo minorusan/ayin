@@ -40,7 +40,7 @@ import { openAiKey, openAiModel } from './llm/providers/openai.js';
 import { noKeyMessage } from './tools/credentials/openai.js';
 import { setRequestAuthority } from './connection.js';
 import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
-import { refreshActiveModel, activeModelId, setAdapter, adapterNames, activeAdapter } from './llm/manager.js';
+import { refreshActiveModel, activeModelId, resetModelResolution, setAdapter, adapterNames, activeAdapter } from './llm/manager.js';
 import { getConfig, getConfigString } from './prompts.js';
 import { log } from './log.js';
 
@@ -393,6 +393,7 @@ async function handleProviderChoice(want: string): Promise<boolean> {
     // are all different processes. The operator picks a provider once; every later invocation has to
     // honour that without being told again on the command line.
     setConfigValue('llmProvider', 'openai');
+    resetModelResolution(); // a new provider serves a different model — never inherit the old id
     await refreshActiveModel();
     addMessage('system', `Now on OpenAI (${status.model || openAiModel()}) — billed per token, for this and every later run. /model local to go back.`);
     return true;
@@ -422,6 +423,7 @@ async function handleProviderChoice(want: string): Promise<boolean> {
     // neither remembers, because "go back to local" would silently last one process.
     setConfigValue('llmProvider', '');
     resetProviderResolution(); // config may have changed; re-decide instead of reusing the boot answer
+    resetModelResolution(); // …and the model id with it, or the old provider's dialect survives the switch
     const after = (await llmProvider()).name;
     await refreshActiveModel();
     if (after === 'openai') {

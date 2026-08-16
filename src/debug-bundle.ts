@@ -70,6 +70,15 @@ export interface BundleFacts {
   provider: string;
   model: string;
   dialect: string;
+  /**
+   * WHY that dialect — the field whose absence cost a whole diagnosis.
+   *
+   * A manifest reading `"model": "unknown", "dialect": "gemma"` states two facts and hides the one
+   * that matters: whether gemma was MATCHED or merely fallen back to. Those are opposite situations —
+   * one is a gemma endpoint working correctly, the other is a qwen model being handed gemma's tool
+   * syntax on every round — and they print identically.
+   */
+  dialectSource: 'matched the served model' | 'chosen by the operator' | 'FALLBACK — model never resolved';
   contextTokens: number;
   cwd: string;
   sessionId: string | null;
@@ -146,7 +155,7 @@ export function writeDebugBundle(dir: string, facts: BundleFacts): BundleResult 
     ``,
     `| file | what it is |`,
     `|---|---|`,
-    `| manifest.json | version, provider, model, dialect, context size, platform |`,
+    `| manifest.json | version, provider, model, dialect (**and why that dialect**), context size, platform |`,
     `| timings.json | this turn's phases, and every [LONG OPERATION] this process saw |`,
     `| session.jsonl | prompts, tool calls and answers, newest last (tailed) |`,
     `| raw-replies.md | the model's text BEFORE parsing, where something notable happened to it |`,

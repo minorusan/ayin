@@ -2168,5 +2168,102 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
     'the guard is gated on `declared`, so the agent loop — which is genuinely calling tools — never sees it');
 }
 
+// ── edit truth: a reported change that was never written ──────────────────────
+//
+// Measured on a real session (ayin 1.0.320, bundle `1bd347dc`): 23 tools, three `str_replace` calls
+// that all failed, nothing written, and a final answer opening "Fixed by reordering the operations in
+// Dispose()" — naming a file it had never attempted to edit. Nothing caught it. The QA gate is
+// session-off by default AND declines on "nothing changed this turn", which is precisely this case,
+// so the guard had to be unconditional and free. Being pure, it is testable here rather than needing
+// a model, a turn and a repo — which is the whole reason it lives in its own module.
+console.log('\nedit truth');
+{
+  const e = await import(`file://${join(DIST, 'edit-truth.js')}`);
+
+  // THE CONTRACT THIS READS. Success is "the tool did not return an error", and every edit tool
+  // reports failure with a leading `Error:`. If a tool ever stops doing that, a failed edit counts as
+  // a success here and the guard goes quiet — so the prefix is pinned against the real sources.
+  for (const t of ['str_replace', 'write_file']) {
+    const src = readFileSync(join(REPO, `src/tools/defs/${t}.ts`), 'utf-8');
+    const returns = src.match(/return\s+[`'"]Error:/g) ?? [];
+    ok(returns.length > 0, `${t} still reports failure with a leading \`Error:\``, `${returns.length} site(s)`);
+  }
+
+  e.beginEditTurn();
+  ok(e.noteEditAttempt('str_replace', '/a.cs', 'Error: old_str not found in /a.cs.') === false,
+    'an Error: result is a failed attempt');
+  ok(e.noteEditAttempt('write_file', '/b.cs', 'wrote 12 lines') === true, 'anything else is a success');
+
+  // The exact shape of the measured failure: three misses on one file, nothing written, a claim.
+  e.beginEditTurn();
+  e.noteEditAttempt('str_replace', '/Brain.cs', 'Error: old_str not found in /Brain.cs.');
+  e.noteEditAttempt('str_replace', '/Brain.cs', 'Error: old_str and new_str are identical — nothing to change.');
+  e.noteEditAttempt('str_replace', '/Brain.cs', 'Error: old_str not found in /Brain.cs.');
+  ok(e.consecutiveMissesOn('/Brain.cs') === 3, 'consecutive misses on ONE file are counted');
+  ok(e.claimsAnEditThatDoesNotExist('Fixed by reordering the operations in Dispose().', 0, 23) === true,
+    'the measured answer is caught');
+  ok(/old_str not found/.test(e.attemptsSummary()),
+    'and the model gets its own error strings back, not a count it can argue with');
+
+  // A SUCCESS ANYWHERE EXEMPTS THE TURN. A turn that really edited something is reporting work.
+  e.beginEditTurn();
+  e.noteEditAttempt('str_replace', '/a.cs', 'Error: old_str not found in /a.cs.');
+  e.noteEditAttempt('str_replace', '/a.cs', 'replaced 1 occurrence');
+  ok(e.claimsAnEditThatDoesNotExist('Fixed by reordering the operations.', 0, 5) === false,
+    'one landed edit exempts the turn');
+  ok(e.consecutiveMissesOn('/a.cs') === 0, 'and a success resets the miss streak');
+
+  // THE FALSE POSITIVES THAT WOULD MAKE IT WORSE THAN NOTHING. `deferral.ts` earned this discipline:
+  // a guard that nags a correct answer trains the operator to ignore the one that matters.
+  e.beginEditTurn();
+  ok(e.claimsCompletedEdit('The fix is to change GetTimeBonus to use the base score.') === false,
+    'PROPOSING a change is not claiming one — present tense never fires');
+  ok(e.claimsCompletedEdit('You should update the multiplier before the bonus is computed.') === false,
+    'nor is recommending one');
+  ok(e.claimsCompletedEdit('I updated GetTimeBonus to read the unmultiplied score.') === true,
+    'completed aspect does fire');
+  ok(e.claimsAnEditThatDoesNotExist('I updated the file.', 2, 9) === false,
+    'files changed → never fires, whatever the wording');
+  ok(e.claimsAnEditThatDoesNotExist('That bug was fixed by an earlier commit.', 0, 0) === false,
+    'a turn that ran no tools is not reporting on its own work');
+
+  // The wiring, which no unit can see: the ledger must be fed only where edits happen, the QA gate
+  // must stop counting a FAILED edit as a changed file, and the guard must be able to fire only once.
+  const agentSrc = readFileSync(join(REPO, 'src/agent.ts'), 'utf-8');
+  ok(/if \(noteEditAttempt\(name, params\.path, result\)\) qaNoteTouched\(params\.path\);/.test(agentSrc),
+    'a file is marked CHANGED only when its edit actually landed');
+  ok(/unwrittenClaimNudges < 1/.test(agentSrc),
+    'ONE nudge — an answer that is genuinely a proposal must be able to stand');
+  ok(existsSync(join(REPO, 'prompts/ayin/unwrittenClaim.txt')),
+    'the nudge is a prompt FILE, never a string in source');
+}
+
+// ── the served model is retried until it is known ─────────────────────────────
+//
+// The same bundle read `"model": "unknown", "dialect": "gemma"` against a qwen3-coder endpoint. The
+// dialect is HOW TOOL CALLS ARE FORMATTED, and it was the gemma DEFAULT purely because one status
+// probe missed: the latch was set before the attempt, so resolution happened at most once per process.
+console.log('\nmodel resolution');
+{
+  const mgrSrc = readFileSync(join(REPO, 'src/llm/manager.ts'), 'utf-8');
+  ok(!/refreshKicked/.test(mgrSrc), 'the one-shot latch is gone');
+  ok(/if \(cachedModelId\) return;/.test(mgrSrc),
+    'resolution stops when it SUCCEEDS, not when it is first attempted');
+  ok(/modelAttempts\+\+;\s*\n\s*modelLastAttemptAt = Date\.now\(\);/.test(mgrSrc),
+    'the attempt is counted around the call, not on entry');
+  ok(/llm_model_unresolved/.test(mgrSrc),
+    'and giving up SAYS SO — a fallback dialect must never be silent');
+  ok(/MODEL_MAX_ATTEMPTS/.test(mgrSrc), 'bounded: an endpoint that never reports a model is a real configuration');
+
+  const picker = readFileSync(join(REPO, 'src/model-picker.ts'), 'utf-8');
+  ok((picker.match(/resetModelResolution\(\)/g) ?? []).length >= 2,
+    'switching PROVIDER forgets the model id, so the old provider\'s dialect cannot survive the switch');
+
+  // The manifest must say WHY, or `"dialect": "gemma"` is again two facts hiding the one that matters.
+  const appSrc = readFileSync(join(REPO, 'src/app.ts'), 'utf-8');
+  ok(/FALLBACK — model never resolved/.test(appSrc),
+    'the debug manifest distinguishes a MATCHED dialect from a fallen-back one');
+}
+
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);
