@@ -162,6 +162,13 @@ export function writeDebugBundle(dir: string, facts: BundleFacts): BundleResult 
  * deliberately not. Naming a path is still better — this is the fallback, not the intent.
  */
 export function defaultBundleDir(): string {
+  // `/tmp` on POSIX, NOT `os.tmpdir()`.
+  //
+  // On macOS `os.tmpdir()` is a per-user `/var/folders/xx/…/T/` path, which is exactly the kind of
+  // place a helper process cannot reach — a beacon ships with `/private/tmp` in its read roots and
+  // nothing under `/var/folders`. The default therefore defeated the one thing this bundle is for:
+  // being read by something else. `/tmp` is `/private/tmp` on macOS and readable on Linux.
+  if (process.platform !== 'win32' && existsSync('/tmp')) return join('/tmp', 'ayin-debug');
   return join(tmpdir(), 'ayin-debug');
 }
 

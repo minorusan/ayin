@@ -233,6 +233,10 @@ ok(/URGENT: Round 13\/15/.test(capped), 'an explicitly capped run still warns as
     'environment variable NAMES are recorded, never their values — which of them is a key depends on the shell');
   ok(!JSON.stringify(manifest).includes('sk-secret'), 'and nothing key-shaped leaks through the manifest either');
 
+  ok(!/var\/folders/.test(DB.defaultBundleDir()),
+    'the default bundle location is reachable by a helper — os.tmpdir() on macOS is a per-user /var/folders path a beacon cannot read',
+    DB.defaultBundleDir());
+
   rmSync(dest, { recursive: true, force: true });
 }
 
