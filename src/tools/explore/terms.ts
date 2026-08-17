@@ -95,8 +95,14 @@ export function extractTerms(question: string): Terms {
 
   // An identifier the user typed directly (already camel/Pascal/snake) is the strongest signal there
   // is — they named the thing. Keep it exactly as written.
+  // A capitalised ENGLISH word is not an identifier. `/^[A-Z]/` alone accepted "Find", "List" and
+  // "FILES" straight out of a prose sentence, and because `typed` ranks first they filled every term
+  // slot — measured on a real corpus build, where the seed search for a domain went looking for
+  // `Find`/`List`/`FILES` across 3,546 files, took 12s instead of 0.5s, and returned two junk seeds
+  // that the entire corpus was then built from. Require a shape prose does not have: an internal
+  // case change, an underscore, or a digit — and never a word the stoplist already knows.
   const typed = (bare.match(CASE_ID) ?? []).filter(
-    (w) => /[A-Z]/.test(w.slice(1)) || w.includes('_') || /^[A-Z]/.test(w),
+    (w) => (/[a-z][A-Z]/.test(w) || w.includes('_') || /\d/.test(w)) && !STOP.has(w.toLowerCase()),
   );
 
   const words = (bare.toLowerCase().match(/\b[a-z][a-z0-9]{1,}\b/g) ?? [])

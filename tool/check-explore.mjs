@@ -110,6 +110,19 @@ console.log('\nterm extraction (no model — this is a casing problem, not a rea
   // A namespaced key is the highest-signal term there is, and the word splitter used to destroy it:
   // "where is chat:send handled" found NOTHING because the key became two words and then an
   // invented identifier.
+  // PROSE IS NOT CODE. A capitalised English word used to count as a typed identifier, so a sentence
+  // like "Find the source files … List every file … FILES:" searched for `Find`, `List` and `FILES`.
+  // Measured on a real corpus build: 12s instead of 0.5s across 3,546 files, two junk seeds, and an
+  // entire corpus built from them — paid for with OpenAI credits.
+  const prose = extractTerms('Find the source files that implement bingo gameplay. List every file under FILES:');
+  ok(!prose.identifiers.includes('Find'), 'a capitalised English verb is not an identifier');
+  ok(!prose.identifiers.includes('List'), '…nor is List');
+  ok(!prose.identifiers.includes('FILES'), '…nor is an all-caps prose word');
+  const real = extractTerms('where is GameManager and _scoreCount and MAX_SIZE');
+  ok(real.identifiers.includes('GameManager'), 'PascalCase with an internal case change IS an identifier');
+  ok(real.identifiers.includes('_scoreCount'), '…and the _private convention');
+  ok(real.identifiers.includes('MAX_SIZE'), '…and SCREAMING_SNAKE');
+
   const k = extractTerms('where is the chat:send socket event handled');
   ok(k.literals.includes('chat:send'), 'an unquoted namespaced key survives as a literal', k.literals.join(','));
   ok(!k.identifiers.includes('chatSendSocketEventHandled'),
