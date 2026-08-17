@@ -24,13 +24,15 @@
  * and is preserved verbatim.
  */
 
-import { llmBaseUrl } from '../../connection.js';
+import { llmBaseUrl, llmChat as transportChat, type NativeToolCall } from '../../connection.js';
 import { log } from '../../log.js';
 import type {
   AcquireOptions, AcquireResult, AuthorityInfo, LlmEvent, LlmProvider, LlmTelemetry, ModelCatalog,
   ProviderStatus,
+  GenerateOptions, GenerateResult, LlmMessage,
 } from '../provider.js';
 import { httpGenerate, httpStatus } from './direct.js';
+import { providerConfig } from './runtime.js';
 
 /** The one door: POST {endpoint}/resource/<name> {op, params}. Never throws; null on any failure. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -283,12 +285,67 @@ function events(onEvent: (e: LlmEvent) => void): () => void {
   return () => { stopped = true; onEvent({ type: 'stream.lost', payload: {} }); };
 }
 
+/**
+ * Does this install declare tools to the RUNTIME instead of in the prompt?
+ *
+ * OFF BY DEFAULT, and that is deliberate. Prompt-declared tools work today for every model whose
+ * Ollama parser leaves the markup alone (`qwen3-coder`, `glimmer`), and flipping the whole install to
+ * native tools is a behaviour change to a working system, not a bug fix.
+ *
+ * It exists because some parsers do NOT leave it alone. `qwen3.5` — which serves qwen3.8 — has no
+ * `len(tools) == 0` guard, so with no tools declared it still consumes the opening `<function=NAME>`
+ * tag, emits no call, and returns orphaned `<parameter=…>` blocks with the tool name already gone.
+ * Nothing downstream can recover a name that was deleted upstream. Declaring the schemas makes
+ * Ollama's parser do the job properly and hand back structured calls.
+ *
+ * `/set resource-native-tools true`, or AYIN_RESOURCE_NATIVE_TOOLS=1.
+ */
+function nativeToolsEnabled(): boolean {
+  if (process.env.AYIN_RESOURCE_NATIVE_TOOLS === '1') return true;
+  return (providerConfig('resourceNativeTools') ?? '').trim().toLowerCase() === 'true';
+}
+
+/**
+ * Generate through the gateway, declaring tool schemas when this install asks for it.
+ *
+ * The returned calls are rendered BACK into the canonical text form before they leave here, exactly
+ * as `providers/openai.ts` does: everything downstream — the dialect parser, the agent loop, the tool
+ * guard — reads text, and giving one provider a second structured path would be a second agent loop
+ * in all but name.
+ */
+async function resourceGenerate(messages: LlmMessage[], opts?: GenerateOptions): Promise<GenerateResult> {
+  if (!opts?.tools?.length) return httpGenerate(messages, opts);
+  let calls: NativeToolCall[] = [];
+  const content = await transportChat(messages, {
+    ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+    ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
+    tools: opts.tools,
+    onToolCalls: (c) => { calls = c; },
+  });
+  const rendered = renderNativeCalls(calls);
+  if (!rendered) return { content };
+  return { content: content ? `${content}\n${rendered}` : rendered };
+}
+
+/** `{name, arguments}` → the XML text every dialect parser already reads. */
+function renderNativeCalls(calls: Array<{ name?: string; arguments?: Record<string, unknown> }> | undefined): string {
+  if (!calls?.length) return '';
+  return calls.map((c) => {
+    const params = Object.entries(c.arguments ?? {})
+      .map(([k, v]) => `<parameter=${k}>\n${typeof v === 'string' ? v : JSON.stringify(v)}\n</parameter>`)
+      .join('\n');
+    return `<function=${c.name ?? 'unknown'}>\n${params}\n</function>`;
+  }).join('\n');
+}
+
 export function createResourceProvider(): LlmProvider {
+  const native = nativeToolsEnabled();
   return {
     name: 'resource',
     // Generation and liveness are the same tiny HTTP contract — the resource layer arbitrates who
     // may generate and on which model, it does not replace the endpoint.
-    generate: httpGenerate,
+    generate: native ? resourceGenerate : httpGenerate,
+    ...(native ? { tools: 'native' as const } : {}),
     status: resourceStatus,
     models,
     setModel,

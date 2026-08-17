@@ -128,9 +128,34 @@ export async function disconnect(): Promise<void> {
  * Passes thinking=true when --thinking flag is active. Retries once on transient errors.
  * No endpoint means an error naming the fix — never a silent hosted-model call.
  */
+/**
+ * A tool schema on the wire, and a call coming back.
+ *
+ * Declared structurally here rather than imported from `llm/provider.ts`: connection.ts is the
+ * TRANSPORT and sits below the provider abstraction — importing upward would make a cycle out of a
+ * shape that is three fields wide.
+ */
+export interface NativeToolSchema {
+  name: string;
+  description: string;
+  parameters: Array<{ name: string; type: string; description: string; required?: boolean }>;
+}
+export interface NativeToolCall {
+  name?: string;
+  arguments?: Record<string, unknown>;
+}
+
 export async function llmChat(
   messages: Array<{ role: string; content: string }>,
-  opts: { temperature?: number; thinking?: boolean } = {},
+  opts: {
+    temperature?: number;
+    thinking?: boolean;
+    /** Schemas to declare to the RUNTIME. Sent only when a provider asks; endpoints that predate the
+     *  field ignore it, which is why this is safe to send at all. */
+    tools?: NativeToolSchema[];
+    /** Called with the endpoint's own parsed calls, when it returned any. */
+    onToolCalls?: (calls: NativeToolCall[]) => void;
+  } = {},
 ): Promise<string> {
   const { THINKING_MODE } = await import('./ui.js');
   const llmUrl = await getLlmUrl();
@@ -175,6 +200,7 @@ export async function llmChat(
       if (lockAuthority) { body.authority = lockAuthority; body.priority = 'high'; }
       if (opts.thinking ?? THINKING_MODE) body.thinking = true;
       if (images.length) body.images = images;
+      if (opts.tools?.length) body.tools = opts.tools;
 
       const reqStart = Date.now();
       const reqBytes = JSON.stringify(body).length;
@@ -197,14 +223,18 @@ export async function llmChat(
       const bodyText = await res.text();
       fileLog('INFO', 'llm_body_received', { bodyBytes: String(bodyText.length), elapsedMs: String(Date.now() - reqStart) });
 
-      let data: { content?: string; reasoning?: string };
+      let data: { content?: string; reasoning?: string; toolCalls?: NativeToolCall[] };
       try {
-        data = JSON.parse(bodyText) as { content?: string; reasoning?: string };
+        data = JSON.parse(bodyText) as { content?: string; reasoning?: string; toolCalls?: NativeToolCall[] };
       } catch {
         const preview = bodyText.substring(0, 500);
         fileLog('ERROR', 'llm_body_parse_failed', { preview, bodyBytes: String(bodyText.length) });
         throw new Error(`endpoint body parse failed (${bodyText.length}B): ${preview}`);
       }
+      // Structured calls, when the endpoint parsed them for us. Handed to the caller rather than
+      // returned, so this function's contract (messages → text) is unchanged for every existing
+      // caller — only the provider that ASKED for tools looks at them.
+      if (data.toolCalls?.length) opts.onToolCalls?.(data.toolCalls);
       let text = data.content || '';
       text = text.replace(/^[\s\S]*<\/think>\s*/g, '').trim();
       fileLog('INFO', 'llm_done', { textBytes: String(text.length), elapsedMs: String(Date.now() - reqStart) });

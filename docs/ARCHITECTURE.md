@@ -390,6 +390,30 @@ provider's dialect cannot survive a `/model` switch. `modelResolution()` exposes
 `/debug` manifest carries **`dialectSource`** — `matched the served model` / `chosen by the operator` /
 `FALLBACK — model never resolved` — so a manifest can never again state "gemma" without saying why.
 
+#### Native tools over the gateway (`resourceNativeTools`, OFF by default)
+
+Ollama attaches a **parser** to each model, and they do not agree about what to do when the caller
+declares no tools. `glimmer.go` and `qwen3-coder` bail out of tool extraction on `len(p.tools) == 0`,
+leaving the markup in the text — which is what makes prompt-declared tools work. **`qwen3.5` (which
+serves `qwen3.8`) has no such guard**: it consumes the opening `<function=NAME>` tag as it streams,
+emits no call because it has nothing to match against, and returns orphaned `<parameter=…>` blocks
+with the tool NAME already destroyed. Nothing downstream can recover a name deleted upstream, so no
+dialect can fix it — measured as an agent that ran zero tools and then told the operator its "tool
+calls are being discarded by the harness", which was true.
+
+The cure is to stop pretending there are no tools. With the flag on, the resource provider declares
+`tools: 'native'`, sends the schemas as `body.tools`, and the gateway (`POST /api/generate`) routes
+them through `chatToolStep` so Ollama's own parser does the work and returns structured calls. Those
+are rendered **back into the canonical `<function=…>` text** before leaving the provider — exactly as
+`providers/openai.ts` does — because everything downstream reads text, and a second structured path
+would be a second agent loop in all but name.
+
+**Off by default on purpose.** Prompt-declared tools work today for every model whose parser has the
+guard, and switching an install wholesale is a behaviour change rather than a bug fix. Turn it on with
+`/set resource-native-tools true` or `AYIN_RESOURCE_NATIVE_TOOLS=1` — required for `qwen3.8`, optional
+for the rest. Both halves are backwards compatible: a client that sends no `tools` gets `{content}`
+byte for byte as before, and a gateway that ignores the field changes nothing.
+
 #### The context window is REPORTED, never invented
 
 Three numbers described one window and none of them agreed. The session meter said **65536** — a
