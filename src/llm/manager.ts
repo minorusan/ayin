@@ -288,6 +288,17 @@ export function toolCallInstructions(): string {
  * provider re-asserts its own mode each time.
  */
 function reconcileToolMode(): void {
+  // UPGRADE, when prompt mode cannot work at all. A dialect owns only half the contract: the server
+  // runs its own parser regardless, and when that parser eats the syntax ayin asked for, there is
+  // nothing left to parse. Leaving such a model in prompt mode makes it emit tool calls into a void
+  // and look like it ignores instructions — which is how a mis-driven model gets called stupid.
+  if (cachedToolMode !== 'native' && cachedDialect.requiresNativeTools) {
+    cachedToolMode = 'native';
+    log('INFO', 'tool_declaration_mode', {
+      provider: 'resource', mode: 'native', reason: `${cachedDialect.id} requires native tools`,
+    });
+    return;
+  }
   if (cachedToolMode !== 'native' || !cachedDialect.rejectsNativeTools) return;
   cachedToolMode = 'prompt';
   log('INFO', 'tool_declaration_mode', {

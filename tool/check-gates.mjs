@@ -2163,6 +2163,27 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
   ok(/if \(retry\.trim\(\)\) reply = retry;/.test(guard),
     'and an EMPTY retry keeps the original — replacing a bad reply with nothing is not an improvement');
 
+  // ── the window is bounded by TOKENS, not by a message count ────────────────
+  //
+  // A fixed count is the wrong unit in both directions: 20 messages is a third of a 65k window and an
+  // overflow of a 32k one, and the operator swaps presets under a running session. Being wrong upward
+  // is not a worse answer — it is a failed call, or a silently truncated prompt whose missing part is
+  // the oldest and most load-bearing history.
+  const winSrc = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
+  ok(/function trimToContext\(/.test(winSrc),
+    'the assembled prompt is trimmed to the context of the model actually loaded');
+  ok(/activeContextTokens\(\) \|\| CONSERVATIVE_CONTEXT/.test(winSrc),
+    'the budget comes from the LIVE preset, with a conservative floor when the model has not resolved');
+  ok(/const head = messages\[0\];/.test(winSrc) && /return \[head, \.\.\.rest\]/.test(winSrc),
+    'the system message is never evicted — it carries the tools, and it must stay byte-identical for the KV cache');
+  {
+    const push = /function pushToWindow[\s\S]{0,600}?\n}/.exec(winSrc)?.[0] ?? '';
+    ok(/WINDOW_HARD_MAX/.test(push),
+      'pushToWindow bounds MEMORY only; what fits the model is decided at build time, not at push time');
+  }
+  ok(/const CHARS_PER_TOKEN = 3;/.test(winSrc),
+    'the char-per-token estimate is pessimistic — code tokenizes denser than prose, and guessing low overruns');
+
   // The agent loop must be untouched: there, a tool call is the point.
   ok(/const declared = toolMode\(\) === 'native' && opts\.declareTools !== false;/.test(mgrSrc),
     'the guard is gated on `declared`, so the agent loop — which is genuinely calling tools — never sees it');

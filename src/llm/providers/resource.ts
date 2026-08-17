@@ -353,7 +353,10 @@ export function createResourceProvider(): LlmProvider {
     name: 'resource',
     // Generation and liveness are the same tiny HTTP contract — the resource layer arbitrates who
     // may generate and on which model, it does not replace the endpoint.
-    generate: native ? resourceGenerate : httpGenerate,
+    // ALWAYS the resource generator. It falls back to `httpGenerate` itself when the caller passes no
+    // tools, so this is identical in prompt mode — and it removes the dead end where `toolMode()`
+    // upgraded to native for a model that needs it while `generate` physically could not send schemas.
+    generate: resourceGenerate,
     ...(native ? { tools: 'native' as const } : {}),
     status: resourceStatus,
     models,

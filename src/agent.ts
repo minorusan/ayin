@@ -18,7 +18,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { cancelActiveThinking } from './connection.js';
-import { llmChat, parseToolCalls, renderToolCall, renderToolResult, activeModelId } from './llm/manager.js';
+import { llmChat, parseToolCalls, renderToolCall, renderToolResult, activeModelId, activeContextTokens } from './llm/manager.js';
 import { llmCall } from './llm.js';
 import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution } from './tools.js';
@@ -128,7 +128,38 @@ function detectProjectExpertise(cwd: string): string {
   return '';
 }
 
-function getWindowSize(): number { return getConfig('windowSize', 12); }
+/**
+ * An explicit message cap, or 0 for AUTO — fill whatever context the live model actually has.
+ *
+ * A fixed message count is the wrong unit. Twenty messages is a third of a 65k window and an overflow
+ * of a 32k one, and the preset changes under a running session, so any constant is wrong for some
+ * model the operator is about to load. `buildMessages` trims by TOKENS instead; this stays only as a
+ * manual override for someone who wants a short leash.
+ */
+function getWindowSize(): number { return getConfig('windowSize', 0); }
+
+/** Memory backstop only — not a context bound. A session that ran for days must not grow forever. */
+const WINDOW_HARD_MAX = 600;
+
+/**
+ * Characters per token, deliberately PESSIMISTIC.
+ *
+ * The usual rule of thumb is ~4 for English prose, but this window is mostly source code and grep
+ * output, which tokenize far denser. Guessing high costs a little unused context; guessing low
+ * overruns the model, and an overrun is not a degraded answer — it is a failed call or a silently
+ * truncated prompt whose missing part is the oldest, most load-bearing history.
+ */
+const CHARS_PER_TOKEN = 3;
+
+/** Room kept for the reply and for anything the caller appends after the window. */
+const RESPONSE_RESERVE_TOKENS = 2_000;
+
+/** When the model has not resolved yet, assume the smallest window we realistically serve. */
+const CONSERVATIVE_CONTEXT = 16_384;
+
+function approxTokens(text: string): number {
+  return Math.ceil(text.length / CHARS_PER_TOKEN);
+}
 /**
  * How many rounds the loop may run. **Unlimited by default** — it works until it is done or the
  * operator cancels.
@@ -378,8 +409,26 @@ async function callJudge(task: string, facts: string[]): Promise<JudgeVerdict> {
  * head is kept for context, the tail because that is where the answer usually is, and the seam says how
  * much went missing and how to get it.
  */
-const WINDOW_RESULT_CHARS = 16_000;
-export function clipForWindow(text: string, limit = WINDOW_RESULT_CHARS): string {
+/**
+ * How much of ONE tool result the window keeps.
+ *
+ * MEASURED, not chosen by feel. The four verbatim tail messages dominate the prompt, so this number
+ * decides how much HISTORY fits beside them. At 16k, a 32k-context model held 9 messages of history;
+ * at 8k it holds 23. Halving the clip more than doubles the history on every preset:
+ *
+ *     clip    muse@32k   gemma@40k   gemma@65k
+ *     16000          9          20          53
+ *      8000         23          33          67
+ *      4000         30          40          74
+ *
+ * The returns flatten below ~8k while the cost — a result too short to carry its own answer — keeps
+ * rising, so this is the knee rather than the minimum. 8k is still ~200 lines of grep output, and the
+ * clip keeps both ends (errors land at the end). Operators who want the old behaviour can raise
+ * `toolResultChars`.
+ */
+const WINDOW_RESULT_CHARS_DEFAULT = 8_000;
+function windowResultChars(): number { return getConfig('toolResultChars', WINDOW_RESULT_CHARS_DEFAULT); }
+export function clipForWindow(text: string, limit = windowResultChars()): string {
   if (text.length <= limit) return text;
   const marker = (n: number): string =>
     `\n\n… [${n.toLocaleString()} characters omitted from the MIDDLE of this result — the end is kept because errors land there. ` +
@@ -392,7 +441,11 @@ export function clipForWindow(text: string, limit = WINDOW_RESULT_CHARS): string
 
 function pushToWindow(role: string, content: string): void {
   conversationWindow.push({ role, content });
-  while (conversationWindow.length > getWindowSize()) {
+  // NO CONTEXT DECISION HERE. Evicting on push threw history away before anyone knew whether it fit —
+  // on a 65k model, two thirds of the window sat unused while the original question was already gone.
+  // What survives is decided at build time, against the model actually loaded. This bound is memory.
+  const cap = getWindowSize() > 0 ? getWindowSize() : WINDOW_HARD_MAX;
+  while (conversationWindow.length > cap) {
     conversationWindow.shift();
   }
 }
@@ -669,7 +722,47 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     }
   }
   if (volatileTurn) messages.push(volatileTurn);
-  return messages;
+  return trimToContext(messages);
+}
+
+/**
+ * Drop the OLDEST history until the prompt fits the model actually loaded.
+ *
+ * This replaces a fixed message count, which was the wrong unit in both directions: twenty messages is
+ * a third of a 65k window and an overflow of a 32k one, and the preset changes under a running session
+ * — the operator swapped gemma@65k for muse@32k mid-work more than once today. A constant chosen for
+ * either is wrong for the other, and being wrong upward is not a worse answer, it is a failed call.
+ *
+ * Two things are never dropped: the SYSTEM message, which carries the tools and the identity and must
+ * stay byte-identical for the KV cache, and the volatile turn at the end, which is this round's actual
+ * instruction. Everything between them is history, newest first in value, so eviction runs from the
+ * front.
+ */
+function trimToContext(messages: Message[]): Message[] {
+  const ctx = activeContextTokens() || CONSERVATIVE_CONTEXT;
+  const budget = ctx - RESPONSE_RESERVE_TOKENS;
+  if (budget <= 0) return messages;
+
+  const total = (ms: Message[]): number => ms.reduce((n, m) => n + approxTokens(m.content), 0);
+  if (total(messages) <= budget) return messages;
+
+  // Index 0 is the system message; the last entry may be the volatile turn. Evict between them.
+  const head = messages[0];
+  const rest = messages.slice(1);
+  let dropped = 0;
+  while (rest.length > 1 && approxTokens(head.content) + total(rest) > budget) {
+    rest.shift();
+    dropped++;
+  }
+  if (dropped) {
+    log('INFO', 'window_trimmed', {
+      dropped: String(dropped),
+      kept: String(rest.length),
+      ctxTokens: String(ctx),
+      estTokens: String(approxTokens(head.content) + total(rest)),
+    });
+  }
+  return [head, ...rest];
 }
 
 function drainQueuedMessages(): number {

@@ -50,4 +50,16 @@ export interface ModelDialect {
    * model correctly does not need it and must not pay this cost.
    */
   readonly rejectsNativeTools?: boolean;
+  /**
+   * True when prompt-declared tools CANNOT work for this model, so schemas must be declared natively.
+   *
+   * The mirror of `rejectsNativeTools`, and it exists because a dialect only owns HALF the contract.
+   * The server runs a parser chosen by the model's own `PARSER` directive, whether or not the client
+   * declared tools. When that parser consumes the very syntax ayin's dialect asks the model to emit,
+   * the text is gone before ayin sees it — no dialect can win that, because there is nothing left to
+   * parse. `qwen3.5` is exactly this: it eats the opening `<function=NAME>` tag and, with no tools
+   * declared, cannot resolve a name, so the call evaporates and the model looks like it ignored its
+   * instructions.
+   */
+  readonly requiresNativeTools?: boolean;
 }

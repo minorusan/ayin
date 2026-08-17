@@ -40,6 +40,14 @@ Several calls may be emitted in one response; each runs in order and its result 
 
 export class QwenDialect extends XmlToolCallDialect {
   readonly id = 'qwen';
-  matches(modelId: string): boolean { return /qwen/i.test(modelId); }
+  /**
+   * Only the qwen3.5-parser models. Proven from the runtime's source: that parser consumes the
+   * opening `<function=NAME>` tag with no `len(tools) == 0` guard, so with tools undeclared the name
+   * is deleted upstream and nothing downstream can recover it. Older qwen parsers do not collide with
+   * this syntax and keep working in prompt mode, so this must not cover the whole family.
+   */
+  get requiresNativeTools(): boolean { return /qwen3\.[58]/i.test(this.servedModel); }
+  private servedModel = '';
+  matches(modelId: string): boolean { this.servedModel = modelId; return /qwen/i.test(modelId); }
   toolCallInstructions(): string { return TOOL_CALL_FORMAT; }
 }
