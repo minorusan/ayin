@@ -59,6 +59,23 @@ console.log('\nthe model pass refuses to be wrong');
   ok(r.roots.includes('Assets/Art'), 'a legitimate pick from the offered list is honoured');
 }
 
+console.log('\nan answer that marks most of the repo is discarded WHOLESALE');
+{
+  // The per-pick guard is necessary and not sufficient. A real classifier said third-party to 54 of
+  // 63 directories — every pick individually small, together the whole repository, including the very
+  // subsystem the build was about. Discovery then indexed ONE file and reported success.
+  const greedy = async (dirs) => dirs.join('\n');   // says yes to everything offered
+  const r = await detectVendorRoots({
+    repoPath: R, corpusDir: mkdtempSync(join(tmpdir(), 'ayin-vendor-g-')), ask: greedy,
+  });
+  ok(!r.roots.includes('Assets/Games/Bingo'),
+    'a wholesale yes does not prune first-party code');
+  ok(r.roots.includes('Assets/Plugins'),
+    '…while the statically KNOWN names still apply — those were never inferred');
+  ok(r.roots.every((x) => !x.startsWith('Assets/Games')),
+    'no part of the greedy answer survives — it is discarded, not sampled');
+}
+
 console.log('\na failed classification degrades, it does not fail the build');
 {
   const boom = async () => { throw new Error('provider down'); };

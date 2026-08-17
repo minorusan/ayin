@@ -96,6 +96,15 @@ const MAX_MENTIONERS = 25;
  */
 const MAX_FANOUT_PER_FILE = 12;
 
+/**
+ * How many files a namespace may hold before `using` it stops being an attributable edge.
+ *
+ * A `using` of a 3-file namespace names almost exactly what the file depends on. A `using` of a
+ * 400-file one names a wing of the building — true, and useless, the namespace equivalent of the
+ * ambient identifiers `MAX_MENTIONERS` already discards.
+ */
+const MAX_NAMESPACE_FILES = 12;
+
 /** Hard ceilings. Every one of them is REPORTED when hit — a silent cap reads as "covered everything". */
 const DEFAULT_MAX_INDEX_FILES = 20000;
 const DEFAULT_MAX_FILES = 400;
@@ -428,7 +437,24 @@ function buildIndex(repoPath: string, cap: number, onStatus?: (n: string) => voi
       if (list) list.push(r); else importedBy.set(t, [r]);
     }
   }
-  onStatus?.(`${[...imports.values()].reduce((n, v) => n + v.length, 0)} import edge(s) resolved`);
+  // ── why this is 0 on a C# repo, and why that is correct ───────────────────────
+  //
+  // `importEdges` understands JS/TS module specifiers and requires a leading `.`, so on a C# repo it
+  // resolves nothing — not a failure to resolve, but a language without the thing being resolved. C#
+  // says `using Some.Namespace`, never `./file`.
+  //
+  // C#'s edges therefore come from the MENTION path below, gated by `reachable()`: a file must both
+  // name a declared type AND be able to see its namespace. That pairing is what makes the edge
+  // attributable.
+  //
+  // TRIED AND REVERTED: promoting `using` of a small namespace to a first-class edge. The edges are
+  // true — a `using` IS a declared dependency — but they are not selective: one `using` links a file
+  // to EVERY file in that namespace. Measured on this repo, 22,639 such edges took "bingo gameplay"
+  // from 80 files to 194 and "trail mini game" from 165 to 1,600, hitting the hard ceiling with depth
+  // 2 incomplete. Breadth without precision is the wrong trade at depth 2: a `using` names a wing of
+  // the building where a mention names a room.
+  const totalEdges = [...imports.values()].reduce((n, v) => n + v.length, 0);
+  onStatus?.(`${totalEdges} import edge(s) resolved${totalEdges === 0 ? ' (C#: none by design — edges come from mentions + namespace visibility)' : ''}`);
   const ambient = [...mentionedBy.entries()].filter(([, who]) => who.size > MAX_MENTIONERS).length;
   if (ambient) onStatus?.(`${ambient} name(s) are mentioned everywhere — ignored as edges`);
   return { declaredIn, mentions, mentionedBy, imports, importedBy, namespace, visible, indexed: files.length, truncated };

@@ -49,6 +49,14 @@ const KNOWN_VENDOR = new Set([
 ]);
 
 /** A candidate directory offered to the classifier. */
+/**
+ * The most of the UNDECIDED set a classifier may call third-party before its answer is discarded.
+ *
+ * Not a tuning knob — a sanity bound. Vendor code arrives in a handful of named imports; a reply that
+ * marks most of a repository is a broken reply, whatever the individual names look like.
+ */
+const VENDOR_SANITY_SHARE = 0.4;
+
 export interface VendorCandidate {
   /** Repo-relative, forward slashes. */
   path: string;
@@ -196,7 +204,24 @@ export async function detectVendorRoots(opts: {
     return !tooBig;
   });
 
-  const roots = [...new Set([...known, ...safePicked])].sort();
+  // AND REFUSE THE WHOLE ANSWER WHEN IT IS OBVIOUSLY NOT AN ANSWER.
+  //
+  // The per-pick guard above is necessary and NOT sufficient: it caught a classifier naming `Assets`,
+  // and then a classifier said "third-party" to 54 of 63 directories — each one individually small,
+  // together the entire repository, including `Assets/BingoGame`, the very subject of the build. The
+  // walk then indexed ONE file and reported success. No real repository is four-fifths vendor code, so
+  // a reply that claims it is has told us about the classifier, not about the repository.
+  const share = safePicked.length / Math.max(1, rest.length);
+  let accepted = safePicked;
+  if (share > VENDOR_SANITY_SHARE) {
+    onStatus?.(
+      `refusing the whole classification — ${safePicked.length}/${rest.length} directories called third-party; `
+      + 'keeping only the names already known',
+    );
+    accepted = [];
+  }
+
+  const roots = [...new Set([...known, ...accepted])].sort();
   saveVendorRoots(corpusDir, roots);
   onStatus?.(`skipping ${roots.length} third-party root(s)${roots.length ? `: ${roots.slice(0, 6).join(', ')}${roots.length > 6 ? ', …' : ''}` : ''}`);
   return { roots, fromCache: false, asked: rest.length };

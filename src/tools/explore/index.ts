@@ -130,7 +130,15 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   const { root, explorer } = resolved;
   const terms = extractTerms(question);
   // Literals the user quoted are searched exactly; derived identifiers come next.
-  const search = [...terms.literals, ...terms.identifiers].slice(0, MAX_TERMS);
+  // WORDS WHEN THERE ARE NO IDENTIFIERS. A stopword between two content words leaves two runs of
+  // length one, and a run of one joins into nothing — so "bingo on speeds" derived NO terms at all
+  // and returned "no identifiers derived" without searching. The words themselves are a perfectly
+  // good search; they were simply never reached, because the empty case returned before the widening
+  // pass that exists for exactly this.
+  const derived = terms.identifiers.length
+    ? terms.identifiers
+    : terms.words.filter((w) => w.length >= 3);
+  const search = [...terms.literals, ...derived].slice(0, MAX_TERMS);
 
   const rootNote = root === process.cwd() ? '' : ` · in ${relative(process.cwd(), root) || root}`;
   toolReport(`explore · ${explorer.id}${rootNote} · ${search.join(', ') || 'no terms'}`);
