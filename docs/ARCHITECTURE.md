@@ -512,6 +512,17 @@ unless **every pipeline segment** independently starts with a read-only command,
 backtick, `>`/`>>`, `<(…)` or `&`. Pipelines still work — `grep -rn x . | head -20` is what
 investigating looks like — and `find -delete`, `find -exec`, `sed -i`, `sort -o` are refused by flag.
 
+**Quoted operators are DATA, and getting that wrong cost more than the hole did.** The first version
+split the raw string, so it split inside quotes too — and
+`grep -rnE "time bonus|bonus.*time" .` became `grep -rnE "time bonus` plus `bonus.*time" .`, whose
+second segment starts with no allowed command. **Every alternation regex was refused**, which is the
+form `grep`'s own tool description tells the model to use. Measured on a real Unity repo: explore lost
+alternation, logged "grep with --include and complex regex was blocked", spent **3m14s of a 4m48s
+turn** (the model itself was 40s) and committed an `ls -la` listing as its finding. Splitting and the
+escape checks are now quote-aware — an operator inside quotes is a pattern being handed to grep, one
+outside is syntax — and `check:explore` pins both directions, so a future tightening cannot silently
+take search away again.
+
 The allow-list is deliberately short: `awk` has `system()`, `sed` has `w`, `sort` has `-o`, `uniq`
 takes an output file. A command earns a place by being unable to change anything, not by being handy.
 **Confinement rather than consent** is the deliberate choice — a gate that prompts twelve times per
