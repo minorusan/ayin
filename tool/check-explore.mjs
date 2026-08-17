@@ -74,7 +74,27 @@ writeFileSync(join(T, 'tsconfig.json'), '{}\n');
 writeFileSync(join(T, 'src/emit.ts'), 'export function go(s: Sock) {\n  s.emit("thing:done", { ok: true });\n}\n');
 writeFileSync(join(T, 'src/handle.ts'), 'export function wire(s: Sock) {\n  s.on("thing:done", (p) => console.log(p));\n}\n');
 
-console.log('project detection');
+// ── the project root is found from BELOW, and from `context` ─────────
+//
+// Observed in real use on a Unity project: `explore · generic`, 0 findings in 51 ms. `matches()` tests
+// ONE directory, so a session started inside the project — or a question whose only locator was the
+// `context` path the tool declared and never read — searched the wrong tree with the wrong explorer.
+console.log('\nfinding the project when we are standing inside it');
+{
+  const { resolveProject, pathsIn } = await import('../dist/tools/explore/index.js');
+  const deep = join(U, 'Assets/Scripts');
+  ok(pickExplorer(deep).id === 'generic', 'testing the subdirectory ALONE still yields generic (the bug)');
+  ok(resolveProject(deep).explorer.id === 'unity', 'walking up finds the Unity project from a subdirectory');
+  ok(resolveProject(deep).root === U, '…and reports the project root, not the subdirectory', resolveProject(deep).root);
+  ok(resolveProject(TMP).explorer.id === 'generic', 'a tree with no project marker stays generic');
+
+  // `context` carries the path the model is actually asking about.
+  const found = pathsIn(`the sprite vanishes, see ${join(U, 'Assets/Scripts/ScoreKeeper.cs')} line 12`);
+  ok(found.includes(join(U, 'Assets/Scripts/ScoreKeeper.cs')), 'a real path inside prose is extracted from context');
+  ok(pathsIn('/no/such/path/anywhere.cs').length === 0, 'a path that does not exist is not offered as a root');
+}
+
+console.log('\nproject detection');
 ok(pickExplorer(U).id === 'unity', 'a tree with Assets/ + ProjectSettings/ is unity', pickExplorer(U).id);
 ok(pickExplorer(T).id === 'typescript', 'a tree with package.json + tsconfig.json is typescript', pickExplorer(T).id);
 ok(pickExplorer(TMP).id === 'generic', 'anything else falls back to generic', pickExplorer(TMP).id);

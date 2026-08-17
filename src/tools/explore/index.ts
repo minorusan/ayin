@@ -22,8 +22,8 @@
  * are not in the text, and deriving them is the only reason this tool should exist.
  */
 
-import { existsSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { existsSync, statSync } from 'node:fs';
+import { dirname, join, relative, sep } from 'node:path';
 import { toolLog, toolReport } from '../runtime.js';
 import { extractTerms } from './terms.js';
 import { parseGrepLine, readSpan, runAll } from './search.js';
@@ -39,6 +39,48 @@ const EXPLORERS: ProjectExplorer[] = [unity, typescript, generic];
 
 export function pickExplorer(root: string): ProjectExplorer {
   return EXPLORERS.find((e) => e.matches(root)) ?? generic;
+}
+
+/** How far up to look for a project marker before giving up. */
+const MAX_WALK_UP = 8;
+
+/**
+ * Find the PROJECT root, not merely the directory we happen to be standing in.
+ *
+ * `matches()` tests one directory, so testing only the cwd means a session started anywhere below the
+ * project root — `…/solitairesmash/Assets/Games/Foo`, or a monorepo package — silently degrades to the
+ * generic explorer. Observed in real use on a Unity project: `explore · generic`, 0 findings in 51 ms,
+ * because `Assets/` and `ProjectSettings/` were one level up and nothing looked there. The generic
+ * explorer greps every file type in the tree, so on a Unity repo it is both slower and blind to the
+ * only edges worth having — GUID references, animation events, asmdef boundaries.
+ *
+ * Walking up is cheap (a few `existsSync` calls) and turns a silent downgrade into a correct answer.
+ */
+export function resolveProject(start: string): { root: string; explorer: ProjectExplorer } {
+  let dir = start;
+  for (let i = 0; i < MAX_WALK_UP; i++) {
+    const hit = EXPLORERS.find((e) => e !== generic && e.matches(dir));
+    if (hit) return { root: dir, explorer: hit };
+    const up = dirname(dir);
+    if (up === dir) break; // filesystem root
+    dir = up;
+  }
+  return { root: start, explorer: generic };
+}
+
+/**
+ * Absolute paths the caller mentioned, best first.
+ *
+ * `context` is where the model puts the file it is actually asking about — a stack frame, the path it
+ * just read. It was DECLARED by the tool and never read, so a model helpfully passing
+ * `…/solitairesmash/Assets/Games/…` had it discarded and got a generic search of the wrong tree. A
+ * path in the context is the strongest hint available about which project the question is about.
+ */
+export function pathsIn(text: string): string[] {
+  if (!text) return [];
+  return [...new Set(text.match(/(?:[A-Za-z]:)?[\\/][\w.\-+/\\]{3,}/g) ?? [])]
+    .map((p) => p.replace(/[),.;]+$/, ''))
+    .filter((p) => existsSync(p));
 }
 
 /**
@@ -67,15 +109,31 @@ const CONTEXT_AFTER = 3;
 export async function exploreExecute(params: Record<string, string>): Promise<string> {
   const question = (params.question ?? '').trim();
   if (!question) return 'Error: question required';
-  const root = params.cwd || process.cwd();
   const started = Date.now();
 
-  const explorer = pickExplorer(root);
+  // WHERE to search, decided from everything the caller gave us rather than from the cwd alone:
+  // an explicit cwd, then any real path in `context`, then the process cwd — each walked UP to the
+  // nearest project marker. A question about a Unity project must reach the Unity explorer even when
+  // the session was started three directories inside it.
+  const contextPaths = pathsIn(params.context ?? '');
+  const starts = [
+    params.cwd,
+    ...contextPaths.map((p) => (statSync(p, { throwIfNoEntry: false })?.isDirectory() ? p : dirname(p))),
+    process.cwd(),
+  ].filter((d): d is string => Boolean(d) && existsSync(d));
+
+  let resolved = { root: starts[0] ?? process.cwd(), explorer: generic as ProjectExplorer };
+  for (const s of starts) {
+    const r = resolveProject(s);
+    if (r.explorer !== generic) { resolved = r; break; }
+  }
+  const { root, explorer } = resolved;
   const terms = extractTerms(question);
   // Literals the user quoted are searched exactly; derived identifiers come next.
   const search = [...terms.literals, ...terms.identifiers].slice(0, MAX_TERMS);
 
-  toolReport(`explore · ${explorer.id} · ${search.join(', ') || 'no terms'}`);
+  const rootNote = root === process.cwd() ? '' : ` · in ${relative(process.cwd(), root) || root}`;
+  toolReport(`explore · ${explorer.id}${rootNote} · ${search.join(', ') || 'no terms'}`);
 
   if (search.length === 0) {
     return formatResult({
