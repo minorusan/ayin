@@ -31,3 +31,6 @@ reviews/
 # npm creates this symlink into the global prefix on a local install — machine-specific,
 # and a path into someone's home directory has no business in a public repo.
 /bin/
+
+# A sentinaile plan is a per-checkout artifact, not source.
+sentinaile_plan.md

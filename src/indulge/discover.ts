@@ -23,7 +23,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { languageFor } from '../entangle/index.js';
-import { exploreExecute } from '../tools/explore.js';
+import { exploreExecute } from '../tools/explore/index.js';
 import { toolPrompts, type ToolPrompts } from '../tools/runtime.js';
 import { ensureToolRuntime } from '../tool-wiring.js';
 import { blobSha, type IndulgeStore } from './store.js';

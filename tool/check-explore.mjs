@@ -1,29 +1,36 @@
 #!/usr/bin/env node
 /**
- * check-explore — proves the `explore` tool stops looping, against the REAL loop.
+ * check-explore — proves the three properties explore is built on, against the real built code.
  *
- * `npm run check:explore` (needs a build first). Not a unit test of the anti-repeat helpers in
- * isolation — those would pass even if the wiring into `exploreExecute` were wrong. Instead this spins
- * up a fake backend implementing the real `/api/status` + `/api/generate` contract, points a child
- * process at it via `AYIN_MODEL_URL`, and scripts a model that deliberately re-suggests a command it already
- * ran — the exact failure mode reported: "it keeps looping". A `spawn`-based subprocess, not an
- * in-process import, because `exploreExecute` shells out for real and a fake backend over HTTP is the
- * only way to drive it end-to-end without also faking the shell.
+ * `npm run check:explore` (needs a build first).
  *
- * NOT in `npm run check:gates` — that suite is instant and network-free; this one starts a server and
- * a child process and takes a few seconds. Run it whenever `tools/explore.ts` changes.
+ * The suite this replaced tested an LLM loop: it stood up a fake backend, scripted a model that
+ * re-suggested the same command, and asserted the loop noticed. All of that is gone, because the
+ * loop is gone — measured at 1 useful answer in 6 real invocations while 27 of its 28 shell commands
+ * returned real data. The searching was never the problem; the judging was.
+ *
+ * So this asserts what the new design actually claims:
+ *
+ *   DETERMINISTIC — same question, same repository, byte-identical answer. No model, so no sampling.
+ *   CANNOT LIE    — every quoted line is re-read from disk and compared to the file. If explore
+ *                   prints `foo.ts:42 │ bar`, then line 42 of foo.ts says `bar`, or this fails.
+ *   READ-ONLY     — the probe runner refuses any binary or flag that can write, and takes argv
+ *                   ARRAYS rather than strings, so there is no shell to inject into.
+ *
+ * Fixtures are built on disk in a temp directory, so the assertions are about behaviour rather than
+ * about the shape of the source.
  */
 
-import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+process.argv.push('-p'); // headless: never take the terminal
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..');
-const TMP = mkdtempSync(join(tmpdir(), 'ayin-explore-'));
+const DIST = join(REPO, 'dist');
 
 let fails = 0;
 const ok = (cond, label, extra = '') => {
@@ -31,273 +38,192 @@ const ok = (cond, label, extra = '') => {
   if (!cond) fails++;
 };
 
-// A small tree to search — one findable string, so a real `grep` has real output.
-writeFileSync(join(TMP, 'target.txt'), 'needle: the thing being searched for\n');
-
-const REPEAT_CMD = `grep -rn "needle" ${TMP}`;
-
-// The scripted model: every call re-suggests the SAME command, never commits an answer. If the
-// anti-repeat memory works, this must terminate in 2-3 rounds (first run + one "already run" refusal
-// noticed for two iterations), not run out the 12-iteration budget.
-let generateCalls = 0;
-const server = createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/api/status') {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, model: 'test-model' }));
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/api/generate') {
-    let body = '';
-    req.on('data', (c) => { body += c; });
-    req.on('end', () => {
-      generateCalls++;
-      const content = JSON.stringify({
-        reasoning: `looking for the needle, attempt ${generateCalls}`,
-        commands: [REPEAT_CMD],
-        confidence: 0.3,
-        answer: null,
-      });
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ content }));
-    });
-    return;
-  }
-  res.writeHead(404); res.end();
-});
-
-await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-const port = server.address().port;
-
-console.log('explore anti-loop (real backend, real shell, scripted repeat)');
-
-const harness = join(TMP, 'harness.mjs');
-writeFileSync(harness, `
-process.argv.push('-p');
-// A tool gets its model and its log as delegates, so a consumer importing the tool module directly —
-// which this harness does deliberately, to exercise the real thing — wires the runtime itself. This
-// harness standing in for a real entry point is what caught \`ayin explain\` and \`plan\` relying on
-// the registry having been imported by somebody else first.
-const { ensureToolRuntime } = await import(${JSON.stringify(`file://${join(REPO, 'dist/tool-wiring.js')}`)});
+const { ensureToolRuntime } = await import(`file://${join(DIST, 'tool-wiring.js')}`);
 ensureToolRuntime();
-const { exploreExecute } = await import(${JSON.stringify(`file://${join(REPO, 'dist/tools/explore.js')}`)});
-const start = Date.now();
-const result = await exploreExecute({ question: 'find the needle' });
-process.stdout.write(JSON.stringify({ result, ms: Date.now() - start }) + '\\n');
-`);
+const { exploreExecute, pickExplorer } = await import(`file://${join(DIST, 'tools/explore/index.js')}`);
+const { extractTerms } = await import(`file://${join(DIST, 'tools/explore/terms.js')}`);
+const { runProbe } = await import(`file://${join(DIST, 'tools/explore/search.js')}`);
+const { guidOf, asmdefOf } = await import(`file://${join(DIST, 'tools/explore/projects/unity.js')}`);
 
-/**
- * The child must talk to THIS gate's stub server and nothing else.
- *
- * Two things had to be pinned, and neither was. `prompts.ts` resolves `~/.ayin-cli/prompts.json` at
- * module load, so a child inheriting the real HOME reads the OPERATOR's settings — and this machine's
- * had `llmProvider: ollama`, which selects the native provider, talks to Ollama directly and ignores
- * AYIN_MODEL_URL completely. The gate then measured zero calls against its own server while the child
- * happily got a real 27-second answer from a real model: every assertion about call counts silently
- * meaningless, and the result depending on whose machine it ran on.
- */
-function childEnv(p) {
-  return {
-    ...process.env,
-    HOME: mkdtempSync(join(tmpdir(), 'ayin-explore-home-')),
-    USERPROFILE: mkdtempSync(join(tmpdir(), 'ayin-explore-home-')),
-    AYIN_MODEL_URL: `http://127.0.0.1:${p}`,
-    AYIN_LLM_PROVIDER: 'direct',   // never the native path — it does not read AYIN_MODEL_URL
-    AYIN_QA: '0',
-    AYIN_PLAN: '0',
+// ── fixtures ─────────────────────────────────────────────────────────
+const TMP = mkdtempSync(join(tmpdir(), 'ayin-explore-'));
+
+/** A Unity project: script + .meta guid + a prefab and an .anim that reference it by guid. */
+const U = join(TMP, 'unity');
+const GUID = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+mkdirSync(join(U, 'Assets/Scripts'), { recursive: true });
+mkdirSync(join(U, 'Assets/Prefabs'), { recursive: true });
+mkdirSync(join(U, 'ProjectSettings'), { recursive: true });
+writeFileSync(join(U, 'Assets/Scripts/ScoreKeeper.cs'),
+  'namespace Game\n{\n    public class ScoreKeeper\n    {\n        private int _scoreMultiplier = 2;\n'
+  + '        public int Apply(int points) { return points * _scoreMultiplier; }\n    }\n}\n');
+writeFileSync(join(U, 'Assets/Scripts/ScoreKeeper.cs.meta'), `fileFormatVersion: 2\nguid: ${GUID}\n`);
+writeFileSync(join(U, 'Assets/Scripts/Game.asmdef'), '{ "name": "Game" }\n');
+writeFileSync(join(U, 'Assets/Prefabs/Player.prefab'), `MonoBehaviour:\n  m_Script: {fileID: 11500000, guid: ${GUID}, type: 3}\n`);
+writeFileSync(join(U, 'Assets/Prefabs/Win.anim'), `AnimationClip:\n  m_Events:\n  - functionName: Apply\n    objectReferenceParameter: {guid: ${GUID}}\n`);
+// A method whose name only ENDS with the term the question yields — the shape that hid a real bug.
+writeFileSync(join(U, 'Assets/Scripts/Clock.cs'),
+  'namespace Game\n{\n    public class Clock\n    {\n        private int _scoreCount = 5;\n'
+  + '        private int GetTimeBonus() => (int)(TimeLeft() / 60.0 * _scoreCount);\n    }\n}\n');
+
+/** A TypeScript project where a string key joins two files with no import between them. */
+const T = join(TMP, 'ts');
+mkdirSync(join(T, 'src'), { recursive: true });
+writeFileSync(join(T, 'package.json'), '{"name":"fx"}\n');
+writeFileSync(join(T, 'tsconfig.json'), '{}\n');
+writeFileSync(join(T, 'src/emit.ts'), 'export function go(s: Sock) {\n  s.emit("thing:done", { ok: true });\n}\n');
+writeFileSync(join(T, 'src/handle.ts'), 'export function wire(s: Sock) {\n  s.on("thing:done", (p) => console.log(p));\n}\n');
+
+console.log('project detection');
+ok(pickExplorer(U).id === 'unity', 'a tree with Assets/ + ProjectSettings/ is unity', pickExplorer(U).id);
+ok(pickExplorer(T).id === 'typescript', 'a tree with package.json + tsconfig.json is typescript', pickExplorer(T).id);
+ok(pickExplorer(TMP).id === 'generic', 'anything else falls back to generic', pickExplorer(TMP).id);
+
+// ── term extraction: the casing gap, and the key that must survive it ─
+console.log('\nterm extraction (no model — this is a casing problem, not a reasoning one)');
+{
+  const t = extractTerms('how is the score multiplier applied');
+  ok(t.identifiers.includes('scoreMultiplier'), 'English words become a camelCase identifier');
+  ok(t.identifiers.includes('ScoreMultiplier'), '…and a PascalCase one');
+  ok(t.identifiers.some((i) => /^Appl/.test(i)), 'an action verb becomes a method-name candidate');
+
+  // A namespaced key is the highest-signal term there is, and the word splitter used to destroy it:
+  // "where is chat:send handled" found NOTHING because the key became two words and then an
+  // invented identifier.
+  const k = extractTerms('where is the chat:send socket event handled');
+  ok(k.literals.includes('chat:send'), 'an unquoted namespaced key survives as a literal', k.literals.join(','));
+  ok(!k.identifiers.includes('chatSendSocketEventHandled'),
+    'a five-word run does NOT become an invented identifier');
+}
+
+// ── the term is a SUFFIX of the real symbol ──────────────────────────
+//
+// A REGRESSION TEST FOR A REAL MISS. "where is the time bonus calculated" yields `TimeBonus`, but the
+// method is `GetTimeBonus()`. `\bTimeBonus` cannot match inside `GetTimeBonus` — both `t` and `T` are
+// word characters, so there is no boundary there. On the real repository explore found the time
+// bonus's CALL SITES and never its declaration, stopping one hop short of the defect, which was in
+// the method body: the bonus scaled by a score that already carried the multiplier.
+console.log('\na term that is only the SUFFIX of the symbol still finds the declaration');
+{
+  const out = await exploreExecute({ question: 'where is the time bonus calculated', cwd: U });
+  ok(/Clock\.cs/.test(out), 'the file declaring GetTimeBonus is found from the term "time bonus"',
+    'the definition probe requires a word boundary the compound name does not have');
+  ok(/GetTimeBonus/.test(out), '…and the declaration line itself is quoted');
+  ok(/defines/.test(out), '…labelled defines, not merely mentions');
+}
+
+// ── the no-lying guarantee ───────────────────────────────────────────
+console.log('\ncannot lie: every quoted line is verified against the file on disk');
+{
+  const out = await exploreExecute({ question: 'how is score multiplier applied', cwd: U });
+  const quoted = [...out.matchAll(/^ +(\d+) │ (.*)$/gm)];
+  ok(quoted.length > 0, 'the answer quoted at least one line', `${quoted.length} line(s)`);
+
+  // Pair every quoted line with the file heading above it and re-read that exact line.
+  const lines = out.split('\n');
+  let checked = 0;
+  let mismatched = 0;
+  let currentFile = null;
+  for (const l of lines) {
+    const h = /^ {2}\[[a-z-]+\] ([^\s:]+)(?::(\d+))?/.exec(l);
+    if (h) { currentFile = h[1]; continue; }
+    const q = /^ +(\d+) │ (.*)$/.exec(l);
+    if (!q || !currentFile) continue;
+    const n = Number(q[1]);
+    let src;
+    try { src = readFileSync(join(U, currentFile), 'utf-8').split('\n'); } catch { continue; }
+    checked++;
+    const actual = (src[n - 1] ?? '').slice(0, 160);
+    if (actual.trimEnd() !== q[2].replace(/…$/, '').trimEnd()) mismatched++;
+  }
+  ok(checked > 0, 'quoted lines were traceable to a file heading', `${checked} checked`);
+  ok(mismatched === 0, 'EVERY quoted line matches the file at that line number', `${mismatched} mismatch(es)`);
+  ok(!/\b(probably|likely|appears to|seems|I think|suggests)\b/i.test(out),
+    'the answer contains no hedging language — there is no prose generator to produce it');
+}
+
+// ── determinism ──────────────────────────────────────────────────────
+console.log('\ndeterministic: no model, so no sampling');
+{
+  const a = await exploreExecute({ question: 'how is score multiplier applied', cwd: U });
+  const b = await exploreExecute({ question: 'how is score multiplier applied', cwd: U });
+  const strip = (s) => s.replace(/· \d+ms/, '· Nms');
+  ok(strip(a) === strip(b), 'the same question twice gives a byte-identical answer');
+}
+
+// ── Unity glue: the link that is a hash, not a name ──────────────────
+console.log('\nunity: GUID references, animation clips, asmdef');
+{
+  ok(guidOf(join(U, 'Assets/Scripts/ScoreKeeper.cs')) === GUID, 'the guid is read from the sibling .meta');
+  ok(asmdefOf(join(U, 'Assets/Scripts/ScoreKeeper.cs'), U).endsWith('Game.asmdef'), 'the enclosing asmdef is found');
+
+  const out = await exploreExecute({ question: 'ScoreKeeper', cwd: U });
+  ok(/Player\.prefab/.test(out), 'a prefab referencing the script BY GUID is reported', 'grep for the class name finds no prefab');
+  ok(/Win\.anim/.test(out), 'an animation clip referencing it is reported too');
+  ok(/anim-event/.test(out), '…and labelled anim-event, because a clip calls methods by NAME STRING');
+  ok(/Game\.asmdef/.test(out), 'the assembly it compiles into is stated');
+
+  // The negative result is an answer, and it must never outrank real code.
+  const idx = out.indexOf('no asset references');
+  const firstCode = out.search(/│/);
+  ok(idx === -1 || firstCode === -1 || firstCode < idx,
+    'a "not wired to anything" line never sorts above actual code');
+}
+
+// ── TypeScript glue: the string key with no import edge ──────────────
+console.log('\ntypescript: string keys joining files with no import between them');
+{
+  const out = await exploreExecute({ question: 'thing:done', cwd: T });
+  ok(/emit\.ts/.test(out) && /handle\.ts/.test(out),
+    'both ends of a string-keyed dispatch are found', 'neither file imports the other');
+  ok(/string-key/.test(out), '…and labelled string-key');
+}
+
+// ── nothing found is an ANSWER ───────────────────────────────────────
+console.log('\n"nothing found" is a real answer, and a SMALL one');
+{
+  const out = await exploreExecute({ question: 'zzzznotarealsymbolzzzz', cwd: T });
+  ok(/NOTHING FOUND/.test(out), 'it says so plainly');
+  ok(!/│/.test(out), 'and quotes nothing, rather than dumping whatever it had');
+  // The old tool answered a miss with a digest of `ls -la`; the replacement must not answer a miss
+  // with thousands of characters of probe transcript either.
+  ok(out.length < 1200, 'the empty answer stays small enough to be worth reading', `${out.length} chars`);
+}
+
+// ── read-only by construction ────────────────────────────────────────
+console.log('\nread-only: enforced by the runner, not by an allow-list of prefixes');
+{
+  const refuses = async (argv, why) => {
+    try { await runProbe(argv, TMP); ok(false, why, 'it RAN'); }
+    catch (e) { ok(/refusing/.test(String(e.message)), why, String(e.message).slice(0, 60)); }
   };
+  await refuses(['rm', '-rf', '/tmp/x'], 'refuses a binary that is not in the read-only set');
+  await refuses(['sh', '-c', 'echo hi'], 'refuses a shell outright');
+  await refuses(['git', 'push'], 'refuses a git subcommand that writes');
+  await refuses(['find', '.', '-delete'], 'refuses find -delete');
+  await refuses(['find', '.', '-exec', 'rm', '{}', ';'], 'refuses find -exec');
+
+  // Shell metacharacters are DATA here: argv goes straight to execve, so there is nothing to inject
+  // into. The previous tool handed model-authored strings to `sh -lc` behind a prefix check that
+  // `grep foo . ; echo INJECTED` walked straight through.
+  const r = await runProbe(['grep', '-rn', 'a; echo INJECTED', '.'], TMP);
+  ok(r.ok && !r.lines.some((l) => /INJECTED/.test(l)),
+    'a shell metacharacter in a pattern is searched for, not executed');
 }
 
-const child = spawn(process.execPath, [harness], {
-  env: childEnv(port),
-  cwd: TMP,
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
-
-let stdout = '';
-child.stdout.on('data', (d) => { stdout += d; });
-let stderr = '';
-child.stderr.on('data', (d) => { stderr += d; });
-
-const exitCode = await new Promise((resolve) => {
-  const timer = setTimeout(() => { child.kill('SIGKILL'); resolve('timeout'); }, 45_000);
-  child.on('exit', (code) => { clearTimeout(timer); resolve(code); });
-});
-
-server.close();
-
-ok(exitCode !== 'timeout', 'the investigation terminated on its own (did not hang)', String(exitCode));
-ok(generateCalls <= 4, 'stopped within a few rounds instead of exhausting the 12-round budget', `${generateCalls} model call(s)`);
-ok(generateCalls >= 1, 'the backend was actually reached at least once', `${generateCalls} call(s)`);
-
-let parsed = null;
-try { parsed = JSON.parse(stdout.trim().split('\n').pop() ?? ''); } catch { /* leave null */ }
-ok(!!parsed, 'the tool returned a result at all', stdout.slice(0, 200) || stderr.slice(0, 200));
-if (parsed) {
-  ok(/circling|already run/i.test(parsed.result), 'the returned text explains it stopped because of a repeat', parsed.result.slice(0, 160));
-}
-
-// ── control: a normal investigation (new command each round, then an answer) must NOT be affected ──
-console.log('\nexplore normal case (must still work — the fix must not break ordinary use)');
+// ── and no model anywhere in the package ─────────────────────────────
+console.log('\nno model in the tool');
 {
-  let calls = 0;
-  const server2 = createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/api/status') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, model: 'test-model' }));
-      return;
-    }
-    if (req.method === 'POST' && req.url === '/api/generate') {
-      let body = '';
-      req.on('data', (c) => { body += c; });
-      req.on('end', () => {
-        calls++;
-        // Round 1: a genuinely new command. Round 2: commit the answer — never repeats anything.
-        const content = calls === 1
-          ? JSON.stringify({ reasoning: 'first look', commands: [`cat ${join(TMP, 'target.txt')}`], confidence: 0.3, answer: null })
-          : JSON.stringify({ reasoning: 'found it', commands: [], confidence: 0.9, answer: 'needle: the thing being searched for — found in target.txt' });
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ content }));
-      });
-      return;
-    }
-    res.writeHead(404); res.end();
-  });
-  await new Promise((resolve) => server2.listen(0, '127.0.0.1', resolve));
-  const port2 = server2.address().port;
-
-  const child2 = spawn(process.execPath, [harness], {
-    env: childEnv(port2),
-    cwd: TMP,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let stdout2 = '';
-  child2.stdout.on('data', (d) => { stdout2 += d; });
-  const code2 = await new Promise((resolve) => {
-    const timer = setTimeout(() => { child2.kill('SIGKILL'); resolve('timeout'); }, 45_000);
-    child2.on('exit', (c) => { clearTimeout(timer); resolve(c); });
-  });
-  server2.close();
-
-  ok(code2 !== 'timeout', 'a normal two-round investigation still terminates');
-  ok(calls === 2, 'it took exactly the two rounds it needed — no extra refusals for genuinely new commands', `${calls} call(s)`);
-  let parsed2 = null;
-  try { parsed2 = JSON.parse(stdout2.trim().split('\n').pop() ?? ''); } catch { /* leave null */ }
-  ok(!!parsed2?.result?.includes('found in target.txt'), 'the real answer is returned, not a repeat-guard message', parsed2?.result?.slice(0, 120));
+  const files = ['index.ts', 'terms.ts', 'search.ts', 'rank.ts', 'format.ts',
+    'projects/unity.ts', 'projects/typescript.ts', 'projects/generic.ts'];
+  let usesLlm = [];
+  for (const f of files) {
+    const src = readFileSync(join(REPO, 'src/tools/explore', f), 'utf-8');
+    if (/toolLlm\s*\(/.test(src)) usesLlm.push(f);
+  }
+  ok(usesLlm.length === 0, 'no file in explore/ calls the model', usesLlm.join(', '));
 }
 
-// ── a tool-trained model answers with a TOOL CALL; recover it, don't burn the turn ──
-//
-// Measured on GPT-4.1: the explore loop asks for shell commands inside a JSON field, and a
-// function-calling model reads "run grep" as a tool call and emits its own syntax —
-// `<function=grep><parameter=pattern>…`. Nothing is wrong with the model; it is being asked to
-// describe a tool invocation in prose, which is exactly what a tool-trained model is built not to do.
-{
-  const src = readFileSync(join(REPO, 'src/tools/explore.ts'), 'utf-8');
-  ok(!/recoverToolCall/.test(src),
-    'explore does NOT carry its own tool-call workaround — the dialect layer exists for exactly this, and one fix there serves every consumer');
-
-  const sys = readFileSync(join(REPO, 'prompts/explore/investigatorSystem.txt'), 'utf-8');
-  ok(/NEVER emit a tool call/i.test(sys),
-    'the system prompt forbids tool calls explicitly — one line saying "only JSON" is not a contract a function-calling model holds');
-  ok(/"commands" array/.test(sys), 'and says where commands actually go');
-}
-
-// ── a truncated reply still carries its answer; a wrapper is never a finding ──
-//
-// Measured on a real session: explore located the bug on its second iteration and wrote it into
-// `answer` — file, line, expression. Generation was cut off mid-object, `JSON.parse` threw, and the
-// old fallback handed the WHOLE RAW OBJECT back as `answer`. The caller saw a blob whose `reasoning`
-// and `commands` fields said "still searching", concluded explore had nothing, and spent six more
-// steps rediscovering what it had already been given.
-{
-  const e = await import(`file://${join(REPO, 'dist/tools/explore.js')}`);
-
-  // The exact shape that was lost: pretty-printed, truncated mid-`answer`.
-  const truncated = '{\n  "reasoning": "still looking",\n  "commands": ["grep -n GetTimeBonus ."],\n'
-    + '  "confidence": 0.7,\n  "answer": "File: GameManager.cs\\nLines 230-232:\\n    private int '
-    + 'GetTimeBonus() => (int)(timeLeft / TIME_START * _scoreCount);';
-  const got = e.salvageAnswer(truncated);
-  ok(got !== undefined && /GetTimeBonus/.test(got) && /_scoreCount/.test(got),
-    'the answer is mined out of a reply truncated mid-object');
-  ok(got !== undefined && !/"reasoning"|"commands"|"confidence"/.test(got),
-    'and carries none of the wrapper the caller would have had to parse');
-  ok(/\n/.test(got ?? ''), 'escaped newlines are decoded, so the caller gets readable code');
-
-  // A properly closed string stops at its own quote, never swallowing the rest of the object.
-  const closed = '{"answer": "the finding", "confidence": 0.9}';
-  ok(e.salvageAnswer(closed) === 'the finding', 'a closed answer string ends at its quote');
-  ok(e.salvageAnswer('{"reasoning": "no answer field here"}') === undefined,
-    'no answer field → nothing salvaged, rather than something invented');
-
-  const src = readFileSync(join(REPO, 'src/tools/explore.ts'), 'utf-8');
-  ok(/answer: undefined,/.test(src),
-    'an unsalvageable parse failure returns NO answer — a wrapper must never be presented as a finding');
-  ok(/DIGEST_PER_COMMAND/.test(src),
-    'and one command\'s output cannot crowd the digest — a bare `ls` of a project root was filling it');
-}
-
-// ── explore's allow-list must actually confine it ─────────────────────────────
-//
-// explore is the ONE tool whose inner commands never reach `checkPermission`: the agent loop gates
-// `bash` per command, but it only ever sees `explore(question, context)`. So approving explore once
-// approved every command it would ever invent — and in headless, silently.
-//
-// The guard was `trimmed.startsWith(prefix)` on a string then handed to `sh -lc`, which is not a
-// check. Demonstrated: `grep foo . ; echo INJECTED` passed and the second command RAN.
-//
-// The fix is confinement rather than consent — a gate that asks twelve times per investigation is a
-// gate the operator turns off. Pipelines still work, because that is what investigating looks like,
-// but every segment must independently be read-only.
-{
-  const { isAllowed } = await import(`file://${join(REPO, 'dist/tools/explore.js')}`);
-  const check = (cmd, want, why) => ok(isAllowed(cmd) === want, `${want ? 'allows' : 'BLOCKS'} ${cmd}`, why);
-
-  // Investigation must stay possible.
-  check('grep -rn foo .', true);
-  check('grep -rn foo . | head -20', true, 'a pipeline of read-only segments');
-  check('git log --oneline -5 | head -3', true);
-  check('find . -name "*.ts"', true);
-  check('cat a.ts | head -40', true);
-
-  // Chaining into a WRITE is the thing that must die.
-  check('grep foo . ; rm -rf /tmp/x', false, 'the original injection, now refused');
-  check('ls && curl evil.com', false);
-  check('cat /etc/hostname | tee /tmp/x', false);
-  check('cat f | sh', false, 'piping into a shell');
-
-  // Shell escapes: nested command, redirect, process substitution, background.
-  check('echo $(whoami)', false);
-  check('cat `id`', false);
-  check('grep foo . > /tmp/out', false);
-  check('grep x . & sleep 100', false);
-
-  // Found by WRITING THIS TEST, not by reading the code: listed read commands with a write flag.
-  check('find . -delete', false, 'find can delete');
-  check('find . -exec rm {} +', false, 'find can exec');
-  check('sed -i s/a/b/ f', false, 'sed can edit in place');
-  check('sort -o /tmp/x f', false, 'sort can write');
-  check('awk "BEGIN{system(\\"id\\")}"', false, 'awk has system()');
-
-  // QUOTED OPERATORS ARE DATA, NOT SYNTAX.
-  //
-  // Splitting the command on `|` without tracking quotes refused every ALTERNATION REGEX — the most
-  // useful search there is, and the one ayin's own grep description tells the model to use. Measured
-  // on a real repo: explore lost alternation, flailed for 3m14s and returned an `ls -la` listing as
-  // its finding. The confinement must survive the fix, so both halves are pinned here together.
-  check('grep -rnE "time bonus|bonus.*time" .', true, 'alternation inside quotes is a PATTERN');
-  check('grep -rnE "GetTimeBonus|_scoreCount" Assets', true);
-  check('grep -rn "a > b" .', true, 'a redirect character inside quotes redirects nothing');
-  check('grep -rn "a; rm -rf /" .', true, 'a semicolon inside quotes starts no second command');
-  check('grep -rn --include=*.cs "TimeBonus" .', true);
-  // …and the same operators OUTSIDE quotes are still syntax, still refused.
-  check('grep -rnE "a|b" . ; rm -rf /tmp/x', false, 'quoted alternation AND a real chained write');
-  check('grep -rnE "a|b" . | tee /tmp/x', false, 'quoted alternation AND a real pipe to a writer');
-
-  // And the list itself must stay short — every tempting addition can write or spawn.
-  const src = readFileSync(join(REPO, 'src/tools/explore.ts'), 'utf-8');
-  ok(!/'awk'|'sed[^']*'|'sort'|'uniq'/.test(src),
-    'awk / sed / sort / uniq are NOT on the allow-list (each can write or spawn)');
-}
-
+rmSync(TMP, { recursive: true, force: true });
 console.log(fails === 0 ? '\nexplore check: ok' : `\nexplore check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

@@ -456,6 +456,34 @@ is a second contract the model has no way to rank against the first.
 ayin's canonical text (`renderToolCalls`) so the rest of the loop remains model-agnostic — and it
 still catches a model that emits the text form anyway.
 
+### When a model REFUSES native tools — `rejectsNativeTools`
+
+Rendering native calls back into canonical `<function=…>` text is model-agnostic for ayin, but not for
+the server. A turn round-trips **twice**: the runtime parses the model's output into structured calls,
+the provider renders them back to text, and that text returns as an assistant message in the NEXT
+request — where the runtime re-renders the whole conversation *in the model's own format*. A model
+whose wire format is ATEM cannot parse the XML it is handed back, and answers
+`500 parse Glimmer call to <tool>: malformed ATEM parameter` on the second round.
+
+Native declaration exists for models whose **parser destroys the tool name** (a renderer missing the
+`len(tools) == 0` guard consumes the opening tag and emits no name). A dialect that parses its own
+model correctly gains nothing and must not pay this cost, so it sets `rejectsNativeTools` and
+`reconcileToolMode()` downgrades the session to prompt-declared tools.
+
+**One source of truth, and it took three attempts to get right.** `provider.tools` is what the provider
+is *willing* to do, decided before the resident model is known; `toolMode()` is that claim reconciled
+against the model actually loaded, and it can only ever be downgraded. Two earlier fixes failed because
+the decision was read from two places:
+
+- reconciling only *after* the model-id guard — the provider re-asserts `native` on every refresh, and
+  `ayin -p` refreshes twice, so the second call restored it and the degrade never reapplied;
+- reading `provider.tools` raw at the declaration site while the system prompt read the reconciled
+  value — the prompt omitted the tool catalogue *and* the request still declared schemas, so the model
+  had no tools from either path and answered from nothing.
+
+`check:gates` now pins both halves: the expression must read `toolMode()`, and `provider.tools` must
+not appear near it.
+
 **The fix belongs here and nowhere else.** The first attempt put a `<function=…>` recovery inside
 `explore.ts`, which would have left every other consumer — the agent loop, indulge, plan, QA — to
 discover the same failure separately. One dialect serves all of them; that is what the abstraction is
@@ -501,223 +529,132 @@ the faulty method and its caller, and the critic (armed at ≥ 2 facts) never ra
 A miss (`0 matches`, an error) is deliberately not evidence — otherwise the judge is lied to in the
 other direction.
 
-**explore's allow-list is confinement, and it has to be real.** explore is the one tool whose inner
-commands never reach `checkPermission` — the agent loop gates `bash` per command, but it only ever
-sees `explore(question, context)`. So approving explore once approved every command it would go on to
-invent, and in headless that happened silently.
+## sentinaile — a standing instruction, carried out on a schedule
 
-The guard was `trimmed.startsWith(prefix)` on a string then handed to `sh -lc`, which is not a check
-at all: `grep foo . ; echo INJECTED` passed, and the second command ran. Now a command is refused
-unless **every pipeline segment** independently starts with a read-only command, with no `$(…)`,
-backtick, `>`/`>>`, `<(…)` or `&`. Pipelines still work — `grep -rn x . | head -20` is what
-investigating looks like — and `find -delete`, `find -exec`, `sed -i`, `sort -o` are refused by flag.
+    /sentinaile check the CI and tell me if anything broke, every 10 minutes
+    /sentinaile                    what is armed
+    /sentinaile stop               stop it
 
-**Quoted operators are DATA, and getting that wrong cost more than the hole did.** The first version
-split the raw string, so it split inside quotes too — and
-`grep -rnE "time bonus|bonus.*time" .` became `grep -rnE "time bonus` plus `bonus.*time" .`, whose
-second segment starts with no allowed command. **Every alternation regex was refused**, which is the
-form `grep`'s own tool description tells the model to use. Measured on a real Unity repo: explore lost
-alternation, logged "grep with --include and complex regex was blocked", spent **3m14s of a 4m48s
-turn** (the model itself was 40s) and committed an `ls -la` listing as its finding. Splitting and the
-escape checks are now quote-aware — an operator inside quotes is a pattern being handed to grep, one
-outside is syntax — and `check:explore` pins both directions, so a future tightening cannot silently
-take search away again.
+Three responsibilities, deliberately split, because collapsing any two of them produces a worse thing:
 
-The allow-list is deliberately short: `awk` has `system()`, `sed` has `w`, `sort` has `-o`, `uniq`
-takes an output file. A command earns a place by being unable to change anything, not by being handy.
-**Confinement rather than consent** is the deliberate choice — a gate that prompts twelve times per
-investigation is a gate the operator switches off. If explore ever needs to MUTATE something, that is
-the point at which it must go through `checkPermission` instead.
-
-**A truncated reply still carries its answer.** `explore` asks its sub-model for JSON
-(`{reasoning, commands, confidence, answer}`), and generation is sometimes cut off mid-object. The old
-fallback handed the **whole raw object back as `answer`** — so the caller received a blob whose
-`reasoning` and `commands` fields read "still searching", concluded explore had found nothing, and
-moved on. Measured: explore had located the bug on its second iteration, written the file, the line
-and the expression into `answer`, and all of it was buried in a wrapper the caller never unpacked;
-six further steps went into rediscovering it.
-
-`salvageAnswer()` now mines the `answer` field out of the raw text before anything is discarded —
-scanning rather than repairing, because a truncated object cannot be parsed by definition while its
-string value is readable long before the object closes. If nothing is salvageable the result carries
-**no answer at all** rather than the wrapper: a caller cannot tell a finding from a scratchpad, and a
-plausible non-answer costs more than an honest miss. The fallback digest also clips each command at
-`DIGEST_PER_COMMAND` — a bare `ls` of a project root is 380 lines of mode bits, measured filling the
-digest at the moment the caller needed to hold two lines of C#.
-
-**`AYIN_UNCHAINED=1` — the measurement switch.** Runs the loop without the judge and without the write
-critic. Both were added to compensate for a weaker setup, and several of the failures they compensate
-for turned out to be in the tools rather than the model, so whether they still earn their cost is an
-experiment. Off unless the value is exactly `1`/`true` — a typo must not silently change how a measured
-run behaves. Graded baseline to compare against, on a closed ticket with a known one-line fix: **26 tool
-calls to the answer, 9 to the faulty line**, with three judge verdicts all reading "insufficient".
-(Note `exploreCallCount` is only counted and printed — the `MAX_EXPLORE_CALLS` constant beside it was
-never enforced and has been removed rather than left to imply a limit that did not exist.)
-
-**Round budget (`getMaxRounds`) — unlimited by default.** The loop runs until the model stops calling
-tools and answers, or until the operator cancels (`Ctrl+C` → `interruptAgent`). There is no round
-cap unless someone deliberately sets one.
-
-It used to cap at 15 interactive. A cap is a guess about how long a task takes, made before anyone
-knows what the task is: it truncated real investigations, and — because the round counter is *in the
-prompt* — it taught the model to rush, since an agent told it has three rounds left writes a
-conclusion it has not earned. Removing the number removes both failures. This is not an infinite
-loop; the cap was never what ended a normal turn, only what cut a long one short.
-
-Two ways to put a cap back, both deliberate:
-
-- **`AYIN_MAX_ROUNDS`** — the `ayin watch` hound sets it to 10, because its job is to make a handful
-  of greps and answer, and an open-ended leash on that shape produces deliberation, not evidence.
-  Values below 1 or unparseable are ignored, so a typo cannot wedge the loop at zero rounds.
-- **`config.maxToolRounds`**, but only when the operator has actually set it — read through
-  `getConfigIfSet` so the shipped default cannot silently reinstate the cap this removed.
-
-With no cap the prompt says `[Round N. Take the rounds you need; stop when the work is done.]` — the
-round number still tells the model it is mid-turn, but every deadline line is gone, since there is no
-deadline to announce and `[Round 3/Infinity]` is nonsense a model will reason about. The two other
-places that did arithmetic on the budget degrade correctly: the headless CTA reminder now fires until
-the deliverable exists, and the QA fix-runway rewind becomes a no-op because the runway is unlimited.
-
-**Always-gated git operations (`permissions.ts#dangerousShellOp`).** `git push`, `git pull` and
-`git checkout` are confirmed **every single time**, ahead of every other rule. No whitelist entry, no
-`--dangerously-skip-permissions`, and no headless run can wave them through; with no human present
-(headless) they are **denied**, because the only safe answer to "may I push?" with nobody watching is
-no. The dialog for them deliberately offers only *Allow once* and *Deny* — no "allow all", no prefix
-option, since those are what caused the incident.
-
-It exists because the agent pushed to a remote unasked. Three reasonable things combined to allow it:
-headless auto-approved every tool call; "Allow all bash" whitelists the *whole tool* for the session;
-and the prefix option offers `git` as a one-word prefix, so approving one `git status` silently
-approved every later `git push`. Matching is per shell segment, so `cd /repo && git push` is caught
-while `git log | grep checkout` is not. It over-triggers by design — a needless confirmation costs a
-keystroke, a missed one cost the incident.
-
-**`!<command>` — shell passthrough (`bang.ts`).** Handled in the input path *before* the slash block,
-because it is a passthrough rather than a command: everything after the `!` is the operator's,
-verbatim. Nothing is added to the conversation window and no round is spent, so the model never sees
-it — which is the entire point. It was added after the operator found that `!git status -sb` behaved
-as an ordinary prompt: the model read the line, decided what was meant, and called the bash tool with
-its own rewrite, so it looked as though only the first word survived.
-
-Rendered through `formatShellForChat` on the `tool` role (the one role whose content is not escaped,
-so blessed tags survive) and set in **bold** — the operator asked for a visible difference, and bold
-is the one emphasis blessed actually has. Command output is escaped *before* the bold tags go on, or
-a command printing `{bold}` would corrupt the panel.
-
-Three obligations, since a passthrough that hangs the UI is worse than none: a 10-minute timeout, a
-200k-character output cap, and Esc → `cancelBang()` (SIGTERM to the process group, SIGKILL after 2s).
-`bangRunning()` is what lets the global key handler give a running command the interrupt before the
-agent gets it. All three announce themselves — a clipped `git log` that looks complete is how you act
-on the wrong commit. Gated by `npm run check:bang`.
-
-**Operator modes (`modes.ts`).** Two persistent toggles, stored in `prompts.json` so they survive a
-restart, injected as prompt text into the system message's stable prefix (they change only when a
-command is typed, so a toggle costs one KV-cache invalidation, not one per round).
-
-| Command | Default | Effect |
+| | who | when |
 |---|---|---|
-| `/verbose` · `/verbose off` | **off** | Without it, answers are the shortest that fully answer — no preamble, no restating the question, no recap (`prompts/ayin/brevity.txt`). The prompt states explicitly that this governs **what is written, never how much is verified**; brevity that becomes laziness trades a wall of text for a wrong answer |
-| `/logcover` · `/logcover off` | off | While on, every feature built gets heavy instrumentation — entry arguments, branches taken, external calls with outcomes, caught errors with their state (`prompts/ayin/logCoverage.txt`). Off by default because logging every branch is right while bringing a thing up and wrong for a small edit to working code |
+| **plan** | one model call | once, at arming |
+| **run** | a fresh `ayin -p` shell | each time it is due, then it exits |
+| **supervise** | a detached poll loop owning no work | every 5s, from state on disk |
 
-Three gates wrap the loop, each on a **deterministic trigger** — no model decides whether they run.
-Plan mode, the Presenter pass, and the QA gate are also each **OFF by default for the session** — a
-bare toggle (`/plan`, `/present`, `/qa`) turns one on for the rest of the session; a one-shot force
-(`/planthis`, `/presentthis`, `/qathis`) runs it for exactly one prompt regardless of the toggle. The
-three toggles are fully independent — see "Off by default: toggle + one-shot force" below.
+**Why a new shell per run rather than one long-lived agent.** A process that runs for days accumulates
+context, holds a model authority nobody can see, and fails in ways that look like "the sentinel has
+been quietly wrong since Tuesday". A process that lives for one task and exits fails as "that run
+failed". It also keeps requestId attribution honest: each run is its own process with its own
+correlation id, so the backend's GPU queue shows one entry per run and nothing shares a module-global
+with the interactive session.
 
-| Gate | Fires when (once its own toggle/force says "yes" this turn) | Module |
-|---|---|---|
-| **Plan mode** | the incoming prompt is ≥ `planMinChars` **and** one triage call says it is cross-feature | `plan/` |
-| **Tool guard** | every tool call, always (not gated — this one has no toggle) | `tool-guard.ts` |
-| **Presenter pass** | the turn changed files **and** the final message reads like a completion report | `presenter/` |
-| **QA gate** | the turn changed files **and** the final message reads like a completion report | `qa/` |
+**The plan file is authoritative.** `sentinaile_plan.md` is written into the working directory and read
+fresh by every run — edit step 3 and the next run does the new step 3, with no command re-issued and no
+second planning call. A plan that were merely a rendering of state kept elsewhere would force an
+operator who disagreed with one step to delete the sentinel and describe the whole thing again.
 
-Two further checks sit on the answer itself. They are **unconditional** — no toggle, no model call —
-because each catches a way the loop mistakes a non-answer for an answer, and both cost a regex:
+**Schedules are clamped, because they come from a model.** `every second` is a plausible reading of
+"keep an eye on it", and a watch spawning an agent every second would take the GPU and the box with it.
+`sanitizeSchedule` floors the interval, drops NaN and negatives, and treats `maxRuns: 0` as absent. A
+plan with **zero steps is rejected outright** — "do nothing, forever" is precisely the runaway this
+must not become.
 
-| Check | Fires when | Module |
-|---|---|---|
-| **Deferral** | the final answer names what to LOOK FOR and carries no file, line or code | `deferral.ts` |
-| **Edit truth** | the final answer reports a change **and nothing was written this turn** | `edit-truth.ts` |
+**No catch-up.** A watch asleep six hours on a ten-minute schedule has "missed" 36 runs. It fires
+**once** on waking and schedules the next from now: a six-hour-old check is stale, not 36 times more
+valuable, and a stampede of 36 agent shells at boot helps nobody.
 
-### Edit truth — a reported change that does not exist
+### Surviving the power cut
 
-The mirror of the deferral check, and the more dangerous of the two: a deferral is visibly unhelpful,
-while *"Fixed by reordering the operations in Dispose()"* reads exactly like a result and gets acted on.
+State is written to disk before the thing it describes happens, and the supervisor rebuilds itself from
+that file — there is no in-memory schedule to lose. Two orderings matter and they pull in opposite
+directions:
 
-Measured (1.0.320, a real `/debug` bundle): 23 tools, three `str_replace` calls that all failed,
-nothing written, and a final answer naming a file the model had never attempted to edit. The text it
-reported was a paraphrase of an **indulge corpus chunk** injected into an earlier tool result — with
-the window exhausted and its live hypothesis dead, the model answered from the loudest thing in
-context rather than from the code.
+- against a **crash**, persist the counter BEFORE spawning: an interrupted launch costs one run that
+  never happened, rather than replaying that run on every boot forever;
+- against an ordinary **exception**, do everything fallible BEFORE the counter moves. Observed during
+  development: `spawn` rejected a `createWriteStream` (its `fd` is null until the `open` event, and
+  stdio is validated synchronously), the throw escaped, and `runsDone` climbed while nothing ran. The
+  log descriptor is now opened with `openSync` first, and a failure there moves no counter.
 
-It is deliberately NOT in the QA gate, which is the natural home and would never have run: QA is
-session-off by default, and its own trigger declines with *"nothing changed this turn"* — precisely
-the condition that defines this failure.
+A recorded pid is always verified with `kill(pid, 0)` rather than trusted: a pid file outliving its
+process is the NORMAL state after a power cut, and a scheduler that reads a stale pid as "already
+running" wedges itself permanently while looking perfectly healthy. The supervisor's poll timer is
+**not** unref'd — it IS the program, and unref'ing it let node decide the loop was idle and `exit(0)`,
+leaving a plan file and a state file describing a watch that would never fire.
 
-- **Zero files changed**, by `qaChangedFiles()` — tool-tracked writes ∪ the git dirty delta. The git
-  half is load-bearing: an edit made through `bash` is real and must exempt the turn.
-- **Completed aspect only.** "Fixed by…", "I updated…" fire; "the fix is to change X" does not.
-  Proposing a change is a legitimate answer.
-- **A tool must have run**, so a conversational turn is never accused of misreporting its own work.
-- **One nudge**, then the answer stands — a guard that can loop is worse than what it corrects.
+Runs set `AYIN_ACQUIRE_LLM=0`: a scheduled run is background work and must queue behind a human at the
+keyboard, not ahead of one. `check:sentinaile` asserts that, the persist-ordering, the pid verification
+and the schedule arithmetic — all with an injected clock, so a six-hour outage is a number rather than
+a six-hour test.
 
-A related fix sits at the tool call itself: a failed `write_file`/`str_replace` no longer marks its
-path as a file this turn changed (it used to, so a turn whose every edit bounced still reported one
-changed file), and a **second consecutive miss on the same path** appends a re-read instruction to the
-tool result — editing text you have not read is the diagnosis, and a third guess only buys the same
-lesson a round later.
+## explore — deterministic localization, no model
 
-### Off by default: toggle + one-shot force
+`grep` answers *"where does this string appear"*. `explore` answers *"what is connected to what"* —
+and if it is not deriving a fact that is absent from the text, it is a slower duplicate of tools the
+agent already has.
 
-Plan mode, Presenter, and QA all cost real GPU time the user didn't explicitly ask to spend on every
-single turn, so none of them applies until the session opts in. Each gets the identical pair of knobs:
+**The previous version was an LLM loop, and it was retired on measurement, not taste.** Six
+invocations across a day of real use: **one** produced an answer, five gave up and dumped raw output
+as a "digest". Twenty-seven of its twenty-eight shell commands returned real data — *the searching
+worked; the judging failed*. In a three-model benchmark the two models that answered correctly both
+scored `explore: 0` and used `grep`/`read_file` directly; the model that delegated to explore
+returned nothing.
 
-- **Bare toggle** — `/plan`, `/present`, `/qa` (no argument) flip that gate on/off for the rest of the
-  session. `isPlanSessionEnabled()` / `isPresenterSessionEnabled()` / `isQaSessionEnabled()` report the
-  current state.
-- **One-shot force** — `/planthis <text>`, `/presentthis <text>`, `/qathis <text>` run that gate for
-  exactly this one prompt, regardless of whether the session toggle is on or off, then strip the
-  command word and fall through to the agent with `<text>` as the message.
+**There is no model in the tool now.** Not fewer calls — none. Three properties follow:
 
-The force flag is **consumed unconditionally, exactly once, every time it is checked** —
-`shouldRunQaThisTurn()` / `shouldRunPresenterThisTurn()` (and plan mode's inline equivalent in
-`runPlan`) clear the flag the instant they read it, whether or not anything ends up running downstream.
-An unconsumed force flag surviving a no-op turn would otherwise silently fire on a *later, unrelated*
-prompt — the same "action fires when you didn't expect it" class of bug the authority-expiry fix
-elsewhere in this codebase exists to prevent.
+| property | how it is guaranteed |
+|---|---|
+| **Fast** | a full probe battery over a 462 MB repo measures ~0.4 s; one local 30B call is 15–20 s. A model call costs ~100 searches, so breadth is bought with more probes instead of more thinking. |
+| **Deterministic** | same question, same repo, byte-identical answer. Asserted by `check:explore`. |
+| **Cannot lie** | `format.ts` emits only: bytes re-read from a file at a stated line, a number the tool counted, or a label from the closed `Reason` set. There is no prose generator, so there is nothing to invent. The gate re-reads every quoted line and compares it to the file. |
 
-The three toggles are **independent of each other** even though Presenter and QA share the identical
-underlying shape check (`qaShouldRun` — see below): enabling Presenter without QA (nicer formatting,
-no reviewer) or QA without Presenter (a reviewer, raw replies) are both legitimate combinations.
-`agent.ts` computes `qaShouldRun(response)` once per turn, then calls `shouldRunQaThisTurn()` and
-`shouldRunPresenterThisTurn()` **unconditionally** (never short-circuited behind the shape check) so
-each one-shot force is always consumed, and only runs the pass whose own `doQa`/`doPresenter` (shape
-**and** toggle-or-force) is true.
+Because it is sub-second and honest, it is meant to be called **repeatedly and narrowly** — the
+answer points at the next question rather than trying to be exhaustive once. **"NOTHING FOUND" is a
+real answer** and is reported as one, compactly, with the strategies that came back empty.
 
-### Making a gate visible (`activity.ts`)
+### The term is usually a suffix, not the whole name
 
-A gate spends the user's GPU on work they did not directly ask for, so it must never look like an
-ordinary turn. That is harder than it sounds: **every** LLM call goes through
-`narrateWait('thinking', …)` (see below), which repaints the thinking line every 2 s with its own text.
-The gates' first implementation set a status label and watched it get overwritten two seconds later —
-so a three-pass review, the slowest thing ayin does, was indistinguishable from a normal reply.
+English asks for "the time bonus"; the code calls it `GetTimeBonus()`. A definition probe anchored as
+`\bTimeBonus` cannot match inside `GetTimeBonus` — `t` and `T` are both word characters, so there is
+no boundary there — and the declaration is unreachable however many probes run. Measured on a real
+repository, explore returned the time bonus's *call sites* and never its declaration, stopping one hop
+short of the defect, which was in the method body.
 
-So "what ayin is doing right now" is **state, not a message**. `activity.ts` holds a small stack
-(phases nest: a QA pass contains LLM calls) and drives both surfaces:
+So the definition probe accepts a leading accessor or verb (`get/set/on/handle/try/compute/calculate/
+apply/update/add/remove/is/has/…`, either case) as well as the `_private` convention it already
+allowed. `check:explore` pins this: a fixture declaring only `GetTimeBonus()` must be found from the
+question "where is the time bonus calculated".
 
-- the **thinking line**, because `narrateWait` now *leads* with the activity instead of overwriting it:
-  `▍⠹ QA 1/3 · reviewing 4 artifacts · ▸ generating on qwen3.6:27b   38s`
-- a **status-bar chip** (`▣ QA 1/3`), which stays lit through the gaps where no LLM call is running and
-  nothing narrates at all — the probe phase, the git snapshot, writing the plan file. It sits first
-  after the connection dot because it changes what the rest of the bar means: those tokens and that GPU
-  load belong to a review, not to the answer you asked for.
+### Read-only by construction
 
-A stack rather than a single value so pops don't fight (an inner phase ending restores the outer one),
-exits are idempotent and remove their own entry rather than whatever is on top, and `clearActivity()`
-runs at the start of every turn — a bar still claiming `▣ QA 2/3` after the answer landed would be
-worse than no indicator. In the chat transcript the gates also speak for themselves: plan mode reports
-its triage decision and the plan's path, and the QA gate prints a verdict card per pass.
+Probes are `argv` **arrays** executed with `spawn(file, args)` — no shell, so `;`, `&&`, `$(…)` and
+redirects are bytes in a pattern, not syntax. The runner refuses any binary outside
+`grep`/`find`/`git`, any writing `git` subcommand, and `find -exec`/`-delete`. The old tool passed
+model-authored *strings* to `sh -lc` behind a prefix allow-list that `grep foo . ; echo INJECTED`
+walked straight through.
+
+### Per-project subclasses, because the glue differs
+
+**Unity** — a script is bound to the game by a **GUID in its `.meta`**, referenced from `.prefab`,
+`.unity`, **`.asset`** (ScriptableObjects, where configuration lives) and **`.anim`** (clips call
+methods *by name string*; rename the method and nothing fails to compile). "Which prefabs use
+ScoreKeeper?" is not a text search for `ScoreKeeper` — it is meta → guid → asset search. The
+enclosing `.asmdef` is reported too, since it bounds what can reference what.
+
+**TypeScript** — the same shape in a different alphabet: **string keys**. One backend carries 116
+socket event names, 92 tool names, 88 resource ops, 41 habit names, plus `getPrompt('id')` →
+`prompts/<ns>/<id>.txt`. Each is a literal joining two distant files with **no import between them**,
+and renaming it breaks nothing at compile time. Plus registry membership — a tool exists because it
+is in a list.
+
+### Ranking
+
+Mechanical, weights stated in `rank.ts`. One correction worth keeping: **tests rank high**. On a real
+question the clearest statement of the rule in the entire repository was a test assertion —
+`TotalScore == base * (int)ScoreMultiplierType.Double` — and no production line said it as plainly.
+Tests are executable specifications and carry their own `spec` label.
 
 ## Executors (`src/executors/`) — plan / QA / present, per project type
 

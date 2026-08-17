@@ -35,4 +35,19 @@ export interface ModelDialect {
   renderToolCall(call: ParsedToolCall): string;
   /** Frame a message (tool output, error, warning) as the model's tool-result turn. */
   renderToolResult(body: string): string;
+  /**
+   * True when this model's SERVER-SIDE format is not the canonical `<function=…>` XML, so native
+   * tool declaration cannot be used with it.
+   *
+   * Native tools round-trip a turn twice: the server parses the model's output into structured calls,
+   * the provider renders them back to XML text, and that text returns as an assistant message in the
+   * NEXT request's history — where the server re-renders the conversation in the model's own format.
+   * If that format is ATEM, the XML is not parseable as ATEM and the server answers
+   * `500 parse Glimmer call to <tool>: malformed ATEM parameter` on the second round.
+   *
+   * Native declaration exists for models whose PARSER destroys the tool name (a renderer missing the
+   * `len(tools) == 0` guard consumes the opening tag and emits no name). A dialect that parses its own
+   * model correctly does not need it and must not pay this cost.
+   */
+  readonly rejectsNativeTools?: boolean;
 }

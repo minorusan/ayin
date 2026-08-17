@@ -85,6 +85,11 @@ export const HELP: HelpEntry[] = [
     short: 'Run the C# tests covering a domain — /testrun reward service · selection comes from the corpus',
     tip: '/testrun <domain> runs only the tests covering it — the corpus decides which, not a guess.',
   },
+  {
+    name: '/sentinaile', kind: 'command', section: 'Code',
+    short: 'A standing watch — /sentinaile check CI every 10 minutes · /sentinaile stop · bare for status',
+    tip: 'Plans once into sentinaile_plan.md; edit it to change what each run does.',
+  },
   { name: '/disentangle', kind: 'command', section: 'Code', short: 'Drop the entangle constraint for this session' },
   { name: '/arduino-explain', kind: 'command', section: 'Code', short: 'Explain an Arduino sketch and regenerate its diagram' },
 

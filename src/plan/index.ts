@@ -71,7 +71,7 @@ import { log } from '../log.js';
 import { getConfig, getPrompt } from '../prompts.js';
 import { prompts as promptsService, packagePath } from '../prompts-service.js';
 import { recentPrompts } from '../session-record.js';
-import { exploreExecute } from '../tools/explore.js';
+import { exploreExecute } from '../tools/explore/index.js';
 import { webSearch } from '../tools/web-search.js';
 import { pushActivity, setActivityDetail } from '../activity.js';
 import { addMessage, setAgentStatus } from '../ui.js';

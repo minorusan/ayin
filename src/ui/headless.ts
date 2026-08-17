@@ -8,6 +8,7 @@
  *  terminal for these (it would swallow their output and leave the tty in a raw state). */
 const NO_TUI_COMMANDS = new Set([
   'watch',      // watch daemon
+  'sentinaile-supervisor', // detached scheduler; owns no terminal
   'update',     // self-update from the registry
   'version', '--version', '-v',
   'explain',    // headless `ayin explain "<question>"` — prints the narrative, exits

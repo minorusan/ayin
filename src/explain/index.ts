@@ -26,7 +26,7 @@
 
 import { existsSync, writeFileSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
-import { exploreExecute } from '../tools/explore.js';
+import { exploreExecute } from '../tools/explore/index.js';
 import { extractExistingPaths } from './paths.js';
 import { gatherGitHistory, extractTicketCandidates, computeBugSignal, renderHistoryEvidence } from './git-history.js';
 import { jiraTickets } from '../jira.js';

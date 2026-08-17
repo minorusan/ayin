@@ -76,6 +76,8 @@ function bareToolName(name: string): string {
 
 export class GlimmerDialect implements ModelDialect {
   readonly id = 'glimmer';
+  /** ATEM on the wire — canonical XML in history makes the server's own parser throw. */
+  readonly rejectsNativeTools = true;
 
   matches(modelId: string): boolean {
     return /muse|glimmer/i.test(modelId);

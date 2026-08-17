@@ -164,9 +164,17 @@ interface WireCatalog {
  * Falls back to the plain contract when the op is unavailable: this doubles as the liveness probe,
  * and a backend that predates the op must not read as "down".
  */
+/**
+ * The model the gateway last reported as resident. Recorded here rather than imported from the
+ * manager, which imports providers — and read per generate, because a preset applied mid-session
+ * swaps the model under a running agent.
+ */
+let lastKnownModel = '';
+
 async function resourceStatus(): Promise<ProviderStatus> {
   const s = await resourceOp('llm', 'status', {}, 4_000).catch(() => null) as WireCatalog | null;
   if (s?.activeModel) {
+    lastKnownModel = s.activeModel;
     const ctx = Number(s.ctxSize);
     return {
       ok: true,
@@ -304,6 +312,7 @@ function nativeToolsEnabled(): boolean {
   if (process.env.AYIN_RESOURCE_NATIVE_TOOLS === '1') return true;
   return (providerConfig('resourceNativeTools') ?? '').trim().toLowerCase() === 'true';
 }
+
 
 /**
  * Generate through the gateway, declaring tool schemas when this install asks for it.

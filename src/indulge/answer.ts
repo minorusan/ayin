@@ -34,7 +34,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { activeModelId } from '../llm/manager.js';
-import { exploreExecute } from '../tools/explore.js';
+import { exploreExecute } from '../tools/explore/index.js';
 import { toolLlm, toolPrompts, type ToolPrompts } from '../tools/runtime.js';
 import { ensureToolRuntime } from '../tool-wiring.js';
 import { resolveInRepo } from './discover.js';

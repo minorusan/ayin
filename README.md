@@ -255,7 +255,7 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 | `write_file` | Create or overwrite a file, with a unified diff back | — |
 | `str_replace` | Surgical single-match edit — **preferred for edits** | — |
 | `bash` | Run a shell command, bounded at 120s and 256 KB | — |
-| `explore` | A focused sub-investigation with its own loop and clean context | — |
+| `explore` | Deterministic code localization — ranked `file:line` spans quoted verbatim, plus the couplings that are not text (Unity GUIDs, string keys). No model inside; sub-second | — |
 | `status` | Check on tools that went background | — |
 | `web_search` | DuckDuckGo in-process, reads the top pages, reports rate-limiting as rate-limiting | — |
 | `naama` | Author a design as facts, one line each; check it is implementable; render it | `render` needs plantuml |
@@ -732,6 +732,41 @@ sidecar — an asset committed without one is a broken Unity commit.
 **Prefabs and scenes are never auto-staged.** Opening a scene rewrites it, which made them the
 largest source of things appearing in your index that you did not put there. And ayin only ever
 unstages **its own** past staging, tracked in a persisted ledger: your `git add` is never reverted.
+
+## `/sentinaile` — a standing watch
+
+Some work is not a request, it is a **standing instruction**: keep an eye on this, and tell me when it
+changes.
+
+```
+/sentinaile check the CI and tell me if anything broke, every 10 minutes
+/sentinaile run the unit tests three times over the next hour and compare
+/sentinaile                     what is armed right now
+/sentinaile stop                stop it
+```
+
+The schedule is read out of your sentence — `every 10 minutes`, `in an hour`, `three times`. Three
+things then happen, and keeping them apart is the whole design:
+
+1. **It plans once**, with the model, into `sentinaile_plan.md` in your working directory.
+2. **It runs many times**, without the model deciding anything new — each run is a fresh `ayin -p`
+   shell handed that plan. It works, reports, and exits.
+3. **A small supervisor** decides only *when*, from state on disk.
+
+**The plan file is the artifact.** Open it, disagree with step 3, edit it — the next run does your
+version. Nothing to re-issue, no second planning call. A plan you cannot edit is a plan you have to
+take on faith.
+
+**It survives a reboot.** The schedule lives on disk, not in a timer, so the watch you armed on Friday
+is still watching on Monday. Waking after an outage costs **one** run, not the backlog: a six-hour-old
+check is stale, not six hours more valuable.
+
+**It is a pair of eyes, not a hand.** Runs are told not to commit, push, or delete, and they queue
+*behind* you rather than ahead — a background watch must never take the GPU from the person at the
+keyboard. A run that finds nothing wrong says so explicitly, because silence and a broken watch look
+identical from outside.
+
+One watch at a time: arming a new one stops the current one.
 
 ## Requirements
 

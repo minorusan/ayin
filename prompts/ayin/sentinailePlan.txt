@@ -1,0 +1,24 @@
+Turn a standing instruction into a schedule and an explicit list of steps. Reply with JSON only.
+
+{{REQUEST}}
+
+Working directory: {{CWD}}
+Current time (ms epoch): {{NOW_MS}}
+
+Rules:
+- Read the schedule out of the request. "every 10 minutes" -> everySeconds 600. "in an hour" -> startAt {{NOW_MS}} plus 3600000. "three times" -> maxRuns 3. No schedule stated -> omit everySeconds, it runs once.
+- Steps are what ONE run does, start to finish. Each is an imperative line a coding agent can execute with its own tools: read a file, run a command, search, compare against last time, report a finding.
+- A run that finds nothing wrong MUST still say so explicitly. Silence is indistinguishable from a broken sentinel.
+- Steps must be concrete enough to execute without asking a question. The run has nobody to ask.
+- 2 to 6 steps. Fewer than 2 is not a plan; more than 6 is a project.
+- NEVER include a step that deletes, overwrites, pushes, or otherwise changes state outside the working directory.
+
+{
+  "title": "short noun phrase naming what this watches",
+  "schedule": { "everySeconds": 600, "startAt": 0, "maxRuns": 0 },
+  "steps": [
+    { "instruction": "imperative line", "rationale": "why this step is here" }
+  ]
+}
+
+Omit startAt and maxRuns entirely when the request does not state them; do not send 0. JSON only, no prose before or after.

@@ -2164,8 +2164,21 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
     'and an EMPTY retry keeps the original — replacing a bad reply with nothing is not an improvement');
 
   // The agent loop must be untouched: there, a tool call is the point.
-  ok(/const declared = \(provider\.tools \?\? 'prompt'\) === 'native' && opts\.declareTools !== false;/.test(mgrSrc),
+  ok(/const declared = toolMode\(\) === 'native' && opts\.declareTools !== false;/.test(mgrSrc),
     'the guard is gated on `declared`, so the agent loop — which is genuinely calling tools — never sees it');
+
+  // ONE SOURCE OF TRUTH for who declares tools.
+  //
+  // `provider.tools` is what the provider is WILLING to do, before the resident model is known;
+  // `toolMode()` is that claim reconciled against the model actually loaded, and it can only be
+  // downgraded. Reading the raw claim here while the system prompt read the reconciled one split the
+  // decision in two and the halves disagreed: the prompt omitted the tool catalogue because the mode
+  // said native, while this line still declared schemas to a model whose wire format could not carry
+  // them. The model emitted canonical XML its own server could not parse, and a real run came back as
+  // 21 lines of unparsed text with ZERO tool calls.
+  const declAt = mgrSrc.indexOf('const declared =');
+  ok(!/provider\.tools/.test(mgrSrc.slice(declAt, declAt + 200)),
+    'the tool-declaration decision reads toolMode(), never provider.tools directly');
 }
 
 // ── edit truth: a reported change that was never written ──────────────────────

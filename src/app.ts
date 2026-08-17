@@ -604,6 +604,20 @@ onInput(async (text: string) => {
           : 'Corpus injection OFF — nothing from the corpus is added to tool results (corpus_search still works).');
         return;
       }
+      case '/sentinaile': {
+        // A standing watch: plan once with the model, then run a fresh `ayin -p` shell on a schedule
+        // until stopped. The supervisor is detached and rebuilds itself from disk, so the watch keeps
+        // its promise across a reboot rather than dying silently with this session. See src/sentinaile/.
+        const arg = text.slice('/sentinaile'.length);
+        try {
+          const { handleSentinaile } = await import('./sentinaile/index.js');
+          if (arg.trim() && arg.trim().toLowerCase() !== 'stop') addMessage('system', 'sentinaile: planning…');
+          addMessage('system', await handleSentinaile(arg, process.cwd()));
+        } catch (err) {
+          addMessage('system', `/sentinaile failed — ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
       case '/logcover': {
         const arg = text.slice('/logcover'.length).trim().toLowerCase();
         const on = arg === '' ? !isLogCoverage() : arg !== 'off' && arg !== '0';
@@ -1062,6 +1076,14 @@ onInput(async (text: string) => {
 // ── Start ───────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  // The detached scheduler. Spawned by `/sentinaile`, never typed by a person — it owns the pid file
+  // and polls persisted state, so a reboot costs one poll interval rather than the whole watch.
+  if (process.argv[2] === 'sentinaile-supervisor') {
+    const { runSupervisor } = await import('./sentinaile/supervisor.js');
+    runSupervisor();
+    return;
+  }
+
   if (process.argv[2] === 'watch') {
     // Repo watcher daemon — no TUI, no agent loop. See src/watch.ts.
     const { runWatch } = await import('./watch.js');

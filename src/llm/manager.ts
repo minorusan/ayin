@@ -202,6 +202,15 @@ export async function refreshActiveModel(): Promise<void> {
       cachedToolMode = mode;
       log('INFO', 'tool_declaration_mode', { provider: provider.name, mode });
     }
+    // RECONCILE HERE TOO, NOT ONLY AFTER THE DIALECT IS PICKED.
+    //
+    // The provider re-asserts `native` on every refresh, but the model-id guard below returns early
+    // when the model has not changed — so a degrade that lives only after that guard is undone by the
+    // next refresh and never reapplied. `ayin -p` refreshes twice (an un-awaited probe on the dialect
+    // path, then an awaited one before the first round), which is exactly that shape: the second call
+    // restored `native`, the prompt then omitted the catalogue, and the provider's rendered
+    // `<function=…>` XML went to a model that speaks ATEM.
+    reconcileToolMode();
     const s = await provider.status();
     // Learned from the SAME call that learns the model, because it changes with it: a preset swap
     // changes the model and the window together, and reading them from two places is how they drift.
@@ -219,6 +228,9 @@ export async function refreshActiveModel(): Promise<void> {
       log('INFO', 'llm_dialect_switch', { model: modelId, dialect: next.id });
     }
     cachedDialect = next;
+    // The dialect just settled — re-apply, since the mode reconciled above was judged against the
+    // PREVIOUS dialect (on a cold session, the gemma default).
+    reconcileToolMode();
     // Worth a line even when the dialect did not change: "resolved to gemma because the model IS
     // gemma" and "still gemma because nothing answered" are the two states this whole retry exists to
     // tell apart, and only one of them is fine.
@@ -263,6 +275,26 @@ export function toolCallInstructions(): string {
 }
 
 /** Who declares tools right now. Sync, because the system prompt is assembled synchronously. */
+/**
+ * Drop to prompt-declared tools when the resident model's own dialect cannot carry native ones.
+ *
+ * Native declaration round-trips a turn twice: the server parses the model's output into structured
+ * calls, the provider renders them back to canonical `<function=…>` XML, and that text returns as an
+ * assistant message in the NEXT request — where the server re-renders history in the model's own
+ * format. A model whose format is ATEM cannot parse that XML, and answers
+ * `500 parse Glimmer call to <tool>: malformed ATEM parameter`.
+ *
+ * Idempotent and cheap, so it is safe to call on every refresh — which is required, because the
+ * provider re-asserts its own mode each time.
+ */
+function reconcileToolMode(): void {
+  if (cachedToolMode !== 'native' || !cachedDialect.rejectsNativeTools) return;
+  cachedToolMode = 'prompt';
+  log('INFO', 'tool_declaration_mode', {
+    provider: 'resource', mode: 'prompt', reason: `${cachedDialect.id} rejects native tools`,
+  });
+}
+
 let cachedToolMode: 'native' | 'prompt' = 'prompt';
 export function toolMode(): 'native' | 'prompt' { return cachedToolMode; }
 /** Adapter pairs already reported this session, so a mismatch is named once and not on every round. */
@@ -380,7 +412,15 @@ export async function llmChat(messages: LlmMessage[], opts: LlmChatOptions = {})
   // Schemas go out ONLY to a provider that declares them AND to a caller that wants them; a text
   // contract provider would ignore the field, and sending it anyway invites exactly the
   // double-declaration this mode exists to prevent.
-  const declared = (provider.tools ?? 'prompt') === 'native' && opts.declareTools !== false;
+  //
+  // `toolMode()`, NOT `provider.tools` — ONE SOURCE OF TRUTH. The provider states what it is willing
+  // to do; `toolMode()` is that claim after reconciling it against the model actually resident, and it
+  // can only ever be downgraded (see `reconcileToolMode`). Reading the raw claim here while the system
+  // prompt read the reconciled one split the decision in two, and the halves disagreed: the prompt
+  // omitted the tool catalogue because the mode said native, while this line still declared schemas to
+  // a model whose format cannot carry them — so the model emitted canonical XML that its own server
+  // could not parse, and the whole turn came back as unparsed text with zero tool calls.
+  const declared = toolMode() === 'native' && opts.declareTools !== false;
   const tools = declared
     ? await (async () => {
         // Reached from any generate path, not only a turn, so it insists on discovery rather than
