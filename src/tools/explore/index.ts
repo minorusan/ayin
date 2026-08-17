@@ -185,6 +185,53 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     }
   }
 
+  // WIDEN WHEN THE JOINED FORMS FIND NOTHING.
+  //
+  // A question about a CONCEPT rather than a symbol — "bingo gameplay", the kind indulge asks to find
+  // a domain's files — yields `bingoGameplay`/`BingoGameplay`, and nothing is called that. The code
+  // lives at `Assets/Games/Bingo/Gameplay/…`, where the two words are PATH SEGMENTS. Measured on a
+  // real corpus build: 0 seed files for "bingo gameplay" while "resource management" found 7, purely
+  // because a `ResourceManagement` class happened to exist. That is luck, not localization.
+  //
+  // So when the joined forms come back empty, search the individual words. It costs one extra battery
+  // only on the searches that already failed, and it is what makes a concept findable at all.
+  if (findings.length === 0 && terms.words.length) {
+    const wordTerms = terms.words.filter((w) => w.length >= 3).slice(0, MAX_TERMS);
+    if (wordTerms.length) {
+      toolReport(`explore · nothing for the joined forms — widening to ${wordTerms.join(', ')}`);
+      const wide = wordTerms.flatMap((w) => explorer.plan(w, root).map((pl) => ({ ...pl, term: w })));
+      const wideResults = await runAll(wide.map((pl) => ({ strategy: pl.strategy, argv: pl.argv })), root);
+      for (let i = 0; i < wideResults.length; i++) {
+        const { reason, term } = wide[i];
+        for (const line of wideResults[i].result.lines) {
+          const parsed = parseGrepLine(line);
+          const relPath = (parsed?.file ?? line).replace(/^\.\//, '');
+          if (!existsSync(join(root, relPath))) continue;
+          if (!parsed) {
+            findings.push({ span: { file: relPath, fromLine: 1, toLine: 1, text: '' }, reason, term, score: 0 });
+            continue;
+          }
+          const got = readSpan(join(root, relPath), parsed.line - CONTEXT_BEFORE, parsed.line + CONTEXT_AFTER);
+          if (!got) continue;
+          findings.push({
+            span: {
+              file: relPath,
+              fromLine: Math.max(1, parsed.line - CONTEXT_BEFORE),
+              toLine: Math.max(1, parsed.line - CONTEXT_BEFORE) + got.text.split('\n').length - 1,
+              text: got.text,
+            },
+            reason, term, symbol: explorer.symbolAt(got.lines, parsed.line), score: 0,
+          });
+        }
+      }
+      attempts.push(...wideResults.map((r, i) => ({
+        strategy: `widened:${wide[i].strategy}(${wide[i].term})`,
+        probe: r.result.printable,
+        hits: r.result.lines.length,
+      })));
+    }
+  }
+
   // The non-textual edges — the reason this tool exists rather than being a grep wrapper.
   let glued: Finding[] = [];
   try {

@@ -27,6 +27,7 @@ import { exploreExecute } from '../tools/explore/index.js';
 import { toolPrompts, type ToolPrompts } from '../tools/runtime.js';
 import { ensureToolRuntime } from '../tool-wiring.js';
 import { blobSha, type IndulgeStore } from './store.js';
+import { isUnderVendorRoot } from './vendor.js';
 
 // This module calls `exploreExecute` directly, so it owns the wiring. Relying on some other module
 // having imported the registry first is initialization by import order, and `indulge` is a headless
@@ -117,6 +118,8 @@ export interface DiscoverOptions {
   domain: string;
   maxDepth?: number;
   maxFiles?: number;
+  /** Repo-relative roots to prune wholesale — third-party code. See vendor.ts. */
+  vendorRoots?: string[];
   maxIndexFiles?: number;
   /** Progress narration — one note per meaningful step. */
   onStatus?: (note: string) => void;
@@ -165,11 +168,11 @@ const MIN_SEEDS = 6;
  * silently adds nothing otherwise. A domain named after a Jira ticket rather than a folder gets no
  * help from here, which is honest — nothing in the code is called that.
  */
-function seedsByPathWords(repoPath: string, domain: string, limit: number): string[] {
+function seedsByPathWords(repoPath: string, domain: string, limit: number, vendorRoots: string[] = []): string[] {
   const joined = domain.toLowerCase().replace(/[^a-z0-9]/g, '');
   if (joined.length < 6) return [];
   const out: string[] = [];
-  for (const rel of walkSources(repoPath, 20000).files) {
+  for (const rel of walkSources(repoPath, 20000, vendorRoots).files) {
     if (rel.toLowerCase().replace(/[^a-z0-9]/g, '').includes(joined)) out.push(rel);
     if (out.length >= limit) break;
   }
@@ -215,7 +218,7 @@ export function extractPaths(answer: string): string[] {
 }
 
 /** Every source file a language handles, bounded and with the skip-list applied. */
-function walkSources(repoPath: string, cap: number): { files: string[]; truncated: boolean } {
+function walkSources(repoPath: string, cap: number, vendorRoots: string[] = []): { files: string[]; truncated: boolean } {
   const files: string[] = [];
   const stack = [repoPath];
   while (stack.length) {
@@ -226,7 +229,12 @@ function walkSources(repoPath: string, cap: number): { files: string[]; truncate
       if (files.length >= cap) return { files, truncated: true };
       const abs = join(dir, e.name);
       if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name) && !e.name.startsWith('.')) stack.push(abs);
+        if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue;
+        // THIRD-PARTY IS PRUNED AT THE DIRECTORY, not filtered per file. A vendor tree is where the
+        // file count explodes — indexing it costs the walk, the reference resolution and, worst, real
+        // questions generated about a library the team only consumes.
+        if (vendorRoots.length && isUnderVendorRoot(relative(repoPath, abs).split(sep).join('/'), vendorRoots)) continue;
+        stack.push(abs);
         continue;
       }
       if (!e.isFile() || !languageFor(abs)) continue;
@@ -352,8 +360,8 @@ function resolveSpecifier(repoPath: string, dir: string, spec: string): string |
  * you ended up depending on. Tokenising and intersecting with the declared-type table does, and it
  * is still deterministic and checkable.
  */
-function buildIndex(repoPath: string, cap: number, onStatus?: (n: string) => void): RefIndex {
-  const { files, truncated } = walkSources(repoPath, cap);
+function buildIndex(repoPath: string, cap: number, onStatus?: (n: string) => void, vendorRoots: string[] = []): RefIndex {
+  const { files, truncated } = walkSources(repoPath, cap, vendorRoots);
   onStatus?.(`indexing ${files.length} source files${truncated ? ` (capped at ${cap})` : ''}`);
 
   const declaredIn = new Map<string, string[]>();
@@ -489,7 +497,7 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
   // after a folder should never come back empty because a model failed to connect the words to it.
   if (!opts.seedsOverride && seeds.length < MIN_SEEDS) {
     const before = seeds.length;
-    for (const p of seedsByPathWords(repoPath, domain, MIN_SEEDS * 3)) {
+    for (const p of seedsByPathWords(repoPath, domain, MIN_SEEDS * 3, opts.vendorRoots ?? [])) {
       if (seeds.length >= MIN_SEEDS * 3) break;
       if (!seeds.includes(p)) seeds.push(p);
     }
@@ -526,7 +534,7 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
 
   // ── deterministic expansion ────────────────────────────────────────────────────
   if (maxDepth > 0) {
-    const index = buildIndex(repoPath, opts.maxIndexFiles ?? DEFAULT_MAX_INDEX_FILES, onStatus);
+    const index = buildIndex(repoPath, opts.maxIndexFiles ?? DEFAULT_MAX_INDEX_FILES, onStatus, opts.vendorRoots ?? []);
     report.indexed = index.indexed;
     report.truncated = index.truncated;
 

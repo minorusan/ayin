@@ -28,6 +28,7 @@ import { writeReport } from './report.js';
 import { recordAnswer, recordPrompt, recordTool } from '../session-record.js';
 import { initSession } from '../session-store.js';
 import { assessChunk } from './staleness.js';
+import { detectVendorRoots } from './vendor.js';
 import { CATEGORIES, openStore, StoreLockedError, type Category, type Manifest, type Stage } from './store.js';
 
 const out = (line = ''): void => { process.stdout.write(`${line}\n`); };
@@ -53,6 +54,8 @@ export interface IndulgeArgs {
   importFrom?: string;
   maxDepth?: number;
   maxFiles?: number;
+  keepVendor?: boolean;
+  rescanVendor?: boolean;
   maxQuestions?: number;
   categories?: Category[];
 }
@@ -90,6 +93,8 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--deep': args.deep = true; break;
       case '--depth': args.maxDepth = num(value(), 'depth'); break;
       case '--max-files': args.maxFiles = num(value(), 'max-files'); break;
+      case '--keep-vendor': case '--include-vendor': args.keepVendor = true; break;
+      case '--rescan-vendor': args.rescanVendor = true; break;
       case '--max-questions': args.maxQuestions = num(value(), 'max-questions'); break;
       case '--categories': {
         // ANY angle, like domains. The five that ship carry tuned prompts; anything else gets a
@@ -593,11 +598,33 @@ export async function runIndulge(argv: string[]): Promise<number> {
     // ── stage 1 ────────────────────────────────────────────────────────────────
     progress('discover', 0, args.domains.length, '');
     let matched = 0;
+  // ── which directories are NOT this team's code ────────────────────────────────
+  //
+  // Decided ONCE, before any domain is discovered, because every later stage pays for it: the walk,
+  // the reference index, and — most expensively — the questions generated and answered about files
+  // the team merely consumes. A real run produced a "bingo gameplay" corpus rooted in
+  // `Plugins/Zenject/Source/Main/IInstantiator.cs`, questions billed and all.
+  //
+  // Cheap pass first (names we already know), one model call for the remainder, cached in the corpus.
+  let vendorRoots: string[] = [];
+  if (!args.keepVendor) {
+    const v = await detectVendorRoots({
+      repoPath,
+      corpusDir: store.dir,
+      refresh: args.rescanVendor === true,
+      onStatus: (s) => out(`  ${s}`),
+    });
+    vendorRoots = v.roots;
+  } else {
+    out('  --keep-vendor: third-party code will be indexed too');
+  }
+
     for (const [i, domain] of args.domains.entries()) {
       if (shouldStop()) break;
       out(`[discover] ${domain}`);
       const r = await discoverDomain({
         store, repoPath, domain, maxDepth: args.maxDepth, maxFiles: args.maxFiles, onStatus: status,
+        vendorRoots,
       });
       matched += r.added;
       progress('discover', i + 1, args.domains.length, domain);

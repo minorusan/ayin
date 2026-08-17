@@ -1,0 +1,11 @@
+Which of these directories hold THIRD-PARTY code rather than this team's own?
+
+{{DIRS}}
+
+Third-party: a package, plugin, SDK, or asset-store import the team consumes but does not author — DI containers, tweening libraries, analytics/ads SDKs, networking middleware, editor tooling, vendored engines.
+
+First-party: gameplay, features, UI, services, tools and tests the team wrote, however generic the name.
+
+Judge by the NAME only. When a name is ambiguous, leave it out — a first-party directory wrongly skipped is knowledge silently missing from the corpus, and that costs more than a few vendor files wrongly kept.
+
+Reply with one repo-relative path per line and nothing else. Reply with an empty line if none are third-party.
