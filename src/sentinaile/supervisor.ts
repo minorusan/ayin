@@ -93,6 +93,9 @@ function launchRun(state: SentinelState, now: number): void {
     ...state,
     runsDone: runNumber,
     lastRunAt: now,
+    // A PROVISIONAL floor only. The real next-due is recomputed from the COMPLETION time in the exit
+    // handler below, because the interval means "wait this long after finishing", not "after
+    // starting". Set here as well so a crash mid-run still leaves a sane time on disk.
     nextDueAt: nextDueAfterRun(state.schedule, now),
   };
   saveState(next);
@@ -127,6 +130,14 @@ function launchRun(state: SentinelState, now: number): void {
     if (!fresh) return;
     const done: SentinelState = { ...fresh };
     delete done.runningPid;
+    // THE INTERVAL IS A GAP BETWEEN RUNS, NOT A PERIOD FROM LAUNCH.
+    //
+    // Computing it from launch time is correct only while runs are shorter than the interval. When a
+    // run outlasts it — a 7-minute web-search-and-report on a 1-minute schedule — the stored time is
+    // already in the past the moment the run ends, so the next tick fires instantly and the sentinel
+    // runs BACK TO BACK forever. Observed in real use: "every 1 minute" became "continuously", and a
+    // watch meant to sip the shared GPU held it permanently, starving the person at the keyboard.
+    done.nextDueAt = nextDueAfterRun(done.schedule, Date.now());
     saveState(done);
     if (isExhausted(done)) stop(done, 'completed every scheduled run');
   });

@@ -83,6 +83,10 @@ export function describeSchedule(s: Schedule, now: number): string {
   if (s.everySeconds) {
     const m = s.everySeconds / 60;
     parts.push(m >= 1 && Number.isInteger(m) ? `every ${m} minute${m === 1 ? '' : 's'}` : `every ${s.everySeconds}s`);
+    // SAY WHAT THE INTERVAL ACTUALLY MEANS. It is a gap BETWEEN runs, so a one-minute schedule whose
+    // runs take seven minutes fires roughly every eight — not every one. An operator reading "every 1
+    // minute" and watching it fire far less often would reasonably conclude it is broken.
+    parts.push('after each run finishes');
   } else {
     parts.push('once');
   }

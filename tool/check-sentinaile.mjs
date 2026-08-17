@@ -68,6 +68,24 @@ console.log('\nno catch-up: waking after an outage costs ONE run, not the backlo
     `got ${after - wokeAt}ms after wake`);
 }
 
+console.log('\na run that OUTLASTS its interval still leaves a gap');
+{
+  // The failure this pins: a 7-minute run on a 1-minute schedule. Measuring the interval from LAUNCH
+  // leaves the next-due time in the past the moment the run ends, so runs go back to back forever and
+  // a watch meant to sip the shared GPU holds it permanently. Reported from real use.
+  const launched = T0;
+  const finished = T0 + 7 * 60_000;
+  const fromLaunch = nextDueAfterRun({ everySeconds: 60 }, launched);
+  const fromFinish = nextDueAfterRun({ everySeconds: 60 }, finished);
+  ok(fromLaunch < finished, 'measured from launch, the next run is already overdue when this one ends (the bug)');
+  ok(fromFinish === finished + 60_000, 'measured from completion, there is a real 60s gap');
+  ok(!isDue({ schedule: { everySeconds: 60 }, runsDone: 1, lastRunAt: launched, nextDueAt: fromFinish, stoppedAt: 0 }, finished + 1_000),
+    'and the sentinel is NOT due one second after finishing');
+  const sup = readFileSync(new URL('../src/sentinaile/supervisor.ts', import.meta.url), 'utf-8');
+  ok(/done\.nextDueAt = nextDueAfterRun\(done\.schedule, Date\.now\(\)\)/.test(sup),
+    'the supervisor recomputes next-due on the child exit, from the completion clock');
+}
+
 console.log('\nthe due-check refuses to double-fire');
 {
   const base = { schedule: { everySeconds: 600 }, runsDone: 0, lastRunAt: 0, nextDueAt: T0, stoppedAt: 0 };
