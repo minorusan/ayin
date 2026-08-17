@@ -227,9 +227,26 @@ export async function refreshActiveModel(): Promise<void> {
   finally { modelRefreshInFlight = false; }
 }
 
-/** The dialect for the currently-active backend model (sync; uses the last refresh). */
+/**
+ * The dialect for the currently-active backend model (sync; uses the last refresh).
+ *
+ * IN NATIVE MODE THE MODEL'S OWN SYNTAX IS NOT WHAT AYIN READS. The runtime parses the tool calls and
+ * the provider renders them BACK into the canonical `<function=…>` text (see `providers/openai.ts`
+ * and the resource provider's `renderNativeCalls`), so the text arriving here is the provider's, not
+ * the model's. Matching on the model id then picks a dialect for a syntax nobody emitted.
+ *
+ * Measured: with native tools on, muse-glimmer's calls were parsed by Ollama, re-rendered as
+ * `<function=bash>…`, and handed to the GLIMMER dialect — which only reads ATEM. Zero tool calls, 35
+ * rounds of a model correctly emitting calls that ayin threw away. `qwen` and `gemma` hid the bug
+ * because their dialects read that same XML form by coincidence.
+ *
+ * An explicit operator adapter still wins: blindfolding ayin deliberately remains the operator's to do.
+ */
 export function activeDialect(): ModelDialect {
   ensureRefreshed();
+  if (!adapterOverride && cachedToolMode === 'native') {
+    return DIALECTS.find((d) => d.id === 'native') ?? cachedDialect;
+  }
   return cachedDialect;
 }
 
