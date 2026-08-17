@@ -456,8 +456,62 @@ const DANGEROUS_FLAGS = /(^|\s)-(delete|exec|execdir|ok|okdir|fls|fprint|fprintf
  */
 const SHELL_ESCAPES = /\$\(|`|>|<\(|&(?!&)/;
 
-/** The separators a legitimate pipeline uses. Each SEGMENT is then validated on its own. */
-const PIPELINE_SPLIT = /\|\||&&|;|\|/;
+/**
+ * Split a command on its pipeline operators, IGNORING anything inside quotes.
+ *
+ * A plain `split(/\|\||&&|;|\|/)` looks right and silently broke the most useful search there is:
+ * `grep -rnE "time bonus|bonus.*time" .` splits inside the REGEX, the second half becomes
+ * `bonus.*time" .`, that starts with no allowed prefix, and the command is refused. Alternation is
+ * exactly what ayin's own grep description tells the model to use ("alternation (a|b), ?, +, () all
+ * work"), so explore lost its best tool and fell back to `ls` — measured as a 3m14s investigation
+ * that returned a directory listing as its finding.
+ *
+ * Quote tracking is what makes the guarantee survive the fix: a `;` INSIDE quotes is data being
+ * handed to grep as a pattern, while a `;` outside them starts a second command and must still be
+ * refused.
+ */
+function splitPipeline(cmd: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (quote) {
+      cur += c;
+      if (c === quote && cmd[i - 1] !== '\\') quote = null;
+      continue;
+    }
+    if (c === '"' || c === '\'') { quote = c; cur += c; continue; }
+    if (c === ';') { out.push(cur); cur = ''; continue; }
+    if (c === '|') { if (cmd[i + 1] === '|') i++; out.push(cur); cur = ''; continue; }
+    if (c === '&' && cmd[i + 1] === '&') { i++; out.push(cur); cur = ''; continue; }
+    cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+
+/**
+ * The command with quoted spans blanked out — what the escape and flag checks must read.
+ *
+ * `grep -rn "a > b" .` contains a `>` that redirects nothing; refusing it is the same false positive
+ * as the pipeline one above. Blanking rather than removing keeps offsets sane for anything that
+ * later wants them.
+ */
+function unquotedSkeleton(cmd: string): string {
+  let out = '';
+  let quote: '"' | '\'' | null = null;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (quote) {
+      out += c === quote && cmd[i - 1] !== '\\' ? (quote = null, c) : ' ';
+      continue;
+    }
+    if (c === '"' || c === '\'') { quote = c; out += c; continue; }
+    out += c;
+  }
+  return out;
+}
 
 /**
  * May this model-authored command run?
@@ -484,9 +538,12 @@ const PIPELINE_SPLIT = /\|\||&&|;|\|/;
 export function isAllowed(cmd: string): boolean {
   const trimmed = cmd.trim();
   if (!trimmed) return false;
-  if (SHELL_ESCAPES.test(trimmed)) return false;
-  if (DANGEROUS_FLAGS.test(trimmed)) return false;
-  const segments = trimmed.split(PIPELINE_SPLIT);
+  // Checked against the skeleton, so a `>` or a `$(` that is plainly INSIDE a quoted search pattern
+  // is read as the data it is. Anything outside quotes is still refused outright.
+  const bare = unquotedSkeleton(trimmed);
+  if (SHELL_ESCAPES.test(bare)) return false;
+  if (DANGEROUS_FLAGS.test(bare)) return false;
+  const segments = splitPipeline(trimmed);
   return segments.every((seg) => {
     const s = seg.trim();
     if (!s) return false;

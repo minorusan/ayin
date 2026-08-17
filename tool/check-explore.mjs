@@ -278,6 +278,21 @@ console.log('\nexplore normal case (must still work — the fix must not break o
   check('sort -o /tmp/x f', false, 'sort can write');
   check('awk "BEGIN{system(\\"id\\")}"', false, 'awk has system()');
 
+  // QUOTED OPERATORS ARE DATA, NOT SYNTAX.
+  //
+  // Splitting the command on `|` without tracking quotes refused every ALTERNATION REGEX — the most
+  // useful search there is, and the one ayin's own grep description tells the model to use. Measured
+  // on a real repo: explore lost alternation, flailed for 3m14s and returned an `ls -la` listing as
+  // its finding. The confinement must survive the fix, so both halves are pinned here together.
+  check('grep -rnE "time bonus|bonus.*time" .', true, 'alternation inside quotes is a PATTERN');
+  check('grep -rnE "GetTimeBonus|_scoreCount" Assets', true);
+  check('grep -rn "a > b" .', true, 'a redirect character inside quotes redirects nothing');
+  check('grep -rn "a; rm -rf /" .', true, 'a semicolon inside quotes starts no second command');
+  check('grep -rn --include=*.cs "TimeBonus" .', true);
+  // …and the same operators OUTSIDE quotes are still syntax, still refused.
+  check('grep -rnE "a|b" . ; rm -rf /tmp/x', false, 'quoted alternation AND a real chained write');
+  check('grep -rnE "a|b" . | tee /tmp/x', false, 'quoted alternation AND a real pipe to a writer');
+
   // And the list itself must stay short — every tempting addition can write or spawn.
   const src = readFileSync(join(REPO, 'src/tools/explore.ts'), 'utf-8');
   ok(!/'awk'|'sed[^']*'|'sort'|'uniq'/.test(src),
