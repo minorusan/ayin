@@ -26,7 +26,7 @@
 
 import { log } from '../log.js';
 import { isCorpusInjection } from '../modes.js';
-import { chunksByIds, embedText, hasUsableVectors, loadVectors, vectorSearch, liveVectors } from './embed.js';
+import { chunksByIds, embedQuery, hasUsableVectors, loadVectors, vectorSearch, liveVectors, QUERY_TIMEOUT_MS } from './embed.js';
 import { buildLexicon, lookupNames, type NameHit } from './lexicon.js';
 import { assessChunk } from './staleness.js';
 import { openStore, type Chunk } from './store.js';
@@ -187,9 +187,10 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
   // ── vector pass, when the corpus has vectors from the model configured right now ──
   // Names narrowed the field; domains narrow it again; cosine only ranks what survived. If the
   // endpoint is down or nothing is embedded, fall through to lexical rather than failing the tool.
+  let vectorNote: string | undefined;
   if (hasUsableVectors(store)) {
     try {
-      const qv = await embedText(query);
+      const qv = await embedQuery(query);
       const hits = vectorSearch(liveVectors(store), qv, {
         limit, within: strongIds.size ? strongIds : undefined,
       });
@@ -197,10 +198,17 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
         return render(repoPath, store, chunksByIds(all, hits.map((h) => h.chunkId)), query, named, 'semantic');
       }
     } catch (e) {
-      // SAY WHY. This catch hid a real failure for four rounds of debugging: the search printed
-      // `[keyword]` with no hint that the semantic pass had been attempted and failed, so a wrong
-      // answer read as a bad corpus. Lexical is still a fine fallback — a silent one is not.
-      log('WARN', 'corpus_vector_pass_failed', { error: e instanceof Error ? e.message : String(e) });
+      // SAY WHY, ON SCREEN. This catch hid a real failure for four rounds of debugging: the search
+      // printed `[keyword]` with no hint that the semantic pass had been attempted and failed, so a
+      // wrong answer read as a bad corpus. Lexical is still a fine fallback — a silent one is not.
+      // A timeout is the case the operator most needs named: it means the embedding endpoint is slow
+      // or busy, which is a fact about the machine, not about this corpus.
+      const msg = e instanceof Error ? e.message : String(e);
+      const timedOut = e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError');
+      log('WARN', 'corpus_vector_pass_failed', { error: msg, timedOut });
+      vectorNote = timedOut
+        ? `semantic pass gave up after ${Math.round(QUERY_TIMEOUT_MS / 1000)}s (embedding endpoint slow or busy)`
+        : `semantic pass failed: ${msg}`;
     }
   }
 
@@ -223,13 +231,13 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
     return `Nothing in the corpus matches "${query}". It holds ${store.totals().chunks} answered question(s) for this repo.`;
   }
 
-  return render(repoPath, store, scored.map((s2) => s2.chunk), query, named, 'keyword');
+  return render(repoPath, store, scored.map((s2) => s2.chunk), query, named, 'keyword', vectorNote);
 }
 
 /** One rendering for both passes — the agent should not be able to tell which found the chunk. */
 function render(
   repoPath: string, store: ReturnType<typeof openStore>, chunks: Chunk[],
-  query: string, named: NameHit[], how: 'semantic' | 'keyword',
+  query: string, named: NameHit[], how: 'semantic' | 'keyword', why?: string,
 ): string {
   // Only names that actually decided the result are named. Reporting a weak fuzzy hit as "matched
   // on: pathPoints" when the answer came from semantics tells the agent something untrue about why
@@ -237,7 +245,7 @@ function render(
   const matchedNames = named.filter((n) => n.score >= 0.9).slice(0, 3).map((n) => n.handle.raw).join(', ');
   const out: string[] = [
     `${chunks.length} of ${store.totals().chunks} chunk(s) match "${query}" [${how}]`
-    + (matchedNames ? ` (matched on: ${matchedNames})` : '') + ':',
+    + (why ? ` — ${why}` : '') + (matchedNames ? ` (matched on: ${matchedNames})` : '') + ':',
   ];
   for (const chunk of chunks) {
     const state = assessChunk(repoPath, chunk);

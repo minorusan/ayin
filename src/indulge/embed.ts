@@ -109,12 +109,41 @@ export interface VectorRecord {
   vector: number[];
 }
 
+/**
+ * How long an embed may take before the caller gives up.
+ *
+ * TWO BUDGETS, because there are two callers with opposite needs. A BUILD embeds thousands of
+ * multi-kilobyte chunks and can afford to wait — abandoning one there costs a re-run. A QUERY sits
+ * inside a turn the operator is watching, and a retrieval that arrives late is worth nothing: the
+ * answer it would have improved has already been given.
+ *
+ * The default was NO timeout at all, and `fetch` has none of its own. Measured on this machine: the
+ * FIRST embed after five idle minutes cost 10.1s because the model had to be loaded onto a card
+ * holding a 20 GB chat model, while the next three cost 0.03s. Across a LAN, behind another job in
+ * the one GPU queue, that same cold start is minutes — and the turn simply waited, with nothing on
+ * screen to say what for. Retrieval is an OPTIONAL improvement to a turn; it must never be able to
+ * hold one open.
+ */
+const BUILD_TIMEOUT_MS = Number(process.env.AYIN_EMBED_TIMEOUT_MS || 120_000);
+export const QUERY_TIMEOUT_MS = Number(process.env.AYIN_EMBED_QUERY_TIMEOUT_MS || 8_000);
+
+/**
+ * Keep the embedding model resident.
+ *
+ * Ollama unloads after five minutes by default, so an operator who asks something, reads the answer,
+ * and asks again pays the full cold load EVERY time — the exact rhythm of real use. The model is
+ * 0.3 GB next to a 20 GB chat model on the same card; keeping it warm for half an hour is the
+ * cheapest ten seconds anyone will ever buy back.
+ */
+const KEEP_ALIVE = process.env.AYIN_EMBED_KEEP_ALIVE || '30m';
+
 /** One text → one array of floats. The whole API surface of an embedding model. */
-export async function embedText(text: string, model = embedModel()): Promise<number[]> {
+export async function embedText(text: string, model = embedModel(), timeoutMs = BUILD_TIMEOUT_MS): Promise<number[]> {
   const res = await fetch(`${embedUrl()}/api/embeddings`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model, prompt: text }),
+    body: JSON.stringify({ model, prompt: text, keep_alive: KEEP_ALIVE }),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`embeddings HTTP ${res.status} — is "${model}" pulled? (ollama pull ${model})`);
   const body = await res.json() as { embedding?: number[] };
@@ -122,6 +151,26 @@ export async function embedText(text: string, model = embedModel()): Promise<num
     throw new Error(`embeddings returned no vector for model "${model}"`);
   }
   return body.embedding;
+}
+
+/**
+ * The QUERY side: a short budget, and the same question is never embedded twice.
+ *
+ * A session asks about one thing from several angles, and the agent's own `corpus_search` calls
+ * repeat the operator's words back almost verbatim — so the cache hits often, and a hit costs
+ * nothing at all instead of a round trip to a shared card.
+ */
+const queryCache = new Map<string, number[]>();
+const QUERY_CACHE_MAX = 64;
+
+export async function embedQuery(text: string, model = embedModel()): Promise<number[]> {
+  const key = `${model}\u0000${text}`;
+  const hit = queryCache.get(key);
+  if (hit) return hit;
+  const v = await embedText(text, model, QUERY_TIMEOUT_MS);
+  if (queryCache.size >= QUERY_CACHE_MAX) queryCache.delete(queryCache.keys().next().value as string);
+  queryCache.set(key, v);
+  return v;
 }
 
 const vectorsPath = (store: IndulgeStore): string => join(store.dir, 'vectors.jsonl');
