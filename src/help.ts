@@ -90,6 +90,11 @@ export const HELP: HelpEntry[] = [
     short: 'A standing watch — /sentinaile check CI every 10 minutes · /sentinaile stop · bare for status',
     tip: 'Plans once into sentinaile_plan.md; edit it to change what each run does.',
   },
+  {
+    name: '/skip-permissions', kind: 'command', section: 'Code',
+    short: 'Run tool calls without confirmation for THIS session — /skip-permissions off to restore',
+    tip: 'git push/pull/checkout stay gated, and with prompts off they are denied rather than allowed.',
+  },
   { name: '/disentangle', kind: 'command', section: 'Code', short: 'Drop the entangle constraint for this session' },
   { name: '/arduino-explain', kind: 'command', section: 'Code', short: 'Explain an Arduino sketch and regenerate its diagram' },
 

@@ -2163,6 +2163,31 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
   ok(/if \(retry\.trim\(\)\) reply = retry;/.test(guard),
     'and an EMPTY retry keeps the original — replacing a bad reply with nothing is not an improvement');
 
+  // ── /skip-permissions turns off a GUARD, so its limits are pinned ──────────
+  {
+    const perm = readFileSync(join(DIST, '..', 'src', 'permissions.ts'), 'utf-8');
+    // The push/pull/checkout check must stay ABOVE every rule the flag can reach, and under the flag
+    // it must DENY rather than allow: those are unrecoverable and public, and nobody is watching.
+    const dangerAt = perm.indexOf('const danger = dangerousShellOp');
+    const skipAt = perm.indexOf('if (skipPermissions || HEADLESS) {');
+    ok(dangerAt > 0 && skipAt > dangerAt,
+      'the push/pull/checkout guard runs BEFORE the skip flag is consulted');
+    ok(/if \(HEADLESS \|\| skipPermissions \|\| READONLY\) \{[\s\S]{0,300}?return 'deny';/.test(perm),
+      '…and with prompts off those ops are DENIED, never waved through');
+
+    // Session-scoped on purpose: a gate that silently stayed off after a restart is one nobody
+    // remembers turning off, and the first they learn of it is the thing it would have stopped.
+    ok(/let skipPermissions = /.test(perm), 'the flag is mutable for the session');
+    ok(!/setConfigValue\([^)]*skipPermission/i.test(perm),
+      'it is NEVER persisted — it must not survive a restart');
+
+    const appSrc = readFileSync(join(DIST, '..', 'src', 'app.ts'), 'utf-8');
+    const cmd = appSrc.slice(appSrc.indexOf("case '/skip-permissions'"), appSrc.indexOf("case '/skip-permissions'") + 1400);
+    ok(/setStickyAlert\('warn'/.test(cmd),
+      'while it is on the operator SEES it — an invisible disabled guard is the dangerous kind');
+    ok(/DENIED, not allowed/.test(cmd), 'the message states what is still gated, rather than implying nothing is');
+  }
+
   // ── the finished-reply marker, and the three places models put it ──────────
   //
   // A `$` opening the LAST line of a multi-line reply was caught by neither pattern: not at the

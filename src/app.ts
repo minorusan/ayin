@@ -618,6 +618,26 @@ onInput(async (text: string) => {
         }
         return;
       }
+      case '/skip-permissions': {
+        // For a benchmark run: several agents, one prompt, none of them stopping on a dialog.
+        // Session-scoped and LOUD — a gate that is off must never be a thing you have to remember.
+        const { isSkippingPermissions, setSkipPermissions } = await import('./permissions.js');
+        const arg = text.slice(text.indexOf(' ') + 1).trim().toLowerCase();
+        const on = arg === '' ? !isSkippingPermissions() : arg !== 'off' && arg !== '0' && arg !== 'false';
+        setSkipPermissions(on);
+        if (on) {
+          setStickyAlert('warn', 'PERMISSIONS SKIPPED — tool calls run unprompted (this session only)');
+          addMessage('system',
+            'Permissions SKIPPED for this session. Tool calls run without asking.\n'
+            + '  · git push / pull / checkout are still gated — and with prompts off they are DENIED, not allowed.\n'
+            + '  · Not persisted: a restart brings the prompts back.\n'
+            + '  · /skip-permissions off to restore now.');
+        } else {
+          clearStickyAlert();
+          addMessage('system', 'Permissions restored — tool calls ask again.');
+        }
+        return;
+      }
       case '/logcover': {
         const arg = text.slice('/logcover'.length).trim().toLowerCase();
         const on = arg === '' ? !isLogCoverage() : arg !== 'off' && arg !== '0';

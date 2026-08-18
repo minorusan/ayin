@@ -20,7 +20,32 @@ import { showDialog, type DialogOption } from './dialog.js';
 import { log } from './log.js';
 import { HEADLESS } from './ui.js';
 
-const SKIP_PERMISSIONS = process.argv.includes('--dangerously-skip-permissions');
+/**
+ * Skip the confirmation prompts for this SESSION.
+ *
+ * Starts from `--dangerously-skip-permissions` and can be toggled at runtime with `/skip-permissions`
+ * — the benchmark case: running the same prompt against several agents and wanting none of them to
+ * stop on a dialog.
+ *
+ * DELIBERATELY NOT PERSISTED. `modes.ts` persists its toggles because a mode you must re-enable every
+ * session is a mode you stop using; the opposite reasoning applies here. A permission gate that
+ * silently stayed off after a restart is one nobody remembers turning off, and the first they learn
+ * of it is the thing it would have stopped.
+ *
+ * It also does NOT reach the push/pull/checkout guard — that check runs first, above every rule here,
+ * and under a skip flag it DENIES rather than allows. Those are unrecoverable and public; the only
+ * safe answer with nobody watching is no.
+ */
+let skipPermissions = process.argv.includes('--dangerously-skip-permissions');
+
+export function isSkippingPermissions(): boolean { return skipPermissions; }
+
+/** Returns the new state. Session-scoped: nothing is written to disk. */
+export function setSkipPermissions(on: boolean): boolean {
+  skipPermissions = on;
+  log(on ? 'WARN' : 'INFO', on ? 'permissions_skipped_on' : 'permissions_skipped_off', {});
+  return skipPermissions;
+}
 // Read-only mode (env AYIN_READONLY=1): hard-deny anything outside the safe read whitelist,
 // even in headless. For callers that must NUDGE, never edit (e.g. the premortem-hound doggo).
 const READONLY = process.env.AYIN_READONLY === '1';
@@ -119,7 +144,7 @@ export async function checkPermission(
   if (danger) {
     // Nobody is watching a headless run, and there is no popup to show. The only safe answer to
     // "may I push?" with no human present is no.
-    if (HEADLESS || SKIP_PERMISSIONS || READONLY) {
+    if (HEADLESS || skipPermissions || READONLY) {
       log('WARN', 'permission_dangerous_denied_unattended', { tool, op: danger, param: primaryValue.slice(0, 200) });
       return 'deny';
     }
@@ -146,7 +171,7 @@ export async function checkPermission(
     log('INFO', ok ? 'permission_readonly_allow' : 'permission_readonly_deny', { tool });
     return ok ? 'allow' : 'deny';
   }
-  if (SKIP_PERMISSIONS || HEADLESS) {
+  if (skipPermissions || HEADLESS) {
     log('INFO', 'permission_skip', { tool });
     return 'allow';
   }
