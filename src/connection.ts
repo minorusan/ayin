@@ -180,7 +180,23 @@ export async function llmChat(
       const requestId = `${randomUUID().slice(0, 8)}`;
       setInFlightRequestId(requestId);
 
-      const body: Record<string, unknown> = { messages, temperature: opts.temperature ?? 0.7, requestId };
+      // A PERSON IS WAITING ON THIS ONE — declared per request, expiring with it.
+      //
+      // The gateway queues by priority and, without a claim, ayin arrives at the bottom: every
+      // background job that fires while a turn waits walks past it. On a box whose habits fire about
+      // once a minute that is not "deprioritised", it is starved — a turn that generates in a second
+      // took minutes and looked exactly like a hang.
+      //
+      // This is deliberately NOT a lock. Nothing is held between calls, so there is nothing to
+      // release, nothing to keep alive with a timer, and nothing left behind when this process is
+      // killed — the three ways the lock this replaced went wrong. It asks to be treated as work
+      // someone is watching, which the gateway grants as normal priority; jumping AHEAD of a person's
+      // own chat still requires a token ayin does not have and should not want.
+      const body: Record<string, unknown> = {
+        messages, temperature: opts.temperature ?? 0.7, requestId,
+        priority: 'interactive',
+        owner: 'ayin',
+      };
       if (opts.thinking ?? THINKING_MODE) body.thinking = true;
       if (images.length) body.images = images;
       if (opts.tools?.length) body.tools = opts.tools;
