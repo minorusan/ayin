@@ -302,10 +302,10 @@ export function normalizeRemote(url: string): string {
  * The `owner/repo` tail of a normalized remote — the part that identifies the PROJECT.
  *
  * `normalizeRemote` keeps the host, which is right for a key and wrong for a comparison: an SSH host
- * ALIAS is a local convenience, not a different repository. A `~/.ssh/config` entry for a work account
- * turns `github.com:Play-Perfect/SolitaireSmash` into `github-solitaire:Play-Perfect/SolitaireSmash`,
- * and the two machines then disagree about which repo they are looking at — so a corpus built on one
- * is refused by the other, which is exactly backwards from what the guard is for.
+ * ALIAS is a local convenience, not a different repository. A `~/.ssh/config` entry for a second
+ * account turns `github.com:<owner>/<repo>` into `<alias>:<owner>/<repo>`, and the two machines then
+ * disagree about which repo they are looking at — so a corpus built on one is refused by the other,
+ * which is exactly backwards from what the guard is for.
  */
 export function ownerRepo(normalized: string): string {
   const parts = normalized.split('/').filter(Boolean);
