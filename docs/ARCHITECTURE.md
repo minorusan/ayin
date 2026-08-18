@@ -1720,6 +1720,15 @@ Gate: `npm run check:launch`.
 
 ## Repo watcher (`watch.ts`)
 
+`ayin unwatch` is the inverse and the only way out: it removes the hooks from the repo (a CHAINED
+block comes out of a host hook byte-for-byte; a hook that is entirely ours is deleted; anything
+unrecognised is reported and left alone), removes the hound script and only our own entry from
+`.claude/settings.json`, and **deregisters the repo** — which is the step that actually ends it, since
+while a repo stays registered the daemon's self-heal reinstalls every hook within five minutes.
+`--all` for every watched repo, `--stop` to stop the daemon without touching any hooks. When nothing
+remains registered the daemon is stopped too. The queue and past reports are kept.
+`tool/check-unwatch.mjs` guards the boundary — the risk here is removing too MUCH.
+
 `ayin watch --repo <path>` installs a `post-commit` hook and runs a foreground daemon;
 bare `ayin watch` is the boot/launchd resume path (hooks already installed); `--once`
 processes the backlog and exits.

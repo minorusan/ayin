@@ -189,6 +189,7 @@ export const HELP: HelpEntry[] = [
   { name: 'ayin testrun', kind: 'cli', section: 'From your shell', short: 'ayin testrun "<domain>" · --list shows what would run without running it' },
   { name: 'ayin explain', kind: 'cli', section: 'From your shell', short: 'ayin explain "<question>" — prints the narrative and exits' },
   { name: 'ayin watch', kind: 'cli', section: 'From your shell', short: 'Repo watcher daemon — reviews what lands, resumes itself after a reboot' },
+  { name: 'ayin unwatch', kind: 'cli', section: 'From your shell', short: 'Stop watching this repo: remove the hooks it installed and deregister it (--all, --stop)' },
   { name: 'ayin -p', kind: 'cli', section: 'From your shell', short: 'Headless: ayin -p "<task>". Auto-approves writes and shell — run it on a tree you can revert' },
   { name: 'ayin debug', kind: 'cli', section: 'From your shell', short: 'ayin debug [dir] — the same bundle without the TUI, for a run nobody was sitting in front of' },
   { name: 'ayin update', kind: 'cli', section: 'From your shell', short: 'Self-update from the configured registry' },

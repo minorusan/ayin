@@ -1099,6 +1099,12 @@ async function main(): Promise<void> {
     await runWatch(process.argv.slice(3));
     return;
   }
+  if (process.argv[2] === 'unwatch') {
+    // The inverse of `watch`: remove the hooks from a repo and deregister it. See src/watch.ts.
+    const { runUnwatch } = await import('./watch.js');
+    await runUnwatch(process.argv.slice(3));
+    return;
+  }
   if (process.argv[2] === 'indulge') {
     // Overnight per-repo corpus build — no TUI, no agent loop, resumes itself. See src/indulge/.
     const { runIndulge } = await import('./indulge/index.js');

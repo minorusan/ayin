@@ -1206,6 +1206,137 @@ export async function runWatch(args: string[]): Promise<void> {
   }
 }
 
+/**
+ * `ayin unwatch` — the exact inverse of what `watch` installed, and nothing more.
+ *
+ * WHY THIS HAS TO EXIST. `watch` writes into repositories that are not ayin's: git hooks, a hook
+ * script under `.claude/`, an entry in the repo's `settings.json`. Anything that writes into someone
+ * else's tree owes them a way to take it back — and until now the only way out was to hand-edit
+ * files most people do not know are there, in a repo where a mistake is a broken commit.
+ *
+ * It self-heals, which makes this sharper: deleting a hook by hand does NOT stop the watching. The
+ * daemon puts it back within five minutes, because a missing hook is indistinguishable from a
+ * re-clone. Deregistering is the only thing that actually ends it, and only this command does that.
+ *
+ * SURGICAL, BECAUSE THE FILES ARE SHARED. A hook may be ours outright or CHAINED onto a repo's own
+ * (git-lfs, husky). A chained block is fenced, so only the fence comes out and the host hook is left
+ * byte-for-byte. A hook we do not recognise at all is reported and left alone: a watcher that removes
+ * someone's release hook while "cleaning up" has done far more damage than it ever prevented.
+ */
+export async function runUnwatch(args: string[]): Promise<void> {
+  const all = args.includes('--all');
+  const stopOnly = args.includes('--stop');
+  const repoIdx = args.indexOf('--repo');
+  const repoArg = repoIdx !== -1 ? args[repoIdx + 1] : null;
+
+  const stopDaemon = (): boolean => {
+    const pid = watchDaemonPid();
+    if (!pid) return false;
+    try { process.kill(pid, 'SIGTERM'); out(`daemon stopped (pid ${pid})`); return true; }
+    catch (e) { out(`could not stop the daemon (pid ${pid}): ${e instanceof Error ? e.message : String(e)}`); return false; }
+  };
+
+  if (stopOnly) {
+    if (!stopDaemon()) out('no watch daemon is running.');
+    out('hooks are untouched — the repos stay registered and resume on the next `ayin watch`.');
+    return;
+  }
+
+  let targets: string[];
+  if (all) {
+    targets = registeredRepos();
+    if (targets.length === 0) { out('no repositories are being watched.'); return; }
+  } else {
+    const where = repoArg ?? process.cwd();
+    const res = await sh('git', ['-C', where, 'rev-parse', '--show-toplevel'], process.cwd());
+    if (!res.ok) {
+      process.stderr.write(`ayin unwatch: ${where} is not a git repository\n`);
+      process.exit(1);
+    }
+    targets = [res.stdout.trim()];
+  }
+
+  for (const repo of targets) {
+    out(`unwatching ${repo}`);
+    for (const { name } of WATCH_HOOKS) {
+      const paths = await hookPathFor(repo, name);
+      if (!paths || !existsSync(paths.hookPath)) { out(`  ${name}: no hook file`); continue; }
+      let body: string;
+      try { body = readFileSync(paths.hookPath, 'utf-8'); }
+      catch { out(`  ${name}: unreadable — left alone`); continue; }
+
+      if (body.includes(CHAIN_BEGIN)) {
+        // Ours is a fenced block appended to someone else's hook. Take the fence, leave their file.
+        const start = body.indexOf(CHAIN_BEGIN);
+        const endTag = body.indexOf(CHAIN_END, start);
+        if (endTag === -1) { out(`  ${name}: chained block has no end marker — left alone`); continue; }
+        // Byte-exact where it matters: our block was APPENDED with a leading blank line, so removing
+        // it must not leave the host hook with a tail it did not have. Verified by diffing the file
+        // against its original content in the gate.
+        const cleaned = (body.slice(0, start) + body.slice(endTag + CHAIN_END.length))
+          .replace(/\n{3,}/g, '\n\n')
+          .replace(/\n+$/, '\n');
+        writeFileSync(paths.hookPath, cleaned);
+        out(`  ${name}: chained block removed, the repo's own hook kept`);
+      } else if (body.includes(HOOK_MARKER)) {
+        // The whole file is ours — written by us, and nothing else was ever added to it.
+        try { unlinkSync(paths.hookPath); out(`  ${name}: hook removed`); }
+        catch (e) { out(`  ${name}: could not remove (${e instanceof Error ? e.message : String(e)})`); }
+      } else {
+        out(`  ${name}: not ours — left alone`);
+      }
+    }
+
+    // The hound: its script, the bash one it replaced, and only OUR entry in settings.json.
+    for (const script of [HOUND_SCRIPT_NAME, LEGACY_HOUND_SCRIPT]) {
+      const path = join(repo, '.claude', 'hooks', script);
+      if (!existsSync(path)) continue;
+      try { unlinkSync(path); out(`  hound: ${script} removed`); }
+      catch (e) { out(`  hound: could not remove ${script} (${e instanceof Error ? e.message : String(e)})`); }
+    }
+    const settingsPath = join(repo, '.claude', 'settings.json');
+    if (existsSync(settingsPath)) {
+      try {
+        const settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as ClaudeSettings;
+        const groups: ClaudeHookGroup[] = settings.hooks?.Stop ?? [];
+        const kept = groups.filter((g) => !g.hooks?.some((h) => HOUND_MARKERS.some((m) => h.command?.includes(m))));
+        if (kept.length !== groups.length) {
+          // Remove the KEY when nothing is left, rather than leaving `"Stop": []` behind: an empty
+          // array is a change to the operator's file that outlives the reason for it.
+          if (kept.length) settings.hooks!.Stop = kept;
+          else delete settings.hooks?.Stop;
+          if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
+          writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+          out('  hound: Stop entry removed from .claude/settings.json');
+        }
+      } catch { out('  hound: settings.json unparseable — left alone'); }
+    }
+
+    // DEREGISTER LAST, and this is the step that actually ends it: while the repo is registered the
+    // daemon's self-heal puts every hook back within five minutes.
+    if (existsSync(REPOS_FILE)) {
+      try {
+        const repos = JSON.parse(readFileSync(REPOS_FILE, 'utf-8')) as Record<string, unknown>;
+        if (repo in repos) {
+          delete repos[repo];
+          writeFileSync(REPOS_FILE, `${JSON.stringify(repos, null, 2)}\n`);
+          out('  deregistered — self-heal will not reinstall it');
+        } else {
+          out('  was not registered (hooks cleaned anyway)');
+        }
+      } catch { out('  repos.json unparseable — left alone; run `ayin unwatch` again after fixing it'); }
+    }
+    log('INFO', 'watch_unwatched', { repo });
+  }
+
+  // Nothing left to watch: a daemon polling an empty set is a process that only costs.
+  if (registeredRepos().length === 0 && watchDaemonPid()) {
+    out('no repositories remain — stopping the daemon.');
+    stopDaemon();
+  }
+  out('The queue and past reports are kept (~/.ayin-cli/watch). `ayin watch --repo <path>` re-adds a repo.');
+}
+
 function cleanupPidfile(): void {
   try {
     if (existsSync(PID_FILE) && readFileSync(PID_FILE, 'utf-8').trim() === String(process.pid)) unlinkSync(PID_FILE);
