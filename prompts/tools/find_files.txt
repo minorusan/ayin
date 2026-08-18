@@ -1,0 +1,1 @@
+Find files by name. A pattern containing "/" is matched against the whole path (e.g. "*/GameServices/*.cs"); otherwise against the file name. Returns matching file paths.

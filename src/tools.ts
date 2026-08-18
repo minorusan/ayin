@@ -8,7 +8,7 @@
 
 import { log } from './log.js';
 import { getConfigString, getPrompt } from './prompts.js';
-import { prompts } from './prompts-service.js';
+import { prompts, packagePath } from './prompts-service.js';
 import type { Tool } from './tools/base.js';
 import { ensureToolRuntime } from './tool-wiring.js';
 import { discoverTools, extraToolDirs } from './tools/loader.js';
@@ -60,6 +60,33 @@ const toolMap = new Map<string, Tool>();
 // a newly shipped prompt id appears on the next boot. Failure to provision one tool must not take
 // the agent down — the tool throws a clear error if it later asks for a prompt it never got.
 
+/**
+ * A TOOL'S DESCRIPTION IS PROMPT TEXT, so it lives in a file like every other prompt.
+ *
+ * It is the sentence the model reads to decide whether to call the tool — the highest-leverage text
+ * in the whole system per character, and it was a string literal in the middle of a TypeScript file:
+ * invisible to anyone tuning behaviour, undiffable as content, and unchangeable without a rebuild.
+ * That is exactly the rule this repo already applies to every other prompt.
+ *
+ * `prompts/tools/<tool name>.txt`, materialized into the operator's store like the rest, so it can be
+ * edited on a running install and survives upgrades. A tool with no file keeps the description in its
+ * source, so nothing breaks and a third-party tool needs no file at all.
+ */
+function applyDescriptionOverrides(list: Tool[]): void {
+  try {
+    const { bundle } = prompts.register('tools', packagePath('prompts', 'tools'));
+    for (const t of list) {
+      if (!bundle.has(t.name)) continue;
+      const text = bundle.get(t.name).trim();
+      if (text) (t as { description: string }).description = text;
+    }
+  } catch (err) {
+    // A missing or unreadable directory must never stop the agent starting: the inline descriptions
+    // are a complete fallback, and a tool that cannot be described is still a tool that runs.
+    log('WARN', 'tool_descriptions_unavailable', { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 function provisionToolPrompts(list: Tool[]): void {
   for (const t of list) {
     if (!t.promptsSourceDir || typeof t.bindPrompts !== 'function') continue;
@@ -107,6 +134,7 @@ export async function loadTools(): Promise<void> {
     tools = report.tools;
     toolMap.clear();
     for (const t of tools) toolMap.set(t.name, t);
+    applyDescriptionOverrides(tools);
     provisionToolPrompts(tools);
     log('INFO', 'tools_loaded', {
       count: String(tools.length),

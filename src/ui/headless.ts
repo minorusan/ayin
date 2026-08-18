@@ -17,6 +17,8 @@ const NO_TUI_COMMANDS = new Set([
   'diff',       // renders an HTML page and opens it; prints a path and exits
   'debug',      // writes a bundle and prints its path
   'testrun',    // runs C# tests and prints a report
+  'unwatch',    // removes hooks from a repo and prints what it touched — it was MISSING, so taking
+                // back a watcher opened a full-screen TUI for the duration of a few file writes
 ]);
 
 export const HEADLESS = process.argv.some(a => a === '-p' || a === '--prompt' || a === '--non-interactive')

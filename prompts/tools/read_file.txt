@@ -1,0 +1,1 @@
+Read a file and return its contents with line numbers. Use offset/limit for large files. For image files (png/jpg/jpeg/webp/gif/avif/tiff/bmp) the image is downscaled and attached to the next LLM call for vision processing instead of returning bytes. PDFs are not supported — rasterize to PNG first.

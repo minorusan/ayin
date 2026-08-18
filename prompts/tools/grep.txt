@@ -1,0 +1,1 @@
+Search file contents with an EXTENDED regex (alternation a|b, ?, +, () all work) — use this when you already know the literal string or pattern to match; use explore when you don't. Returns matching lines with file paths and line numbers, automatically skipping VCS/build/dependency directories (.git, node_modules, dist, Library, …) unless one is the exact path given.

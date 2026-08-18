@@ -1,0 +1,1 @@
+Check the status of background tool tasks — tools that took long enough to move to the background. Shows each task's status (running/completed/failed), how long it has been running, and a preview of its result once done. Call this to check on long-running tools like explore or web_search.

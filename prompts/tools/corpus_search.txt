@@ -1,0 +1,1 @@
+Search what a previous `ayin indulge` run already answered about THIS repo — questions, answers and the code they cite. Use it before investigating something from scratch: the answer may already exist, with citations. Keyword match over question text, file paths and answers (not semantic). Returns nothing if no corpus has been built.

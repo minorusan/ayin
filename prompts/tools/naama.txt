@@ -1,0 +1,12 @@
+Author a design document one fact per line — types, their members, what each member must do, the domains that own them and what those may reference. Use it during the design conversation instead of hand-writing a diagram file: nothing is regenerated, so nothing is dropped, and a fact about an undeclared type is refused rather than landing somewhere harmless. ops: add · show · check (what cannot be true) · render (draw it as a page).
+
+The `lines` grammar, one per line, batched as long as you like:
+
+  domain <name> refs=A,B|NONE [sealed]
+  type <Name> : class|interface|struct|enum|abstract @ <domain>  [— what it is for]
+  member <Type>.<signature>  — what it must do
+  private <Type>.<signature>
+  edge <From> -> <To> : dependency|extension|composition|aggregation
+  drop type <Name> | drop domain <name>
+
+Record the intent on every member: a signature alone cannot tell an implementer that a multiplier is the maximum of live values rather than their product, and that is the half a diagram loses.

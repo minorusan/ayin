@@ -1,0 +1,1 @@
+Execute a shell command and return its output — scripts, package installs, git, listing files, checking system state. Commands are killed after 120s by default; raise timeout_seconds for a build, and background anything open-ended (a server, a watcher) yourself.

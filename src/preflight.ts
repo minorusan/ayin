@@ -46,6 +46,13 @@ const NO_MODEL_NEEDED = new Set([
   'debug',
   // `testrun` drives NUnit/Unity; the model is only consulted through the corpus, which is on disk.
   'testrun',
+  // `unwatch` removes git hooks and deregisters a repo. It reads no model and writes no prompt, so
+  // gating it behind "configure a model first" stopped an operator from UNDOING a thing on a machine
+  // where the model had gone away — which is exactly when they want it undone.
+  'unwatch',
+  // The detached scheduler owns no terminal and nobody types it. An interactive gate in front of it
+  // is a gate nobody can answer: it would block forever, or fail a reboot's worth of scheduled work.
+  'sentinaile-supervisor',
 ]);
 
 /**
