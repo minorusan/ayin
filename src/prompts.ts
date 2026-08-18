@@ -200,8 +200,9 @@ export function getPromptsDir(): string {
  * Throw away local edits to ayin's prompts and take the shipped text again.
  * Config is untouched — it lives in a different file and is not a prompt.
  */
-export function resetPromptsToDefaults(): string[] {
-  return prompts.restoreDefaults(AYIN_NS);
+export function resetPromptsToDefaults(): { restored: string[]; backedUp: string[] } {
+  const restored = prompts.restoreDefaults(AYIN_NS);
+  return { restored, backedUp: prompts.lastBackedUp() };
 }
 
 /**

@@ -23,8 +23,17 @@ import { spawnSync } from 'node:child_process';
 import { HELP, SECTIONS, type HelpEntry } from './help.js';
 import { packagePath } from './prompts-service.js';
 
+/**
+ * PLAIN IS THE DEFAULT, and that is a decision about who reads this.
+ *
+ * ayin is driven by other agents at least as often as by a person, and an agent asking what the
+ * commands are gets box drawing, ANSI colour and a pager that never returns. So `ayin --help` prints
+ * a flat list with no escape codes and no pager — greppable, diffable, and the same bytes every time.
+ * `--ui` asks for the version made for eyes, and `--json` for the version made for parsers.
+ */
+let dressed = false;
 const useColor = (): boolean =>
-  process.stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
+  dressed && process.stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
 
 const C = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',
@@ -36,6 +45,8 @@ const paint = (code: string, text: string): string => (useColor() ? `${code}${te
 export function slugFor(name: string): string {
   const bare = name.replace(/^ayin\s+/, '').replace(/^\//, '');
   if (bare.startsWith('!')) return 'bang';
+  // `-p` is the headless mode, and a page called `p.md` tells a reader nothing. Named, like `bang`.
+  if (bare === '-p' || bare.startsWith('-p ')) return 'headless';
   const slug = bare.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   return slug || 'ayin';
 }
@@ -159,9 +170,62 @@ export function printPaged(text: string): void {
   } catch { process.stdout.write(text); }
 }
 
-/** `ayin --help [topic]`. Returns the process exit code. */
+/**
+ * The flat list: one command per line, no colour, no pager, no box drawing.
+ *
+ * Aligned rather than tab-separated because it has two readers and alignment costs the parser
+ * nothing — a machine splits on the first run of two spaces, a person reads the columns. The header
+ * names the two other forms, because an agent that wants structure should not have to guess that
+ * `--json` exists.
+ */
+export function plainPage(): string {
+  const lines = [
+    'ayin — a terminal coding agent that runs on a model you host',
+    '',
+    'ayin                      start the agent in this directory',
+    'ayin -p "<prompt>"        one task, no TUI, answer on stdout',
+    'ayin --help <topic>       one command in full',
+    'ayin --help --ui          the same list, formatted for a terminal',
+    'ayin --help --json        the same list, as JSON',
+    '',
+  ];
+  const width = Math.max(...HELP.map((e) => e.name.length));
+  for (const section of SECTIONS) {
+    const entries = HELP.filter((e) => e.section === section);
+    if (!entries.length) continue;
+    lines.push(`${section}:`);
+    for (const e of entries) lines.push(`  ${e.name.padEnd(width)}  ${e.short}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+/** Everything a parser needs, including whether a topic has a page worth fetching. */
+export function jsonPage(): string {
+  return `${JSON.stringify({
+    commands: HELP.map((e) => ({
+      name: e.name,
+      kind: e.kind,
+      section: e.section,
+      summary: e.short,
+      topic: slugFor(e.name),
+      hasDetail: detailFor(e) !== null,
+    })),
+  }, null, 2)}\n`;
+}
+
+/** `ayin --help [topic] [--ui|--json]`. Returns the process exit code. */
 export function runHelp(argv: string[]): number {
   const topic = argv.find((a) => !a.startsWith('-'));
-  printPaged(topic ? topicPage(topic) : fullPage());
+  if (argv.includes('--json')) { process.stdout.write(jsonPage()); return 0; }
+
+  dressed = argv.includes('--ui');
+  if (topic) {
+    const page = topicPage(topic);
+    if (dressed) printPaged(page); else process.stdout.write(page);
+    return 0;
+  }
+  if (dressed) { printPaged(fullPage()); return 0; }
+  process.stdout.write(plainPage());
   return 0;
 }

@@ -998,10 +998,18 @@ onInput(async (text: string) => {
         addMessage('system', 'Goal set ✓');
         return;
       }
-      case '/reset':
-        resetPromptsToDefaults();
-        addMessage('system', 'Prompts restored to defaults ✓');
+      case '/reset': {
+        // SAYS WHAT IT DID, because its name does not. `/reset` sounds like "start a new session" and
+        // is in fact "overwrite every prompt with the shipped text" — an operator reaching for a clean
+        // chat lost an evening of tuning and was told only `Prompts restored to defaults ✓`.
+        const r = resetPromptsToDefaults();
+        addMessage('system', `${r.restored.length} prompt(s) restored to the shipped text.`);
+        if (r.backedUp.length) {
+          addMessage('system', `Your edited copies were kept beside them as .bak-… : ${r.backedUp.join(', ')}`);
+        }
+        addMessage('system', 'This did not touch the conversation — /clear starts a new session.');
         return;
+      }
       case '/help': {
         // Rendered from src/help.ts — the ONE list. This block used to be a hand-written run of
         // addMessage calls, which is how `!` ended up documented nowhere at all.

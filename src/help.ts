@@ -68,7 +68,7 @@ export const HELP: HelpEntry[] = [
   },
   {
     name: '/explain', kind: 'command', section: 'Code',
-    short: 'Explain a feature or answer a question about this codebase, with a diagram where it helps',
+    short: 'Explain a feature or answer a question about this codebase, in prose, from the code it read',
     tip: '/explain <feature> walks the codebase and comes back with a narrative, not a file list.',
   },
   {
@@ -147,7 +147,7 @@ export const HELP: HelpEntry[] = [
   },
   { name: '/summary', kind: 'command', section: 'Session', short: 'Session summary (Esc closes) — same as Ctrl+S' },
   { name: '/clear', kind: 'command', section: 'Session', short: 'Clear the chat view (the session itself is untouched)' },
-  { name: '/reset', kind: 'command', section: 'Session', short: 'Start over — new session, empty context' },
+  { name: '/reset', kind: 'command', section: 'Session', short: "Restore ayin's prompts to the shipped text — your edited copies are kept as .bak-… · does NOT clear the chat" },
   {
     name: '/transcribe', kind: 'command', section: 'Session',
     short: 'Record EVERYTHING — prompts, raw responses, full tool results — to a JSON file. Big on purpose · /transcribe off',
@@ -158,7 +158,7 @@ export const HELP: HelpEntry[] = [
   { name: '/help', kind: 'command', section: 'Session', short: 'This list' },
 
   // ── the model ──────────────────────────────────────────────────────────────────
-  { name: '/model', kind: 'command', section: 'Model', short: 'Pick from the models the backend serves (popup) · /model <name|qwen|gemma> to switch straight away' },
+  { name: '/model', kind: 'command', section: 'Model', short: 'Who answers — local or OpenAI (popup) · /model gemma|qwen|glm|auto forces the tool-call dialect · /model <name|qwen|gemma> to switch straight away' },
   { name: '/set', kind: 'command', section: 'Model', short: '/set <key> <value> — persist a setting (kebab-case: /set terminal-command …)' },
 
   // ── connectors ─────────────────────────────────────────────────────────────────
@@ -166,7 +166,7 @@ export const HELP: HelpEntry[] = [
   { name: '/jira', kind: 'command', section: 'Connectors', short: 'Ask Jira directly — an agentic loop against its API' },
   { name: '/sentry-auth', kind: 'command', section: 'Connectors', short: 'Store a Sentry token + org slug' },
   { name: '/sentry', kind: 'command', section: 'Connectors', short: 'Ask Sentry directly' },
-  { name: '/openai', kind: 'command', section: 'Connectors', short: 'Use OpenAI instead of the local model · /openai key sk-…' },
+  { name: '/openai', kind: 'command', section: 'Connectors', short: 'Store and verify an OpenAI key · switching to it is /model openai — two decisions, two commands' },
 
   // ── keys ───────────────────────────────────────────────────────────────────────
   {

@@ -11,11 +11,35 @@ import { join } from 'node:path';
 
 const REPO = new URL('..', import.meta.url).pathname;
 const { HELP, SECTIONS } = await import(join(REPO, 'dist/help.js'));
-const { fullPage, topicPage, slugFor, detailFor } = await import(join(REPO, 'dist/help-page.js'));
+const { fullPage, plainPage, jsonPage, topicPage, slugFor, detailFor } = await import(join(REPO, 'dist/help-page.js'));
 
 const failures = [];
 const ok = (m) => console.log(`  ok   ${m}`);
 const fail = (m) => { failures.push(m); console.log(`  FAIL ${m}`); };
+
+// ── the DEFAULT form is the one a machine reads ──────────────────────────────────
+// ayin is driven by other agents at least as often as by a person. `ayin --help` must therefore be
+// flat text: an agent handed box drawing and ANSI colour has to strip them before it can act, and a
+// pager that waits for a keypress it cannot send is worse than no output at all.
+const plain = plainPage();
+if (/\x1b\[/.test(plain)) fail('`ayin --help` contains ANSI escapes — the default form is read by machines');
+else ok('the default `ayin --help` is plain text, no escape codes');
+if (!/--help --ui/.test(plain) || !/--help --json/.test(plain)) {
+  fail('the plain form does not name --ui and --json — an agent should not have to guess they exist');
+} else ok('the plain form names the formatted and structured forms');
+const everyName = HELP.every((e) => plain.includes(e.name));
+if (!everyName) fail('the plain form omits commands the formatted one lists');
+else ok(`the plain form carries all ${HELP.length} commands`);
+
+let parsed = null;
+try { parsed = JSON.parse(jsonPage()); } catch (e) { fail(`--help --json is not valid JSON: ${e.message}`); }
+if (parsed) {
+  if (parsed.commands?.length !== HELP.length) fail(`--help --json lists ${parsed.commands?.length} of ${HELP.length} commands`);
+  else ok(`--help --json parses and carries all ${HELP.length} commands`);
+  const bad = (parsed.commands ?? []).find((c) => !c.name || !c.topic || typeof c.hasDetail !== 'boolean');
+  if (bad) fail(`--help --json has an entry missing name/topic/hasDetail: ${JSON.stringify(bad)}`);
+  else ok('every JSON entry carries name, topic and whether a detail page exists');
+}
 
 // ── every command reaches the page ───────────────────────────────────────────────
 const page = fullPage();

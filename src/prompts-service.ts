@@ -340,6 +340,7 @@ class PromptsService {
    * edit away. This is the ONLY path that overwrites a local file.
    */
   restoreDefaults(namespace: string, id?: string): string[] {
+    backedUp.length = 0;
     const sourceDir = this.sources.get(namespace);
     if (!sourceDir || !existsSync(sourceDir)) {
       throw new Error(`no source directory registered for prompt namespace "${namespace}"`);
@@ -352,12 +353,38 @@ class PromptsService {
     for (const t of targets) {
       const from = join(sourceDir, `${t}.txt`);
       if (!existsSync(from)) throw new Error(`prompt "${namespace}/${t}" is not shipped by source`);
-      writeAtomic(join(dir, `${t}.txt`), readFileSync(from, 'utf8'));
+      const shipped = readFileSync(from, 'utf8');
+      const dest = join(dir, `${t}.txt`);
+
+      // BACK UP WHAT IS ABOUT TO BE OVERWRITTEN, in the same code path that overwrites it.
+      //
+      // This is the one deliberately destructive path in the prompt system, and it destroyed an
+      // evening's tuning without asking: an operator who edited a prompt and later restored defaults
+      // had no copy of what they wrote. A backup a human has to remember to take is a backup that
+      // does not exist. Only a file that actually DIFFERS is copied — restoring an untouched prompt
+      // should not litter the directory with identical files.
+      try {
+        if (existsSync(dest) && readFileSync(dest, 'utf8') !== shipped) {
+          const stamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+          writeAtomic(`${dest}.bak-${stamp}`, readFileSync(dest, 'utf8'));
+          backedUp.push(`${namespace}/${t}`);
+        }
+      } catch { /* a backup that cannot be written must not stop the restore the operator asked for */ }
+
+      writeAtomic(dest, shipped);
       restored.push(t);
     }
     return restored;
   }
+
+  /** What the last `restoreDefaults` copied aside, so the caller can say where it went. */
+  lastBackedUp(): string[] {
+    return [...backedUp];
+  }
 }
+
+/** Filled by `restoreDefaults`, read by `lastBackedUp` — so a destructive command can name the cost. */
+const backedUp: string[] = [];
 
 /** The one instance. Tools never import this — they are handed a `PromptBundle`. */
 export const prompts = new PromptsService();
