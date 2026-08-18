@@ -114,6 +114,7 @@ async function refreshTokens(): Promise<void> {
 
 import blessed from 'blessed';
 import { startLiveMirror } from './live-mirror.js';
+import { registerShippedPrompts } from './prompts.js';
 
 let summaryOverlay: blessed.Widgets.BoxElement | null = null;
 
@@ -1309,6 +1310,13 @@ async function runInteractive(): Promise<void> {
       // From here the run explains itself from OUTSIDE, continuously — see live-mirror.ts. A hang
       // cannot produce its own debug bundle, so the bundle stops being the only way to see one.
       startLiveMirror({ sessionId: id, version: getVersion() });
+      // Shipped prompt fixes land at BOOT, and they are ANNOUNCED. A prompt replaced silently is the
+      // same class of problem as one never replaced: text the operator cannot reason about.
+      const pr = registerShippedPrompts();
+      for (const r of pr.repaired) {
+        addMessage('system', `prompt ${r.id} could no longer carry what the code sends — replaced with the shipped text. Yours: ${r.backupPath}`);
+      }
+      if (pr.refreshed.length) addMessage('system', `prompt(s) updated to the shipped version: ${pr.refreshed.join(', ')}`);
     }).catch(err => {
       log('WARN', 'session_init_failed', { error: err instanceof Error ? err.message : String(err) });
     });

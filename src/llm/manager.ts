@@ -27,6 +27,7 @@
 import { log } from '../log.js';
 import type { LlmMessage, ModelDialect, ParseAllResult, ParsedToolCall } from './types.js';
 import { GemmaDialect } from './dialects/gemma.js';
+import { GlmDialect } from './dialects/glm.js';
 import { GlimmerDialect } from './dialects/glimmer.js';
 import { NativeToolDialect } from './dialects/native.js';
 import { QwenDialect } from './dialects/qwen.js';
@@ -38,7 +39,7 @@ import { llmProvider } from './select.js';
 // FIRST, because it is the most specific match and the only one whose absence was a bug: without it
 // an OpenAI model fell through to the gemma fallback and was told, in prose, to emit XML tool calls
 // that its API was already carrying natively.
-const DIALECTS: ModelDialect[] = [new NativeToolDialect(), new QwenDialect(), new GlimmerDialect(), new GemmaDialect()];
+const DIALECTS: ModelDialect[] = [new NativeToolDialect(), new QwenDialect(), new GlimmerDialect(), new GlmDialect(), new GemmaDialect()];
 const DEFAULT: ModelDialect = DIALECTS[DIALECTS.length - 1]; // gemma — used until the model id is known
 
 let cachedModelId = '';

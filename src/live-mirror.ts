@@ -24,7 +24,7 @@
  * can open is a diagnostic nobody reads, and this one lives in a temp directory shared with the OS.
  */
 
-import { appendFile, mkdirSync, rename, statSync, truncateSync, writeFile } from 'node:fs';
+import { appendFile, mkdirSync, readdirSync, rename, statSync, truncateSync, unlinkSync, writeFile } from 'node:fs';
 import { join } from 'node:path';
 import { platform, tmpdir } from 'node:os';
 import { addLogSink, currentLogFile, type LogEntry } from './log.js';
@@ -67,7 +67,7 @@ let phaseAt = Date.now();
 const status: Status = {
   pid: process.pid, sessionId: '', cwd: process.cwd(), version: '', logFile: '',
   startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-  phase: 'starting', phaseSince: new Date().toISOString(), phaseForMs: 0,
+  phase: 'idle', phaseSince: new Date().toISOString(), phaseForMs: 0,
   llm: { state: 'idle', at: new Date().toISOString() }, tool: null,
 };
 
@@ -113,8 +113,13 @@ export function startLiveMirror(opts: { sessionId: string; version: string }): v
   try {
     const dir = liveDir();
     mkdirSync(dir, { recursive: true });
-    mirrorPath = join(dir, 'log.ndjson');
-    statusPath = join(dir, 'status.json');
+    // PER PROCESS. One fixed path meant every ayin on the machine wrote the same file, and a reader
+    // got whichever wrote last — measured: a session idle for an hour kept overwriting the status of
+    // the session actually being debugged, with `phase: starting`, every two seconds. The file that
+    // exists to end guessing was producing it. Several ayin processes at once is NORMAL (a headless
+    // run, the watch daemon, a second terminal), so the reader picks the freshest `updatedAt`.
+    mirrorPath = join(dir, `log-${process.pid}.ndjson`);
+    statusPath = join(dir, `status-${process.pid}.json`);
     status.sessionId = opts.sessionId;
     status.version = opts.version;
     status.logFile = currentLogFile();
@@ -136,6 +141,25 @@ export function startLiveMirror(opts: { sessionId: string; version: string }): v
   const beat = setInterval(writeStatus, HEARTBEAT_MS);
   beat.unref?.();
   writeStatus();
+  pruneStale(join(liveDir()));
+}
+
+/**
+ * Drop the files of processes that are gone, so the directory stays readable by a human.
+ *
+ * Per-process files accumulate — every headless run leaves one. A reader facing forty of them is back
+ * to guessing, which is the thing this module exists to stop. Nothing here may throw: a mirror that
+ * cannot tidy up is still a mirror.
+ */
+function pruneStale(dir: string): void {
+  try {
+    for (const f of readdirSync(dir)) {
+      const m = /^(?:status|log)-(\d+)\.(?:json|ndjson)$/.exec(f);
+      if (!m || Number(m[1]) === process.pid) continue;
+      try { process.kill(Number(m[1]), 0); continue; } catch { /* no such process — its files are litter */ }
+      try { unlinkSync(join(dir, f)); } catch { /* someone else got there first */ }
+    }
+  } catch { /* unreadable dir — nothing to tidy */ }
 }
 
 /** What the agent is doing now. The "since" clock resets only when the phase actually changes. */

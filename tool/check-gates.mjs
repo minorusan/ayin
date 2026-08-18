@@ -2472,8 +2472,14 @@ console.log('\nglimmer dialect (ATEM)');
   // Registered, and gemma must remain the LAST entry — manager.ts derives DEFAULT from the tail.
   const mgrSrc = readFileSync(join(REPO, 'src/llm/manager.ts'), 'utf-8');
   ok(/new GlimmerDialect\(\)/.test(mgrSrc), 'registered in DIALECTS');
-  ok(/new GlimmerDialect\(\), new GemmaDialect\(\)\]/.test(mgrSrc),
-    'and inserted BEFORE gemma, which must stay the fallback DEFAULT');
+  // The INVARIANT is that gemma is LAST — manager.ts derives DEFAULT from the tail, and a dialect
+  // after it would become the fallback for every unrecognised model. Pinning glimmer as gemma's
+  // immediate neighbour tested something narrower than that and failed the moment a fourth dialect
+  // was added between them, which is a correct change wearing a broken assertion.
+  ok(/new GemmaDialect\(\)\]/.test(mgrSrc), 'gemma is LAST, so it stays the fallback DEFAULT');
+  const order = [...mgrSrc.matchAll(/new (\w+Dialect)\(\)/g)].map((m) => m[1]);
+  ok(order.indexOf('GlimmerDialect') < order.indexOf('GemmaDialect'),
+    'glimmer is matched BEFORE gemma, so gemma cannot shadow it');
 }
 
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);

@@ -29,6 +29,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, rename
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 /** `~/.ayin-cli/prompts` — the local, operator-owned store. Override for tests/sandboxes. */
 export const LOCAL_PROMPTS_ROOT =
@@ -62,6 +63,15 @@ export interface RegisterResult {
   kept: string[];
   /** Local copies that can no longer receive the data the code passes — see `PromptDrift`. */
   drifted: PromptDrift[];
+  /** Untouched local copies replaced by a newer shipped version — how a prompt FIX reaches an install. */
+  refreshed: string[];
+  /** Drifted copies replaced by the shipped text, with the operator's own kept beside them. */
+  repaired: PromptRepair[];
+}
+
+/** A drifted prompt that was replaced, and where the operator's version was put. */
+export interface PromptRepair extends PromptDrift {
+  backupPath: string;
 }
 
 /**
@@ -88,6 +98,21 @@ export interface PromptDrift {
   /** In the local prompt but no longer supplied by the code — will render as a literal `{{VAR}}`. */
   staleVars: string[];
   localPath: string;
+}
+
+/** Sidecar: id → sha of the bytes we last SHIPPED for it. Absent/unreadable behaves as "unknown". */
+const SHIPPED_RECORD = '.shipped.json';
+
+function sha(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+function readShippedRecord(path: string): Record<string, string> {
+  try { return JSON.parse(readFileSync(path, 'utf8')) as Record<string, string>; } catch { return {}; }
+}
+
+function writeShippedRecord(path: string, record: Record<string, string>): void {
+  try { writeAtomic(path, `${JSON.stringify(record, null, 2)}\n`); } catch { /* advisory only */ }
 }
 
 function varsIn(body: string): Set<string> {
@@ -199,28 +224,68 @@ class PromptsService {
     const materialized: string[] = [];
     const kept: string[] = [];
     const drifted: PromptDrift[] = [];
+    const refreshed: string[] = [];
+    const repaired: PromptRepair[] = [];
+    const recordPath = join(dir, SHIPPED_RECORD);
+    const shippedRecord = readShippedRecord(recordPath);
 
     if (existsSync(sourceDir)) {
       for (const id of idsIn(sourceDir)) {
         const dest = join(dir, `${id}.txt`);
         const shipped = readFileSync(join(sourceDir, `${id}.txt`), 'utf8');
         if (existsSync(dest)) {
+          let local: string | null = null;
+          try { local = readFileSync(dest, 'utf8'); } catch { /* `get()` will throw loudly on first use */ }
+
+          // A PROMPT FIX MUST BE ABLE TO REACH AN INSTALL THAT ALREADY EXISTS.
+          //
+          // "Never overwrite" is right for the operator's WORDING and wrong for everything else: a
+          // prompt is code's interface to the model, and under that rule a shipped BUG was permanent
+          // for every existing install. Measured: a protocol line whose format and explanation shared
+          // a line made the model echo the explanation back as part of its command, costing an extra
+          // model call per run — fixed in the repo, and still running unfixed on the machine that
+          // reported it, because a local copy from an earlier version outranks the fix forever.
+          //
+          // The sidecar records the bytes we last SHIPPED. Local still equal to that = the operator
+          // never touched it, so a newer shipped version simply replaces it. Local different = theirs,
+          // and it stays theirs.
+          if (local !== null && shippedRecord[id] === sha(local) && sha(shipped) !== shippedRecord[id]) {
+            writeAtomic(dest, shipped);
+            shippedRecord[id] = sha(shipped);
+            refreshed.push(id);
+            continue;
+          }
+
           kept.push(id);
           // The variable CONTRACT is checked even though the text is not touched. Wording is the
           // operator's; placeholders are the code's interface to the text, and a local copy that
           // cannot receive what the code now passes is broken, not customised.
-          try {
-            const localVars = varsIn(readFileSync(dest, 'utf8'));
+          if (local !== null) {
+            const localVars = varsIn(local);
             const shippedVars = varsIn(shipped);
             const missingVars = [...shippedVars].filter((v) => !localVars.has(v)).sort();
             const staleVars = [...localVars].filter((v) => !shippedVars.has(v)).sort();
             if (missingVars.length || staleVars.length) {
+              // BROKEN, NOT CUSTOMISED — the service's own words. The code cannot feed this text what
+              // it now sends, so running it is strictly worse than running the shipped one. The
+              // operator's copy is kept BESIDE it, never deleted: the edits may be worth re-applying,
+              // and this is exactly the kind of file someone spent real thought on.
+              const backup = `${dest}.bak-${new Date().toISOString().replace(/[:.]/g, '').slice(0, 15)}`;
+              try {
+                writeAtomic(backup, local);
+                writeAtomic(dest, shipped);
+                shippedRecord[id] = sha(shipped);
+                repaired.push({ namespace, id, missingVars, staleVars, localPath: dest, backupPath: backup });
+                kept.pop();
+                continue;
+              } catch { /* could not back it up — then do NOT replace it; report the drift instead */ }
               drifted.push({ namespace, id, missingVars, staleVars, localPath: dest });
             }
-          } catch { /* unreadable local file — `get()` will throw loudly on first use */ }
+          }
           continue;
         }
         writeAtomic(dest, shipped);
+        shippedRecord[id] = sha(shipped);
         materialized.push(id);
       }
       this.sources.set(namespace, sourceDir);
@@ -232,7 +297,8 @@ class PromptsService {
       this.bundles.set(namespace, bundle);
     }
     for (const d of drifted) this.drift.push(d);
-    return { bundle, materialized, kept, drifted };
+    writeShippedRecord(recordPath, shippedRecord);
+    return { bundle, materialized, kept, drifted, refreshed, repaired };
   }
 
   /** Every drift found since boot, for the startup warning and for `/prompts`. */

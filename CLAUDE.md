@@ -147,9 +147,14 @@ prompt) and **injects the resulting `PromptBundle` into the tool**, which then c
 `this.prompt(id, vars)`. A tool never learns that `~/.ayin-cli` exists. That injection is what lets a
 tool package live in its own repo and depend on an interface rather than on ayin's filesystem layout.
 
-**Materialization never overwrites.** A local file is the operator's, full stop. A newly shipped id
-appears on the next boot; an edited one is left alone. `restoreDefaults()` is the only overwriting
-path and it is explicit. That is the whole upgrade story — do not add another.
+**Materialization protects EDITS, not staleness.** A newly shipped id appears on the next boot. A
+local copy the operator never touched (byte-equal to the `.shipped.json` record) is **refreshed** to
+the new shipped text — otherwise a shipped prompt BUG is permanent for every existing install, which
+is exactly what happened. A copy they DID edit is kept; a copy whose `{{VARS}}` no longer match the
+shipped contract is **repaired** (shipped text installed, theirs kept beside it as `.bak-<stamp>`),
+because the code can no longer feed it what it sends. Every refresh and repair is announced in the
+session. `restoreDefaults()` is still the explicit blunt instrument. See docs/ARCHITECTURE.md
+"How a prompt FIX reaches an install that already exists" — do not add a fourth path.
 
 **Rules when you touch a prompt:**
 - Adding a prompt = a new `.txt` in the owning package's `prompts/` dir. Never a string in a `.ts`.

@@ -40,6 +40,16 @@ let inFlightRequestId = '';
 function setInFlightRequestId(id: string): void { inFlightRequestId = id; }
 export function currentRequestId(): string { return inFlightRequestId; }
 
+/**
+ * Is a model call of OURS out right now?
+ *
+ * The id used to be set and never cleared, so it answered "what did we last send" — useless for
+ * deciding whether the shared card is busy on our behalf or somebody else's. It is cleared when the
+ * call settles now, and that single fact is what stops the status bar reporting other people's work
+ * as this session's. See llm-events.ts.
+ */
+export function llmCallInFlight(): boolean { return inFlightRequestId !== ''; }
+
 import { takePendingImages } from './image.js';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -240,6 +250,7 @@ export async function llmChat(
       text = text.replace(/^[\s\S]*<\/think>\s*/g, '').trim();
       fileLog('INFO', 'llm_done', { textBytes: String(text.length), elapsedMs: String(Date.now() - reqStart) });
       liveLlm('returned', { elapsedMs: Date.now() - reqStart });
+      setInFlightRequestId('');
       return text;
     } catch (err) {
       lastErr = err;
@@ -258,7 +269,7 @@ export async function llmChat(
         // Our abort, dressed up as a network failure by undici. Say which it was.
         throw new Error('gave up after 20 min — the request was still waiting for the shared GPU, not stuck.');
       }
-      if (!transient || aborted || attempt >= MAX_ATTEMPTS) throw err;
+      if (!transient || aborted || attempt >= MAX_ATTEMPTS) { setInFlightRequestId(''); throw err; }
 
       fileLog('WARN', 'llm_transient_error_retrying', { attempt: String(attempt), error: msg.substring(0, 200), waitMs: String(RETRY_DELAY_MS) });
       await new Promise<void>(resolve => setTimeout(resolve, RETRY_DELAY_MS));
@@ -268,6 +279,7 @@ export async function llmChat(
     }
   }
 
+  setInFlightRequestId('');
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 

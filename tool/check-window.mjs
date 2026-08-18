@@ -47,3 +47,7 @@ const small = [msg('system', 300), msg('user', 300)];
 if (trimToContext(small).length !== 2) fail('a window under budget was trimmed');
 
 console.log(`check-window: OK — trimmed to ${after}/${budget} tokens, ${headroom} of headroom, prefix intact`);
+
+// Exit explicitly: importing the agent drags in modules that hold the event loop open (the blessed
+// screen, a keep-alive HTTP pool). A gate that hangs is a gate that gets deleted.
+process.exit(0);

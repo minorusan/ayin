@@ -11,7 +11,7 @@
  * writes there. Prompt entries that used to sit beside it are migrated out on first run.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { prompts, packagePath, writeAtomic, LOCAL_PROMPTS_ROOT } from './prompts-service.js';
@@ -202,4 +202,31 @@ export function getPromptsDir(): string {
  */
 export function resetPromptsToDefaults(): string[] {
   return prompts.restoreDefaults(AYIN_NS);
+}
+
+/**
+ * Register EVERY shipped namespace at boot, not lazily on first use.
+ *
+ * A tool registers its prompts the first time it runs, which means a prompt fix — or a warning that a
+ * local copy can no longer carry what the code sends — arrives only after the operator has already
+ * used the broken thing. Boot is when it is worth knowing.
+ *
+ * Returns what changed, so the caller can SAY it. A prompt replaced silently is the same class of
+ * problem as one never replaced: the operator cannot reason about text they do not know changed.
+ */
+export function registerShippedPrompts(): { refreshed: string[]; repaired: Array<{ id: string; backupPath: string }> } {
+  const root = packagePath('prompts');
+  const refreshed: string[] = [];
+  const repaired: Array<{ id: string; backupPath: string }> = [];
+  let namespaces: string[];
+  try { namespaces = readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); }
+  catch { return { refreshed, repaired }; }
+  for (const ns of namespaces) {
+    try {
+      const r = prompts.register(ns, join(root, ns));
+      for (const id of r.refreshed) refreshed.push(`${ns}/${id}`);
+      for (const x of r.repaired) repaired.push({ id: `${ns}/${x.id}`, backupPath: x.backupPath });
+    } catch { /* one bad namespace must not stop the rest */ }
+  }
+  return { refreshed, repaired };
 }

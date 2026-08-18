@@ -2835,3 +2835,27 @@ something else at a moment nobody controls. Its own smoke test caught it.
 
 Providers report `llm` through the provider runtime seam (`providerLlmState`), never by importing core
 — the same rule that keeps `llm/providers/` extractable, enforced by `check:gates`.
+
+## How a prompt FIX reaches an install that already exists
+
+The rule that a local prompt is the operator's, full stop, is right for WORDING and was wrong for
+everything else. Under it, a shipped prompt BUG was permanent: `~/.ayin-cli/prompts/<ns>/<id>.txt`
+outranks the repo forever, so a fix landed in git, shipped in the package, and never ran on a single
+machine that had used the feature before. Measured: a protocol line whose format and explanation
+shared a line made the model echo the explanation back inside its command and cost an extra model call
+per run — fixed in the repo, still running unfixed on the machine that reported it.
+
+Three states now, decided per id at boot (`registerShippedPrompts()`, every shipped namespace, not
+lazily on first use — boot is when it is worth knowing):
+
+| Local copy | What happens |
+|---|---|
+| byte-equal to what we last shipped (`.shipped.json` sidecar) | **refreshed** to the new shipped text — the operator never touched it, so there is nothing to protect |
+| edited, and its `{{VARS}}` still match the shipped contract | **kept**. Theirs. |
+| edited, and its `{{VARS}}` no longer match | **repaired**: the shipped text is installed and their copy is kept beside it as `<id>.txt.bak-<stamp>`. The service's own words for this state are "broken, not customised" — the code cannot feed the text what it now sends, so running it is strictly worse. Their version is never deleted; the edits may be worth re-applying. |
+
+`.shipped.json` in each local namespace dir maps id → sha256 of the bytes shipped at the time it was
+written. No record means "unknown", which falls through to the drift check rather than overwriting.
+
+Every refresh and repair is ANNOUNCED in the session. A prompt replaced silently is the same class of
+problem as one never replaced: text the operator cannot reason about.

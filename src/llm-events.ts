@@ -10,6 +10,7 @@
  */
 
 import { llmProvider } from './llm/select.js';
+import { llmCallInFlight } from './connection.js';
 
 export interface LlmPhase {
   phase: 'swapping' | 'preprocessing' | 'responding' | 'postprocessing' | 'done' | 'warning' | null;
@@ -54,7 +55,16 @@ export function subscribeLlmPhase(onPhase: PhaseListener): () => void {
     if (!p.events) return; // no stream on this provider — the segment simply never appears
     stopStream = p.events((e) => {
       const phase = reducePhase(e.type, e.payload);
-      if (phase !== undefined) onPhase(phase);
+      if (phase === undefined) return;
+      // ONLY OUR OWN WORK. The gateway broadcasts every caller's events — habits, other sessions,
+      // anything else on the shared card — and this reduced ALL of them into this session's status
+      // bar. So a finished turn kept showing `generating … 5m49s`, counting somebody else's job,
+      // and an operator watching a spinner reasonably concluded their agent had hung. It had not:
+      // the turn had ended nineteen seconds in. Cost: an afternoon, chasing a stall that never was.
+      //
+      // `stream.lost` (phase null) still passes — a dead stream must never leave a phase lit.
+      if (phase.phase !== null && !llmCallInFlight()) return;
+      onPhase(phase);
     });
   });
 
