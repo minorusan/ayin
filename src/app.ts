@@ -37,7 +37,7 @@ import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation, rec
 import { findToolBySlash, slashTools, loadTools } from './tools.js';
 import { startPromptServer } from './prompt-server.js';
 import { llmProvider } from './llm/select.js';
-import { handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
+import { showIndulgePicker, handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
 import { showDialog } from './dialog.js';
 import { startLlmStatusPoll, findOwnPlace } from './llm-status.js';
 import { startUpdateWatch, checkForUpdate } from './updater.js';
@@ -485,15 +485,9 @@ onInput(async (text: string) => {
        */
       case '/indulge-model': {
         const arg = text.slice('/indulge-model'.length).trim();
-        const { indulgeBackend } = await import('./indulge/index.js');
-        if (!arg) {
-          const cur = indulgeBackend();
-          addMessage('system', cur.provider
-            ? `indulge builds on: ${cur.provider}${cur.model ? ` · ${cur.model}` : ' · that provider\'s default model'}`
-            : 'indulge builds on the same provider as the agent. Set one: /indulge-model openai gpt-4.1');
-          addMessage('system', '/indulge-model <provider> [model] · /indulge-model off to go back to following the agent');
-          return;
-        }
+        // No argument = the DIALOG. The decision is two rows wide (your card vs a hosted model) and a
+        // syntax nobody remembers is how a setting that matters goes unset.
+        if (!arg) { await showIndulgePicker(); return; }
         if (arg.toLowerCase() === 'off') {
           setConfigValue('indulgeProvider', '');
           setConfigValue('indulgeModel', '');
@@ -504,16 +498,13 @@ onInput(async (text: string) => {
         const model = rest.join(' ').trim();
         const known = ['openai', 'ollama', 'resource', 'direct'];
         if (!known.includes(provider.toLowerCase())) {
-          addMessage('system', `Unknown provider "${provider}". One of: ${known.join(', ')}`);
+          addMessage('system', `Unknown provider "${provider}". One of: ${known.join(', ')} — or /indulge-model with no argument to choose.`);
           return;
         }
         setConfigValue('indulgeProvider', provider.toLowerCase());
         setConfigValue('indulgeModel', model);
         addMessage('system', `indulge will build on ${provider.toLowerCase()}${model ? ` · ${model}` : ' · that provider\'s default model'}.`
           + ' The interactive agent is unchanged.');
-        if (provider.toLowerCase() === 'openai' && !model) {
-          addMessage('system', 'No model named — the OpenAI default is the expensive tier. Name one (e.g. /indulge-model openai gpt-4.1) unless you mean it.');
-        }
         return;
       }
       /**

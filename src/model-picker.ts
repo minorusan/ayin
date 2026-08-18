@@ -387,6 +387,94 @@ async function showProviderPicker(): Promise<void> {
   await handleProviderChoice('local');
 }
 
+/**
+ * `/indulge-model` — WHO builds the corpus, picked the same way as who answers.
+ *
+ * A build is hours of a model reading source; a chat turn is seconds. Those are different jobs, and
+ * the operator legitimately wants them on different machines — the corpus on a hosted model for the
+ * window and the reasoning, the agent on the card in the room at no cost per token. The decision that
+ * matters is exactly two rows wide, which is why it is a dialog and not a syntax to remember.
+ *
+ * The TIER is the whole cost of a build. The same corpus on a flagship and on the cheap tier differ
+ * by an order of magnitude, and a build is thousands of calls, so choosing OpenAI asks a second
+ * question rather than silently taking that provider's default — which is the expensive one.
+ */
+export async function showIndulgePicker(): Promise<void> {
+  const { indulgeBackend } = await import('./indulge/index.js');
+  const cur = indulgeBackend();
+  const key = openAiKey();
+  const local = llmProviderName();
+  const localModel = activeModelId();
+
+  const options: DialogOption[] = [
+    {
+      label: 'Local',
+      note: cur.provider && cur.provider !== 'openai' ? `${cur.provider} · chosen` : local,
+      sub: localModel
+        ? `${localModel} · your card, no cost per token, hours instead of minutes`
+        : 'a model you host — no cost per token, and slower',
+    },
+    {
+      label: 'OpenAI',
+      note: key ? (cur.provider === 'openai' ? `${cur.model || 'default model'} · chosen` : 'billed per token') : 'no key',
+      sub: key
+        ? 'hosted — a build is thousands of calls, so the tier is the whole bill'
+        : 'run /openai sk-… first — the key is verified before it is saved',
+    },
+    {
+      label: 'Follow the agent',
+      note: cur.provider ? '' : 'current',
+      sub: 'build on whatever /model is set to — one choice instead of two',
+    },
+  ];
+
+  const choice = await showDialog('What builds the corpus', options, {
+    subtitle: 'indulge only — the interactive agent is not touched',
+    selected: cur.provider === 'openai' ? 1 : cur.provider ? 0 : 2,
+    footer: '↑↓ select · Enter choose · Esc cancel',
+  });
+  if (choice < 0) return;
+
+  if (choice === 2) {
+    setConfigValue('indulgeProvider', '');
+    setConfigValue('indulgeModel', '');
+    addMessage('system', 'indulge follows the agent\'s provider again.');
+    return;
+  }
+
+  if (choice === 0) {
+    setConfigValue('indulgeProvider', llmProviderName());
+    setConfigValue('indulgeModel', '');
+    addMessage('system', `indulge builds on ${llmProviderName()} — whatever model is resident. The agent is unchanged.`);
+    return;
+  }
+
+  if (!key) {
+    addMessage('system', 'No OpenAI key stored. Run /openai sk-… first — it is verified before it is saved.');
+    return;
+  }
+
+  // The tier, as its own question. Prices move and this list will rot: it says so, and any other id
+  // can still be set with `/indulge-model openai <model>`.
+  const tiers: DialogOption[] = [
+    { label: 'gpt-4.1', note: cur.model === 'gpt-4.1' ? 'current' : 'cheap', sub: 'the working tier for a corpus — thousands of calls at a rate you can afford' },
+    { label: 'gpt-5.4', note: cur.model === 'gpt-5.4' ? 'current' : '', sub: 'general-work tier — better reasoning, several times the bill' },
+    { label: 'gpt-5.5', note: cur.model === 'gpt-5.5' ? 'current' : 'expensive', sub: 'flagship — for a corpus this is rarely worth it' },
+    { label: "that provider's default", note: cur.model ? '' : 'current', sub: 'whatever openai.ts picks — today the expensive tier' },
+  ];
+  const tier = await showDialog('Which OpenAI model', tiers, {
+    subtitle: 'the tier IS the cost of a build · any other id: /indulge-model openai <model>',
+    selected: Math.max(0, tiers.findIndex((t) => t.note === 'current')),
+    footer: '↑↓ select · Enter choose · Esc cancel',
+  });
+  if (tier < 0) return;
+
+  setConfigValue('indulgeProvider', 'openai');
+  setConfigValue('indulgeModel', tier === 3 ? '' : tiers[tier].label);
+  addMessage('system', `indulge builds on openai${tier === 3 ? " · that provider's default model" : ` · ${tiers[tier].label}`}.`
+    + ' The interactive agent is unchanged.');
+}
+
 export async function handleModelCommand(arg: string): Promise<void> {
   const want = arg.trim().toLowerCase();
   const names = adapterNames();
