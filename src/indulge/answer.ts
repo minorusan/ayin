@@ -123,8 +123,25 @@ export function verifyCitations(repoPath: string, text: string): { citations: Ci
   const citations: Citation[] = [];
   let rejected = 0;
   const seen = new Set<string>();
-  for (const m of text.matchAll(/^\s*CITE:\s*(.+?):(\d+)\s*-\s*(\d+)\s*$/gim)) {
-    const [, rawPath, rawStart, rawEnd] = m;
+  // RECOGNISE MORE SHAPES; VERIFY EXACTLY AS STRICTLY.
+  //
+  // The old pattern demanded `CITE:` at line start and the range at line END, so every ordinary way a
+  // model decorates a list discarded the WHOLE answer: `**CITE:** x.cs:1-5`, `- CITE: x.cs:1-5`, a
+  // single line `x.cs:42`, or any trailing word. Measured on a real build: 906 of 1,420 answered
+  // questions failed with "answer carried no citation" — 64% of the GPU time spent, thrown away, on
+  // answers that were probably fine. The source already recorded this happening once before.
+  //
+  // Loosening the PARSE is safe because it changes nothing about what is accepted as true: every
+  // citation below still has to resolve to a real file and a real line range, or it is rejected. Only
+  // the ways of WRITING one have widened.
+  // The leading anchor accepts a JSON boundary as well as a line start: the blended shape puts the
+  // citation inside an object — {"a":"…","CITE: src/a.ts:2-4"} — where it is preceded by `","`, not a
+  // newline. Requiring the literal CITE keyword is what keeps this from matching prose.
+  const CITE = /(?:^|[\n,"'{])\s*(?:[-*>]\s*)?\**\s*CITE\**\s*:\s*\**\s*([^\s:*"'][^:*\n"']*?)\s*:\s*L?(\d+)\s*(?:-\s*L?(\d+))?/gi;
+  for (const m of text.matchAll(CITE)) {
+    // A single line is a one-line range, not a malformed one.
+    const [, rawPath, rawStart, rawEndMaybe] = m;
+    const rawEnd = rawEndMaybe ?? rawStart;
     const key = `${rawPath}:${rawStart}-${rawEnd}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -513,6 +530,9 @@ async function buildAnswerBatch(
   // an awkward shape for a model emitting JSON, and it simply dropped them: unproven answers went
   // from 3% of a run to 19%, three hundred answers thrown away for want of a format. `path/from/to`
   // is the shape the model is already writing everything else in.
+  // How far past a matched entry to look for a stray citation. One entry's worth: enough to reach the
+// keys the model put after `a`, short enough that it cannot borrow the NEXT answer's citation.
+const ENTRY_LOOKAHEAD = 400;
   const known = new Set(questions.map((q) => q.id));
   const pair = /"id"\s*:\s*"([^"]+)"\s*,\s*"a"\s*:\s*("(?:[^"\\]|\\.)*")\s*(?:,\s*"cite"\s*:\s*(\[[\s\S]*?\]))?/g;
   let m: RegExpExecArray | null;
@@ -525,8 +545,21 @@ async function buildAnswerBatch(
 
     // Structured first; the CITE-line form still parses, because a model that writes them anyway is
     // giving a correct answer in the older shape and dropping it would be pedantry.
+    //
+    // AND LOOK IN THE WHOLE ENTRY, not just the answer string. Observed on a real build: the model
+    // blends the two conventions and writes the CITE line as a bare JSON KEY beside `a` —
+    //     {"id":"q1","a":"…","CITE: path/File.cs:10-14"}
+    // — so there is no `cite` array to capture, and scanning only the answer TEXT finds nothing. The
+    // citation is present and correct; it is simply one field over. That mismatch failed 70% of the
+    // answers in a run, each one discarded as "answer carried no citation" while carrying one.
+    const entry = reply.slice(m.index, m.index + m[0].length + ENTRY_LOOKAHEAD);
     const structured = m[3] ? citationsFromJson(repoPath, m[3]) : null;
-    const v = structured && structured.citations.length ? structured : verifyCitations(repoPath, text);
+    const v = structured && structured.citations.length
+      ? structured
+      : (() => {
+        const inText = verifyCitations(repoPath, text);
+        return inText.citations.length ? inText : verifyCitations(repoPath, entry);
+      })();
     out.set(id, { answer: stripCitations(text), citations: v.citations, rejected: v.rejected });
   }
   return out;

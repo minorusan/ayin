@@ -1693,6 +1693,38 @@ console.log('\nscoped domains');
     'the stored domain is the BARE name — the path is a discovery constraint, not vocabulary');
 }
 
+// ── a citation is recognised in the shapes models actually write ────────────────
+//
+// The old pattern demanded `CITE:` at line start and the range at line END, so every ordinary way a
+// model decorates a list threw the WHOLE answer away. Measured on a real build: 906 of 1,420 answered
+// questions failed as "answer carried no citation" — 64% of the GPU time spent, discarded, on answers
+// that were probably fine.
+//
+// Loosening the PARSE is safe precisely because it changes nothing about what is accepted as TRUE.
+console.log('\ncitation shapes');
+{
+  const R = new URL('..', import.meta.url).pathname;
+  const A = await import(join(ROOT, 'dist/indulge/answer.js'));
+  const shapes = [
+    ['plain',         'CITE: src/log.ts:1-5'],
+    ['bold',          '**CITE:** src/log.ts:1-5'],
+    ['bulleted',      '- CITE: src/log.ts:1-5'],
+    ['single line',   'CITE: src/log.ts:42'],
+    ['L-prefixed',    'CITE: src/log.ts:L1-L5'],
+    ['trailing text', 'CITE: src/log.ts:1-5 (the header)'],
+    // The blended shape: the model writes the citation as a bare JSON key beside `a`, so there is no
+    // `cite` array to capture and scanning only the answer text finds nothing.
+    ['json key',      '{"a":"answer","CITE: src/log.ts:1-5"}'],
+  ];
+  for (const [name, txt] of shapes) {
+    ok(A.verifyCitations(R, txt).citations.length === 1, `a citation written ${name} is recognised`);
+  }
+  // The whole point: recognising more shapes must not accept more UNTRUE things.
+  const bogus = A.verifyCitations(R, 'CITE: src/does-not-exist-anywhere.ts:1-5');
+  ok(bogus.citations.length === 0 && bogus.rejected === 1,
+    'a citation to a file that does not exist is still REJECTED — the parse widened, the proof did not');
+}
+
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
 process.exit(fails ? 1 : 0);
 

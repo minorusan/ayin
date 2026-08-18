@@ -17,6 +17,9 @@ Reply with JSON only, no prose and no code fence. One entry per question id, in 
    "cite":[{"path":"<path exactly as shown above>","from":<first line>,"to":<last line>}]}
 ]}
 
+Citations go in the `cite` ARRAY and nowhere else. A `CITE:` line, or a citation written as a key
+beside `a`, is not a citation and the entry is discarded.
+
 `cite` is not optional and must not be empty. An answer you cannot point at specific lines for is one
 you must not give — set `"a"` to `NOTHING KNOWN` and `"cite"` to `[]` instead. That is a real answer
 and costs nothing. A plausible answer with no proof is the one outcome worth avoiding, because later
