@@ -151,6 +151,13 @@ export async function detectVendorRoots(opts: {
   onStatus?: (s: string) => void;
   /** Re-decide even when a cached answer exists. */
   refresh?: boolean;
+  /**
+   * Ask a model about the directories the static list could not decide.
+   *
+   * OFF by default — see the note at the call site. Every genuine vendor root in both test repos was
+   * caught by name; every catastrophic false positive came from here.
+   */
+  classify?: boolean;
 }): Promise<{ roots: string[]; fromCache: boolean; asked: number }> {
   const { repoPath, corpusDir, onStatus } = opts;
   const ask = opts.ask ?? (async (dirs: string[]): Promise<string> =>
@@ -168,8 +175,28 @@ export async function detectVendorRoots(opts: {
   const rest = undecided(candidates, known);
   onStatus?.(`${candidates.length} director(ies) scanned · ${known.length} known third-party by name`);
 
+  // ── THE MODEL PASS IS OPT-IN, because it failed twice out of two ───────────────
+  //
+  // The idea was sound: names we do not know go to a classifier. In practice, on both repositories it
+  // was tried against, it pruned first-party code and produced a corpus that reported success while
+  // knowing nothing.
+  //
+  //   Unity repo: 54 of 63 directories called third-party — including the very subsystem being
+  //               indexed. Discovery then indexed ONE file.
+  //   ayin      : `src/tools` (52 of 190 files), `src/ui`, `tool/` and every `prompts/*` marked
+  //               third-party. Two whole domains silently produced nothing.
+  //
+  // Both slipped the guards: individually each pick is small, and 14 of ~40 is under the aggregate
+  // bound. The guards are not wrong, they are simply downstream of a judgement that a directory NAME
+  // cannot support — "tools", "ui" and "prompts" are exactly as plausible for a vendor as for a team.
+  //
+  // The static list, meanwhile, caught every genuine vendor root in both repos at zero cost. So that
+  // is the default, and the classifier is something an operator turns on deliberately and checks.
   let modelPicked: string[] = [];
-  if (rest.length) {
+  if (rest.length && !opts.classify) {
+    onStatus?.(`${rest.length} director(ies) undecided — left IN (pass --classify-vendor to have a model judge them)`);
+  }
+  if (rest.length && opts.classify) {
     // Names only, never contents. Bounded so a sprawling repo cannot turn this into a huge prompt.
     const names = rest.map((c) => c.path).slice(0, 200);
     onStatus?.(`asking the model about ${names.length} undecided director(ies)`);

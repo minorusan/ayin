@@ -19,9 +19,10 @@ import { log } from '../../log.js';
 import type { Attributor, Indulger } from './types.js';
 import { unityAttributor } from '../attributors/unity.js';
 import { unityIndulger } from '../indulgers/unity.js';
+import { typescriptIndulger } from '../indulgers/typescript.js';
 
 const BUILTIN_ATTRIBUTORS: Attributor[] = [unityAttributor];
-const BUILTIN_INDULGERS: Indulger[] = [unityIndulger];
+const BUILTIN_INDULGERS: Indulger[] = [unityIndulger, typescriptIndulger];
 
 const localDir = (kind: 'attributors' | 'indulgers'): string =>
   process.env.AYIN_HOOKS_DIR

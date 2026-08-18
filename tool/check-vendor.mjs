@@ -44,12 +44,27 @@ console.log('the free pass: names we already know');
     'nothing inside a known vendor root is sent to the model — that decision is already made');
 }
 
+console.log('\nthe model pass is OFF by default');
+{
+  // It failed twice out of two repos: 54/63 directories on a Unity repo, and ayin's own `src/tools`,
+  // `src/ui`, `tool/` and every `prompts/*`. Both times the corpus reported success while knowing
+  // nothing. The static list caught every genuine vendor root in both, for free.
+  let asked = 0;
+  const counting = async () => { asked++; return 'Assets/Games/Bingo'; };
+  const r = await detectVendorRoots({
+    repoPath: R, corpusDir: mkdtempSync(join(tmpdir(), 'ayin-vendor-d-')), ask: counting,
+  });
+  ok(asked === 0, 'no model is asked unless --classify-vendor is passed', `${asked} call(s)`);
+  ok(r.roots.includes('Assets/Plugins'), '…and the static list still applies');
+  ok(!r.roots.includes('Assets/Games/Bingo'), '…so nothing first-party is pruned on a default run');
+}
+
 console.log('\nthe model pass refuses to be wrong');
 {
   // A hostile classifier: names the world, names something real, and invents a path never offered.
   const hostile = async () => 'Assets\nAssets/Art\n/etc/passwd\nAssets/Games/Bingo\n';
   const r = await detectVendorRoots({
-    repoPath: R, corpusDir: mkdtempSync(join(tmpdir(), 'ayin-vendor-c-')), ask: hostile,
+    repoPath: R, corpusDir: mkdtempSync(join(tmpdir(), 'ayin-vendor-c-')), ask: hostile, classify: true,
   });
   ok(!r.roots.includes('Assets'),
     'a pick that swallows most of the tree is REFUSED — it would empty the corpus while looking like success');
@@ -66,7 +81,7 @@ console.log('\nan answer that marks most of the repo is discarded WHOLESALE');
   // subsystem the build was about. Discovery then indexed ONE file and reported success.
   const greedy = async (dirs) => dirs.join('\n');   // says yes to everything offered
   const r = await detectVendorRoots({
-    repoPath: R, corpusDir: mkdtempSync(join(tmpdir(), 'ayin-vendor-g-')), ask: greedy,
+    repoPath: R, corpusDir: mkdtempSync(join(tmpdir(), 'ayin-vendor-g-')), ask: greedy, classify: true,
   });
   ok(!r.roots.includes('Assets/Games/Bingo'),
     'a wholesale yes does not prune first-party code');
@@ -80,7 +95,7 @@ console.log('\na failed classification degrades, it does not fail the build');
 {
   const boom = async () => { throw new Error('provider down'); };
   const r = await detectVendorRoots({
-    repoPath: R, corpusDir: mkdtempSync(join(tmpdir(), 'ayin-vendor-e-')), ask: boom,
+    repoPath: R, corpusDir: mkdtempSync(join(tmpdir(), 'ayin-vendor-e-')), ask: boom, classify: true,
   });
   ok(r.roots.includes('Assets/Plugins'),
     'the static list survives a dead classifier — an overnight build must not die on a nice-to-have');
@@ -91,11 +106,11 @@ console.log('\nthe decision is cached, so the model is asked once per repository
   const dir = mkdtempSync(join(tmpdir(), 'ayin-vendor-k-'));
   let calls = 0;
   const counting = async () => { calls++; return ''; };
-  await detectVendorRoots({ repoPath: R, corpusDir: dir, ask: counting });
-  const second = await detectVendorRoots({ repoPath: R, corpusDir: dir, ask: counting });
+  await detectVendorRoots({ repoPath: R, corpusDir: dir, ask: counting, classify: true });
+  const second = await detectVendorRoots({ repoPath: R, corpusDir: dir, ask: counting, classify: true });
   ok(calls === 1, 'the second run asks nothing', `${calls} call(s)`);
   ok(second.fromCache === true, '…and says it came from cache');
-  const forced = await detectVendorRoots({ repoPath: R, corpusDir: dir, ask: counting, refresh: true });
+  const forced = await detectVendorRoots({ repoPath: R, corpusDir: dir, ask: counting, refresh: true, classify: true });
   ok(calls === 2 && forced.fromCache === false, '--rescan-vendor re-decides');
 }
 

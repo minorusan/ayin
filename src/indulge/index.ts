@@ -17,7 +17,7 @@
 
 import { getConfigString } from '../prompts.js';
 import { parseList } from './args.js';
-import { cpSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { acquireLlm, type LlmHold } from '../llm/authority.js';
 import { answerQuestions } from './answer.js';
@@ -29,7 +29,7 @@ import { recordAnswer, recordPrompt, recordTool } from '../session-record.js';
 import { initSession } from '../session-store.js';
 import { assessChunk } from './staleness.js';
 import { detectVendorRoots } from './vendor.js';
-import { CATEGORIES, openStore, StoreLockedError, type Category, type Manifest, type Stage } from './store.js';
+import { CATEGORIES, openStore, StoreLockedError, type Category, type Manifest, type Stage, sameProject } from './store.js';
 
 const out = (line = ''): void => { process.stdout.write(`${line}\n`); };
 
@@ -55,6 +55,7 @@ export interface IndulgeArgs {
   maxDepth?: number;
   maxFiles?: number;
   keepVendor?: boolean;
+  classifyVendor?: boolean;
   scope?: string;
   rescanVendor?: boolean;
   maxQuestions?: number;
@@ -97,6 +98,7 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--max-files': args.maxFiles = num(value(), 'max-files'); break;
       case '--keep-vendor': case '--include-vendor': args.keepVendor = true; break;
       case '--rescan-vendor': args.rescanVendor = true; break;
+      case '--classify-vendor': args.classifyVendor = true; break;
       case '--max-questions': args.maxQuestions = num(value(), 'max-questions'); break;
       case '--categories': {
         // ANY angle, like domains. The five that ship carry tuned prompts; anything else gets a
@@ -423,11 +425,20 @@ function importCorpus(repoPath: string, from: string): number {
   const theirs = incoming.identity;
 
   if (theirs && theirs.value !== mine.value) {
-    out(`That corpus belongs to a different repo.`);
-    out(`  it was built for : ${theirs.kind} ${theirs.value}`);
-    out(`  this repo is     : ${mine.kind} ${mine.value}`);
-    out('Importing it would fill retrieval with answers about code this tree does not have.');
-    return 3;
+    // SAME PROJECT, DIFFERENT HOST is not a different repo. An SSH host alias — the usual way to hold
+    // two GitHub accounts on one machine — rewrites the remote locally, so a corpus built on the box
+    // with the alias was refused by the box without it. The owner/repo tail is what identifies the
+    // project; the host is how this machine happens to reach it.
+    if (!sameProject(mine, theirs)) {
+      out(`That corpus belongs to a different repo.`);
+      out(`  it was built for : ${theirs.kind} ${theirs.value}`);
+      out(`  this repo is     : ${mine.kind} ${mine.value}`);
+      out('Importing it would fill retrieval with answers about code this tree does not have.');
+      return 3;
+    }
+    out(`note: built against a different remote host for the same project — importing anyway.`);
+    out(`  built for : ${theirs.value}`);
+    out(`  this repo : ${mine.value}`);
   }
   if (!theirs) out('note: that corpus predates identity tracking — cannot verify it is for this repo.');
 
@@ -440,6 +451,17 @@ function importCorpus(repoPath: string, from: string): number {
 
   mkdirSync(dirname(store.dir), { recursive: true });
   cpSync(src, store.dir, { recursive: true });
+
+  // RE-KEY to this machine's identity. The copied manifest still carries the building machine's key
+  // and remote; leaving them would make every later run compare against a repo this tree is not, and
+  // the next import would refuse the corpus it just installed.
+  try {
+    const mf = join(store.dir, 'manifest.json');
+    const m = JSON.parse(readFileSync(mf, 'utf-8')) as Manifest;
+    m.identity = mine;
+    m.repoKey = mine.key;
+    writeFileSync(mf, `${JSON.stringify(m, null, 2)}\n`, 'utf-8');
+  } catch { /* a manifest that cannot be re-keyed still imports; the note above already said why */ }
 
   const after = openStore(repoPath);
   const chunks = after.chunks();
@@ -614,6 +636,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
       repoPath,
       corpusDir: store.dir,
       refresh: args.rescanVendor === true,
+      classify: args.classifyVendor === true,
       onStatus: (s) => out(`  ${s}`),
     });
     vendorRoots = v.roots;

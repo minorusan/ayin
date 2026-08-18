@@ -298,6 +298,38 @@ export function normalizeRemote(url: string): string {
     .toLowerCase();
 }
 
+/**
+ * The `owner/repo` tail of a normalized remote — the part that identifies the PROJECT.
+ *
+ * `normalizeRemote` keeps the host, which is right for a key and wrong for a comparison: an SSH host
+ * ALIAS is a local convenience, not a different repository. A `~/.ssh/config` entry for a work account
+ * turns `github.com:Play-Perfect/SolitaireSmash` into `github-solitaire:Play-Perfect/SolitaireSmash`,
+ * and the two machines then disagree about which repo they are looking at — so a corpus built on one
+ * is refused by the other, which is exactly backwards from what the guard is for.
+ */
+export function ownerRepo(normalized: string): string {
+  const parts = normalized.split('/').filter(Boolean);
+  return parts.slice(-2).join('/');
+}
+
+/**
+ * Do two identities name the same project?
+ *
+ * Exact match, or the same `owner/repo` reached through a different host. Deliberately NOT "same repo
+ * name": `acme/utils` and `other/utils` are different projects, and mixing their corpora would fill
+ * retrieval with answers about code the tree does not have — the thing the guard exists to prevent.
+ */
+export function sameProject(
+  a: { kind: string; value: string },
+  b: { kind: string; value: string },
+): boolean {
+  if (a.value === b.value) return true;
+  if (a.kind !== 'remote' || b.kind !== 'remote') return false;
+  const x = ownerRepo(a.value);
+  const y = ownerRepo(b.value);
+  return Boolean(x) && x === y && x.includes('/');
+}
+
 const slugify = (s: string): string =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'repo';
 
