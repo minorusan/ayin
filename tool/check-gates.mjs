@@ -2183,6 +2183,15 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
     ok(/if \(tool\?\.slashOnly\)/.test(agent), 'a slash-only call is refused explicitly');
     ok(/is not available to you — it is an operator command/.test(agent),
       '…and says WHO can run it, rather than claiming the tool does not exist');
+
+    // A tool whose ARGUMENT is a credential must never be offered to the model. Its catalogue entry
+    // otherwise sits in the prompt every turn teaching the model that a place to put tokens exists,
+    // and a tool the model can call is a tool it can be talked into calling.
+    for (const name of ['jira_auth', 'sentry_auth', 'openai_auth']) {
+      const src = readFileSync(join(DIST, '..', 'src', 'tools', 'defs', `${name}.ts`), 'utf-8');
+      ok(/secret: true/.test(src) ? /slashOnly: true/.test(src) : true,
+        `${name} takes a secret, so it is operator-only`);
+    }
   }
 
   // ── /skip-permissions turns off a GUARD, so its limits are pinned ──────────

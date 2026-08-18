@@ -17,6 +17,12 @@ export const tool: Tool = {
   parameters: [
     { name: 'question', type: 'string', description: 'The question, in plain language', required: true },
   ],
+  // SLASH-ONLY: the operator may run it, the agent may not.
+  //
+  // A connector's `run` is an inner agentic loop against a REST API, so one call costs several round
+  // trips mid-turn for something the operator can fetch in one command before asking anything. The
+  // result still reaches the model — a slash invocation is recorded into the conversation window.
+  slashOnly: true,
   slash: {
     command: 'sentry',
     param: 'question',

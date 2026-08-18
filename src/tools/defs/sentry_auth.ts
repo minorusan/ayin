@@ -17,6 +17,13 @@ export const tool: Tool = {
   parameters: [
     { name: 'text', type: 'string', description: 'Pasted token / org slug / project; omit to report status', required: false },
   ],
+  // SLASH-ONLY, and here it is about the ARGUMENT, not the cost.
+  //
+  // This tool's parameter is a credential (`secret: true` below). A tool the model can call is a tool
+  // the model can be talked into calling, and its catalogue entry sits in the prompt every turn
+  // teaching it that a place to put tokens exists. The operator types this one; the agent has no
+  // business anywhere near it.
+  slashOnly: true,
   slash: {
     command: 'sentry-auth',
     param: 'text',
