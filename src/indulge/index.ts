@@ -17,7 +17,9 @@
 
 import { getConfigString } from '../prompts.js';
 import { parseList } from './args.js';
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { answerQuestions } from './answer.js';
 import { discoverDomain } from './discover.js';
@@ -412,12 +414,48 @@ function printStatus(repoPath: string): number {
  * "142 chunks" and "142 chunks, 9 of them describing code you have since changed" are different
  * things to be handed.
  */
-function importCorpus(repoPath: string, from: string): number {
+/**
+ * A corpus travels as an ARCHIVE, so import has to accept one.
+ *
+ * The build happens on the box with the GPU and the corpus is carried to the laptop as a `.tgz` —
+ * that is the whole point of import. Taking only an unpacked directory made the documented workflow
+ * fail at its last step: the operator was handed a tarball, passed it to the flag named for exactly
+ * this, and was told it was "not a corpus".
+ *
+ * The archive's own root directory is the store directory (`<repoKey>/manifest.json`), so after
+ * extraction the manifest is one level down. Accept either shape rather than dictating how the
+ * tarball was rolled: look at the root, then at a lone subdirectory.
+ */
+function unpacked(from: string): { dir: string; temp?: string } | null {
   const src = resolve(from);
-  if (!existsSync(join(src, 'manifest.json'))) {
-    out(`Not a corpus: ${src} (no manifest.json)`);
+  if (existsSync(join(src, 'manifest.json'))) return { dir: src };
+  if (!existsSync(src) || statSync(src).isDirectory()) return null;
+
+  const temp = mkdtempSync(join(tmpdir(), 'ayin-corpus-'));
+  try {
+    execFileSync('tar', ['xzf', src, '-C', temp], { stdio: 'pipe' });
+  } catch {
+    try { execFileSync('tar', ['xf', src, '-C', temp], { stdio: 'pipe' }); }
+    catch { rmSync(temp, { recursive: true, force: true }); return null; }
+  }
+  if (existsSync(join(temp, 'manifest.json'))) return { dir: temp, temp };
+  const entries = readdirSync(temp).filter((e) => statSync(join(temp, e)).isDirectory());
+  for (const e of entries) {
+    if (existsSync(join(temp, e, 'manifest.json'))) return { dir: join(temp, e), temp };
+  }
+  rmSync(temp, { recursive: true, force: true });
+  return null;
+}
+
+function importCorpus(repoPath: string, from: string): number {
+  const found = unpacked(from);
+  if (!found) {
+    out(`Not a corpus: ${resolve(from)} (no manifest.json)`);
+    out('Expected a corpus directory, or a .tgz/.tar archive of one.');
     return 2;
   }
+  const src = found.dir;
+  const cleanup = (): void => { if (found.temp) rmSync(found.temp, { recursive: true, force: true }); };
   const store = openStore(repoPath);
   const incoming = JSON.parse(readFileSync(join(src, 'manifest.json'), 'utf-8')) as Manifest;
   const mine = store.identity;
@@ -433,6 +471,7 @@ function importCorpus(repoPath: string, from: string): number {
       out(`  it was built for : ${theirs.kind} ${theirs.value}`);
       out(`  this repo is     : ${mine.kind} ${mine.value}`);
       out('Importing it would fill retrieval with answers about code this tree does not have.');
+      cleanup();
       return 3;
     }
     out(`note: built against a different remote host for the same project — importing anyway.`);
@@ -441,11 +480,21 @@ function importCorpus(repoPath: string, from: string): number {
   }
   if (!theirs) out('note: that corpus predates identity tracking — cannot verify it is for this repo.');
 
-  if (resolve(store.dir) === src) { out('That corpus is already installed here.'); return 0; }
+  if (resolve(store.dir) === src) { out('That corpus is already installed here.'); cleanup(); return 0; }
+
+  // AN EXISTING CORPUS IS MOVED ASIDE, NEVER DELETED AND NEVER LEFT IN THE WAY.
+  //
+  // Import is how a corpus built on the machine with the card reaches the laptop, and that happens
+  // again every time the corpus grows — so "move or delete it first" was an instruction to hand-run
+  // `rm -rf` on hours of paid model time, repeatedly, at the exact moment the operator is trying to
+  // get on with something else. Refusing to merge is still right; refusing to proceed is not.
+  //
+  // The old corpus keeps its content under a timestamped name, so a bad import costs one `mv` back.
   if (existsSync(store.dir)) {
-    out(`A corpus already exists for this repo: ${store.dir}`);
-    out('Move or delete it first — refusing to merge two corpora silently.');
-    return 3;
+    const aside = `${store.dir}.bak-${new Date().toISOString().replace(/[:.]/g, '').replace(/-/g, '').slice(0, 15)}-import`;
+    renameSync(store.dir, aside);
+    out(`the corpus already here was moved aside → ${aside}`);
+    out('nothing was merged; restore it with mv if this import was a mistake.');
   }
 
   mkdirSync(dirname(store.dir), { recursive: true });
@@ -470,6 +519,7 @@ function importCorpus(repoPath: string, from: string): number {
   out(stale
     ? `${stale} of them describe code that has changed in this checkout — those are labelled STALE when used.`
     : 'every chunk still matches the code in this checkout.');
+  cleanup();
   return 0;
 }
 
