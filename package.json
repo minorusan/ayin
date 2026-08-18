@@ -1,6 +1,6 @@
 {
   "name": "ayin",
-  "version": "1.0.338",
+  "version": "1.0.339",
   "license": "MIT",
   "description": "A small, model-agnostic terminal coding agent \u2014 an agentic loop in your shell against a self-hosted LLM (Ollama or any OpenAI-compatible endpoint).",
   "type": "module",
@@ -39,7 +39,8 @@
     "release": "npm publish --registry ${AYIN_REGISTRY:?set AYIN_REGISTRY to your private registry}",
     "check:sentinaile": "node tool/check-sentinaile.mjs",
     "check:vendor": "node tool/check-vendor.mjs",
-    "check:tsindulger": "node tool/check-ts-indulger.mjs"
+    "check:tsindulger": "node tool/check-ts-indulger.mjs",
+    "check:updater": "node tool/check-updater.mjs"
   },
   "dependencies": {
     "blessed": "^0.1.81",

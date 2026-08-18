@@ -203,6 +203,15 @@ function gitCheckout(): string | null {
  * A DIRTY TREE IS NEVER TOUCHED. Someone else's uncommitted work is not this command's to stash, and a
  * merge conflict mid-update leaves a build that matches no commit.
  */
+/**
+ * Files this command itself rewrites, which therefore must never block the next run of it.
+ *
+ * Only the lockfile: `npm install` regenerates it routinely, and nothing else the update touches is
+ * tracked. Deliberately a small, explicit set — "ignore anything that looks generated" is how a guard
+ * stops guarding.
+ */
+const SELF_WRITTEN = new Set(['package-lock.json', 'npm-shrinkwrap.json']);
+
 async function updateFromCheckout(root: string, opts: { check: boolean; force: boolean }): Promise<void> {
   const current = getCurrentVersion();
   const git = (...args: string[]): Promise<{ code: number; out: string }> => run('git', ['-C', root, ...args]);
@@ -236,12 +245,27 @@ async function updateFromCheckout(root: string, opts: { check: boolean; force: b
   // else's uncommitted work is not this command's to stash, and a conflict mid-update leaves a build
   // that matches no commit.
   const dirty = (await git('status', '--porcelain')).out.trim();
-  if (dirty && !opts.force) {
-    const n = dirty.split('\n').length;
-    process.stderr.write(`ayin update: ${n} uncommitted change(s) in ${root} — refusing to pull over them.\n`);
+  // THE UPDATE MUST NOT BE BLOCKED BY ITS OWN OUTPUT.
+  //
+  // This command runs `npm install`, and npm rewrites the lockfile as a matter of course — a different
+  // npm version, a different platform, an optional dependency resolving differently. So a successful
+  // update left the tree dirty in exactly one file and the NEXT update refused to run, every time,
+  // until the operator passed --force. The guard exists to protect someone else's work; a lockfile
+  // this command wrote thirty seconds ago is not that.
+  const blocking = dirty
+    ? dirty.split('\n').filter((line) => !SELF_WRITTEN.has(line.slice(3).trim()))
+    : [];
+  if (blocking.length && !opts.force) {
+    process.stderr.write(`ayin update: ${blocking.length} uncommitted change(s) in ${root} — refusing to pull over them.\n`);
+    for (const line of blocking.slice(0, 5)) process.stderr.write(`               ${line}\n`);
     process.stderr.write('             Commit or stash them, or re-run with --force to pull anyway.\n');
     process.exit(1);
     return;
+  }
+  if (dirty && !blocking.length) {
+    // Said out loud rather than silently swallowed: a pull over a modified lockfile is a real decision,
+    // and the operator should see it was made for them.
+    process.stdout.write('Ignoring local changes to the lockfile — `npm install` writes it on every update.\n');
   }
 
   const pulled = await git('pull', '--ff-only');
