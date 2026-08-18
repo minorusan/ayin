@@ -41,7 +41,7 @@
 import type {
   GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ModelEntry, ProviderStatus,
 } from '../provider.js';
-import { providerLog, providerConfig, providerPendingImages } from './runtime.js';
+import { providerLog, providerConfig, providerPendingImages, providerLlmState } from './runtime.js';
 
 /** Loopback default: a neutral built-in that reveals nothing about any particular machine. */
 const DEFAULT_URL = 'http://127.0.0.1:11434';
@@ -233,12 +233,20 @@ export function createOllamaProvider(): LlmProvider {
       const tools = toOllamaTools(opts?.tools);
       if (tools) body.tools = tools;
 
+      // Mirrored, like the gateway path: a model call in flight is the single most useful fact about
+      // a run that appears stuck, and it must be readable from outside the process.
+      const started = Date.now();
+      providerLlmState('issued', { url: `${baseUrl()}/api/chat` });
       const res = await fetch(`${baseUrl()}/api/chat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
+      }).catch((e: unknown) => {
+        providerLlmState('failed', { error: e instanceof Error ? e.message : String(e), elapsedMs: Date.now() - started });
+        throw e;
       });
+      providerLlmState('returned', { elapsedMs: Date.now() - started });
       if (!res.ok) {
         throw new Error(`ollama ${res.status}: ${(await res.text()).slice(0, 300)}`);
       }

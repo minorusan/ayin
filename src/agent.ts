@@ -51,6 +51,7 @@ import { presenterPass, shouldRunPresenterThisTurn } from './presenter/index.js'
 import { clearActivity } from './activity.js';
 import { guardBeginTurn, guardCheck, guardDirective, guardNoteDenied } from './tool-guard.js';
 import { planContextBlock, runPlan } from './plan/index.js';
+import { liveTool } from './live-mirror.js';
 
 let interrupted = false;
 let immediateCancel = false;
@@ -1552,10 +1553,14 @@ async function runAgentTurn(userInput: string): Promise<void> {
       const toolStarted = Date.now();
       // Tools are timed too: a ten-minute turn is as often one shell command that never returned as
       // it is a slow model, and the status line cannot tell them apart.
+      // Named in the live mirror for the whole run: a connector waiting on an external API is
+      // indistinguishable, from outside, from a model that will not answer — and both look like a
+      // spinner. `tool` with an old timestamp says which it is without asking anyone to type anything.
+      liveTool(name);
       const toolPromise = timed('tool', name, () => tool.execute(params),
         (line) => { addMessage('system', line); }).catch(
         (err: unknown) => `Error: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      ).finally(() => liveTool(null));
 
       let result: string | null = null;
       const timeoutResult = await Promise.race([

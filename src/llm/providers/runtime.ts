@@ -39,6 +39,14 @@ export interface ProviderServices {
    * one error message that has to carry the whole instruction.
    */
   credential(vendor: string): { key: string; model: string; setupHint: string };
+  /**
+   * Report a model call in flight, for whatever core uses to explain a run from OUTSIDE the process.
+   *
+   * A provider knows the one fact that matters when a run looks stuck — a request is out and has not
+   * come back — and it is the only place that knows it. It must not learn where that fact is written;
+   * that is core's business, exactly like the logger above.
+   */
+  llmState(state: 'issued' | 'returned' | 'failed', detail?: { url?: string; elapsedMs?: number; error?: string }): void;
 }
 
 let services: ProviderServices | null = null;
@@ -71,6 +79,14 @@ export function providerPendingImages(): string[] {
 
 export function providerCredential(vendor: string): { key: string; model: string; setupHint: string } {
   return require_().credential(vendor);
+}
+
+export function providerLlmState(
+  state: 'issued' | 'returned' | 'failed',
+  detail?: { url?: string; elapsedMs?: number; error?: string },
+): void {
+  // Never fail a generation because the mirror could not be written: it explains runs, it does not run them.
+  try { require_().llmState(state, detail); } catch { /* unwired or broken — the call proceeds */ }
 }
 
 export function providerRuntimeReady(): boolean {

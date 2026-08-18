@@ -18,6 +18,7 @@
  * caller keeps working; new code may use the widget instances (chat, input, …) directly.
  */
 
+import { livePhase } from '../live-mirror.js';
 import { HEADLESS, THINKING_MODE } from './headless.js';
 import { screen, render } from './screen.js';
 import { registerStack, relayout } from './layout.js';
@@ -86,6 +87,9 @@ export function clearChat(): void {
 
 export function setAgentStatus(text: string): void {
   chat.setAgentStatus(text);
+  // Mirrored where a reader on another machine can see it. The terminal shows this text; a wedged
+  // terminal shows it forever, and nothing outside the process knows how long it has been there.
+  livePhase(text);
 }
 
 /** Explicit stateful variant — pick the animation state directly. */

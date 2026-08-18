@@ -113,6 +113,7 @@ async function refreshTokens(): Promise<void> {
 // ── Summary overlay ─────────────────────────────────────────────────
 
 import blessed from 'blessed';
+import { startLiveMirror } from './live-mirror.js';
 
 let summaryOverlay: blessed.Widgets.BoxElement | null = null;
 
@@ -1220,7 +1221,10 @@ async function runHeadless(): Promise<void> {
 
   // Establish a session id so the per-run record (session-record.ts) has a key to write under.
   // Headless runs (ayin -p, the watch daemon) need this exactly like the interactive REPL does.
-  await initSession().catch(() => {});
+  const headlessSession = await initSession().catch(() => '');
+  // AND THE LIVE MIRROR MOST OF ALL HERE. An unattended run has nobody to notice it stopped, and no
+  // terminal to type `/debug` into — the mirror is the only thing that can say where it stopped.
+  startLiveMirror({ sessionId: headlessSession || 'headless', version: getVersion() });
 
   // FULL TRANSCRIPT for an unattended run — `AYIN_TRANSCRIBE=1` or `--transcribe`. This is the mode
   // that matters most for it: an enqueued task has nobody watching, so the only way to answer "why did
@@ -1291,6 +1295,9 @@ async function runInteractive(): Promise<void> {
     // Open a local session record (non-blocking — failure is non-fatal)
     initSession().then(id => {
       addMessage('system', `Session: ${id.substring(0, 16)}  (${SESSION_NAMESPACE})`);
+      // From here the run explains itself from OUTSIDE, continuously — see live-mirror.ts. A hang
+      // cannot produce its own debug bundle, so the bundle stops being the only way to see one.
+      startLiveMirror({ sessionId: id, version: getVersion() });
     }).catch(err => {
       log('WARN', 'session_init_failed', { error: err instanceof Error ? err.message : String(err) });
     });

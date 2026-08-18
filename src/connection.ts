@@ -46,6 +46,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { log as fileLog } from './log.js';
+import { liveLlm } from './live-mirror.js';
 import { getConfigString } from './prompts.js';
 
 /**
@@ -204,6 +205,7 @@ export async function llmChat(
       const reqStart = Date.now();
       const reqBytes = JSON.stringify(body).length;
       fileLog('INFO', 'llm_fetch_start', { url: `${llmUrl}/api/generate`, attempt: String(attempt), reqBytes: String(reqBytes), images: String(images.length) });
+      liveLlm('issued', { url: `${llmUrl}/api/generate` });
 
       const res = await undiciFetch(`${llmUrl}/api/generate`, {
         method: 'POST',
@@ -237,10 +239,12 @@ export async function llmChat(
       let text = data.content || '';
       text = text.replace(/^[\s\S]*<\/think>\s*/g, '').trim();
       fileLog('INFO', 'llm_done', { textBytes: String(text.length), elapsedMs: String(Date.now() - reqStart) });
+      liveLlm('returned', { elapsedMs: Date.now() - reqStart });
       return text;
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message : String(err);
+      liveLlm('failed', { error: msg });
       const transient =
         msg.includes('fetch failed') ||
         msg.includes('ECONNRESET') ||

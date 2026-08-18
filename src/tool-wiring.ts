@@ -22,6 +22,7 @@ import { initProviderRuntime, providerRuntimeReady } from './llm/providers/runti
 import { takePendingImages } from './image.js';
 import { noKeyMessage, readOpenAiKey, readOpenAiModel } from './tools/credentials/openai.js';
 import type { ChildProcess } from 'node:child_process';
+import { liveLlm } from './live-mirror.js';
 
 export function ensureToolRuntime(): void {
   if (toolRuntimeReady()) return;
@@ -105,6 +106,7 @@ export function ensureToolRuntime(): void {
 export function ensureProviderRuntime(): void {
   if (providerRuntimeReady()) return;
   initProviderRuntime({
+    llmState: (state, detail) => liveLlm(state, detail),
     log: {
       info: (event, fields) => log('INFO', event, fields),
       warn: (event, fields) => log('WARN', event, fields),

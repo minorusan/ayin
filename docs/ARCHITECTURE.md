@@ -2799,3 +2799,30 @@ absence is load-bearing: adding any of them back would break a property the agen
   "Self-update" below), and refuses a registry it did not resolve deliberately.
 - **No network sandbox.** `bash` can do whatever your shell can. Headless mode auto-approves writes
   and commands, so run it on a tree you can diff and revert.
+
+## The live mirror — a run that explains itself from outside
+
+`/debug` writes a bundle, and it can only run in an ayin that still answers. The one moment the bundle
+is needed is the one moment it cannot be produced: a wedged session takes the keystroke, queues it
+behind the turn that is stuck, and writes nothing. A bundle collected from a SECOND terminal holds a
+session seconds old and nothing about the hang.
+
+So `live-mirror.ts` writes the evidence continuously, before anyone asks for it, to a path something
+else can read — `/private/tmp/ayin-debug/live` on macOS, `$TMPDIR/ayin-debug/live` elsewhere
+(`AYIN_LIVE_DIR` overrides). Two files:
+
+- `status.json` — pid, session, cwd, version, the log file's path, and **`phase` with `phaseForMs`**:
+  what the agent says it is doing and how long it has been saying it. Plus `llm` (`issued` /
+  `returned` / `failed`, with the URL and elapsed) and `tool` (the tool in flight). An `issued` LLM
+  state with an old timestamp is a stalled request; an old `tool` is a connector waiting on an API.
+  From outside, those two look identical — and both look like a spinner.
+- `log.ndjson` — every log entry, arriving through the logger's sink API so nothing touches the hot
+  path, truncated at 4 MB keeping the tail.
+
+Written atomically: the status file lands via temp + `rename`, and concurrent updates are coalesced
+behind one writer. Without that, two updates in the same tick produced a JSON file with a fragment of
+the previous version welded to its tail — unparseable, from a file whose only job is to be read by
+something else at a moment nobody controls. Its own smoke test caught it.
+
+Providers report `llm` through the provider runtime seam (`providerLlmState`), never by importing core
+— the same rule that keeps `llm/providers/` extractable, enforced by `check:gates`.
