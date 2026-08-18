@@ -1045,7 +1045,12 @@ onInput(async (text: string) => {
     // cursive line updates itself via the goal subscription.
     if (!getGoal()) {
       setAgentStatus('Determining goal...');
-      await Promise.race([refreshGoal(text), new Promise(r => setTimeout(r, 12_000))]);
+      // THREE SECONDS, NOT TWELVE. The goal is one short line and the derivation keeps running in the
+      // background either way, landing on a later round — so the only thing a long block buys is
+      // having it in round 1 instead of round 2. Twelve seconds of a dead terminal, on the FIRST
+      // prompt of every session, before any work starts, is not worth that. When the endpoint is that
+      // slow, waiting longer helps nobody: it is exactly when the operator most needs to see motion.
+      await Promise.race([refreshGoal(text), new Promise(r => setTimeout(r, 3_000))]);
     }
 
     // Corpus lookup for this prompt: the first of the session (it states the task), or when asked.

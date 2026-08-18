@@ -95,19 +95,21 @@ export async function askSentry(question: string): Promise<string> {
         ISSUES: list,
         OBSERVATIONS: observations.length ? observations.join('\n\n') : '(none — answer from the list)',
       })
-      : prompts.get('loop', {
-        SCOPE: scope,
-        ISSUES: list,
-        OBSERVATIONS: observations.length ? observations.join('\n\n') : '(no stacktrace opened yet)',
-        REMAINING: String(MAX_ROUNDS - round),
-        FINAL_NOTICE: '',
-      });
+      : prompts.get('loop', { SCOPE: scope, ISSUES: list });
+
+    // Whatever GROWS rides in the user turn, so the system message is the same bytes every round and
+    // the server can reuse the prefix it already computed. See tool/check-connector-loop.mjs.
+    const user = isFinal ? q : prompts.get('round', {
+      QUESTION: q,
+      OBSERVATIONS: observations.length ? observations.join('\n\n') : '(no stacktrace opened yet)',
+      REMAINING: String(MAX_ROUNDS - round),
+    });
 
     let reply: string;
     try {
       reply = (await toolLlm().ask([
         { role: 'system', content: system },
-        { role: 'user', content: q },
+        { role: 'user', content: user },
       ])).trim();
     } catch (err) {
       toolLog().error('sentry_llm_error', { round: String(round), error: String(err) });

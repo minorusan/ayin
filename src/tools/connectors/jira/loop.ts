@@ -83,6 +83,31 @@ export async function askJira(question: string): Promise<string> {
   const sprintList = issues.map(fmtLine).join('\n');
   const observations: string[] = [];
   const opened = new Set<string>();
+
+  // A KEY THE OPERATOR ALREADY NAMED COSTS NO ROUND TO DISCOVER.
+  //
+  // "solve 13804" names the ticket. Spending a full model call — with the sprint list in the prompt —
+  // to have the model reply with that same key is asking it to repeat what was in the question, and it
+  // is the slowest call of the turn because the reply gates everything after it. Matched against the
+  // FETCHED SET, so scope is still decided by what Jira returned and never by the prompt: a bare
+  // number resolves only if exactly one sprint ticket ends in it, and an ambiguous one is left to the
+  // model rather than guessed at.
+  for (const raw of q.match(/\b([A-Za-z][A-Za-z0-9_]*-)?\d{2,}\b/g) ?? []) {
+    if (opened.size >= MAX_OPENS) break;
+    const token = raw.toUpperCase();
+    const hits = token.includes('-')
+      ? (inSprint.has(token) ? [token] : [])
+      : [...inSprint.keys()].filter((k) => k.endsWith(`-${token}`));
+    if (hits.length !== 1 || opened.has(hits[0])) continue;
+    try {
+      toolReport(`jira: opening ${hits[0]} (named in the question)`);
+      const detail = await issueDetail(hits[0]);
+      opened.add(hits[0]);
+      observations.push(fmtDetail(detail));
+    } catch (err) {
+      observations.push(`${hits[0]} could not be read: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   /**
    * Set when the model asks to re-open something it has already read — a stall, not thoroughness.
    * Measured on the sentry connector, which shares this loop's shape: the model mirrored the word
@@ -103,25 +128,33 @@ export async function askJira(question: string): Promise<string> {
      * question and it was mirroring, not choosing. A prompt that mentions no commands has nothing to
      * mirror. (Measured on the sentry connector; this loop shares the shape and the failure.)
      */
+    // THE SYSTEM MESSAGE IS THE SAME BYTES EVERY ROUND. What grows — the tickets read so far, the
+    // rounds left — rides in the USER turn, at the end.
+    //
+    // A server caches the KV state of a prompt PREFIX. Putting OBSERVATIONS and a decrementing
+    // counter in the system message guaranteed a different prefix on every round, so each round
+    // reprocessed the whole prompt — sprint list, ticket description and comments included — instead
+    // of appending to what was already computed. Rounds two and three are where this loop spends its
+    // time, and they were the two paying full price.
     const system = isFinal
       ? prompts.get('final', {
         ME: me.name,
         SPRINT: sprintList,
         OBSERVATIONS: observations.length ? observations.join('\n\n') : '(none — answer from the list)',
       })
-      : prompts.get('loop', {
-        ME: me.name,
-        SPRINT: sprintList,
-        OBSERVATIONS: observations.length ? observations.join('\n\n') : '(nothing opened yet)',
-        REMAINING: String(MAX_ROUNDS - round),
-        FINAL_NOTICE: '',
-      });
+      : prompts.get('loop', { ME: me.name, SPRINT: sprintList });
+
+    const user = isFinal ? q : prompts.get('round', {
+      QUESTION: q,
+      OBSERVATIONS: observations.length ? observations.join('\n\n') : '(nothing opened yet)',
+      REMAINING: String(MAX_ROUNDS - round),
+    });
 
     let reply: string;
     try {
       reply = (await toolLlm().ask([
         { role: 'system', content: system },
-        { role: 'user', content: q },
+        { role: 'user', content: user },
       ])).trim();
     } catch (err) {
       toolLog().error('jira_llm_error', { round: String(round), error: String(err) });

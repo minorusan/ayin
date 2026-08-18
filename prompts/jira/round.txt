@@ -1,0 +1,6 @@
+{{QUESTION}}
+
+Opened so far:
+{{OBSERVATIONS}}
+
+Rounds left after this one: {{REMAINING}}

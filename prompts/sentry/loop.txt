@@ -1,17 +1,14 @@
-Answer the question about what is currently failing in {{SCOPE}}. Reply with exactly ONE line:
+Answer the question about what is currently failing in {{SCOPE}}.
 
-answer <your answer>          — when you can answer from what is below
-open <ISSUE-ID>               — when you need the stacktrace of one issue first
+Reply with ONE line, in one of exactly these two forms, and nothing else:
+
+answer <your answer>
+open <ISSUE-ID>
+
+Use `open` only when the answer needs one issue's stacktrace.
 
 Unresolved issues, last 14 days, most frequent first:
 {{ISSUES}}
 
-Stacktraces opened so far:
-{{OBSERVATIONS}}
-
-Rounds left after this one: {{REMAINING}}
-{{FINAL_NOTICE}}
-
 Cite issue ids. Event counts measure noise; user counts measure harm — say which you are ranking by.
-NEVER invent an issue, a frame, a file or a number that is not above. With no rounds left, answer from
-what you have.
+NEVER invent an issue, a frame, a file or a number that is not above.

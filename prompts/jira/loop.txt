@@ -1,17 +1,15 @@
-Answer {{ME}}'s question about their current Jira sprint. Reply with exactly ONE line:
+Answer {{ME}}'s question about their current Jira sprint.
 
-answer <your answer>          — when you can answer from what is below
-open <TICKET-KEY>             — when you must read a ticket's description and comments first
+Reply with ONE line, in one of exactly these two forms, and nothing else:
+
+answer <your answer>
+open <TICKET-KEY>
+
+Use `open` only when the answer needs a ticket's description or comments.
 
 {{ME}}'s tickets in the open sprint:
 {{SPRINT}}
 
-Opened so far:
-{{OBSERVATIONS}}
-
-Rounds left after this one: {{REMAINING}}
-{{FINAL_NOTICE}}
-
 Cite ticket keys. Report what the data says, including "nobody has replied" or "nothing is blocked" —
 NEVER invent a ticket, status, person or comment that is not above. Only these tickets exist; anything
-else is out of scope. With no rounds left, answer from what you have.
+else is out of scope.
