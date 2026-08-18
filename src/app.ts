@@ -641,9 +641,16 @@ onInput(async (text: string) => {
             provider: llmProviderName(),
             model: activeModelId() || 'unknown',
             dialect: activeAdapter().id,
+            // THREE STATES, NOT TWO. "never resolved" and "not resolved YET" look identical to a
+            // reader and mean opposite things: the first is a real misconfiguration worth chasing,
+            // the second is a bundle taken a few hundred milliseconds after boot, before the
+            // background probe has answered. Reporting the alarming one as fact sent two separate
+            // investigations after a session that was fine.
             dialectSource: activeAdapter().forced ? 'chosen by the operator'
               : modelResolution().resolved ? 'matched the served model'
-                : 'FALLBACK — model never resolved',
+                : modelResolution().gaveUp
+                  ? 'FALLBACK — the endpoint never reported a model'
+                  : `not resolved YET — attempt ${modelResolution().attempts} still in flight, dialect is provisional`,
             contextTokens: contextTokens(),
             cwd: process.cwd(),
             sessionId: (await import('./session-store.js')).getSessionId(),

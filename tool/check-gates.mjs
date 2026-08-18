@@ -2163,6 +2163,31 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
   ok(/if \(retry\.trim\(\)\) reply = retry;/.test(guard),
     'and an EMPTY retry keeps the original — replacing a bad reply with nothing is not an improvement');
 
+  // ── the finished-reply marker, and the three places models put it ──────────
+  //
+  // A `$` opening the LAST line of a multi-line reply was caught by neither pattern: not at the
+  // string start (no `m` flag, deliberately) and not the last non-space character, because a word
+  // follows it. It reached the operator's screen as `$ Done.` after they had asked for it to be gone.
+  {
+    const fm = readFileSync(join(DIST, '..', 'src', 'final-marker.ts'), 'utf-8');
+    ok(/const FINAL_MARKER_LAST_LINE = /.test(fm),
+      'a marker opening the last line is stripped — models put it there and neither old pattern caught it');
+    ok(/function insideCodeFence/.test(fm),
+      'a `$` inside a fenced block is a SHELL PROMPT and must survive — `$ npm run build` is not a signal');
+  }
+
+  // ── the model-resolution state has THREE values, not two ───────────────────
+  //
+  // "never resolved" and "not resolved YET" read the same to a human and mean opposite things. The
+  // bundle reported the alarming one as fact and sent two investigations after a healthy session.
+  {
+    const appSrc = readFileSync(join(DIST, '..', 'src', 'app.ts'), 'utf-8');
+    ok(/modelResolution\(\)\.gaveUp/.test(appSrc),
+      'the bundle distinguishes GAVE UP from still-trying');
+    ok(/not resolved YET/.test(appSrc),
+      '…and says so, rather than claiming a fallback that has not happened');
+  }
+
   // ── the window is bounded by TOKENS, not by a message count ────────────────
   //
   // A fixed count is the wrong unit in both directions: 20 messages is a third of a 65k window and an

@@ -78,7 +78,15 @@ export interface BundleFacts {
    * one is a gemma endpoint working correctly, the other is a qwen model being handed gemma's tool
    * syntax on every round — and they print identically.
    */
-  dialectSource: 'matched the served model' | 'chosen by the operator' | 'FALLBACK — model never resolved';
+  /**
+   * Why this dialect. A free string rather than a union, because the states are not two.
+   *
+   * "never resolved" and "not resolved YET" read identically to a human and mean opposite things: one
+   * is a misconfiguration worth chasing, the other is a bundle taken a few hundred milliseconds after
+   * boot, before the background probe has answered. Reporting the alarming one as fact sent two
+   * separate investigations after a session that was fine.
+   */
+  dialectSource: string;
   contextTokens: number;
   cwd: string;
   sessionId: string | null;
