@@ -697,7 +697,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
       out(`[discover] ${domain}`);
       const r = await discoverDomain({
         store, repoPath, domain, maxDepth: args.maxDepth, maxFiles: args.maxFiles, onStatus: status,
-        vendorRoots, scope,
+        vendorRoots, scope, countOnly: args.dryRun,
       });
       matched += r.added;
       progress('discover', i + 1, args.domains.length, domain);
@@ -717,10 +717,13 @@ export async function runIndulge(argv: string[]): Promise<number> {
     }
 
     if (args.dryRun) {
-      const files = store.files().length;
+      // THIS RUN's files, not the store's. Reporting `store.files().length` counted every file every
+      // previous run had discovered, so a rehearsal of three small domains on top of an existing
+      // corpus estimated 18,000 questions for work that was actually a hundred files.
+      const files = matched;
       out();
       out(`dry run: ${files} file(s) discovered. A full run would ask roughly ${files * 5 * 2}–${files * 5 * 5} question(s).`);
-      out('Nothing was spent and no questions were written.');
+      out('Nothing was spent, and nothing was written to the corpus.');
       store.endRun(runId, 'finished');
       return 0;
     }

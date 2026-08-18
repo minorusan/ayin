@@ -145,6 +145,15 @@ export interface DiscoverOptions {
   onStatus?: (note: string) => void;
   /** Skip the LLM and use these repo-relative seeds (used by the gate; keeps discovery testable). */
   seedsOverride?: string[];
+  /**
+   * Count the files, write NONE of them.
+   *
+   * `--dry-run` promises it costs nothing and changes nothing, and it was keeping only the first
+   * half: discovery persisted every file it walked, so trying two depths to pick one left the store
+   * holding the union of both — and the run afterwards generated questions for all of it. A rehearsal
+   * that alters the thing being rehearsed is worse than no rehearsal, because the operator trusts it.
+   */
+  countOnly?: boolean;
 }
 
 export interface DiscoverReport {
@@ -596,7 +605,7 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
     let sha = '';
     try { sha = blobSha(readFileSync(join(repoPath, file))); } catch { return false; }
     const unit = unitOf(repoPath, file);
-    store.addFile({ domain, path: file, depth, why: unit ? `${why} · in ${unit}` : why, sha });
+    if (!opts.countOnly) store.addFile({ domain, path: file, depth, why: unit ? `${why} · in ${unit}` : why, sha });
     report.added++;
     report.byDepth[depth] = (report.byDepth[depth] ?? 0) + 1;
     return true;
