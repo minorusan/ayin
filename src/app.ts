@@ -472,6 +472,51 @@ onInput(async (text: string) => {
         await handleModelCommand(text.slice('/model'.length));
         return;
       /**
+       * `/indulge-model` — what a CORPUS BUILD runs on, which is a different decision from `/model`.
+       *
+       * A build is hours of a model reading source; a chat turn is seconds. An operator legitimately
+       * wants them apart: the corpus on a hosted model for the window and the reasoning, the agent on
+       * the card in the room at no cost per token. And the TIER is the whole cost of a build — the
+       * same corpus on a flagship and on a cheap tier differ by an order of magnitude — so the model
+       * is chosen here, not inherited from whatever the agent happens to be using.
+       *
+       * Stored, not per-session: a build runs unattended, usually from another terminal, and a
+       * setting that died with this session would silently not apply to it.
+       */
+      case '/indulge-model': {
+        const arg = text.slice('/indulge-model'.length).trim();
+        const { indulgeBackend } = await import('./indulge/index.js');
+        if (!arg) {
+          const cur = indulgeBackend();
+          addMessage('system', cur.provider
+            ? `indulge builds on: ${cur.provider}${cur.model ? ` · ${cur.model}` : ' · that provider\'s default model'}`
+            : 'indulge builds on the same provider as the agent. Set one: /indulge-model openai gpt-4.1');
+          addMessage('system', '/indulge-model <provider> [model] · /indulge-model off to go back to following the agent');
+          return;
+        }
+        if (arg.toLowerCase() === 'off') {
+          setConfigValue('indulgeProvider', '');
+          setConfigValue('indulgeModel', '');
+          addMessage('system', 'indulge follows the agent\'s provider again.');
+          return;
+        }
+        const [provider, ...rest] = arg.split(/\s+/);
+        const model = rest.join(' ').trim();
+        const known = ['openai', 'ollama', 'resource', 'direct'];
+        if (!known.includes(provider.toLowerCase())) {
+          addMessage('system', `Unknown provider "${provider}". One of: ${known.join(', ')}`);
+          return;
+        }
+        setConfigValue('indulgeProvider', provider.toLowerCase());
+        setConfigValue('indulgeModel', model);
+        addMessage('system', `indulge will build on ${provider.toLowerCase()}${model ? ` · ${model}` : ' · that provider\'s default model'}.`
+          + ' The interactive agent is unchanged.');
+        if (provider.toLowerCase() === 'openai' && !model) {
+          addMessage('system', 'No model named — the OpenAI default is the expensive tier. Name one (e.g. /indulge-model openai gpt-4.1) unless you mean it.');
+        }
+        return;
+      }
+      /**
        * `/transcribe` — start the FULL, unclipped record of this session (see transcript.ts).
        * `/transcribe off` stops it. It is loud on purpose: the bottom row stays red for as long as it
        * runs, because this writes every byte the model saw — including whatever a tool printed — to a

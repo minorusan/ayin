@@ -66,18 +66,18 @@ export class GlmDialect extends XmlToolCallDialect {
   readonly id = 'glm';
 
   /**
-   * NATIVE TOOLS ARE REFUSED for this family, and that is the other half of the fix.
+   * NATIVE TOOLS STAY ON, and this is a reversal worth recording.
    *
-   * With schemas declared, Ollama parses the reply with the server-side parser its Modelfile names —
-   * and for glm that parser returned `read_file` calls with EMPTY arguments: eight in one run against
-   * the real repository, each printed as "read_file: missing path", each costing a round. The name
-   * survived the parse and every parameter was eaten, and nothing downstream can recover a path that
-   * was destroyed upstream.
+   * Ollama's own glm parser was seen returning `read_file` calls with EMPTY arguments — eight in one
+   * run, each "missing path". Refusing native tools fixed that run and BROKE a worse thing: with the
+   * catalogue moved into the prompt the model started narrating its plan and asking permission
+   * instead of calling anything — "Please confirm this approach and proceed" — and repeated it
+   * verbatim when told to go. Structured calls it must emit beat a format it may merely describe.
    *
-   * So the format is taught in the prompt and parsed here, where both halves are ayin's and can be
-   * verified against each other.
+   * So the empty-argument case is handled where it belongs: the parser below recovers the text form
+   * when the native path yields nothing usable. One run is not evidence enough to change how a model
+   * is driven; it is evidence enough to add a fallback.
    */
-  readonly rejectsNativeTools = true;
   matches(modelId: string): boolean { return /\bglm[-_.]?\d/i.test(modelId); }
   toolCallInstructions(): string { return TOOL_CALL_FORMAT; }
 

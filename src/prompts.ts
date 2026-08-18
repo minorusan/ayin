@@ -156,7 +156,7 @@ export const KNOWN_CONFIG_KEYS = [
   'embedProvider',
   // Which provider BUILDS a corpus, separately from the one the agent chats through. A build is
   // hours of reading source; a chat turn is seconds. One global choice makes one of them worse.
-  'indulgeProvider',
+  'indulgeProvider', 'indulgeModel',
   // Only honoured when the operator sets it — the round budget is otherwise unlimited (agent.ts).
   'maxToolRounds',
   // `ayin launch`: the command that opens a terminal window, with {{SCRIPT}} for the launch script.

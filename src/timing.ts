@@ -26,6 +26,15 @@ export interface PhaseTiming {
 
 const DEFAULT_LONG_MS = 120_000;
 
+/** A single operation at or past this is called out by name. Longer than anyone waits without asking. */
+const BARK_MS = 30_000;
+
+/** A session at or past this gets a report even when no single operation was slow. */
+const REPORT_MS = 10_000;
+
+/** How far the measured operations may fall short of the wall clock before it is an instrumentation bug. */
+const GAP_TOLERANCE_MS = 2_000;
+
 let turn: PhaseTiming[] = [];
 
 /**
@@ -58,6 +67,19 @@ export function human(ms: number): string {
   const s = Math.round(ms / 1000);
   return s < 90 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
 }
+
+/**
+ * What the NEXT model call is for, so a call measured at the transport can still be named.
+ *
+ * Every LLM call is timed at its single funnel (`llmChat`) rather than at each caller, because timing
+ * per caller is how time escapes: measured on a real session, only the agent's own rounds and tool
+ * runs were wrapped, so the critic pass, the arbiter ratings, the goal derivation and every connector's
+ * inner loop were invisible — eleven seconds of a seventy-two second session with no line in the
+ * report. Anything a report cannot see, it implicitly attributes to something else.
+ */
+let llmPurpose = 'sub-call';
+export function setLlmPurpose(purpose: string): void { llmPurpose = purpose; }
+export function takeLlmPurpose(): string { const p = llmPurpose; llmPurpose = 'sub-call'; return p; }
 
 /**
  * Measure one phase. Returns whatever the phase returned; never swallows an error.
@@ -100,8 +122,22 @@ export async function timed<T>(
  */
 export function formatTurnTimings(): string | null {
   if (!turn.length) return null;
-  const total = turn.reduce((n, t) => n + t.ms, 0);
-  if (total < longOperationMs()) return null;
+
+  const accounted = turn.reduce((n, t) => n + t.ms, 0);
+  // The SESSION, from the moment node started — not from ayin's first measured phase. `process.uptime`
+  // is the only clock that includes the runtime's own boot, module loading, tool discovery and prompt
+  // registration, and those are exactly the parts a phase tally cannot see.
+  const session = Math.round(process.uptime() * 1000);
+  const unaccounted = Math.max(0, session - accounted);
+  const slowest = turn.reduce((m, t) => (t.ms > m.ms ? t : m), turn[0]);
+
+  // Report when there is something to answer for: a turn worth timing, one slow operation, or a
+  // measurement gap. A report that fires on every trivial turn is a report nobody reads.
+  // Anything already announced DURING the turn must appear in the tally at the end of it — otherwise
+  // the operator sees a warning and then a report that does not mention it. `longOperationMs` is the
+  // operator's own threshold, so honouring it here keeps the two consistent by construction.
+  const announceAt = Math.min(BARK_MS, longOperationMs());
+  if (session < REPORT_MS && slowest.ms < announceAt && unaccounted <= GAP_TOLERANCE_MS) return null;
 
   const byPhase = new Map<string, { n: number; ms: number; max: number; worst: string }>();
   for (const t of turn) {
@@ -111,11 +147,28 @@ export function formatTurnTimings(): string | null {
     byPhase.set(t.phase, e);
   }
   const rows = [...byPhase.entries()].sort((a, b) => b[1].ms - a[1].ms);
-  const lines = [`where the turn went — ${human(total)} across ${turn.length} phase(s)`];
+
+  const pct = (ms: number): string => `${Math.round((ms / Math.max(1, session)) * 100)}%`;
+  const lines = [
+    `where the session went — ${human(session)} wall clock, ${turn.length} measured operation(s)`,
+  ];
   for (const [phase, e] of rows) {
-    lines.push(`  ${human(e.ms).padStart(7)}  ${phase} ×${e.n}`
+    lines.push(`  ${human(e.ms).padStart(7)}  ${pct(e.ms).padStart(4)}  ${phase} ×${e.n}`
       + (e.n > 1 ? ` · slowest ${human(e.max)}` : '')
       + (e.worst ? ` · ${e.worst.slice(0, 60)}` : ''));
+  }
+
+  // THE GAP IS PRINTED, ALWAYS. If the measured operations do not add up to the wall clock, the
+  // instrumentation is incomplete — and an incomplete measurement that looks complete is how "where
+  // did the time go" gets answered wrongly with confidence. Naming the residue is the honest form.
+  lines.push(`  ${human(unaccounted).padStart(7)}  ${pct(unaccounted).padStart(4)}  unmeasured`
+    + (unaccounted > GAP_TOLERANCE_MS
+      ? ` — startup, discovery and anything with no timer around it. Over the ${GAP_TOLERANCE_MS / 1000}s tolerance: instrumentation gap.`
+      : ' — startup and teardown, within tolerance'));
+
+  // BARK on anything that took longer than a person will sit still for, by name.
+  for (const t of turn) {
+    if (t.ms >= announceAt) lines.push(`  SLOW: ${t.phase} took ${human(t.ms)}${t.detail ? ` · ${t.detail.slice(0, 70)}` : ''}`);
   }
   return lines.join('\n');
 }

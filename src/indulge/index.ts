@@ -540,7 +540,26 @@ function applyProviderOverride(explicit?: string): string | null {
   const want = (explicit || getConfigString('indulgeProvider') || '').trim().toLowerCase();
   if (!want) return null;
   process.env.AYIN_LLM_PROVIDER = want;
+
+  // THE MODEL TOO, not only the vendor. A build is hours of paid tokens and the tier is the whole
+  // cost: the same corpus on the flagship and on the cheap tier differ by an order of magnitude in
+  // price, and picking the vendor while inheriting whatever model the interactive agent happens to
+  // use is how a build gets billed at a rate nobody chose. Set per VENDOR, because the two providers
+  // read different variables and a model name means nothing outside its vendor.
+  const model = (getConfigString('indulgeModel') ?? '').trim();
+  if (model) {
+    if (want === 'openai') process.env.AYIN_OPENAI_MODEL = model;
+    else process.env.AYIN_OLLAMA_MODEL = model;
+  }
   return want;
+}
+
+/** What a build WOULD run on right now — provider and model, as `/indulge-model` reports them. */
+export function indulgeBackend(): { provider: string; model: string } {
+  return {
+    provider: (getConfigString('indulgeProvider') ?? '').trim(),
+    model: (getConfigString('indulgeModel') ?? '').trim(),
+  };
 }
 
 export async function runIndulge(argv: string[]): Promise<number> {
@@ -557,7 +576,10 @@ export async function runIndulge(argv: string[]): Promise<number> {
 
   if (args.status) return printStatus(repoPath);
   if (args.search !== undefined) return searchCorpus(repoPath, args.search);
-  if (forced) out(`provider: ${forced} (this build only — the interactive agent is unchanged)`);
+  if (forced) {
+    const m = (getConfigString('indulgeModel') ?? '').trim();
+    out(`provider: ${forced}${m ? ` · model ${m}` : ''} (this build only — the interactive agent is unchanged)`);
+  }
   if (args.retryFailed) return runRetryFailed(repoPath, args);
   if (args.qa) return runQaPass(repoPath, args);
   if (args.fix) return runFixPass(repoPath, args);

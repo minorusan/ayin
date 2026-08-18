@@ -57,6 +57,11 @@ export const HELP: HelpEntry[] = [
 
   // ── working on code ────────────────────────────────────────────────────────────
   {
+    name: '/indulge-model', kind: 'command', section: 'Code',
+    short: 'What a CORPUS BUILD runs on — a separate choice from /model · /indulge-model openai gpt-4.1 · off',
+    tip: 'A build is hours of tokens and the TIER is the whole cost. /indulge-model picks it without touching the agent.',
+  },
+  {
     name: '/diff', kind: 'command', section: 'Code',
     short: 'Working tree — staged, unstaged AND untracked — as a reviewable HTML page · /diff <rev> to compare against one',
     tip: '/diff opens your working tree as a real review page — filters, per-file triage, changed tokens marked.',

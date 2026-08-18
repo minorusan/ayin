@@ -2157,8 +2157,11 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
 
   // Bounded, and only for callers that said they have no tools.
   // Bounded slice from the guard itself — anchoring the end on a symbol name finds the IMPORT.
+  // Sliced to the END OF THE GUARD, not a fixed character count: a comment added inside it pushed the
+  // last assertion out of a 1400-char window and failed a gate about code that had not changed.
   const guardAt = mgrSrc.indexOf('if (!declared && activeDialect()');
-  const guard = mgrSrc.slice(guardAt, guardAt + 1400);
+  const guardEnd = mgrSrc.indexOf('emitLlmCall(', guardAt);
+  const guard = mgrSrc.slice(guardAt, guardEnd > guardAt ? guardEnd : guardAt + 1400);
   ok(!/while|for \(/.test(guard), 'ONE retry — a guard that can loop is worse than the behaviour it corrects');
   ok(/if \(retry\.trim\(\)\) reply = retry;/.test(guard),
     'and an EMPTY retry keeps the original — replacing a bad reply with nothing is not an improvement');

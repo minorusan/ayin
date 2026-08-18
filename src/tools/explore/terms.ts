@@ -83,6 +83,21 @@ function joinRun(run: string[]): string[] {
   return [camel, pascal, snake, snake.toUpperCase()];
 }
 
+/**
+ * Words that DESCRIBE code instead of naming it. A compound of two of these is never a symbol.
+ *
+ * Deliberately narrow: `handler`, `service`, `manager`, `controller`, `factory` are NOT here, because
+ * people really do write `RewardHandler`. This list is only the vocabulary of talking ABOUT code.
+ */
+const META = new Set([
+  'class', 'classes', 'interface', 'interfaces', 'definition', 'definitions', 'declaration',
+  'implementation', 'method', 'methods', 'function', 'functions', 'field', 'fields', 'property',
+  'properties', 'variable', 'variables', 'file', 'files', 'path', 'paths', 'line', 'lines', 'code',
+  'name', 'names', 'type', 'types', 'usage', 'usages', 'reference', 'references', 'signature',
+  'parameter', 'parameters', 'argument', 'arguments', 'return', 'value', 'values', 'list',
+  'event', 'events', 'member', 'members', 'section', 'block', 'statement', 'expression',
+]);
+
 export function extractTerms(question: string): Terms {
   const quoted = [...question.matchAll(/["'`]([^"'`]{2,})["'`]/g)].map((m) => m[1].trim()).filter(Boolean);
   // Namespaced keys count as literals even unquoted — they are searched verbatim, never re-cased.
@@ -135,7 +150,37 @@ export function extractTerms(question: string): Terms {
     if (run.length > 2) push(run);
   }
   candidates.sort((a, b) => a.words - b.words || a.style - b.style);
-  const joined = candidates.map((c) => c.id);
+
+  /**
+   * A JOINED FORM MUST PLAUSIBLY BE A SYMBOL SOMEONE WROTE. Three ways it cannot be, all measured on
+   * one real session where the agent searched five times and found nothing:
+   *
+   *     ISolitaireStreakBrain, isolitairestreakbrainInterface, interfaceDefinition, definitionEvents
+   *
+   * Only the first is real. The other three filled every remaining slot, so each rephrasing produced a
+   * different set of invented symbols, found nothing, and the agent asked again — the loop the operator
+   * watched. Fewer, likelier terms beat more terms: only MAX_TERMS are searched at all.
+   *
+   *  1. BOTH HALVES DESCRIBE CODE rather than name it. `classDefinition`, `definitionEvents`,
+   *     `interfaceFile` — nobody writes those. `scoreMultiplier` survives: those are domain words.
+   *  2. THE HALVES ARE THE SAME WORD. `eventsEvents` came out of a real question.
+   *  3. IT IS BUILT FROM A SYMBOL THE USER ALREADY TYPED. They named the thing; gluing an English word
+   *     onto it invents a sibling that does not exist AND displaces the name that does.
+   */
+  const typedLower = new Set(typed.map((t) => t.toLowerCase()));
+  const plausible = candidates.filter((c) => {
+    // Split by the style that BUILT it: SCREAMING_SNAKE has no camel boundaries, and splitting it on
+    // every capital yields single letters — which silently exempted every SCREAMING form from the
+    // checks below (`CLASS_DEFINITION` sailed through as twelve one-letter "words").
+    const parts = c.id.includes('_')
+      ? c.id.toLowerCase().split('_').filter(Boolean)
+      : c.id.split(/(?=[A-Z])/).map((w) => w.toLowerCase()).filter(Boolean);
+    if (parts.length === 2 && parts[0] === parts[1]) return false;
+    if (parts.length === 2 && parts.every((w) => META.has(w))) return false;
+    for (const t of typedLower) if (c.id.toLowerCase().includes(t)) return false;
+    return true;
+  });
+  const joined = plausible.map((c) => c.id);
 
   // Action words become method-name candidates on their own: "applied" -> Apply, apply.
   const actions = words.filter((w) => ACTION.has(w)).flatMap((w) => {

@@ -52,6 +52,8 @@ import { clearActivity } from './activity.js';
 import { guardBeginTurn, guardCheck, guardDirective, guardNoteDenied } from './tool-guard.js';
 import { planContextBlock, runPlan } from './plan/index.js';
 import { liveTool } from './live-mirror.js';
+import { exploreCacheNoteTool } from './tools/explore/cache.js';
+import { setLlmPurpose } from './timing.js';
 
 let interrupted = false;
 let immediateCancel = false;
@@ -287,6 +289,7 @@ async function runCritic(proposedAnswer: string, facts: string[]): Promise<strin
       FACTS: factsText.substring(0, 5000),
     });
 
+    setLlmPurpose('critic · peer review');
     const peerResponse = await llmChat([{ role: 'user', content: peerPrompt }]);
     peerConclusion = peerResponse.trim();
     log('INFO', 'critic_peer', { conclusion: peerConclusion.substring(0, 300) });
@@ -962,7 +965,12 @@ export async function runAgent(userInput: string): Promise<void> {
   }
 }
 
+/** How often the loop-breaker fires for one tool within a turn. */
+const LOOP_NUDGE_EVERY = 8;
+
 async function runAgentTurn(userInput: string): Promise<void> {
+  // Per TURN, not per session: a second question legitimately searches again from scratch.
+  const toolUseCounts = new Map<string, number>();
   // Discovery, once. Idempotent, so every entry point can insist rather than assume.
   await loadTools();
   currentGoal = userInput;
@@ -1042,9 +1050,9 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // evidence was that ayin was slow — and "the model is slow" was the wrong answer three times in
       // one day. Measured live during one of them: the GPU sat at 0% and the gateway queue was EMPTY
       // while ayin had been "generating" for 10m38s. Nothing was slow. Nothing was running.
-      response = await timed('llm', `round ${round + 1} · ${activeModelId() || 'model'}`,
-        () => llmChat(messages),
-        (line) => { addMessage('system', line); showAlert('warn', line); });
+      // Named, not wrapped: llmChat times itself now, so wrapping here would count the round twice.
+      setLlmPurpose(`round ${round + 1} · ${activeModelId() || 'model'}`);
+      response = await llmChat(messages);
     } catch (err) {
       setAgentStatus('');
       if (nudgeForQueuedMessage) {
@@ -1557,6 +1565,34 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // indistinguishable, from outside, from a model that will not answer — and both look like a
       // spinner. `tool` with an old timestamp says which it is without asking anyone to type anything.
       liveTool(name);
+      // A tool that could have changed the tree invalidates the explore cache — the list is inverted
+      // in cache.ts, so anything not known to be read-only clears it. A stale hit would send the agent
+      // to line numbers that no longer exist, which is worse than the seconds it saves.
+      exploreCacheNoteTool(name);
+
+      // A TOOL THAT HAS NOT WORKED THIRTEEN TIMES WILL NOT WORK ON THE FOURTEENTH.
+      //
+      // Measured on one real session: 30 `find_files` calls across 26 rounds, each with a slightly
+      // different glob, ending with no answer at all. Nothing was repeated exactly, so no cache could
+      // catch it — the model was not stuck on one query, it was stuck on one STRATEGY. Left alone it
+      // spends the whole turn there, and the operator watches a spinner for two and a half minutes.
+      //
+      // The nudge is deterministic and it names the alternatives, because "try something else" is
+      // advice a model cannot act on. Fired on a schedule rather than once: a loop that survives the
+      // first nudge is exactly the one that needs the second.
+      const used = (toolUseCounts.get(name) ?? 0) + 1;
+      toolUseCounts.set(name, used);
+      if (used % LOOP_NUDGE_EVERY === 0) {
+        const alt = name === 'find_files' || name === 'grep'
+          ? 'explore (it derives identifiers and searches for you), or read a directory listing to see what is actually there'
+          : 'a different tool, or state what you have and what is missing';
+        addMessage('system', `[${name} used ${used}× this turn — changing approach]`);
+        pushToWindow('user', renderToolResult(
+          `You have called ${name} ${used} times in this turn and it has not answered the question. `
+          + `It will not answer on the next call either. Change approach: try ${alt}. `
+          + `If the thing you are looking for may not exist under that name, say so and work from what you have.`));
+        log('INFO', 'tool_loop_nudge', { tool: name, uses: String(used) });
+      }
       const toolPromise = timed('tool', name, () => tool.execute(params),
         (line) => { addMessage('system', line); }).catch(
         (err: unknown) => `Error: ${err instanceof Error ? err.message : String(err)}`,

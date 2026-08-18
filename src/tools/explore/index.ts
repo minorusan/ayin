@@ -33,6 +33,7 @@ import { unity } from './projects/unity.js';
 import { typescript } from './projects/typescript.js';
 import { generic } from './projects/generic.js';
 import type { Attempt, ExploreResult, Finding, ProjectExplorer } from './types.js';
+import { exploreCacheGet, exploreCacheKey, exploreCacheSet } from './cache.js';
 
 /** Most specific first; `generic` always matches. */
 const EXPLORERS: ProjectExplorer[] = [unity, typescript, generic];
@@ -142,6 +143,19 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
 
   const rootNote = root === process.cwd() ? '' : ` · in ${relative(process.cwd(), root) || root}`;
   toolReport(`explore · ${explorer.id}${rootNote} · ${search.join(', ') || 'no terms'}`);
+
+  // ALREADY ASKED, THIS SESSION, AND NOTHING HAS CHANGED SINCE. Keyed on the derived TERMS: an agent
+  // that has not found what it wants rephrases rather than changes tack, and the rephrasings collapse
+  // to the same search. Saying so is the point — a repeat handed back silently reads as new evidence.
+  const cacheKey = exploreCacheKey(explorer.id, root, search);
+  const cached = exploreCacheGet(cacheKey);
+  if (cached) {
+    toolReport(`explore · already searched ${search.join(', ')} this session — same answer, no re-run`);
+    toolLog().info('explore_cache_hit', { project: explorer.id, terms: String(search.length) });
+    return `You already searched these exact terms this session (${search.join(', ')}) and nothing has `
+      + `changed since. This is that same result — asking again will not produce more. Search for `
+      + `something different, or use what is here.\n\n${cached}`;
+  }
 
   if (search.length === 0) {
     return formatResult({
@@ -265,7 +279,9 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     ms: String(result.elapsedMs),
   });
   toolReport(`explore → ${result.findings.length} finding(s) in ${result.elapsedMs}ms`);
-  return formatResult(result);
+  const formatted = formatResult(result);
+  exploreCacheSet(cacheKey, formatted);
+  return formatted;
 }
 
 export { relative, sep };

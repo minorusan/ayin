@@ -25,6 +25,7 @@
  */
 
 import { log } from '../log.js';
+import { timed, takeLlmPurpose } from '../timing.js';
 import type { LlmMessage, ModelDialect, ParseAllResult, ParsedToolCall } from './types.js';
 import { GemmaDialect } from './dialects/gemma.js';
 import { GlmDialect } from './dialects/glm.js';
@@ -416,6 +417,12 @@ export interface LlmChatOptions {
 }
 
 export async function llmChat(messages: LlmMessage[], opts: LlmChatOptions = {}): Promise<string> {
+  // EVERY model call is measured here, at the one funnel they all pass through. Wrapping callers
+  // instead left the critic, the arbiters, the goal derivation and every connector loop unmeasured.
+  return timed('llm', takeLlmPurpose(), () => llmChatInner(messages, opts));
+}
+
+async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}): Promise<string> {
   ensureRefreshed();
   // Declare the tools. A provider that can pass them to the runtime (providers/ollama.ts) gets native
   // tool-calling — the model emits the syntax it was trained on and the runtime parses it — while the
@@ -475,8 +482,14 @@ export async function llmChat(messages: LlmMessage[], opts: LlmChatOptions = {})
       // mangle it" — and it was previously kept nowhere unless /transcribe had been switched on
       // beforehand, which nobody does before the bug they did not expect.
       void import('../session-record.js').then((r) => r.recordRaw(0, `tool call with no tools declared · dialect ${activeDialect().id} · model ${cachedModelId || 'unknown'}`, reply));
+      // THE RETRY IS SHORT. It used to re-send the ENTIRE conversation — measured on the gateway at
+      // 16,818 prompt tokens and 91 seconds, for a correction whose whole content is "you cannot call
+      // tools here". The instruction that was already given is in the system message; the only new
+      // fact is the reply that broke the rule. Sending the middle again buys nothing and costs the
+      // slowest call in the turn.
+      const head = messages.find((m) => m.role === 'system');
       const retry = await narrateWait('thinking', async () => (await provider.generate([
-        ...messages,
+        ...(head ? [head] : []),
         { role: 'assistant', content: reply },
         { role: 'user', content:
           'This request declared no tools and there is nothing to call — a tool call cannot be run '

@@ -186,8 +186,13 @@ ok(/URGENT: Round 13\/15/.test(capped), 'an explicitly capped run still warns as
   ok(announced.length === 0, 'a fast phase says nothing');
 
   const tally = T.formatTurnTimings();
-  ok(tally && /where the turn went/.test(tally), 'the turn tally names where the time went');
+  ok(tally && /where the session went/.test(tally), 'the tally names where the time went');
   ok(/llm ×2/.test(tally), 'grouped by phase — fourteen separate lines is the same data arranged so nobody reads it', tally);
+  // THE ACCOUNTING LINE IS THE CONTRACT. Measured phases that do not add up to the wall clock mean the
+  // instrumentation is incomplete, and an incomplete measurement that looks complete is how "where did
+  // the time go" gets answered wrongly with confidence. The residue is named, always.
+  ok(/unmeasured/.test(tally), 'and states the residue against the wall clock, so a gap cannot hide', tally);
+  ok(/wall clock/.test(tally), 'measured against the session, not against itself', tally);
 
   writeConfig({});
 }
