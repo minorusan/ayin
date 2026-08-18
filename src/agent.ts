@@ -21,7 +21,7 @@ import { cancelActiveThinking } from './connection.js';
 import { llmChat, parseToolCalls, renderToolCall, renderToolResult, activeModelId, activeContextTokens } from './llm/manager.js';
 import { llmCall } from './llm.js';
 import { webSearch } from './tools/web-search.js';
-import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution } from './tools.js';
+import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution, modelTools } from './tools.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
 import { getGoal } from './goal.js';
 import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLESS, formatToolResultForChat, formatToolCallForChat, escapeBlessedTags, toItalic } from './ui.js';
@@ -1368,10 +1368,22 @@ async function runAgentTurn(userInput: string): Promise<void> {
       seenInBatch.add(batchKey);
 
       const tool = getTool(name);
+      // A slash-only tool EXISTS but is not the agent's to call. Saying "unknown tool" would be a lie
+      // the model would then try to route around; saying who can run it is actionable.
+      if (tool?.slashOnly) {
+        setAgentStatus('');
+        const msg = `${name} is not available to you — it is an operator command (/${tool.slash?.command ?? name}). `
+          + 'Ask for its output in the reply, or work from what is already in the conversation.';
+        addMessage('system', `${name}: operator-only, not called`);
+        log('INFO', 'slash_only_tool_refused', { tool: name });
+        pushToWindow('assistant', textPrefix ? `${textPrefix}\n[Called ${name}]` : `[Called ${name}]`);
+        pushToWindow('user', renderToolResult(`Error: ${msg}`));
+        continue;
+      }
       if (!tool) {
         setAgentStatus('');
         const shellLike = /^(git|npm|node|python|bash|sh|curl|grep|find|ls|cat|cd|mv|cp|rm|mkdir|echo|sed|awk|jq)$/.test(name);
-        const availableNames = getAllTools().map(t => t.name).join(', ');
+        const availableNames = modelTools().map(t => t.name).join(', ');
         const hint = shellLike
           ? ` There is no "${name}" tool. To run shell commands use the bash tool: bash(command="${name} ...")`
           : ` Available tools: ${availableNames}.`;

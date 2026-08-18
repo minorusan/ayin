@@ -17,6 +17,14 @@ export const tool: Tool = {
   parameters: [
     { name: 'question', type: 'string', description: 'The question, in plain language', required: true },
   ],
+  // SLASH-ONLY: the operator may run it, the agent may not.
+  //
+  // This tool is a connector — its `run` is an inner agentic loop against Jira's REST API, so a single
+  // call costs several round trips mid-turn for something the operator can fetch in one command BEFORE
+  // asking anything. Measured in a real session it was the first thing the model reached for and the
+  // slowest step in the turn. Nothing is lost: a slash invocation is recorded into the conversation
+  // window, so the ticket text still reaches the model — just without the agent waiting for it.
+  slashOnly: true,
   slash: {
     command: 'jira',
     param: 'question',

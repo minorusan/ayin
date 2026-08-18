@@ -438,7 +438,9 @@ export async function llmChat(messages: LlmMessage[], opts: LlmChatOptions = {})
         // assuming the agent loop ran first.
         const reg = await import('../tools.js');
         await reg.loadTools();
-        return reg.getAllTools().map((t) => ({
+        // The SAME list the prompt catalogue uses — a tool offered natively but hidden from the
+        // prompt (or the reverse) is a contract the model cannot satisfy.
+        return reg.modelTools().map((t) => ({
           name: t.name,
           description: t.description,
           parameters: t.parameters.map((p) => ({ name: p.name, type: p.type, description: p.description, required: p.required })),

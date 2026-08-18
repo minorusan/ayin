@@ -65,6 +65,18 @@ export interface Tool {
   execute(params: Record<string, string>): Promise<string>;
   /** Run this tool directly from a slash command. See ToolSlash. */
   readonly slash?: ToolSlash;
+  /**
+   * Keep this tool OUT of the model's catalogue — the operator may run it, the agent may not.
+   *
+   * Not a permission: a slash-only tool is not dangerous, it is EXPENSIVE IN THE WRONG PLACE. `jira`
+   * runs its own agentic loop against a REST API, so the agent pays several round trips mid-turn for
+   * something the operator can fetch in one command before asking anything. The result still reaches
+   * the model — a slash invocation is recorded into the conversation window — so nothing is lost
+   * except the waiting.
+   *
+   * Requires `slash`, or the tool would be unreachable by anyone. The registry enforces that at boot.
+   */
+  readonly slashOnly?: boolean;
   /** Source prompts directory shipped by this tool, if it has prompts. Read-only at runtime. */
   readonly promptsSourceDir?: string;
   /** Called by the registry with the LOCAL bundle once its prompts are materialized. */

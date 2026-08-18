@@ -103,12 +103,14 @@ export async function loadTools(): Promise<void> {
     if (report.duplicates.length) {
       throw new Error(`duplicate tool name(s): ${report.duplicates.join('; ')}`);
     }
+    assertSlashOnlyReachable(report.tools);
     tools = report.tools;
     toolMap.clear();
     for (const t of tools) toolMap.set(t.name, t);
     provisionToolPrompts(tools);
     log('INFO', 'tools_loaded', {
       count: String(tools.length),
+      modelCallable: String(tools.filter((x) => !x.slashOnly).length),
       failed: String(report.failed.length),
       extraDirs: String(extraToolDirs(getConfigString).length),
     });
@@ -151,9 +153,32 @@ function assertLoaded(): void {
   }
 }
 
+/**
+ * A slash-only tool with no slash command is reachable by NOBODY — hidden from the model and typed by
+ * no one. Caught at boot rather than discovered as a tool that silently never runs.
+ */
+function assertSlashOnlyReachable(list: Tool[]): void {
+  const orphan = list.filter((t) => t.slashOnly && !t.slash).map((t) => t.name);
+  if (orphan.length) {
+    throw new Error(`tool(s) marked slashOnly with no slash command — unreachable: ${orphan.join(', ')}`);
+  }
+}
+
 export function getAllTools(): Tool[] {
   assertLoaded();
   return tools;
+}
+
+/**
+ * The tools the MODEL may choose from — everything except the slash-only ones.
+ *
+ * One list feeds the prompt catalogue, the native tool schemas and the unknown-tool hint, so a tool
+ * hidden from one and offered by another cannot happen. `getAllTools()` stays the full set for name
+ * resolution and `/help`: a slash-only tool still exists, it is just not the agent's to reach for.
+ */
+export function modelTools(): Tool[] {
+  assertLoaded();
+  return tools.filter((t) => !t.slashOnly);
 }
 
 // ── System prompt XML ───────────────────────────────────────────────
@@ -172,7 +197,7 @@ export function toolsSystemPrompt(): string {
       TOOL_CALL_FORMAT: '',
     });
   }
-  const toolDefs = tools.map(t => {
+  const toolDefs = modelTools().map(t => {
     const params = t.parameters
       .map(p => `  - ${p.name} (${p.type}${p.required === false ? ', optional' : ''}): ${p.description}`)
       .join('\n');

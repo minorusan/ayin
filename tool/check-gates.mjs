@@ -2163,6 +2163,28 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
   ok(/if \(retry\.trim\(\)\) reply = retry;/.test(guard),
     'and an EMPTY retry keeps the original — replacing a bad reply with nothing is not an improvement');
 
+  // ── slash-only tools: the operator may run them, the agent may not ─────────
+  {
+    const reg = readFileSync(join(DIST, '..', 'src', 'tools.ts'), 'utf-8');
+    ok(/export function modelTools\(\)/.test(reg),
+      'there is ONE list of what the model may call');
+    ok(/tools\.filter\(\(t\) => !t\.slashOnly\)/.test(reg), '…and it excludes the slash-only ones');
+    ok(/function assertSlashOnlyReachable/.test(reg),
+      'slashOnly without a slash command is caught at BOOT — otherwise the tool is reachable by nobody');
+
+    // The prompt catalogue and the native schemas must agree, or the model is offered a tool the
+    // prompt never described, or told about one it cannot call.
+    const mgr = readFileSync(join(DIST, '..', 'src', 'llm', 'manager.ts'), 'utf-8');
+    ok(/reg\.modelTools\(\)\.map/.test(mgr), 'native tool schemas come from the same list as the prompt');
+    ok(/const toolDefs = modelTools\(\)/.test(reg), '…and so does the prompt catalogue');
+
+    // Refusing must be honest: the tool exists, it is simply not the agent's.
+    const agent = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
+    ok(/if \(tool\?\.slashOnly\)/.test(agent), 'a slash-only call is refused explicitly');
+    ok(/is not available to you — it is an operator command/.test(agent),
+      '…and says WHO can run it, rather than claiming the tool does not exist');
+  }
+
   // ── /skip-permissions turns off a GUARD, so its limits are pinned ──────────
   {
     const perm = readFileSync(join(DIST, '..', 'src', 'permissions.ts'), 'utf-8');
