@@ -61,6 +61,20 @@ writeFileSync(join(U, 'Assets/Scripts/ScoreKeeper.cs.meta'), `fileFormatVersion:
 writeFileSync(join(U, 'Assets/Scripts/Game.asmdef'), '{ "name": "Game" }\n');
 writeFileSync(join(U, 'Assets/Prefabs/Player.prefab'), `MonoBehaviour:\n  m_Script: {fileID: 11500000, guid: ${GUID}, type: 3}\n`);
 writeFileSync(join(U, 'Assets/Prefabs/Win.anim'), `AnimationClip:\n  m_Events:\n  - functionName: Apply\n    objectReferenceParameter: {guid: ${GUID}}\n`);
+// An installer that BINDS a service — the third way a C# class reaches the running game, and the one
+// that leaves no trace in any asset.
+writeFileSync(join(U, 'Assets/Scripts/DeckService.cs'), 'namespace Game { public class DeckService {} }\n');
+writeFileSync(join(U, 'Assets/Scripts/DeckService.cs.meta'), 'fileFormatVersion: 2\nguid: b1b2c3d4e5f60718293a4b5c6d7e8f91\n');
+writeFileSync(join(U, 'Assets/Scripts/IDeckView.cs'), 'namespace Game { public interface IDeckView {} }\n');
+writeFileSync(join(U, 'Assets/Scripts/IDeckView.cs.meta'), 'fileFormatVersion: 2\nguid: c1b2c3d4e5f60718293a4b5c6d7e8f92\n');
+writeFileSync(join(U, 'Assets/Scripts/GameInstaller.cs'),
+  'public class GameInstaller {\n'
+  + '    void Install() {\n'
+  + '        Container.BindInterfacesAndSelfTo<DeckService>().FromNew().AsSingle();\n'
+  + '        Container.Bind<IDeckView>().WithId("x").FromInstance(v);\n'
+  + '        var unrelated = new ScoreKeeper();\n'
+  + '    }\n}\n');
+
 // A method whose name only ENDS with the term the question yields — the shape that hid a real bug.
 writeFileSync(join(U, 'Assets/Scripts/Clock.cs'),
   'namespace Game\n{\n    public class Clock\n    {\n        private int _scoreCount = 5;\n'
@@ -94,12 +108,68 @@ console.log('\nfinding the project when we are standing inside it');
   ok(pathsIn('/no/such/path/anywhere.cs').length === 0, 'a path that does not exist is not offered as a root');
 }
 
+// ── the search is index-backed in a git tree ─────────────────────────
+//
+// Not a micro-optimisation. The same explore call measured 0.4s here and 22 SECONDS on a macOS
+// checkout of the same repository (BSD grep, cold APFS). A tool that promises sub-second and delivers
+// 22 is not the same tool. Correctness first: the translation must return the same hits.
+console.log('\ngit grep translation');
+{
+  const { asGitGrep } = await import('../dist/tools/explore/search.js');
+  const plain = ['grep', '-rnI', '--exclude-dir=.git', '--include=*.cs', '-E', 'Foo', '.'];
+  ok(asGitGrep(plain, TMP) === null, 'a directory that is not a git tree runs the original grep');
+
+  const g = asGitGrep(plain, REPO);
+  ok(g?.[0] === 'git' && g?.[1] === 'grep', 'inside a git tree it becomes git grep', (g ?? []).slice(0, 2).join(' '));
+  ok(!g?.includes('-C'), 'no -C: the runner sets cwd, and -C sits where the read-only guard reads the subcommand');
+  ok(g?.includes('--untracked'),
+    'untracked files are searched — a file the operator has not committed is still code they asked about');
+  ok(g?.includes('*.cs'), 'the --include becomes a pathspec');
+  ok(g?.includes('Foo') && g?.includes('-E'), 'the pattern and its mode survive');
+
+  const listing = asGitGrep(['grep', '-rlI', '--include=*.prefab', '-F', 'abc', '.'], REPO);
+  ok(listing?.includes('-lI'), 'a files-only probe stays files-only');
+  ok(listing?.includes('-F'), '…and a fixed-string probe stays fixed-string');
+
+  ok(asGitGrep(['find', '.', '-name', 'x'], REPO) === null, 'find is not translated');
+}
+
 console.log('\nproject detection');
 ok(pickExplorer(U).id === 'unity', 'a tree with Assets/ + ProjectSettings/ is unity', pickExplorer(U).id);
 ok(pickExplorer(T).id === 'typescript', 'a tree with package.json + tsconfig.json is typescript', pickExplorer(T).id);
 ok(pickExplorer(TMP).id === 'generic', 'anything else falls back to generic', pickExplorer(TMP).id);
 
 // ── term extraction: the casing gap, and the key that must survive it ─
+// ── "used in 0 assets" is only two thirds of an answer ───────────────
+//
+// A C# class reaches the running game three ways: a GUID reference from an asset, an animation event
+// calling it by name, and a DI container binding it. The third leaves NO trace in any asset, so a
+// service wired entirely by the container reported "used in 0 assets" — true, and indistinguishable
+// from dead code.
+console.log('\ncontainer bindings (the wiring that leaves no asset behind)');
+{
+  const { bindingsOf } = await import('../dist/tools/explore/projects/unity.js');
+
+  const svc = await bindingsOf(U, 'Assets/Scripts/DeckService.cs');
+  ok(svc.length === 1, 'a service bound by the container is found', `${svc.length} binding(s)`);
+  ok(svc[0]?.file === 'Assets/Scripts/GameInstaller.cs', '…and the installer is named');
+  ok(/BindInterfacesAndSelfTo<DeckService>/.test(svc[0]?.text ?? ''), '…with the binding line quoted');
+
+  // Matching only `Bind<` — the obvious form — would have missed this one. Counted on a real
+  // codebase: BindInterfacesTo (284) + BindInterfacesAndSelfTo (163) are 447 of 937 bindings.
+  ok(!/^Container\.Bind</.test(svc[0]?.text ?? ''),
+    'the form found here is NOT plain Bind< — matching only that misses nearly half of all bindings');
+
+  const view = await bindingsOf(U, 'Assets/Scripts/IDeckView.cs');
+  ok(view.some((b) => /Bind<IDeckView>/.test(b.text)), 'plain Bind<> is found too');
+
+  const none = await bindingsOf(U, 'Assets/Scripts/Clock.cs');
+  ok(none.length === 0, 'a class nobody binds reports nothing — mentioning it in an installer is not a binding');
+  const merelyMentioned = await bindingsOf(U, 'Assets/Scripts/ScoreKeeper.cs');
+  ok(merelyMentioned.length === 0,
+    'a class CONSTRUCTED in an installer is not "injected" — a looser rule would call everything injected');
+}
+
 console.log('\nterm extraction (no model — this is a casing problem, not a reasoning one)');
 {
   const t = extractTerms('how is the score multiplier applied');

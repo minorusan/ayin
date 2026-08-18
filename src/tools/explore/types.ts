@@ -60,10 +60,15 @@ export interface Span {
  *   string-key     — a string literal ties two distant files together (event name, tool name, prompt id)
  *   follows        — the searched name is handed to another symbol here; the answer continues there
  *   assembly       — an asmdef boundary this file sits inside
+ *   injected       — a DI container BINDS this type. The third way a C# class reaches the running
+ *                    game, after a GUID reference and an animation event, and the one that leaves no
+ *                    trace in any asset: `Container.Bind<Foo>()` in an installer. Without it, a class
+ *                    wired purely by the container reads as "used in 0 assets", which is true and
+ *                    reads exactly like dead code.
  */
 export type Reason =
   | 'defines' | 'filename' | 'mentions' | 'spec' | 'registered'
-  | 'asset-ref' | 'anim-event' | 'string-key' | 'follows' | 'assembly';
+  | 'asset-ref' | 'anim-event' | 'string-key' | 'follows' | 'assembly' | 'injected';
 
 export interface Finding {
   span: Span;

@@ -21,6 +21,7 @@ const REASON_WEIGHT: Record<Reason, number> = {
   'anim-event': 0.85,   // a string-bound call no compiler checks — always worth surfacing
   'string-key': 0.8,    // ditto, in TypeScript
   'asset-ref': 0.75,
+  injected: 0.75,     // a container binding wires it as surely as a prefab reference does
   follows: 0.7,
   registered: 0.65,
   mentions: 0.4,

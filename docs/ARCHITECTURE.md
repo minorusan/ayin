@@ -635,6 +635,36 @@ redirects are bytes in a pattern, not syntax. The runner refuses any binary outs
 model-authored *strings* to `sh -lc` behind a prefix allow-list that `grep foo . ; echo INJECTED`
 walked straight through.
 
+### Searching through the git index, not the filesystem
+
+Probes are written as `grep -rnI …` and translated to the equivalent `git grep` whenever the root is a
+git work tree. Not a micro-optimisation: the SAME call measured **0.4 s on Linux and 22 SECONDS on a
+macOS checkout of the same repository** — BSD grep, cold APFS, a 462 MB tree. A tool that promises
+sub-second and delivers twenty-two is not the same tool, and the agent that called it three times in
+one turn spent a minute waiting.
+
+`git grep` walks the index rather than the filesystem and runs parallel. Correctness first: the
+translation was verified to return byte-identical hits on the real repository, `--untracked` is
+included so a file the operator has not committed is still searched, and an unrecognised argv shape
+runs unchanged rather than being guessed at. On Linux with a warm cache plain grep is marginally
+faster; the switch is worth it because it is enormous where the machine is slow and negligible where
+it is fast.
+
+### Container bindings — the wiring that leaves no asset behind
+
+A C# class reaches the running game three ways: a **GUID reference** from an asset, an **animation
+event** calling it by name, and a **DI container binding**. Only the third leaves no trace anywhere in
+the project files, so a service wired entirely by `Container.Bind<Foo>()` reported *"no asset
+references this — plain C#, no scene wiring"*. True, and indistinguishable from dead code, which is
+the worst kind of true.
+
+`bindingsOf` resolves it deterministically: the type name (taken from the filename, the convention
+this ecosystem follows) must appear inside the angle brackets of a binding call on one line. Matching
+only `Bind<` — the form that comes to mind first — would have missed **447 of 937 bindings** in a real
+codebase, because `BindInterfacesTo` (284) and `BindInterfacesAndSelfTo` (163) dominate. A class
+merely CONSTRUCTED in an installer is not injected; a looser rule would call everything injected, and
+a fact that applies to everything is not a fact.
+
 ### Per-project subclasses, because the glue differs
 
 **Unity** — a script is bound to the game by a **GUID in its `.meta`**, referenced from `.prefab`,

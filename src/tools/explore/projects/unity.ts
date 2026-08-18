@@ -73,6 +73,52 @@ export function asmdefOf(absFile: string, root: string): string {
   return '';
 }
 
+/**
+ * Where a DI container binds this file's type — the wiring that leaves no asset behind.
+ *
+ * DETERMINISTIC, and deliberately narrow: the type name must appear inside the angle brackets of a
+ * `Bind<…>` on one line. That matches the forms Zenject actually uses in this codebase —
+ * `Container.Bind<IDeckView>()`, `Bind<Foo>().To<Bar>()` — and matches nothing that merely mentions
+ * the class. A looser rule ("named anywhere in an installer") would call every type an installer
+ * touches "injected", which is how a useful fact becomes noise.
+ *
+ * The type name is taken from the FILENAME, which is the C# convention this codebase follows.
+ */
+/**
+ * The binding forms that actually appear, counted in a real installer-heavy codebase:
+ *
+ *     Bind                     417
+ *     BindInterfacesTo         284
+ *     BindInterfacesAndSelfTo  163
+ *     To                        73
+ *
+ * Matching only `Bind<` — the obvious form, and the one that comes to mind first — would have missed
+ * 447 of 937 bindings, very nearly half. `DeckService` is bound by `BindInterfacesAndSelfTo<>` and
+ * would have been reported as reached by nothing at all.
+ */
+const BIND_FORMS = '(Bind|BindInterfacesTo|BindInterfacesAndSelfTo|BindFactory|To)';
+
+export async function bindingsOf(
+  root: string,
+  rel: string,
+): Promise<Array<{ file: string; line: number; text: string }>> {
+  const type = rel.split('/').pop()?.replace(/\.cs$/i, '') ?? '';
+  if (!type || type.length < 3) return [];
+  const r = await runProbe(
+    ['grep', '-rnI', ...pruneArgs(), '--include=*.cs', '-E', `\\b${BIND_FORMS}<[^>]*\\b${type}\\b[^>]*>`, '.'],
+    root,
+  );
+  const out: Array<{ file: string; line: number; text: string }> = [];
+  for (const line of r.lines.slice(0, 8)) {
+    const parsed = parseGrepLine(line);
+    if (!parsed) continue;
+    const file = parsed.file.replace(/^\.\//, '');
+    if (file === rel) continue;              // a type binding itself is not someone else wiring it
+    out.push({ file, line: parsed.line, text: parsed.text.trim().slice(0, 200) });
+  }
+  return out;
+}
+
 export const unity: ProjectExplorer = {
   id: 'unity',
 
@@ -151,10 +197,27 @@ export const unity: ProjectExplorer = {
         });
       }
       if (r.lines.length === 0) {
+        // "NO ASSET REFERENCES THIS" IS ONLY TWO THIRDS OF AN ANSWER.
+        //
+        // A C# class reaches the running game three ways: a GUID reference from an asset, an animation
+        // event calling it by name, and a DI container binding it. The third leaves no trace in any
+        // asset, so a service wired entirely by `Container.Bind<Foo>()` reported "used in 0 assets" —
+        // true, and indistinguishable from dead code, which is the worst kind of true.
+        const bound = await bindingsOf(root, rel);
+        for (const b of bound.slice(0, 4)) {
+          out.push({
+            span: { file: b.file, fromLine: b.line, toLine: b.line, text: b.text },
+            reason: 'injected',
+            detail: `${rel} is bound by the container here`,
+            score: 0.75,
+          });
+        }
         out.push({
           span: { file: rel, fromLine: 1, toLine: 1, text: '' },
           reason: 'asset-ref',
-          detail: `no asset references ${rel} (guid ${guid.slice(0, 12)}… ) — plain C#, no scene wiring`,
+          detail: bound.length
+            ? `no asset references ${rel} (guid ${guid.slice(0, 12)}… ) — reached through the container, not the scene`
+            : `no asset references ${rel} (guid ${guid.slice(0, 12)}… ) — plain C#, no scene wiring`,
           score: 0.05, fixedScore: true,
         });
       }
