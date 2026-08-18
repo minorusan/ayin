@@ -325,29 +325,52 @@ const mismatchWarned = new Set<string>();
  * would have parsed it, that is not a model problem and it is not ambiguous: it is named, with the fix.
  * Only runs on the failure path, so a working session pays nothing.
  */
+/** Did the active dialect see a tool call the model never finished writing? */
+export function replyTruncated(raw: string): boolean {
+  const d = activeDialect();
+  try { return d.truncated?.(raw) === true; } catch { return false; }
+}
+
 export function parseToolCalls(raw: string): ParseAllResult {
   const active = activeDialect();
   const result = active.parse(raw);
   if (result.toolCalls.length > 0 || raw.trim().length < 20) return result;
 
+  /**
+   * ANOTHER DIALECT'S CALL IS STILL A CALL — take it, do not merely warn about it.
+   *
+   * The served model is learned from an ASYNCHRONOUS status probe, deliberately never awaited so a
+   * probe cannot put latency in front of a generation. The cost was a race nobody could see: on a fast
+   * run the first round is generated and PARSED before the probe lands, so it is read by the gemma
+   * default. A reply in the real model's format then parses to nothing, is treated as a final answer,
+   * and its tool call is printed at the operator as prose. Same build, same prompt, different outcome
+   * depending on which finished first — which is exactly why this looked intermittent.
+   *
+   * This block already knew: it computed that another dialect WOULD parse it, logged a warning nobody
+   * reads mid-turn, and threw the result away. Using it costs nothing and closes the race for good,
+   * whatever the probe is doing. Each dialect requires its own tags, so a prose reply does not become
+   * a tool call by being offered to more parsers.
+   */
   for (const other of DIALECTS) {
     if (other.id === active.id) continue;
-    let wouldParse = 0;
-    try { wouldParse = other.parse(raw).toolCalls.length; } catch { continue; }
-    if (wouldParse === 0) continue;
+    let alt: ParseAllResult | null = null;
+    try { alt = other.parse(raw); } catch { continue; }
+    if (!alt || alt.toolCalls.length === 0) continue;
     const pair = `${active.id}<-${other.id}`;
-    if (mismatchWarned.has(pair)) break;
-    mismatchWarned.add(pair);
-    log('WARN', 'adapter_format_mismatch', {
-      active: active.id,
-      looksLike: other.id,
-      calls: String(wouldParse),
-      model: cachedModelId || '(unknown)',
-      forced: String(adapterOverride !== ''),
-      hint: `the reply carries ${other.id}-shaped tool calls that the ${active.id} adapter cannot read — `
-        + `/model ${other.id}, or /model auto to match on the served model`,
-    });
-    break;
+    if (!mismatchWarned.has(pair)) {
+      mismatchWarned.add(pair);
+      log('WARN', 'adapter_format_mismatch', {
+        active: active.id,
+        looksLike: other.id,
+        calls: String(alt.toolCalls.length),
+        model: cachedModelId || '(unknown)',
+        forced: String(adapterOverride !== ''),
+        recovered: 'true',
+        hint: `the reply carried ${other.id}-shaped tool calls; the ${active.id} adapter could not read `
+          + `them and they were parsed with ${other.id} instead. /model auto matches on the served model.`,
+      });
+    }
+    return alt;
   }
   return result;
 }

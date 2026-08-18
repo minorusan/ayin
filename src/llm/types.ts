@@ -31,6 +31,15 @@ export interface ModelDialect {
   toolCallInstructions(): string;
   /** Extract tool calls (and any leading prose) from a raw model response. */
   parse(raw: string): ParseAllResult;
+
+  /**
+   * True when the reply OPENS a tool call it never closed — the generation was cut off.
+   *
+   * Without this, a truncated call has no tool calls to run and is therefore indistinguishable from a
+   * final answer, so ayin printed half a `str_replace` at the operator as prose and edited nothing.
+   * Optional: a dialect that cannot tell says nothing and the old behaviour stands.
+   */
+  truncated?(raw: string): boolean;
   /** Re-render an assistant tool-call turn when replaying it into the window. */
   renderToolCall(call: ParsedToolCall): string;
   /** Frame a message (tool output, error, warning) as the model's tool-result turn. */

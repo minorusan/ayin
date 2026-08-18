@@ -18,7 +18,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { cancelActiveThinking } from './connection.js';
-import { llmChat, parseToolCalls, renderToolCall, renderToolResult, activeModelId, activeContextTokens } from './llm/manager.js';
+import { llmChat, parseToolCalls, replyTruncated, renderToolCall, renderToolResult, activeModelId, activeContextTokens } from './llm/manager.js';
 import { llmCall } from './llm.js';
 import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution, modelTools } from './tools.js';
@@ -1092,7 +1092,30 @@ async function runAgentTurn(userInput: string): Promise<void> {
      * transcript above has already recorded the raw text, which is the point of the transcript.
      */
     parsed.text = stripFinalMarker(parsed.text ?? '');
-    const hasToolCalls = parsed.toolCalls.length > 0;
+    let hasToolCalls = parsed.toolCalls.length > 0;
+
+    /**
+     * A CUT-OFF TOOL CALL IS NOT AN ANSWER.
+     *
+     * A reply that opens a call and never closes it parses to zero calls, which is exactly what a
+     * final answer parses to — so ayin printed half a `str_replace` at the operator as if it were
+     * prose, edited nothing, and ended the turn. Reported by the operator, and the worst kind of
+     * failure: it looks like the agent decided to stop.
+     *
+     * Ask for it again, once per round, saying what happened. The generation hit a ceiling, so the
+     * instruction is to make the call SMALLER rather than to repeat it verbatim.
+     */
+    if (!hasToolCalls && replyTruncated(response)) {
+      log('WARN', 'reply_truncated_mid_tool_call', { chars: String(response.length) });
+      addMessage('system', `[the model's reply was cut off mid tool call (${response.length} chars) — asking again]`);
+      pushToWindow('assistant', '[reply cut off]');
+      pushToWindow('user', renderToolResult(
+        'Your last reply ended in the middle of a tool call, so nothing ran and the closing tag never '
+        + 'arrived. The generation hit a length limit. Send the call again, smaller: edit one region at '
+        + 'a time, or write the file in parts.'));
+      continue;
+    }
+    hasToolCalls = parsed.toolCalls.length > 0;
     // The RAW model text, before any parsing strips the tool-call markup — this is the thing you need
     // when the question is "why did it call that", and it is the first thing every other record drops.
     transcribeResponse(round, activeModelId(), response, parsed.toolCalls.length);

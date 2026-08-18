@@ -2485,5 +2485,51 @@ console.log('\nglimmer dialect (ATEM)');
     'glimmer is matched BEFORE gemma, so gemma cannot shadow it');
 }
 
+
+// ── the glm dialect speaks GLM's OWN format, not one inferred from a sample ───────
+//
+// A dialect was written from a single observed reply — `<read_file><path>…</path></read_file>` — and
+// taught back to the model. GLM-4.5/4.6 are trained on an envelope with the name on the opening line
+// and alternating <arg_key>/<arg_value> pairs. Teaching a model a syntax it does not know produces a
+// bad imitation: a `//` comment marker arrived as `/`, and a long call arrived unterminated and was
+// printed at the operator as prose. This gate pins the real format so nobody re-derives it by eye.
+{
+  const { GlmDialect } = await import(join(REPO, 'dist/llm/dialects/glm.js'));
+  const d = new GlmDialect();
+
+  ok(d.matches('glm-4.7-flash:q4_K_M') && d.matches('GLM-4.6'), 'glm: claims glm models');
+  ok(!d.matches('gemma4:26b') && !d.matches('qwen3-coder:30b'), 'glm: steals neither gemma nor qwen');
+
+  const documented = '<tool_call>read_file\n<arg_key>path</arg_key>\n<arg_value>src/x.ts</arg_value>\n</tool_call>';
+  const one = d.parse(documented).toolCalls[0];
+  ok(one?.name === 'read_file' && one.params.path === 'src/x.ts', 'glm: the documented <tool_call>NAME + arg_key/arg_value form parses');
+
+  ok(/arg_key/.test(d.toolCallInstructions()) && /arg_value/.test(d.toolCallInstructions()),
+    'glm: the prompt teaches THAT form, not another one');
+
+  const json = d.parse('<tool_call>{"name": "grep", "arguments": {"pattern": "a|b"}}</tool_call>').toolCalls[0];
+  ok(json?.name === 'grep' && json.params.pattern === 'a|b', 'glm: the JSON compatibility form parses too');
+
+  const code = 'const f = (id) => x !== id;\n\n// note\nfunction g(o = {}) { return o; }';
+  const rt = d.parse(d.renderToolCall({ name: 'str_replace', params: { path: 'p.ts', new_str: code } }));
+  ok(rt.toolCalls[0]?.params.new_str === code,
+    'glm: a value carrying //, braces and newlines round-trips byte-exact — this is what was mangled');
+
+  const withTag = d.parse('<tool_call>write_file\n<arg_key>content</arg_key>\n<arg_value><div>hi</div></arg_value>\n</tool_call>');
+  ok(withTag.toolCalls[0]?.params.content === '<div>hi</div>', 'glm: a value containing markup survives');
+
+  ok(d.parse('See the <Component> tag and the <path> element.').toolCalls.length === 0,
+    'glm: prose that merely contains tags is not executed');
+
+  const cut = '<tool_call>str_replace\n<arg_key>new_str</arg_key>\n<arg_value>function g(o = {}) {';
+  ok(d.truncated(cut) === true && d.parse(cut).toolCalls.length === 0,
+    'glm: a CUT-OFF call is reported truncated and never parsed into a runnable call');
+  ok(d.truncated(documented) === false, 'glm: a complete call is not mistaken for a truncated one');
+
+  const agentSrc = readFileSync(join(REPO, 'src/agent.ts'), 'utf-8');
+  ok(/replyTruncated\(response\)/.test(agentSrc),
+    'glm: and the agent CHECKS it — a truncated call is otherwise indistinguishable from a final answer');
+}
+
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);
