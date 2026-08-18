@@ -738,7 +738,7 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
  * instruction. Everything between them is history, newest first in value, so eviction runs from the
  * front.
  */
-function trimToContext(messages: Message[]): Message[] {
+export function trimToContext(messages: Message[]): Message[] {
   const ctx = activeContextTokens() || CONSERVATIVE_CONTEXT;
   const budget = ctx - RESPONSE_RESERVE_TOKENS;
   if (budget <= 0) return messages;
@@ -746,11 +746,32 @@ function trimToContext(messages: Message[]): Message[] {
   const total = (ms: Message[]): number => ms.reduce((n, m) => n + approxTokens(m.content), 0);
   if (total(messages) <= budget) return messages;
 
+  // EVICT IN ONE BITE, NOT ONE MESSAGE PER ROUND — the difference is a 27-SECOND ROUND vs a
+  // half-second one, and it is the whole reason a long session felt like it had seized up.
+  //
+  // The server caches the KV state of the prompt PREFIX and reuses it when the next prompt starts
+  // with the same tokens. Dropping the oldest message changes the sequence immediately after the
+  // system message, so nothing past it matches and the ENTIRE prompt is processed again from
+  // scratch. Trimming to exactly the budget guarantees the next round is over budget again — the
+  // window only grows — so it evicts again, and again, and every single round pays a full reprocess.
+  //
+  // Measured through the gateway on this hardware: 920 prompt tokens → 0.56s, 17,594 → 26.9s. Once a
+  // session filled the window (a ticket dump does it in one tool call), every round cost ~27s and the
+  // operator saw an agent that "holds for more than a minute" while doing nothing visible.
+  //
+  // So overshoot deliberately: come down to EVICT_TO of the budget and leave headroom, and the next
+  // several rounds append to an unchanged prefix and hit the cache. Same total work evicted, paid
+  // once instead of every round. The cost is history dropped slightly earlier than strictly forced —
+  // cheap, since it is the oldest history, and the alternative is paying for it in wall-clock forever.
+  const EVICT_TO = 0.7;
+  const target = Math.floor(budget * EVICT_TO);
+
   // Index 0 is the system message; the last entry may be the volatile turn. Evict between them.
   const head = messages[0];
   const rest = messages.slice(1);
+  const before = approxTokens(head.content) + total(rest);
   let dropped = 0;
-  while (rest.length > 1 && approxTokens(head.content) + total(rest) > budget) {
+  while (rest.length > 1 && approxTokens(head.content) + total(rest) > target) {
     rest.shift();
     dropped++;
   }
@@ -760,6 +781,8 @@ function trimToContext(messages: Message[]): Message[] {
       kept: String(rest.length),
       ctxTokens: String(ctx),
       estTokens: String(approxTokens(head.content) + total(rest)),
+      wasTokens: String(before),
+      targetTokens: String(target),
     });
   }
   return [head, ...rest];

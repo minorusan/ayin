@@ -11,7 +11,7 @@
  * browser; here we keep a compact, ordered, greppable transcript of the whole run.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { getSessionId } from './session-store.js';
@@ -86,6 +86,23 @@ export function recordRaw(round: number, why: string, text: string): void {
 }
 
 /** Path of the current run's record file, or null if no session is established. */
+/**
+ * The NEWEST session record on this machine, whichever process wrote it.
+ *
+ * A bundle is usually collected from a SECOND terminal, because the first one is the one that is
+ * stuck — and that second process has its own, empty session. Handing back its blank record is worse
+ * than handing back nothing: it looks like evidence, and the reader diagnoses from it.
+ */
+export function newestSessionRecordPath(): string | null {
+  try {
+    const rows = readdirSync(SESSIONS_DIR)
+      .filter((f) => f.endsWith('.jsonl'))
+      .map((f) => ({ f, at: statSync(join(SESSIONS_DIR, f)).mtimeMs }))
+      .sort((a, b) => b.at - a.at);
+    return rows.length ? join(SESSIONS_DIR, rows[0].f) : null;
+  } catch { return null; }
+}
+
 export function sessionRecordPath(): string | null {
   const sessionId = getSessionId();
   return sessionId ? join(SESSIONS_DIR, `${sessionId}.jsonl`) : null;

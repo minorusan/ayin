@@ -24,7 +24,7 @@ import { homedir, platform, release, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { currentLogFile } from './log.js';
 import { getPromptsFile } from './prompts.js';
-import { sessionRecordPath } from './session-record.js';
+import { newestSessionRecordPath, sessionRecordPath } from './session-record.js';
 import { longOperations, turnTimings } from './timing.js';
 
 /** Tail size for anything that grows without bound. */
@@ -111,6 +111,7 @@ export function writeDebugBundle(dir: string, facts: BundleFacts): BundleResult 
   mkdirSync(out, { recursive: true });
   const files: string[] = [];
   const omitted: string[] = [];
+  let sessionSource: string | null = null;
 
   const put = (name: string, body: string): void => {
     if (!body) { omitted.push(name); return; }
@@ -149,8 +150,23 @@ export function writeDebugBundle(dir: string, facts: BundleFacts): BundleResult 
     ].join('\n')
     : '');
 
-  put('session.jsonl', tail(sessionRecordPath()));
+  // THE SESSION THAT IS ACTUALLY STUCK, not the terminal used to ask about it.
+  //
+  // A bundle is collected from a SECOND terminal — the first one is the one that will not respond —
+  // and that second process has a session seconds old with nothing in it. Falling back to this
+  // machine's newest record puts the real turn in the bundle, and the manifest says which record was
+  // taken so a reader is never guessing whose transcript they are holding.
+  const mine = sessionRecordPath();
+  const mineBody = tail(mine);
+  const fallback = mineBody ? null : newestSessionRecordPath();
+  const sessionBody = mineBody || tail(fallback);
+  put('session.jsonl', sessionBody);
+  sessionSource = mineBody ? mine : (sessionBody ? `${fallback} (this process had no record yet)` : null);
   put('log.txt', tail(currentLogFile()));
+  put('sources.json', JSON.stringify({
+    sessionRecord: sessionSource ?? '(none — no session record had any content)',
+    log: currentLogFile() ?? '(none)',
+  }, null, 2) + '\n');
 
   const promptsFile = getPromptsFile();
   if (existsSync(promptsFile)) put('config.json', redactConfig(readFileSync(promptsFile, 'utf-8')));
@@ -193,10 +209,22 @@ export function writeDebugBundle(dir: string, facts: BundleFacts): BundleResult 
   // Copied rather than symlinked: a reader's allow-list is a path test, and a link is exactly the
   // sort of thing that resolves to somewhere the test rejects. This module has already made that
   // mistake twice.
+  //
+  // CLEARED FIRST. It used to copy only the files this run produced, over whatever the last run left
+  // — so a bundle with nothing to say about the session kept the PREVIOUS bundle's session.jsonl,
+  // and a reader opening `latest/` got today's manifest beside a transcript from two days ago. That
+  // is the exact failure this directory exists to prevent, dressed as a complete answer.
   const latest = join(dir, 'latest');
   try {
+    rmSync(latest, { recursive: true, force: true });
     mkdirSync(latest, { recursive: true });
     for (const f of files) copyFileSync(join(out, f), join(latest, f));
+    // Name what is NOT here, in the directory itself. An absent file reads as "nothing went wrong".
+    if (omitted.length) {
+      writeFileSync(join(latest, 'MISSING.txt'),
+        `not written for this bundle: ${omitted.join(', ')}\n`
+        + 'Absent because there was nothing to write, not because it was withheld.\n', 'utf-8');
+    }
   } catch { /* the timestamped copy is the one that matters */ }
 
   pruneOldBundles(dir);
