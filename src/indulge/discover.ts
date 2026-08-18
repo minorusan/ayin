@@ -129,6 +129,17 @@ export interface DiscoverOptions {
   maxFiles?: number;
   /** Repo-relative roots to prune wholesale — third-party code. See vendor.ts. */
   vendorRoots?: string[];
+  /**
+   * Repo-relative prefix this domain lives under. Nothing outside it is admitted, at any depth.
+   *
+   * A domain name is a CONCEPT; a repository is organised by PLACE, and the two only coincide by
+   * luck. Measured on a real build: "trail mini game" derived `MiniGame`, matched a generic
+   * `PickMiniGamePopupLogic` and a mock data file, and admitted 26 files of which ZERO were the trail
+   * — which lives in `Assets/Games/Bingo/Gameplay/…/Trail`. No amount of term extraction fixes that,
+   * because both matches are honest readings of the words. The operator knows the place; this is how
+   * they say it.
+   */
+  scope?: string;
   maxIndexFiles?: number;
   /** Progress narration — one note per meaningful step. */
   onStatus?: (note: string) => void;
@@ -482,6 +493,10 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
     domain, seeds: 0, added: 0, hallucinated: [], skippedNonSource: [], byDepth: {}, truncated: false, indexed: 0,
   };
 
+  const scope = (opts.scope ?? '').replace(/^\.?\//, '').replace(/\/$/, '');
+  const inScope = (file: string): boolean =>
+    !scope || file === scope || file.startsWith(`${scope}/`);
+
   // ── seeds ──────────────────────────────────────────────────────────────────────
   let candidates: string[];
   if (opts.seedsOverride) {
@@ -501,6 +516,10 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
   for (const c of candidates) {
     const r = resolveInRepo(repoPath, c);
     if (!r) { if (!opts.seedsOverride) report.hallucinated.push(c); continue; }
+    // A SCOPED DOMAIN DISCARDS OUT-OF-SCOPE SEEDS SILENTLY — they are not hallucinations, they are
+    // real files somewhere else. Counting them as bad guesses would blame explore for answering the
+    // question it was asked.
+    if (!inScope(r)) continue;
     // A corpus answers questions about CODE. `Core.csproj` is a generated file list, and a real run
     // even seeded on ayin's own `AYIN-REPORT-*.md` output — both produced questions, and an answer
     // about a project manifest is a spent investigation that helps nobody.
@@ -525,10 +544,35 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
     const before = seeds.length;
     for (const p of seedsByPathWords(repoPath, domain, MIN_SEEDS * 3, opts.vendorRoots ?? [])) {
       if (seeds.length >= MIN_SEEDS * 3) break;
+      if (!inScope(p)) continue;
       if (!seeds.includes(p)) seeds.push(p);
     }
     if (seeds.length > before) {
       onStatus?.(`${seeds.length - before} more seed(s) from path names — explore verified only ${before}`);
+    }
+  }
+
+  // ── last resort for a SCOPED domain: the scope itself ──────────────────────────
+  //
+  // A scope is the operator saying "the thing I mean is in here". If nothing else produced a seed
+  // inside it, the honest reading is not "this domain does not exist" but "the words did not match,
+  // and the place still does". Measured: "trail mini game" scoped to the Bingo tree found ZERO seeds
+  // — explore had matched a generic mini-game popup elsewhere and every candidate was rejected by the
+  // scope — so the domain silently produced nothing at all.
+  //
+  // Seeding from the scope's own files, PREFERRING those whose path carries a domain word, turns that
+  // into a small honest corpus about the right place.
+  if (!opts.seedsOverride && scope && seeds.length === 0) {
+    const words = domain.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
+    const under = walkSources(repoPath, 20000, opts.vendorRoots ?? []).files
+      .map((abs) => rel(repoPath, abs))
+      .filter(inScope);
+    const scored = under
+      .map((f) => ({ f, hits: words.filter((w) => f.toLowerCase().includes(w)).length }))
+      .sort((a, b) => b.hits - a.hits || a.f.length - b.f.length);
+    for (const { f } of scored.slice(0, MIN_SEEDS * 3)) if (!seeds.includes(f)) seeds.push(f);
+    if (seeds.length) {
+      onStatus?.(`nothing matched "${domain}" by name — seeding from ${scope} itself (${seeds.length} file(s))`);
     }
   }
 
@@ -545,6 +589,9 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
   const hardCeiling = maxFiles * DEPTH_OVERRUN;
   const write = (file: string, depth: number, why: string): boolean => {
     if (seen.has(file) || report.added >= hardCeiling) return false;
+    // THE SCOPE BINDS AT EVERY DEPTH, not only on seeds. A neighbour reached at depth 2 is exactly
+    // how a scoped domain leaks back out into the rest of the repository.
+    if (!inScope(file)) return false;
     seen.add(file);
     let sha = '';
     try { sha = blobSha(readFileSync(join(repoPath, file))); } catch { return false; }

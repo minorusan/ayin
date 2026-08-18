@@ -55,6 +55,7 @@ export interface IndulgeArgs {
   maxDepth?: number;
   maxFiles?: number;
   keepVendor?: boolean;
+  scope?: string;
   rescanVendor?: boolean;
   maxQuestions?: number;
   categories?: Category[];
@@ -78,6 +79,7 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--repoPath': case '--repo': args.repoPath = value(); break;
       case '--domains': case '--domain':
         args.domains = parseList(value()); break;
+      case '--scope': args.scope = value(); break;
       case '--status': args.status = true; break;
       case '--report': args.report = true; break;
       case '--search': case '--ask': args.search = value(); break;
@@ -619,12 +621,19 @@ export async function runIndulge(argv: string[]): Promise<number> {
     out('  --keep-vendor: third-party code will be indexed too');
   }
 
-    for (const [i, domain] of args.domains.entries()) {
+    for (const [i, spec] of args.domains.entries()) {
+      // `name@path` scopes ONE domain to a subtree — different domains need different places, so a
+      // single global scope would not do. The name stored on every file and chunk is the bare name;
+      // the path is a discovery constraint, not part of the operator's vocabulary.
+      const at = spec.lastIndexOf('@');
+      const domain = at > 0 ? spec.slice(0, at).trim() : spec;
+      const scope = at > 0 ? spec.slice(at + 1).trim() : (args.scope ?? '');
+      if (scope) out(`  scoped to ${scope}`);
       if (shouldStop()) break;
       out(`[discover] ${domain}`);
       const r = await discoverDomain({
         store, repoPath, domain, maxDepth: args.maxDepth, maxFiles: args.maxFiles, onStatus: status,
-        vendorRoots,
+        vendorRoots, scope,
       });
       matched += r.added;
       progress('discover', i + 1, args.domains.length, domain);

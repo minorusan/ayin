@@ -566,6 +566,43 @@ reject('CITE: src/nope.ts:1-2', 'a citation to a file that does not exist is ref
 reject('CITE: ../../../etc/passwd:1-2', 'a citation escaping the repo is refused');
 reject('CITE: /etc/passwd:1-2', 'an absolute path outside the repo is refused');
 
+// THE SHAPES A MODEL ACTUALLY WRITES.
+//
+// The matcher once demanded `CITE:` at line start and the range at line END. Every ordinary way a
+// model decorates a list therefore discarded the WHOLE answer, and a real build failed 906 of 1,420
+// answered questions with "answer carried no citation" — 64% of the GPU time, on answers that were
+// probably fine. Recognising more shapes is safe precisely because it changes nothing about what is
+// ACCEPTED: the rejections asserted above still reject.
+const accepts = (text, label) => {
+  const r = AN.verifyCitations(V, text);
+  ok(r.citations.length === 1 && r.rejected === 0, label, JSON.stringify(r));
+};
+accepts('answer\n**CITE:** src/a.ts:2-4', 'markdown bold around CITE is not a malformed citation');
+accepts('answer\n- CITE: src/a.ts:2-4', 'a bulleted citation is a citation');
+accepts('answer\n> CITE: src/a.ts:2-4', 'a blockquoted one too');
+accepts('answer\nCITE: src/a.ts:3', 'a single line is a one-line range, not a syntax error');
+accepts('answer\nCITE: src/a.ts:L2-L4', 'an L-prefixed line number is understood');
+accepts('answer\nCITE: src/a.ts:2-4 (the constructor)', 'trailing prose after the range does not void it');
+{
+  const r = AN.verifyCitations(V, 'answer\n**CITE:** src/nope.ts:1-2');
+  ok(r.citations.length === 0 && r.rejected === 1,
+    'a decorated citation to a missing file is still REJECTED — parsing widened, verification did not');
+}
+
+// A CITATION ONE FIELD OVER IS STILL A CITATION.
+//
+// Observed on a real build: the model blended the two conventions and wrote the CITE line as a bare
+// JSON key beside `a` — {"id":"q1","a":"…","CITE: src/a.ts:2-4"} — so there was no `cite` array to
+// capture and scanning the answer TEXT found nothing. 70% of answers were discarded as "answer
+// carried no citation" while carrying one. The prompt now names the single field, and the parser
+// looks across the whole entry rather than only the answer string.
+{
+  const blended = '{"id":"q1","a":"It defines a deck.","CITE: src/a.ts:2-4"}';
+  const r = AN.verifyCitations(V, blended);
+  ok(r.citations.length === 1 && r.rejected === 0,
+    'a CITE written as a stray key is still found', JSON.stringify(r.citations));
+}
+
 const none = AN.verifyCitations(V, 'The answer is obviously 42, no proof needed.');
 ok(none.citations.length === 0 && none.rejected === 0, 'an answer with no citation yields none');
 ok(AN.verifyCitations(V, 'CITE: src/a.ts:2-4\nCITE: src/a.ts:2-4').citations.length === 1,
@@ -1630,6 +1667,30 @@ rmSync(TMP, { recursive: true, force: true });
   ok(st.questions().find((q) => q.id === 'f1').status === 'failed', 'a failed question stays failed on its own');
   ok(st.pendingQuestions().length === 0,
     'and a normal run will NOT pick it up — which is why recovering it needed its own path');
+}
+
+// ── a scoped domain stays in its subtree, and is never empty because of it ──────
+//
+// A domain name is a CONCEPT; a repository is organised by PLACE. Measured on a real build: "trail
+// mini game" derived `MiniGame`, matched a generic popup and a mock-data file, and admitted 26 files
+// of which ZERO were the trail — which lives under the Bingo tree. Both readings of the words are
+// honest, so no amount of term extraction fixes it. The operator knows the place.
+console.log('\nscoped domains');
+{
+  const src = readFileSync(new URL('../src/indulge/discover.ts', import.meta.url), 'utf-8');
+  ok(/if \(!inScope\(file\)\) return false;/.test(src),
+    'the scope binds inside write() — so it holds at EVERY depth, not only on seeds');
+  ok(/if \(!inScope\(r\)\) continue;/.test(src),
+    'an out-of-scope seed is discarded QUIETLY — it is a real file elsewhere, not a hallucination');
+  ok(!/inScope\(r\)\) \{ [^}]*hallucinated/.test(src),
+    '…and is never counted against explore, which answered the question it was asked');
+  ok(/seeding from \$\{scope\} itself/.test(src),
+    'a scoped domain that matches nothing by name seeds from the scope rather than producing nothing');
+  const idx = readFileSync(new URL('../src/indulge/index.ts', import.meta.url), 'utf-8');
+  ok(/const at = spec\.lastIndexOf\('@'\);/.test(idx),
+    'name@path scopes ONE domain — different domains need different places');
+  ok(/domain = at > 0 \? spec\.slice\(0, at\)\.trim\(\) : spec/.test(idx),
+    'the stored domain is the BARE name — the path is a discovery constraint, not vocabulary');
 }
 
 console.log(fails ? `\nindulge check: ${fails} FAILURE(S)\n` : '\nindulge check: ok\n');
