@@ -36,7 +36,6 @@ import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { llmChat, refreshActiveModel } from './llm/manager.js';
 import { connect, llmBaseUrl } from './connection.js';
-import { acquireLlm, type LlmHold } from './llm/authority.js';
 import { initLlmProvider } from './llm/select.js';
 import { prompts, packagePath, writeAtomic } from './prompts-service.js';
 import { log } from './log.js';
@@ -139,7 +138,6 @@ function entryKey(e: { repo?: string; commit?: string; kind?: string; ts?: numbe
 }
 
 // llm authority (one door to the GPU): reviews take the llm resource as the `ayin` authority per
-// backlog batch via acquireLlm() (llm/authority.ts) — gemma → qwen on gained, revert on release.
 // A provider with no authority layer answers 'no-resource-layer' and the batch runs on whatever
 // model is being served; the watcher is unchanged either way.
 // BUSY (podcast render, code_agent) → reviews DEFER to a later poll; a background reviewer waits
@@ -1058,23 +1056,16 @@ async function runWorktreePass(): Promise<void> {
   }
   if (changed.length === 0) return;
 
-  const hold: LlmHold = await acquireLlm('ayin watch: working-tree review');
-  if (hold === 'busy') { out(`llm busy — working-tree review of ${changed.length} repo(s) deferred`); return; }
-  if (typeof hold === 'object') { activeHold = hold; out('llm acquired (ayin) — working-tree review'); }
   await refreshActiveModel().catch(() => {});
-  try {
-    for (const repo of changed) {
-      // The ledger persists across passes AND across a power cut: what ayin staged stays ayin's to
-      // clean up, and a crash between staging and the next pass never re-attributes it to the dev.
-      let ledger = state[repo]?.staged ?? [];
-      try { ledger = await reviewWorktree(repo, ledger); }
-      catch (err) { log('WARN', 'worktree_review_failed', { repo, error: (err instanceof Error ? err.message : String(err)).slice(0, 200) }); }
-      // Recompute AFTER staging (staging flips porcelain XY codes) so we don't re-trigger on our own work.
-      state[repo] = { fingerprint: await worktreeFingerprint(repo), at: Date.now(), staged: ledger };
-      saveWorktreeState(state);
-    }
-  } finally {
-    if (typeof hold === 'object') { await hold.release(); activeHold = null; }
+  for (const repo of changed) {
+    // The ledger persists across passes AND across a power cut: what ayin staged stays ayin's to
+    // clean up, and a crash between staging and the next pass never re-attributes it to the dev.
+    let ledger = state[repo]?.staged ?? [];
+    try { ledger = await reviewWorktree(repo, ledger); }
+    catch (err) { log('WARN', 'worktree_review_failed', { repo, error: (err instanceof Error ? err.message : String(err)).slice(0, 200) }); }
+    // Recompute AFTER staging (staging flips porcelain XY codes) so we don't re-trigger on our own work.
+    state[repo] = { fingerprint: await worktreeFingerprint(repo), at: Date.now(), staged: ledger };
+    saveWorktreeState(state);
   }
 }
 
@@ -1103,7 +1094,6 @@ export function watchDaemonPid(): number | null {
 }
 
 let lastBusyLogAt = 0;
-let activeHold: { release: () => Promise<void> } | null = null; // released on SIGTERM so a kill mid-batch doesn't strand the grant until TTL
 
 async function processBacklog(retryState: Map<string, { attempts: number; nextTryAt: number }>): Promise<void> {
   const processed = new Set(readJsonl(PROCESSED_FILE).map(r => String(r.key)));
@@ -1119,24 +1109,9 @@ async function processBacklog(retryState: Map<string, { attempts: number; nextTr
   const reviewEntries = queue.filter(e => e.repo && e.commit && ready(e));
   if (reviewEntries.length === 0) return;
 
-  // One door: take the llm resource as `ayin` for the REVIEW batch (backend swaps gemma → qwen).
-  const hold: LlmHold = await acquireLlm('ayin watch: commit review batch');
-  if (hold === 'busy') {
-    if (Date.now() - lastBusyLogAt > 60_000) {
-      lastBusyLogAt = Date.now();
-      out(`llm resource busy — ${reviewEntries.length} review(s) deferred until it frees`);
-      log('INFO', 'watch_llm_busy_deferred', { pending: String(reviewEntries.length) });
-    }
-    return;
-  }
-  if (hold !== 'no-resource-layer') {
-    activeHold = hold;
-    out('llm acquired (ayin) — backend swapping to the coder model');
-  }
-  // The swap changes the served model → re-resolve the dialect before reviewing.
+  // Re-resolve the dialect before reviewing — the endpoint may be serving something else now.
   await refreshActiveModel().catch(() => {});
 
-  try {
   for (const entry of reviewEntries) {
     const key = entryKey(entry);
     const retry = retryState.get(key);
@@ -1162,10 +1137,6 @@ async function processBacklog(retryState: Map<string, { attempts: number; nextTr
         out(`  → attempt ${attempts} failed (${msg.substring(0, 120)}) — will retry`);
       }
     }
-  }
-  } finally {
-    // Batch drained (or failed) → give the GPU back; backend reverts to gemma.
-    if (typeof hold === 'object') { await hold.release(); activeHold = null; }
   }
 }
 
@@ -1211,7 +1182,6 @@ export async function runWatch(args: string[]): Promise<void> {
 
   const shutdownSignal = async () => {
     cleanupPidfile();
-    if (activeHold) await activeHold.release().catch(() => {});
     process.exit(0);
   };
   process.on('SIGINT', () => { void shutdownSignal(); });

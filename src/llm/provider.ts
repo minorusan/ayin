@@ -11,7 +11,7 @@
  *
  *   OPTIONAL   models()     a catalog to pick from            → no picker without it
  *              setModel()   ask for a different model         → `/model x` is refused politely
- *              acquire()    take an authority over the GPU    → no `/lock`, no booking
+ *              acquire()    take an authority over the GPU    → optional; ayin no longer uses it
  *              authority()  who owns the model right now      → no ⚑ segment
  *              telemetry()  GPU + scheduler queue             → no gpu/queue segments, no wait narration
  *              events()     a live phase stream               → no animated phase segment

@@ -24,8 +24,9 @@
  * rather than permanent, and it never churns the KV-cached prefix.
  */
 
+import { log } from '../log.js';
 import { isCorpusInjection } from '../modes.js';
-import { chunksByIds, embedText, hasUsableVectors, loadVectors, vectorSearch } from './embed.js';
+import { chunksByIds, embedText, hasUsableVectors, loadVectors, vectorSearch, liveVectors } from './embed.js';
 import { buildLexicon, lookupNames, type NameHit } from './lexicon.js';
 import { assessChunk } from './staleness.js';
 import { openStore, type Chunk } from './store.js';
@@ -160,7 +161,26 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
   // gated the candidate set — so the chunk that actually answers it (the tail apex) was never
   // considered. An exact name is evidence; a fuzzy hit on an English word is a coincidence.
   const STRONG = 0.9;
-  const strongIds = new Set(named.filter((n) => n.score >= STRONG).flatMap((n) => [...n.handle.chunkIds]));
+  /**
+   * A symbol whose name is also an ordinary English word may BOOST, never GATE.
+   *
+   * The comment above fixed the FUZZY case; an EXACT match walks straight through it. Measured on a
+   * real corpus: "what unloads game mode resources and when is that wrong" matched a symbol literally
+   * named `Resources` at score 1.00, which gated the candidate set to that ONE chunk — a test about
+   * mock state — so the semantic pass, restricted to it, found nothing and fell through to keyword.
+   * The answer was confidently wrong and read as a bad corpus rather than a bad gate.
+   *
+   * Same rule as everywhere else here: an ambiguous name is not an identity. Such a hit still scores
+   * as a weak one, so a genuinely relevant chunk keeps its boost — it simply cannot silence the rest.
+   */
+  const AMBIGUOUS_NAME = new Set([
+    'resources', 'resource', 'state', 'data', 'value', 'result', 'item', 'items', 'name', 'type',
+    'event', 'events', 'error', 'config', 'settings', 'manager', 'service', 'controller', 'view',
+    'model', 'game', 'time', 'text', 'file', 'path', 'point', 'points', 'size', 'index', 'count',
+    'input', 'output', 'context', 'session', 'target', 'source', 'content', 'action', 'status',
+  ]);
+  const gating = named.filter((n) => n.score >= STRONG && !AMBIGUOUS_NAME.has(n.handle.normalized.toLowerCase()));
+  const strongIds = new Set(gating.flatMap((n) => [...n.handle.chunkIds]));
   const namedIds = new Set(named.flatMap((n) => [...n.handle.chunkIds]));   // weak hits still BOOST
   const pool = strongIds.size ? all.filter((c) => strongIds.has(c.chunkId)) : all;
 
@@ -170,13 +190,18 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
   if (hasUsableVectors(store)) {
     try {
       const qv = await embedText(query);
-      const hits = vectorSearch(loadVectors(store), qv, {
+      const hits = vectorSearch(liveVectors(store), qv, {
         limit, within: strongIds.size ? strongIds : undefined,
       });
       if (hits.length) {
         return render(repoPath, store, chunksByIds(all, hits.map((h) => h.chunkId)), query, named, 'semantic');
       }
-    } catch { /* no endpoint / model not pulled — lexical still works */ }
+    } catch (e) {
+      // SAY WHY. This catch hid a real failure for four rounds of debugging: the search printed
+      // `[keyword]` with no hint that the semantic pass had been attempted and failed, so a wrong
+      // answer read as a bad corpus. Lexical is still a fine fallback — a silent one is not.
+      log('WARN', 'corpus_vector_pass_failed', { error: e instanceof Error ? e.message : String(e) });
+    }
   }
 
   const scored = pool.map((c) => {

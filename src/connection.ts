@@ -40,21 +40,6 @@ let inFlightRequestId = '';
 function setInFlightRequestId(id: string): void { inFlightRequestId = id; }
 export function currentRequestId(): string { return inFlightRequestId; }
 
-/**
- * The authority token of a LOCKED session (`/lock`), or '' when unlocked.
- *
- * Sent with every generation so the backend can put this session at the FRONT of the shared GPU
- * queue: `/api/generate` is LOW priority by default (background agent work must yield to a human),
- * and the token is what proves we are entitled to more. Asking for priority without the token is
- * ignored — otherwise any client could promote itself past user chat.
- *
- * Set from model-picker.ts on lock/unlock; kept module-level to avoid an import cycle
- * (model-picker → resource-client → connection).
- */
-let lockAuthority = '';
-export function setRequestAuthority(token: string): void { lockAuthority = token; }
-export function currentRequestAuthority(): string { return lockAuthority; }
-
 import { takePendingImages } from './image.js';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -196,8 +181,6 @@ export async function llmChat(
       setInFlightRequestId(requestId);
 
       const body: Record<string, unknown> = { messages, temperature: opts.temperature ?? 0.7, requestId };
-      // Locked session → ask for the front of the queue, and prove we may have it.
-      if (lockAuthority) { body.authority = lockAuthority; body.priority = 'high'; }
       if (opts.thinking ?? THINKING_MODE) body.thinking = true;
       if (images.length) body.images = images;
       if (opts.tools?.length) body.tools = opts.tools;
@@ -253,7 +236,7 @@ export async function llmChat(
       const aborted = controller.signal.aborted && !transient;
       if (controller.signal.aborted && transient) {
         // Our abort, dressed up as a network failure by undici. Say which it was.
-        throw new Error('gave up after 20 min — the request was still waiting for the shared GPU, not stuck. /lock puts this session in the priority band.');
+        throw new Error('gave up after 20 min — the request was still waiting for the shared GPU, not stuck.');
       }
       if (!transient || aborted || attempt >= MAX_ATTEMPTS) throw err;
 

@@ -996,7 +996,7 @@ not a regression. If it returns, it belongs back as an explicit opt-in, not bund
   honestly ("no original intent could be recovered") rather than papered over.
 - **Verified against the real backend, not assumed**: run live against the parent backend's actual
   `llmResource` (`backend/src/resources/llm.ts`) from a `backend/` launch directory — correctly
-  identified the real file (not a same-named decoy — ayin's own `acquireLlm`/`llm/authority.ts` was
+  identified the real file (not a same-named decoy — a same-named module elsewhere was
   the wrong target the first attempt found, exactly the cwd bug above, before the root-relative fix
   landed), correctly reported no Jira ticket recoverable (Jira wasn't configured), and named real
   churn/bugfix evidence (a VRAM-reclamation regression, a model-warming latency fix) the reviewer could
@@ -2422,63 +2422,16 @@ tree knows about the internals). Design rules:
   `.git/HEAD` (handles a `.git` *file* for submodules/worktrees; detached HEAD → short sha) and
   cached 2s so the per-tick status redraw doesn't hammer the fs.
 
-- **`/lock` / `/unlock`** (`model-picker.ts#lockSession`) — hold this session's **priority band** until
-  the client exits or stops responding. The enforcement IS the grant TTL, which is why it needs no
-  server-side session tracking: the hold is taken with a **10-minute** ttl and refreshed every
-  **2 minutes** while ayin is alive. Quit cleanly (or `/unlock`) → released at once; die, hang or lose
-  the network → the grant lapses within 10 minutes and the backend reverts on its own. Nothing can be
-  left locked by a process that no longer exists. Shown as **🔒** beside the model in the status bar.
+- **No session lock.** ayin holds nothing. It generates through whatever endpoint it is pointed at and
+  takes no authority, no priority band and no model booking — earlier versions had `/lock`, `/unlock`
+  and an auto-lock on boot, and all of it is gone.
 
-  **A LOCK IS NOT A MODEL CHOICE (since 1.0.210).** It fires no swap, in any path. It used to have to:
-  an endpoint with a per-owner model policy swapped the model when ayin gained the authority, so the
-  lock compensated — pin the model, remember it, re-apply it on every regrant. That compensation was
-  the source of three consecutive releases of bugs (1.0.207-1.0.209), and it meant **starting ayin
-  changed what the shared GPU served for every other consumer on the machine**. Removed at the root:
-  ayin never selects a model implicitly. It runs on whatever the endpoint is serving and switches only
-  when a human types `/model` — one deliberate request, one door. `/set default-model` is gone with it
-  (a stored preference nothing applies is worse than none), as is `lockSessionWithDefaultModel()`.
-  **A lock also buys QUEUE PRIORITY.** ayin's `/api/generate` calls are LOW priority by design, so a
-  locked session would still sit behind every habit. While locked, ayin sends its authority token
-  plus `priority:"high"`; the backend grants HIGH only when that token matches the current holder, so
-  priority is proven, never self-declared, and it drops back to LOW the instant the lock ends.
-  Measured with the GPU busy: an unlocked request sent FIRST finished in 237.5s, a locked one sent
-  1.2s LATER finished in 62.0s.
-  **Interactive sessions AUTO-LOCK on boot** (`AYIN_AUTOLOCK=0` opts out). A human at a keyboard
-  should not have to know a command to avoid starving: without it a session sits in LOW behind every
-  habit, which produced `GPU: chatOnce 306s · 1 waiting` and then a client abort at 10m surfaced as
-  `fetch failed`. Auto-lock takes **priority only** — it does not pin or load a model (1.0.210), so
-  launching ayin is invisible to every other consumer of the shared GPU. Headless runs do NOT
-  auto-lock — unattended work yields.
-  **The lock survives the backend losing it.** The authority stack is in-memory, so a daemon restart
-  erases every grant: the next keepalive returns a NEW grant rather than a refresh, which silently
-  broke the priority the lock exists for: the token being sent was dead, so the session was quietly
-  back in the LOW band. `acquireLlm`'s `onRegrant` rotates the token and says so in the transcript —
-  **the token only**, since 1.0.210 (it used to re-pin a model here too, which is exactly the implicit
-  selection ayin no longer does). `release()` recovers from a rotated token too: if the detach frees nothing and `ayin`
-  still holds the resource, it re-acquires to learn the live token and hands THAT back, instead of
-  leaking the grant until its TTL.
-  **REAL USAGE now keeps the lock alive too — not just the keepalive timer.** Found live: a session
-  deep in `/plan` (several long sequential agentic sub-loops, real minutes each) had the model swap out
-  from under it mid-session, `gemma` loading over an active `qwen` session with no warning. Root cause:
-  the backend's `/api/generate` route checked `holdsToken()` for queue priority (deliberately a
-  **non-throwing, no-side-effect** read, so a client can't fake entitlement by merely asking) but
-  NOTHING slid the grant's expiry except the client's own 2-minute keepalive — a purely in-memory,
-  near-instant op that should never itself be the failure point, but a session that goes minutes
-  between keepalive ticks (fully possible; the timer's own schedule, not activity, decided when it
-  fired) had zero fallback if that one tick landed even slightly late. `AuthorityHolder#touch(token)`
-  (backend `resources/authority.ts`) is `authorise()`'s expiry-sliding effect with `holdsToken()`'s
-  safety (never throws, no-ops on a mismatch); `/api/generate` now calls it on every locked request, so
-  active use — not a background timer nobody's watching — is what a live session actually depends on.
-  Verified in an isolated `AuthorityHolder` instance (no contact with the live resource): a 10s-TTL
-  grant, touched once at t=8s, was confirmed still held at t=12s — past what would have been its
-  original, un-touched expiry.
-  **`/set default-model <name>`** (`lockSessionWithDefaultModel`, `model-picker.ts`) makes auto-lock
-  explicit instead of implicit: with nothing configured, boot pins whatever the backend's own
-  `ownership.gained` policy happened to swap to (today's plain `lockSession()` behavior, unchanged).
-  With a default set, boot explicitly requests THAT model and `awaitResident()`s it — not just
-  "requested," actually resident in VRAM — before the session is reported locked, and the regrant
-  handler re-pins THIS model (not whatever was active moments before the swap) if the backend ever
-  drops and re-issues the grant.
+  It was removed because the cost landed on the operator rather than the machine: a held authority
+  refused OTHER work on the same box — a corpus search could not embed its query while an interactive
+  session held the grant, and degraded silently to keyword matching, which reads as a bad corpus
+  rather than a blocked request. A priority band is only worth having if the thing it starves is
+  someone else's; here it was the same person's.
+
 - **Per-model context windows.** Every picker row is labelled with the window that model will
   ACTUALLY get (`27.8B · Q4_K_M · 16.2G · 24k ctx`), because one global `numCtx` is wrong on a 24 GB
   card: KV cost per token is architectural, not a function of size. Measured here — `gemma4:26b`
@@ -2839,7 +2792,7 @@ absence is load-bearing: adding any of them back would break a property the agen
   visibly rather than appearing to succeed.
 - **No model of its own, and no implicit model selection.** ayin brings no weights and does not choose
   what is loaded: it reads the active model from `GET /api/status`, picks a matching dialect, and asks
-  for a different model only when a human does (`/model`). See the `/lock` section.
+  for a different model only when a human does (`/model`).
 - **No hardcoded package registry.** The *passive* startup update check is **opt-in** via
   `AYIN_UPDATE_REGISTRY`; unset (the default) → it never contacts any registry. The explicit
   **`ayin update`** command may additionally fall through to npm's own configured registry (see

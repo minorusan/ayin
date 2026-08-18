@@ -294,7 +294,21 @@ export function vectorSearch(
 /** True when this corpus has vectors from the model that is configured right now. */
 export function hasUsableVectors(store: IndulgeStore): boolean {
   const model = embedModel();
-  return loadVectors(store).some((v) => v.model === model);
+  return liveVectors(store).some((v) => v.model === model);
+}
+
+/**
+ * Vectors whose CHUNK still exists.
+ *
+ * A corpus rebuilt in place keeps its old `vectors.jsonl` rows, and those rows still carry the right
+ * embedding model — so every check passes and they rank normally. Measured on a rebuilt corpus: 1,410
+ * vectors from the previous build sat beside 1,033 live ones, took all three top slots by cosine, and
+ * were then dropped as unresolvable — leaving semantic search with nothing and the caller silently
+ * reading a keyword result. The vector was fine; the thing it pointed at was gone.
+ */
+export function liveVectors(store: IndulgeStore): VectorRecord[] {
+  const live = new Set(store.chunks().map((c) => c.chunkId));
+  return loadVectors(store).filter((v) => live.has(v.chunkId));
 }
 
 /** Chunks in id order matching a set of hits, for rendering. */

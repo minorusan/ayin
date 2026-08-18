@@ -25,7 +25,7 @@
  *
  * NOT EVERY PROVIDER HAS ANY OF THIS. `setModel` and `acquire` are OPTIONAL capabilities of the LLM
  * port; the public `direct` provider has neither. Then `/model` says, in one line, that this
- * installation serves a fixed model, `/lock` says there is no authority to take, and nothing else
+ * installation serves a fixed model, the picker says so, and nothing else
  * in the UI mentions either — no empty popup, no failed request, no error.
  *
  * TECH DEBT — see docs/TechDebt.md "model picker & GPU status".
@@ -34,21 +34,15 @@
 import { addMessage, setAgentStatus } from './ui.js';
 import { showDialog, type DialogOption } from './dialog.js';
 import { setConfigValue } from './prompts.js';
-import { acquireLlm, type LlmHold } from './llm/authority.js';
 import { llmProvider, llmProviderName, setProviderOverride, providerOverrideName, resetProviderResolution } from './llm/select.js';
 import { openAiKey, openAiModel } from './llm/providers/openai.js';
 import { noKeyMessage } from './tools/credentials/openai.js';
-import { setRequestAuthority } from './connection.js';
 import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
 import { refreshActiveModel, activeModelId, resetModelResolution, setAdapter, adapterNames, activeAdapter } from './llm/manager.js';
 import { getConfig, getConfigString } from './prompts.js';
 import { log } from './log.js';
 
-/** The session's booking. Held until /quit, /model <shared>, or process exit (grant TTL). */
-let modelHold: LlmHold | null = null;
-
 /**
- * `/lock` — hold this session's PRIORITY BAND until the client exits or stops responding.
  *
  * The mechanism is the grant TTL itself, which is why it needs no server-side session tracking: the
  * hold is taken with a SHORT 10-minute ttl and refreshed every 2 minutes while ayin is alive. Quit
@@ -63,99 +57,14 @@ let modelHold: LlmHold | null = null;
  * rule is now explicit: **ayin never selects a model implicitly.** It runs on whatever the endpoint is
  * serving and changes it only when a human asks (`/model <name>`) — one door, one deliberate request.
  */
-const LOCK_TTL_MS = 10 * 60 * 1000;
-const LOCK_KEEPALIVE_MS = 2 * 60 * 1000;
-let locked = false;
-
-export function isSessionLocked(): boolean {
-  return locked && isModelBooked();
-}
-
-/**
- * Whether locking means anything here. Callers that lock on their own initiative (the interactive
- * auto-lock) must check this and stay SILENT when it is false — an installation without an authority
- * layer has nothing to lock, and saying so unprompted is noise about a feature it never had.
- */
-export async function lockSupported(): Promise<boolean> {
-  return typeof (await llmProvider()).acquire === 'function';
-}
-
-/**
- * Take the lock. Returns '' on success, else a human reason.
- *
- * Authority ONLY — it fires no model swap, in any code path. Everything this function used to do about
- * models (a `pinTo` target, remembering `lockedModel`, a "put it back" corrective swap, a re-pin when
- * the grant rotated) was compensation for an endpoint that swapped the model on `ownership.gained`.
- * Three releases (1.0.207-1.0.209) went into making that compensation land correctly on every machine;
- * removing the policy removes the whole problem, so the compensation goes with it. If a session wants a
- * particular model, a human types `/model <name>`.
- */
-export async function lockSession(): Promise<string> {
-  const provider = await llmProvider();
-  if (!provider.acquire) return 'this LLM provider has no authority layer — there is nothing to lock';
-  if (!isModelBooked()) {
-    setAgentStatus('Taking the priority lock…');
-    const hold = await acquireLlm('ayin /lock (held while this session lives)', {
-      ttlMs: LOCK_TTL_MS,
-      keepaliveMs: LOCK_KEEPALIVE_MS,
-      force: true, // a human at the keyboard outranks background work of equal or lower rank
-      // A backend restart wipes the in-memory authority stack, so the next keepalive returns a NEW
-      // grant instead of a refresh. Left alone that breaks the lock silently: the token we send for
-      // priority is dead. Re-adopt the new token — and ONLY the token. Re-pinning a model here is
-      // exactly the implicit selection that is no longer ayin's business.
-      onRegrant: (token, via) => {
-        setRequestAuthority(locked ? token : '');
-        if (!locked) return;
-        addMessage('system', `Lock re-established after the backend dropped it (${via}).`);
-        log('INFO', 'lock_regranted', { via });
-      },
-    });
-    setAgentStatus('');
-    if (hold === 'busy') return 'the GPU is held by a higher authority right now — try again shortly';
-    if (hold === 'no-resource-layer') return 'backend has no resource layer (or is unreachable)';
-    modelHold = hold;
-  }
-  locked = true;
-  // From here every generation carries the token, so the backend can promote this session to the
-  // front of the GPU queue instead of leaving it in the LOW band behind every habit.
-  setRequestAuthority((modelHold as { token: string }).token);
-  log('INFO', 'session_locked', { ttlMinutes: String(LOCK_TTL_MS / 60000) });
-  return '';
-}
-
-/**
- * REMOVED in 1.0.210 — `lockSessionWithDefaultModel()`.
- *
- * It was the startup path that took the lock AND loaded a configured `defaultModel`, waiting until that
- * model was resident. Together with `lockSession`'s "put it back" swap and its re-pin-on-regrant, it
- * meant **launching ayin silently changed which model the shared GPU was serving** — for every other
- * consumer on the machine, not just this session. Three releases (1.0.207-1.0.209) were spent making
- * that behaviour land deterministically; the operator's decision is that it should not happen at all.
- *
- * A model is now only ever loaded because a human asked in the session: `/model` (picker) or
- * `/model <name>`. `/set default-model` is gone with this function — a stored preference that nothing
- * applies is worse than no preference. Sessions start on whatever the endpoint is serving; the status
- * bar and `/model` show what that is.
- */
-
-/** Release the lock (and the booking it took). */
-export async function unlockSession(): Promise<void> {
-  locked = false;
-  setRequestAuthority(''); // back to the LOW band immediately, before the grant is even released
-  await releaseModelHold();
-  log('INFO', 'session_unlocked', {});
-}
-
+/** Model booking is gone with the lock: ayin runs on whatever the endpoint serves. */
 export function isModelBooked(): boolean {
-  return !!modelHold && typeof modelHold === 'object';
+  return false;
 }
 
+/** Kept as a no-op so callers need not learn that booking is gone. Nothing is held any more. */
 export async function releaseModelHold(): Promise<void> {
-  const h = modelHold;
-  modelHold = null;
-  locked = false;
-  setRequestAuthority(''); // a stale token would just be ignored, but never send one
-  if (h && typeof h === 'object') await h.release().catch(() => {});
+  /* the authority layer was removed: ayin holds nothing */
 }
 
 function gpuLine(g: GpuInfo | null): string {
@@ -251,27 +160,12 @@ export async function switchModel(model: string, cat: ModelCatalog): Promise<boo
     return ok;
   }
 
-  // Any other model means we own the GPU for this session.
-  if (!isModelBooked()) {
-    addMessage('system', `Requesting the ayin authority from the backend…`);
-    setAgentStatus('Acquiring the GPU…');
-    const hold = await acquireLlm(`interactive /model ${model} (held for session)`);
-    setAgentStatus('');
-    if (hold === 'busy') {
-      addMessage('system', 'GPU is busy — another authority holds the model right now. Try again shortly.');
-      return false;
-    }
-    if (hold === 'no-resource-layer') {
-      addMessage('system', 'Backend has no resource layer (or is unreachable) — cannot switch the model from here.');
-      return false;
-    }
-    modelHold = hold;
-  }
+  // No booking: ayin asks the endpoint to serve a model and works on whatever it serves. Nothing is
+  // held, so nothing has to be released, and no other consumer waits on this session.
 
-  const token = (modelHold as { token: string }).token;
-  const res = await provider.setModel(model, token);
+  const res = await provider.setModel(model, '');
   if (!res) {
-    addMessage('system', `Backend refused the swap to ${model} (authority lost or unknown model).`);
+    addMessage('system', `Backend refused the swap to ${model} (unknown model, or it declined the request).`);
     log('WARN', 'model_set_failed', { model });
     return false;
   }

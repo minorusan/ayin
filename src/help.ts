@@ -154,11 +154,6 @@ export const HELP: HelpEntry[] = [
 
   // ── the model ──────────────────────────────────────────────────────────────────
   { name: '/model', kind: 'command', section: 'Model', short: 'Pick from the models the backend serves (popup) · /model <name|qwen|gemma> to switch straight away' },
-  {
-    name: '/lock', kind: 'command', section: 'Model',
-    short: 'Hold the model for this session — ⚿ in the bar; self-releases 10 min after you stop · /unlock',
-    tip: '/lock holds the model for your session and frees it by itself if this client dies.',
-  },
   { name: '/set', kind: 'command', section: 'Model', short: '/set <key> <value> — persist a setting (kebab-case: /set terminal-command …)' },
 
   // ── connectors ─────────────────────────────────────────────────────────────────

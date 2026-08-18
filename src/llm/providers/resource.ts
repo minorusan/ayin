@@ -20,7 +20,7 @@
  * Everything in here was MOVED, not rewritten: the acquisition dance, its keepalive semantics, the
  * `models`-op backoff, the SSE reconnect. In particular the keepalive's re-grant handling (a backend
  * restart wipes the in-memory authority stack, so the next keepalive returns a NEW grant instead of
- * a refresh; the token rotates and the pinned model must be re-asserted) is load-bearing for `/lock`
+ * a refresh; the token rotates) belongs to the port's `acquire()`, which ayin itself no longer calls
  * and is preserved verbatim.
  */
 
@@ -91,7 +91,7 @@ async function acquire(reason: string, opts: AcquireOptions = {}): Promise<Acqui
     ...(opts.force ? { force: true } : {}),
   }, 5_000);
   if (grant && grant.granted) {
-    // Slide the grant for long runs. A SHORT ttl with a fast keepalive is what makes `/lock`
+    // Slide the grant for long runs. A SHORT ttl with a fast keepalive is what makes a grant
     // self-releasing: stop responding and the grant lapses on its own.
     const every = opts.keepaliveMs ?? 10 * 60 * 1000;
     const keepalive = setInterval(() => {

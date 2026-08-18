@@ -9,7 +9,7 @@
  *
  * That is two endpoints, and they map exactly onto the two REQUIRED methods of the port. Everything
  * else — authorities, model swapping, GPU telemetry, an event stream — is simply not offered, so
- * every consumer hides the corresponding UI. No queue line, no `/lock`, no GPU readout, no error.
+ * every consumer hides the corresponding UI. No queue line, no GPU readout, no error.
  *
  * The one extra it does offer is `models()`, because it is FREE over this contract: `/api/status`
  * already names the model that is answering, so the catalog is that one model. It costs nothing,

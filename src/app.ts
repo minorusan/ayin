@@ -36,9 +36,8 @@ import { togglePresenterSession, forcePresenterNextTurn } from './presenter/inde
 import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation, recordSlashTurn } from './agent.js';
 import { findToolBySlash, slashTools, loadTools } from './tools.js';
 import { startPromptServer } from './prompt-server.js';
-import { acquireLlm, type LlmHold } from './llm/authority.js';
 import { llmProvider } from './llm/select.js';
-import { handleModelCommand, releaseModelHold, isModelBooked, lockSession, unlockSession, isSessionLocked, lockSupported } from './model-picker.js';
+import { handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
 import { showDialog } from './dialog.js';
 import { startLlmStatusPoll, findOwnPlace } from './llm-status.js';
 import { startUpdateWatch, checkForUpdate } from './updater.js';
@@ -308,7 +307,6 @@ onConnectionChange((state) => {
 // own (every failure just clears the segments and the next tick retries), and the interval is
 // unref'd so it never keeps the process alive.
 // A model swap is no longer something gaining/losing the `ayin` authority causes (1.0.210 —
-// model-picker.ts#lockSession takes priority only, never a model). The backend now moves the model
 // for reasons of its own — a schedule, an explicit `setModel` from any other consumer, or another
 // workload borrowing the card — none of which this client can see the cause of,
 // only the effect. So this narration DELIBERATELY never attributes a reason: it just says what's
@@ -339,7 +337,6 @@ function startModelStatusPoll(): void {
           loaded: catalog.loadedModel,
           booked: isModelBooked(),
           swapping: catalog.loadedModel !== catalog.activeModel,
-          locked: isSessionLocked(),
         }
         : null,
       gpu,
@@ -545,27 +542,6 @@ onInput(async (text: string) => {
         addMessage('system', `Full transcript started → ${p}\nPrompts, raw model responses and complete tool results, nothing clipped. /transcribe off to stop.`);
         return;
       }
-      case '/lock': {
-        // Hold the PRIORITY BAND for this session: short TTL + fast keepalive, so it self-releases if
-        // this client dies rather than stranding the GPU. It does not change the model — see
-        // model-picker.ts#lockSession.
-        // An LLM provider without an authority layer has nothing to lock — say it once, plainly,
-        // because the user asked; nothing else in the UI ever mentions locking on such a setup.
-        if (!(await lockSupported())) {
-          addMessage('system', 'No authority layer on this LLM endpoint — /lock has nothing to hold here.');
-          return;
-        }
-        if (isSessionLocked()) { addMessage('system', 'Already locked. /unlock releases it.'); return; }
-        const err = await lockSession();
-        if (err) { addMessage('system', `/lock failed: ${err}`); return; }
-        addMessage('system', 'Locked ⚿ — this session holds priority (not the model choice) until you /quit, /unlock, or stop responding for 10 minutes.');
-        return;
-      }
-      case '/unlock':
-        if (!isSessionLocked()) { addMessage('system', 'Not locked.'); return; }
-        await unlockSession();
-        addMessage('system', 'Unlocked — the backend may reclaim the model.');
-        return;
       case '/verbose': {
         // Brevity is the default, so this command turns it OFF. Named for what the operator wants
         // ("be verbose"), not for the flag it clears.
@@ -1255,24 +1231,6 @@ async function runHeadless(): Promise<void> {
     process.stderr.write(p ? `ayin: full transcript → ${p}\n` : 'ayin: could not start a transcript (no session id)\n');
   }
 
-  // Coder authority (AYIN_ACQUIRE_LLM=1): take the llm resource for this run. PRIORITY ONLY — it does
-  // not swap the model (no per-owner policy since 1.0.210); the run uses whatever is resident.
-  // Sliding grant + unref'd keepalive → auto-released when the process exits; also released
-  // explicitly on normal completion so nothing waits on a grant this run no longer needs.
-  // FOREGROUND BY DEFAULT. `/api/generate` is LOW priority so background agents yield to a human — but
-  // `ayin -p` IS a human waiting at a terminal, and it used to run in LOW. Measured: a run's final call
-  // sat ~11 minutes behind a journal habit and a CPU embedding load on an otherwise idle GPU, with the
-  // wait invisible (the narrator is TUI-only). runInteractive already auto-locks for exactly this
-  // reason; this is the same decision for the headless path, through the same tested grant.
-  //
-  // `AYIN_ACQUIRE_LLM=0` opts out — the watch daemon and anything cron-driven genuinely IS background
-  // work and should keep yielding to a person.
-  let llmHold: LlmHold = 'no-resource-layer';
-  if (process.env.AYIN_ACQUIRE_LLM !== '0') {
-    llmHold = await acquireLlm('ayin -p (foreground — a human is waiting on this)');
-  }
-
-  // Resolve the active model (gemma/qwen) → dialect before the first round.
   await refreshActiveModel();
 
   try {
@@ -1280,8 +1238,6 @@ async function runHeadless(): Promise<void> {
   } catch (err) {
     process.stderr.write(`ayin: agent error — ${err instanceof Error ? err.message : err}\n`);
     process.exit(1);
-  } finally {
-    if (typeof llmHold === 'object') { try { await llmHold.release(); } catch { /* autoreleased on process exit */ } }
   }
 
   flushTranscript(); // belt and braces — the exit hook covers the rest
@@ -1310,26 +1266,6 @@ async function runInteractive(): Promise<void> {
 
   // Always-on model + GPU segments (polled from the llm resource's read ops).
   startModelStatusPoll();
-
-  // AUTO-LOCK. An interactive session is a human waiting at a keyboard, so it takes the priority
-  // band by default instead of sitting in LOW behind every habit — the failure mode that produced
-  // "GPU: chatOnce 306s · 1 waiting" and then a 10-minute client abort reported as `fetch failed`.
-  // Self-releasing (10-min TTL + 2-min keepalive), released on /quit, and opt-out with
-  // AYIN_AUTOLOCK=0 for a session that should yield to background work. On a provider with no
-  // authority layer this is not a failure to report — there is no lock to take and never was. Check
-  // first and stay silent, or every public clone opens with an error about a resource layer its
-  // owner has never heard of.
-  //
-  // PRIORITY ONLY — it does not choose or load a model (1.0.210). Starting ayin no longer changes
-  // what the shared GPU is serving for everyone else on the machine; use `/model` to ask for one.
-  if (process.env.AYIN_AUTOLOCK !== '0') {
-    void (async () => {
-      if (!(await lockSupported())) return;
-      const err = await lockSession();
-      if (err) addMessage('system', `Could not take the priority lock: ${err} — /lock to retry.`);
-      else addMessage('system', 'Locked ⚿ — priority band for this session (/unlock to yield). Model unchanged: /model to switch.');
-    })();
-  }
 
   addMessage('system', `ayin v${getVersion()}`);
   addMessage('system', process.cwd());

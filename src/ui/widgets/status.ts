@@ -4,7 +4,7 @@
  * `strWidth` 1 for a padlock (U+1F512) while every modern terminal draws it 2 cells wide, so ONE emoji makes this
  * one-row box overflow, wrap, and then smartCSR's cell diff re-emits shifted rows — the visible
  * result is the input bar swallowing the thinking line and fragments appearing duplicated. It has
- * bitten this file twice: U+1F512 (padlock, for /lock) and U+23F3 (hourglass, for the queue), now
+ * bitten this file twice: U+1F512 (a padlock) and U+23F3 (hourglass, for the queue), now
  * U+26BF and U+29D7. `npm run check:glyphs` enforces the rule so there is no third time.
  *
  * StatusBar — the one-row bar at the very bottom:
@@ -38,7 +38,7 @@ export interface StatusState {
    *  `swapping` = the backend is mid-reload, so `name` is the TARGET and `loaded` is what is
    *  actually in VRAM — both are shown, because naming only the target reads as "all good, qwen"
    *  while gemma is still the thing answering (or nothing is, for the next minute). */
-  model: { name: string; loaded?: string; booked: boolean; swapping: boolean; locked?: boolean } | null;
+  model: { name: string; loaded?: string; booked: boolean; swapping: boolean } | null;
   /** Shared-GPU telemetry from the backend host (null = unknown / no card → segment hidden). */
   gpu: { util: number; usedMiB: number; totalMiB: number; tempC: number } | null;
   /** A named phase of the loop that is not the plain agent turn — plan mode, a QA pass. Driven by
@@ -167,13 +167,11 @@ export class StatusBar {
     }
 
     // The model is a permanent fact of the session, not an event: always shown once known.
-    // ⬢ = booked by us (we hold the llm authority) · ⬡ = the shared model · ⇆ = mid-swap.
+    // ⬡ = the model being served · ⇆ = mid-swap.
     if (this.state.model) {
       const m = this.state.model;
       const narrow = (screen.width as number) < 100;
       const short = (n: string) => (narrow ? n.replace(/:.*$/, '') : n); // qwen3-coder:30b → qwen3-coder
-      // U+26BF = /lock: this session holds the model until it exits or stops responding (10-min TTL).
-      const lock = m.locked ? '⚿ ' : '';
       const glyph = m.swapping ? '⇆' : m.booked ? '⬢' : '⬡';
       const color = m.swapping ? theme.warn : m.booked ? theme.accent : theme.muted;
       // Mid-swap, say it as a transition — "gemma4:26b→qwen3.6:27b loading" — so the bar can never
@@ -181,7 +179,7 @@ export class StatusBar {
       const label = m.swapping && m.loaded
         ? `${short(m.loaded)}→${short(m.name)} loading`
         : short(m.name);
-      parts.push(`{${color}-fg}${lock}${glyph} ${label}{/}`);
+      parts.push(`{${color}-fg}${glyph} ${label}{/}`);
     }
 
     // Shared-GPU load — util, VRAM, temp. Colored by VRAM pressure (the thing that OOMs a swap).

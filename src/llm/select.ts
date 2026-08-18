@@ -16,7 +16,7 @@
  * THE INCONCLUSIVE PROBE. "The backend said 404" and "the backend did not answer" are different
  * facts and must not be treated alike: ayin is often launched while its backend is still coming up
  * (a reboot, a redeploy), and condemning the whole session to the degraded provider because of a
- * three-second window would lose `/lock` and the model picker for hours. So an inconclusive probe
+ * three-second window would lose the model picker for hours. So an inconclusive probe
  * picks `direct` PROVISIONALLY and re-probes, at most every 30s, the next time anyone asks for the
  * provider — the status poll asks every 5s, so recovery is automatic and needs no restart.
  * The upgrade is one-way (direct → resource) and never the reverse: a held authority must not have

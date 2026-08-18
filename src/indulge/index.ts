@@ -19,7 +19,6 @@ import { getConfigString } from '../prompts.js';
 import { parseList } from './args.js';
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { acquireLlm, type LlmHold } from '../llm/authority.js';
 import { answerQuestions } from './answer.js';
 import { discoverDomain } from './discover.js';
 import { embedCorpus } from './embed.js';
@@ -605,14 +604,6 @@ export async function runIndulge(argv: string[]): Promise<number> {
     store.setProgress({ runId, stage, done, total, current, startedAt });
   const status = (note: string): void => out(`  ${note}`);
 
-  // ONE DOOR: generation goes through the resource layer as a background consumer, so a human at the
-  // keyboard is never starved by an overnight sweep. A refusal is not fatal — indulge is a guest.
-  let hold: LlmHold | null = null;
-  try {
-    hold = await acquireLlm('ayin indulge: overnight corpus build');
-    if (hold === 'busy') out('note: the model is held by someone else; queuing behind them.');
-  } catch { /* no resource layer here — the provider is reached directly */ }
-
   try {
     out(`indulge ${repoPath}`);
     out(`corpus  ${store.dir}`);
@@ -799,11 +790,5 @@ export async function runIndulge(argv: string[]): Promise<number> {
     recordAnswer(`indulge FAILED: ${msg}`);
     out(`indulge failed: ${msg}`);
     return 1;
-  } finally {
-    // Same shape as the watch daemon: only a real grant has a release, and letting it go matters —
-    // an overnight job that dies holding the authority starves every other consumer until the TTL.
-    if (typeof hold === 'object' && hold) {
-      try { await hold.release(); } catch { /* best effort — the TTL frees it anyway */ }
-    }
   }
 }
