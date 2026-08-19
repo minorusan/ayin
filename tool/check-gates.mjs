@@ -307,8 +307,11 @@ console.log('\nayin refuses to start without a model');
   const up = readFileSync(join(DIST, '..', 'src', 'updater.ts'), 'utf-8');
   ok(/function gitCheckout\(\)/.test(up) && /existsSync\(join\(root, '\.git'\)\)/.test(up),
     'the updater locates the checkout the running binary resolves to');
-  ok(/if \(checkout && !flag\('registry'\)\)/.test(up),
-    'and prefers it over the registry — the registry path is now an explicit --registry request');
+  // `has`, not `flag`: bare `ayin update --registry` (no URL) used to be dropped on the floor — the
+  // operator asking for the PUBLISHED build silently got a local rebuild instead. The flag's PRESENCE
+  // is the request; its value is optional and only overrides which registry.
+  ok(/if \(checkout && !has\('registry'\)\)/.test(up),
+    'and prefers it over the registry — the registry path is an explicit --registry request, value optional');
   ok(/'pull', '--ff-only'/.test(up) && /'npm', \['install', '--prefix', root\]/.test(up)
     && /'npm', \['run', '--prefix', root, 'build'\]/.test(up),
     'update = pull, then INSTALL (a pull can add a dependency), then build');

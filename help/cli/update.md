@@ -9,10 +9,15 @@ When the running binary resolves to a git checkout — the normal case, since ay
     --check             report what would update, without doing it
     --registry <url>    use this registry instead of the configured one
     --tag <dist-tag>    dist-tag to install (default: latest)
-    --force             reinstall/pull even when already up to date, or over a dirty tree
+    --force             reinstall/pull even when already up to date. Over a DIRTY tree it stashes the
+                        uncommitted changes (labelled, recoverable with `git stash pop`) so the pull
+                        can land — it used to skip the guard and then fail inside git, doing nothing.
+    --registry          bare: install the PUBLISHED build from the configured registry, even when the
+                        running ayin resolves to a git checkout
 
 ## Examples
 
     ayin update
     ayin update --check
+    ayin update --registry
     ayin update --registry http://<host>:4873

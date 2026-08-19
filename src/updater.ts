@@ -258,9 +258,32 @@ async function updateFromCheckout(root: string, opts: { check: boolean; force: b
   if (blocking.length && !opts.force) {
     process.stderr.write(`ayin update: ${blocking.length} uncommitted change(s) in ${root} — refusing to pull over them.\n`);
     for (const line of blocking.slice(0, 5)) process.stderr.write(`               ${line}\n`);
-    process.stderr.write('             Commit or stash them, or re-run with --force to pull anyway.\n');
+    process.stderr.write('             Commit them, or re-run with --force (which stashes them for you).\n');
     process.exit(1);
     return;
+  }
+  /**
+   * `--force` MOVES THE WORK OUT OF THE WAY. It used to only skip the guard, which is not the same
+   * thing: `git pull --ff-only` then failed on its own with "your local changes would be overwritten",
+   * so `--force` over a dirty tree reliably did nothing except print a git error — the update the
+   * operator asked for twice never happened.
+   *
+   * STASH, NEVER DISCARD. `--force` is permission to get out of the way, not permission to destroy
+   * hours of someone's uncommitted work; a `checkout`/`reset` here would be unrecoverable and this
+   * command runs unattended from a status-bar hint. The stash is labelled with the timestamp and
+   * printed, so the work is one `git stash pop` away and the operator is told so.
+   */
+  if (blocking.length && opts.force) {
+    const label = `ayin update --force ${new Date().toISOString()}`;
+    process.stdout.write(`--force: stashing ${blocking.length} uncommitted change(s) so the pull can land…\n`);
+    const stashed = await git('stash', 'push', '--include-untracked', '-m', label);
+    if (stashed.code !== 0) {
+      process.stderr.write(`ayin update: could not stash local changes — ${stashed.out.trim() || 'no detail'}\n`);
+      process.stderr.write('             Nothing was pulled; your tree is untouched.\n');
+      process.exit(stashed.code || 1);
+      return;
+    }
+    process.stdout.write(`         stashed as "${label}" — recover with: git -C ${root} stash pop\n`);
   }
   if (dirty && !blocking.length) {
     // Said out loud rather than silently swallowed: a pull over a modified lockfile is a real decision,
@@ -308,7 +331,16 @@ async function updateFromCheckout(root: string, opts: { check: boolean; force: b
   }
 
   const after = getCurrentVersionFrom(root);
-  log('INFO', 'ayin_updated_from_checkout', { root, from: current, to: after, before: before.slice(0, 7) });
+  const head = (await git('rev-parse', 'HEAD')).out.trim();
+  if (head === before) {
+    // The honest version of "nothing happened": a --force on a checkout that was ALREADY at
+    // origin/<branch> reinstalls and rebuilds the same commit. That is a real action, but it is not an
+    // update, and reporting a version that did not move reads as a no-op. Name the other door — the
+    // published build — because that is what the operator usually meant.
+    process.stdout.write(`Rebuilt the SAME commit (${head.slice(0, 7)}) — this checkout was already at origin/${branch}.\n`);
+    process.stdout.write('To install the PUBLISHED build instead of this checkout: ayin update --registry\n');
+  }
+  log('INFO', 'ayin_updated_from_checkout', { root, from: current, to: after, before: before.slice(0, 7), rebuiltSameCommit: String(head === before) });
   process.stdout.write(`ayin is now ${after} (${(await git('rev-parse', '--short', 'HEAD')).out.trim()}). Restart any running session to pick it up.\n`);
   await restartWatchDaemon(after);
 }
@@ -332,7 +364,13 @@ export async function runUpdate(argv: string[]): Promise<void> {
   // A LINKED CHECKOUT IS THE NORMAL CASE NOW, and updating the global package would change something
   // other than what runs here. `--registry` is taken as an explicit request for the old path.
   const checkout = gitCheckout();
-  if (checkout && !flag('registry')) {
+  /**
+   * `--registry` is ALSO a door, not just a value. Written bare (`ayin update --registry`) it used to
+   * be dropped on the floor — `flag()` returned undefined, the checkout path ran, and the operator who
+   * asked for the published build got a local rebuild with no hint that their flag was ignored. Bare
+   * now means "the configured registry", which is the only registry they could have meant.
+   */
+  if (checkout && !has('registry')) {
     await updateFromCheckout(checkout, { check: has('check'), force: has('force') });
     return;
   }

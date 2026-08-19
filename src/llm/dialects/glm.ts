@@ -52,6 +52,51 @@ const CALL = /<tool_call>[ \t]*([A-Za-z_][A-Za-z0-9_.-]*)?[ \t]*\r?\n?([\s\S]*?)
 /** The pairs inside one call. Each tag closes itself, so a value carrying `<` is safe. */
 const PAIR = /<arg_key>([\s\S]*?)<\/arg_key>\s*<arg_value>([\s\S]*?)<\/arg_value>/g;
 
+/**
+ * Parameters whose value is VERBATIM TEXT — source code, a file body, a replacement string.
+ *
+ * The distinction matters because unquoting is safe for one kind of argument and destructive for the
+ * other, and the parameter NAME is the only signal available here (a dialect has no tool schema).
+ * `path` cannot want its quotes; `old_str` routinely can — `"use strict"`, a quoted CSS value, a JSON
+ * fixture. Stripping those would not fail loudly, it would write subtly wrong bytes into a file, which
+ * is the worst outcome available in this file.
+ */
+const VERBATIM_PARAMS = new Set(['old_str', 'new_str', 'content', 'text', 'body', 'patch', 'code', 'replacement', 'command']);
+
+/**
+ * WHAT AN `<arg_value>` ACTUALLY CONTAINS — and why the rule differs per parameter.
+ *
+ * GLM-4.7-Flash's own `chat_template.jinja` renders every argument through `tojson`, so the format the
+ * model was TRAINED on carries `<arg_value>"src/thing.ts"</arg_value>` — quotes included, numbers bare,
+ * objects as JSON. Handed through as-is, `read_file` gets a path with literal quotes and opens nothing.
+ * Meanwhile `toolCallInstructions()` asks for BARE values, and in prompt mode the model complies. Both
+ * shapes are real, and one rule cannot serve both blindly:
+ *
+ *   - Non-string JSON (number, boolean, null, object, array) → decoded, always. Unambiguous: no bare
+ *     value looks like `{"a":1}` by accident, and a tool wanting `240` cannot want `"240"`.
+ *   - A quoted string in a STRUCTURAL parameter (`path`, `pattern`, anything not in VERBATIM_PARAMS)
+ *     → unquoted. A quoted path is never what was meant; it is the trained encoding.
+ *   - A quoted string in a VERBATIM parameter → unquoted ONLY when it carries a JSON escape
+ *     (`\n`, `\"`, `\\`, `\uXXXX`). An escape is proof of encoding — and it is exactly the case that
+ *     matters there, since a tojson'd file body arrives with its newlines escaped.
+ *   - Anything that merely LOOKS like JSON but does not parse → passed through byte for byte.
+ *
+ * In native mode none of this runs: Ollama's own glm parser consumes the call and hands over decoded
+ * `arguments`. This is the prompt-mode path, where ayin owns the parse.
+ */
+export function decodeArgValue(raw: string, key = ''): string {
+  const t = raw.trim();
+  if (!t) return t;
+  const starts = t[0];
+  const looksJson = starts === '"' || starts === '{' || starts === '[' || t === 'true' || t === 'false' || t === 'null' || /^-?\d/.test(t);
+  if (!looksJson) return t;
+  let parsed: unknown;
+  try { parsed = JSON.parse(t); } catch { return t; } // starts like JSON, is not JSON — a bare value
+  if (typeof parsed !== 'string') return typeof parsed === 'object' ? JSON.stringify(parsed) : String(parsed);
+  if (!VERBATIM_PARAMS.has(key.trim())) return parsed; // a quoted path is an encoding, never a value
+  return /\\[nrt"\\u/]/.test(t) ? parsed : t;
+}
+
 /** The shape an earlier ayin build taught this model: `<name><param>value</param></name>`. */
 const LEGACY = /<([a-z][a-z0-9_]{2,40})>([\s\S]*?)<\/\1>/g;
 const LEGACY_CHILD = /<([a-z][a-z0-9_]{0,40})>([\s\S]*?)<\/\1>/g;
@@ -67,16 +112,56 @@ function fencedRanges(raw: string): Array<[number, number]> {
 
 export class GlmDialect extends XmlToolCallDialect {
   readonly id = 'glm';
+  /**
+   * GLM CANNOT DO PROMPT MODE AT ALL, and the reason is the tokenizer, not the prompt.
+   *
+   * `<tool_call>`, `<arg_key>` and `<arg_value>` are SPECIAL TOKENS in this family's vocabulary. The
+   * runtime strips special tokens from the text it returns, and with no `tools` array declared there is
+   * no parser to collect them either — so the call is not mangled, it is DELETED. Measured through the
+   * gateway on glm-4.7-flash:q4_K_M, three runs: `evalTokens=13, thinkingChars=0, content=""` — the
+   * model spoke thirteen tokens and every field came back blank. A fourth run leaked the tail of one
+   * call as text (`…</arg_value>\n</tool_call>`), which is the same thing seen from the other side: the
+   * opening tokens were consumed, the plain-text remainder was not.
+   *
+   * The agent's own report of that: "Tool calls: 0 · No evidence gathered — nothing was read", after a
+   * task whose first step was to read one file. Nothing in a prompt can fix a token that is removed
+   * before the text exists, so the schemas must go to the runtime. Same conclusion the qwen3.5 parser
+   * forced (see qwen.ts) — different mechanism, identical remedy.
+   */
+  readonly requiresNativeTools = true;
   matches(modelId: string): boolean { return /\bglm[-_.]?\d/i.test(modelId); }
   toolCallInstructions(): string { return TOOL_CALL_FORMAT; }
 
-  /** True when the reply opens a call it never closed — a cut-off generation, not a refusal. */
+  /**
+   * True when the reply opens a call it never closed — a cut-off generation, not a refusal.
+   *
+   * THE LEGACY SCAN HAS TO BE NARROW, because the shape it looks for (`<word>`) is also ordinary prose
+   * in half the languages this agent reads. Measured against the shipped parser: `Dictionary<string,
+   * float>` in a sentence returned TRUE, and so did `public List<string> Names;` inside a fenced code
+   * block — so in a C# repo any answer that mentioned a generic was classified as a truncated
+   * generation and cost a retry round. Two conditions fix it without weakening the real case:
+   *
+   *   - FENCES ARE EXCLUDED, exactly as `parse()` already excludes them. Code the model is showing you
+   *     is not code the model is calling.
+   *   - THE OPENER MUST START A LINE. A tool call is emitted at the start of a line; a generic
+   *     parameter appears mid-sentence, after a word or an identifier.
+   *
+   * The `<tool_call>` count above is untouched: that tag is unambiguous, and an unbalanced one is a
+   * cut-off call whether it sits in a fence or not.
+   */
   truncated(raw: string): boolean {
     const opens = (raw.match(/<tool_call>/g) ?? []).length;
     const closes = (raw.match(/<\/tool_call>/g) ?? []).length;
     if (opens > closes) return true;
-    const openLegacy = [...raw.matchAll(/<([a-z][a-z0-9_]{2,40})>/g)].map((m) => m[1]);
-    return openLegacy.some((n) => TOOL_NAME.test(n) && !ENVELOPE.includes(n) && !raw.includes(`</${n}>`));
+    const fences = fencedRanges(raw);
+    const inFence = (at: number): boolean => fences.some(([a, b]) => at >= a && at < b);
+    for (const m of raw.matchAll(/^[ \t]*<([a-z][a-z0-9_]{2,40})>/gm)) {
+      const name = m[1];
+      if (inFence(m.index ?? 0)) continue;
+      if (!TOOL_NAME.test(name) || ENVELOPE.includes(name)) continue;
+      if (!raw.includes(`</${name}>`)) return true;
+    }
+    return false;
   }
 
   parse(raw: string): ParseAllResult {
@@ -89,7 +174,7 @@ export class GlmDialect extends XmlToolCallDialect {
       const [, name, inner] = m;
       const params: Record<string, string> = {};
       PAIR.lastIndex = 0;
-      for (let p = PAIR.exec(inner); p; p = PAIR.exec(inner)) params[p[1].trim()] = p[2].trim();
+      for (let p = PAIR.exec(inner); p; p = PAIR.exec(inner)) params[p[1].trim()] = decodeArgValue(p[2], p[1]);
 
       if (name) {
         mark(m.index);

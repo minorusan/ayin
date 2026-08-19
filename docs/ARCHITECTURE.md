@@ -365,6 +365,28 @@ dialect  ── toolCallInstructions (→ system prompt) · parse(raw) · render
   gateway forwards no tools array — and `glimmer.go` bails out of tool extraction on
   `len(p.tools) == 0` — so the markup survives into the reply text and something must read it.
 
+- **`dialects/glm.ts`** — GLM 4.5/4.6/4.7: `<tool_call>NAME` on the opening line, then alternating
+  `<arg_key>`/`<arg_value>` pairs, closed with `</tool_call>`. Taken from `zai-org/GLM-4.7-Flash`'s own
+  `chat_template.jinja`, which also `tojson`s every argument — so the trained format carries
+  `<arg_value>"src/thing.ts"</arg_value>`, quotes included. `decodeArgValue()` unwraps that, and the rule
+  is deliberately per-parameter: non-string JSON always decodes, a quoted string decodes for structural
+  parameters (`path`, `pattern`), and for VERBATIM parameters (`old_str`, `content`, `command`, …) only
+  when it carries a JSON escape. Source text that legitimately begins and ends with a quote —
+  `"use strict"` — must keep it: unquoting there does not fail loudly, it writes wrong bytes into a file.
+
+  **`requiresNativeTools = true`, and for GLM it is not a preference.** `<tool_call>`/`<arg_key>`/
+  `<arg_value>` are SPECIAL TOKENS in this family's vocabulary: the runtime strips them from the text it
+  returns, and with no `tools` array there is no parser to collect them either, so a call is not mangled
+  — it is DELETED. Measured through the gateway on `glm-4.7-flash:q4_K_M`: `evalTokens=13`,
+  `thinkingChars=0`, `content=""` on three consecutive rounds, and the agent reported
+  "Tool calls: 0 · nothing was read" for a task whose first step was to read one file. A fourth run
+  leaked the *tail* of a call as text (`…</arg_value></tool_call>`) — the opening tokens consumed, the
+  remainder not. Nothing in a prompt can fix a token removed before the text exists, so the schemas go
+  to the runtime; the parse path above remains for the leaked-remnant and legacy cases.
+  `truncated()` also excludes fenced code and requires a line-start opener, because `Dictionary<string,
+  float>` in prose was being read as a cut-off call — a wasted retry round on every mention, in a C# repo.
+  Gate: `npm run check:glm`.
+
 **Adding a model family** = implement `ModelDialect` (or extend `XmlToolCallDialect`) and
 register it in `manager.ts`'s `DIALECTS`. A few lines. Insert **before** `GemmaDialect`: `DEFAULT` is
 derived from the last entry, so appending would silently change the fallback for every unmatched model.
