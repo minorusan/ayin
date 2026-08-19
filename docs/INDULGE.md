@@ -481,6 +481,14 @@ of an import says so.
 staleness pass still labels every chunk describing code this checkout has since changed. The address
 lives on the command line or in the operator's config — never in this repo, which is public.
 
+## Retrieval rides along with `explore`
+
+The corpus is not only a tool the agent may call. An `explore` result — a deterministic localization —
+carries the `functionality` chunks nearest the same question below it, semantic pass only, above a 0.55
+similarity floor, labelled as corpus prose rather than file bytes. The reasoning for each of those
+choices is in ARCHITECTURE.md under "What the corpus already knows, appended"; the short version is that
+the agent's next question after "where is it" is "what does it do", and that answer already exists.
+
 ## `--jira <EPIC>` — the half of the answer that is not in the repository
 
 The corpus above is built from code, and code cannot say what the code was supposed to do. The required

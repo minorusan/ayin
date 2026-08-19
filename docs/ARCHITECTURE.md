@@ -636,6 +636,38 @@ Because it is sub-second and honest, it is meant to be called **repeatedly and n
 answer points at the next question rather than trying to be exhaustive once. **"NOTHING FOUND" is a
 real answer** and is reported as one, compactly, with the strategies that came back empty.
 
+### What the corpus already knows, appended (`explore/corpus.ts`)
+
+A localization tells the agent WHERE; its very next question is what that code DOES — which an overnight
+corpus has already answered, with citations. Making it fetch that separately costs a round, and the model
+has to think of it, which mostly it did not. So an explore result carries a corpus block below it:
+
+- **Semantic only.** A vector pass over the question, no keyword fallback — the localization above IS the
+  keyword answer, and a second keyword match over the same terms is tokens without information. No vectors
+  from the currently configured embedding model → no block, because "not embedded yet" is not "nothing
+  known".
+- **`functionality` only.** Of the five shipped categories the other four answer questions nobody asked at
+  this moment: `git` is history, `dependencies` and `connections` restate the reference graph the walk just
+  followed, `gotchas` warns about a change that has not been made. A `ticket` chunk (`indulge --jira`) is
+  out too — a requirement is not a description of the code.
+- **A similarity FLOOR (0.55), which `corpus_search` deliberately lacks.** The difference is who asked:
+  there the agent typed a query and top-K beats a threshold, because a weak match it can judge beats
+  "nothing matched". Here nothing asked, so a weak match is not a hint — it is a distractor injected into
+  every explore result, which is the measured way to degrade the rest of the prompt.
+- **Labelled, and below the findings.** `format.ts` guarantees every character it emits is a file byte, a
+  counted number or a closed-set label; a corpus answer is model prose from another run. It says so, names
+  the model and date, carries its citations, and never mixes into the findings above it.
+- **Never fatal, never silent.** A failed or slow embedding call returns one line naming the reason (a
+  timeout is reported as "slow or busy" — a fact about the machine), because a silent fallback once cost
+  four rounds of debugging: the wrong answer read as a bad corpus rather than as a pass that never ran.
+  Measured live while the card was busy: the 8s query budget expired and the block said exactly that.
+- Recomputed on a cache HIT as well, so an `indulge --embed` that finished mid-session shows up on the next
+  call instead of after a restart.
+
+Gate: `npm run check:explore-corpus` — hermetic (throwaway corpus root, hand-written vectors, stubbed
+embedding endpoint): category and reject filtering against an identical vector, the floor, the absent-block
+cases, and both failure messages.
+
 ### The term is usually a suffix, not the whole name
 
 English asks for "the time bonus"; the code calls it `GetTimeBonus()`. A definition probe anchored as

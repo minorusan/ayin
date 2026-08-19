@@ -34,6 +34,7 @@ import { typescript } from './projects/typescript.js';
 import { generic } from './projects/generic.js';
 import type { Attempt, ExploreResult, Finding, ProjectExplorer } from './types.js';
 import { exploreCacheGet, exploreCacheKey, exploreCacheSet } from './cache.js';
+import { exploreCorpusBlock } from './corpus.js';
 
 /** Most specific first; `generic` always matches. */
 const EXPLORERS: ProjectExplorer[] = [unity, typescript, generic];
@@ -152,9 +153,12 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   if (cached) {
     toolReport(`explore · already searched ${search.join(', ')} this session — same answer, no re-run`);
     toolLog().info('explore_cache_hit', { project: explorer.id, terms: String(search.length) });
+    // The corpus block is NOT cached with the body: it is recomputed here so an `indulge --embed` that
+    // finished mid-session shows up on the next call instead of after a restart.
+    const knownAgain = await exploreCorpusBlock(root, question);
     return `You already searched these exact terms this session (${search.join(', ')}) and nothing has `
       + `changed since. This is that same result — asking again will not produce more. Search for `
-      + `something different, or use what is here.\n\n${cached}`;
+      + `something different, or use what is here.\n\n${cached}${knownAgain ? `\n${knownAgain}` : ''}`;
   }
 
   if (search.length === 0) {
@@ -281,7 +285,10 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   toolReport(`explore → ${result.findings.length} finding(s) in ${result.elapsedMs}ms`);
   const formatted = formatResult(result);
   exploreCacheSet(cacheKey, formatted);
-  return formatted;
+  // What the corpus already answered about this question, semantically, `functionality` only. Appended
+  // AFTER the cache write: the deterministic body is what is worth caching, the corpus moves under it.
+  const known = await exploreCorpusBlock(root, question);
+  return known ? `${formatted}\n${known}` : formatted;
 }
 
 export { relative, sep };

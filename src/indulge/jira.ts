@@ -250,7 +250,15 @@ export async function runJiraIndulge(opts: JiraRunOptions): Promise<JiraRunRepor
     }
 
     // ── answers ─────────────────────────────────────────────────────────────────
+    //
+    // PROGRESS PER ANSWER, not only per ticket. A ticket with six questions is minutes of model time, and
+    // reporting only at its start makes a working run look hung for exactly as long as the ticket is
+    // interesting. `done` stays in tickets — one unit, all the way through — and the question counter rides
+    // in `current`, which is where a mixed unit belongs.
+    let n = 0;
     for (const q of asked) {
+      n++;
+      opts.onProgress?.(index, total, `${doc.key} · question ${n}/${asked.length}`);
       if (stop()) { report.stopped = true; break; }
       if (answeredThisRun >= budget) { report.stopped = true; break; }
       const id = chunkId(store.key, doc.path, null, JIRA_CATEGORY, q.id);
