@@ -86,9 +86,12 @@ export function lastAssistantMessage(): string {
   return _lastAssistant;
 }
 
-export function addMessage(role: MessageRole, content: string): void {
-  if (role === 'assistant') _lastAssistant = content;
-  chat.add(role, content);
+export function addMessage(role: MessageRole, content: string, opts?: { interim?: boolean }): void {
+  // `_lastAssistant` is what something OUTSIDE the terminal shows as the reply (a diff-page comment
+  // thread). A mid-turn note is not the reply, so it must not overwrite it — otherwise the page reports
+  // "let me check the mapper first" as the answer to the comment it asked about.
+  if (role === 'assistant' && !opts?.interim) _lastAssistant = content;
+  chat.add(role, content, opts?.interim === true);
 }
 
 export function updateLastAssistant(content: string): void {

@@ -55,6 +55,15 @@ export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 export interface Message {
   role: MessageRole;
   content: string;
+  /**
+   * MID-TURN prose: what the model says on its way somewhere, not its answer.
+   *
+   * The pre-tool sentence ("let me check the mapper first") and the answer used to render identically —
+   * same glyph, same margin, same white — so a turn with six tool calls put seven things on screen that
+   * all looked like conclusions, and the actual conclusion was the one that happened to be last. This
+   * is the same text, set one tab further in and paler: still readable, visibly on the way.
+   */
+  interim?: boolean;
 }
 
 export class ChatLog {
@@ -167,7 +176,7 @@ export class ChatLog {
     return `  {${theme.faint}-fg}ᵍᵒᵃˡ ${escapeBlessedTags(text)}{/}`;
   }
 
-  add(role: MessageRole, content: string): void {
+  add(role: MessageRole, content: string, interim = false): void {
     if (HEADLESS) {
       // Strip TUI markup here, at the one place headless output is written, rather than asking every
       // call site to know which mode it is in. The widget owns how a message looks; in headless, how
@@ -177,7 +186,7 @@ export class ChatLog {
       else process.stderr.write(`[${role}] ${plain}\n`);
       return;
     }
-    this.messages.push({ role, content });
+    this.messages.push({ role, content, ...(interim ? { interim: true } : {}) });
     this.redraw();
   }
 
@@ -267,6 +276,16 @@ export class ChatLog {
         for (const line of msg.content.split('\n')) {
           lines.push(`{${theme.accent}-fg}▌{/} {bold}${escapeBlessedTags(line)}{/bold}`);
         }
+      } else if (msg.role === 'assistant' && msg.interim) {
+        // ON THE WAY, NOT THE ANSWER. A tab in from the answer's margin (level with the tool cards it
+        // introduces, because that is what it is about) and in `subtle` — the same pale the system
+        // notices use, which was chosen because `dim` read as black on a real terminal. Markdown is
+        // deliberately NOT rendered here: it would emit its own colour tags inside this one.
+        lines.push('');
+        msg.content.split('\n').forEach((line, i2) => {
+          const glyph = i2 === 0 ? `{${theme.accentDim}-fg}\u25E6{/} ` : '  ';
+          lines.push(`${TOOL_INDENT}${glyph}{${theme.subtle}-fg}${escapeBlessedTags(line)}{/}`);
+        });
       } else if (msg.role === 'assistant') {
         lines.push('');
         // The goal watermark rides above the answer, so the anchor is in view while READING it.

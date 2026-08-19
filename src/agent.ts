@@ -1137,9 +1137,11 @@ async function runAgentTurn(userInput: string): Promise<void> {
     // when the question is "why did it call that", and it is the first thing every other record drops.
     transcribeResponse(round, activeModelId(), response, parsed.toolCalls.length);
 
-    // For tool-call rounds: print pre-tool reasoning immediately (both modes)
+    // For tool-call rounds: print pre-tool reasoning immediately (both modes).
+    // Marked INTERIM: this is prose on the way to a tool call, and the TUI sets it a tab in and paler so
+    // a turn with six calls does not put seven answer-looking paragraphs on screen (ui/widgets/chat.ts).
     if (hasToolCalls && parsed.text) {
-      addMessage('assistant', parsed.text);
+      addMessage('assistant', parsed.text, { interim: true });
       lastPrintedText = parsed.text;
     }
 
