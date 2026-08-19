@@ -338,6 +338,51 @@ export async function qaGate(
     setActivityDetail(`checking ${ctx.type} project facts`);
     const facts = await executor.probe(ctx, files);
 
+    /**
+     * FACTS-ONLY PROJECT TYPES STOP HERE.
+     *
+     * A project type may declare (`ExecutorConfig.factsOnly`) that its deterministic facts ARE the gate:
+     * no criteria are derived, no evidence is gathered, and the judge is never asked. Unity is the case
+     * that forced it — "does the C# compile" is the floor, and everything the generic path asked of a
+     * Unity project was either wrong for the type (a README needing "a parts list and a pin map", which
+     * hard-failed every turn on a real repo) or unmeasurable without launching the editor.
+     *
+     * Placed here, before `deriveCriteria`, because the point is to spend nothing: two LLM calls per pass
+     * saved on a turn whose verdict is a compiler's.
+     */
+    if (executor.config.factsOnly) {
+      const failures = hardFailingFacts(facts);
+      if (failures.length === 0) {
+        recordQa('pass', pass, `${ctx.type}: ${facts.map((f) => f.key).join(', ') || 'no facts'}`, 0);
+        return {
+          action: 'pass', pass, maxPasses, verdict: { verdict: 'pass', summary: facts.map((f) => f.detail).join('\n'), issues: [] },
+          card: { kind: 'pass', title: `QA PASS ${pass}/${maxPasses} · ${ctx.type}`, body: facts.map((f) => f.detail) },
+        };
+      }
+      const willFix = pass < maxPasses;
+      const issues: QaIssue[] = failures.map((f) => ({
+        criterion: f.key, file: ctx.root,
+        problem: f.detail.split('\n')[0],
+        fix: 'fix exactly what the tool reported — it is measured, not judged',
+      }));
+      const verdict: QaVerdict = { verdict: 'fail', summary: `${ctx.type}: ${failures.length} deterministic check(s) failed.`, issues };
+      turn.lastIssues = issues;
+      recordQa('fail', pass, verdict.summary, issues.length);
+      log('INFO', 'qa_facts_only_fail', { project: ctx.type, keys: failures.map((f) => f.key).join(',') });
+      const card = failCard(pass, maxPasses, verdict, willFix);
+      if (!willFix) return { action: 'exhausted', pass, maxPasses, verdict, card };
+      return {
+        action: 'fix', pass, maxPasses, verdict, card,
+        feedback: [
+          `<system>QA GATE — pass ${pass} of ${maxPasses}: ${failures.length} MEASURED check(s) failed on this ${ctx.type} project. A compiler said this; there is nothing to argue with.`,
+          '',
+          ...failures.map((f, n) => `${n + 1}. [${f.key}] ${f.detail}`),
+          '',
+          'Fix exactly these. Then report what you changed.</system>',
+        ].join('\n'),
+      };
+    }
+
     const webview = await probeWebview(files);
     const api = probeThirdPartyApi(files);
     const dims: Set<Dimension> = dimensionsOf(files, webview.applies, api.applies);

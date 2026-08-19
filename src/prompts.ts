@@ -167,6 +167,10 @@ export const KNOWN_CONFIG_KEYS = [
   // `/testrun`: where the NUnit console runner and the matching Unity Editor live. Both are
   // machine-specific paths, so both are config with detection as the fallback.
   'nunitConsole', 'unityPath',
+  // The QA gate's Unity compile check: how long `Unity -batchmode` may take before the fact is reported
+  // as unverified instead of failed. A first import of a large project can exceed the 20-minute default,
+  // and a timeout must never read as "your code does not compile".
+  'unityCompileTimeoutMs',
 ];
 
 export function getConfigString(key: string): string | undefined {

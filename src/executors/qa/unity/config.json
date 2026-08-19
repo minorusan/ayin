@@ -1,0 +1,10 @@
+{
+  "id": "unity",
+  "kind": "qa",
+  "projectTypes": [
+    "unity"
+  ],
+  "priority": 10,
+  "factsOnly": true,
+  "description": "Unity QA — ONE deterministic check: does the C# compile. Batch-mode compile when the editor is closed; the editor's own Library/ScriptAssemblies result when it is open (Unity writes a DLL only on success). factsOnly, so no criteria are derived and the judge is not consulted: everything the generic gate asked of a Unity project was either wrong for the type (a README 'parts list and pin map') or unmeasurable without launching the editor."
+}

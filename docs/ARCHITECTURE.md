@@ -1164,6 +1164,37 @@ intent → criteria (once per turn) → probes → review → pass? done
   shapes, whether 429s are handled at all — and the criterion fails a change that shows no sign the
   current API was actually looked up. Recalled API knowledge is the failure that passes every review and
   breaks only against the live service.
+- **Unity is a `factsOnly` project type: the gate is ONE compile check and nothing else**
+  (`executors/qa/unity`). Before it existed a Unity project fell to `qa/base`, whose only contributed
+  fact is `readme-substance` — marked `hard`, so it fails the gate without the judge. Measured on a real
+  Unity repo: a 56-byte root README produced *"README.md is only 54 chars — too short to carry a parts
+  list and a pin map"*, Arduino wording from the Arduino scaffold check, on all three passes of every
+  qualifying turn, whatever the work was — while the judge was handed generic code/docs criteria and no
+  compile result at all. So the executor declares `factsOnly: true` in its config and `runQaGate` stops
+  after the facts: no criteria derived, no evidence gathered, no judge (two LLM calls per pass saved).
+  Compilation is the floor — an answer about code that does not compile is not worth reviewing — and
+  everything else the generic path asked was either wrong for the type or unmeasurable without launching
+  the editor.
+
+  **The check has two paths, because on a working machine the editor is usually open:**
+  - **editor CLOSED** → `Unity -batchmode -quit -nographics -projectPath …`, then read the log.
+    `error CS…` lines are the verdict, NOT the exit code: Unity exits non-zero for a licence problem or a
+    missing module too, so a non-zero exit with no CS errors is reported as unverified *with* the exit
+    code and the log tail. Editor discovery is `testrun/run.ts` `unityBinary` — on macOS
+    `/Applications/Unity/Hub/Editor/<version>/Unity.app/Contents/MacOS/Unity`, version from
+    `ProjectSettings/ProjectVersion.txt`, overridable with `/set unity-path`.
+  - **editor OPEN** → read what it already built. Unity writes `Library/ScriptAssemblies/<Assembly>.dll`
+    only on a SUCCESSFUL compile and leaves the previous DLL in place on a failure, so a DLL newer than
+    every source under its asmdef is positive proof for that assembly. Batch mode here would be wrong
+    twice over: it cannot take `Temp/UnityLockfile`, and killing the operator's editor to answer a QA
+    question is not something a read-only probe may do.
+
+  **Unverified is never a failure**: no install, a batch run past `unityCompileTimeoutMs` (default 20 min),
+  or an assembly the editor has not rebuilt yet each yield a non-`hard` fact naming the case and what
+  would make it answerable. A gate that blocks a finished answer on "I could not check" is a worse bug
+  than the ones it catches. Gate: `npm run check:qa-unity` (synthetic Unity projects on disk; spawning a
+  real editor and the macOS Hub path are named there as NOT covered rather than faked).
+
 - **Project-type bars are chosen by the QA EXECUTOR, not by file shape.** `dimensionsOf` used to
   compute two extra Arduino dimensions from a probe; the Arduino bars are now requested **by id** from
   `executors/qa/arduino`, which selects them from its own deterministic facts — it knows whether a

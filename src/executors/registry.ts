@@ -32,6 +32,7 @@ import { basePlanExecutor } from './plan/base/index.js';
 import { arduinoPlanExecutor } from './plan/arduino/index.js';
 import { baseQaExecutor } from './qa/base/index.js';
 import { arduinoQaExecutor } from './qa/arduino/index.js';
+import { unityQaExecutor } from './qa/unity/index.js';
 import { basePresentExecutor } from './present/base/index.js';
 import { arduinoPresentExecutor } from './present/arduino/index.js';
 
@@ -41,6 +42,7 @@ const INSTANCES: Record<string, AnyExecutor> = {
   'plan/arduino': arduinoPlanExecutor,
   'qa/base': baseQaExecutor,
   'qa/arduino': arduinoQaExecutor,
+  'qa/unity': unityQaExecutor,
   'present/base': basePresentExecutor,
   'present/arduino': arduinoPresentExecutor,
 };
@@ -86,7 +88,16 @@ function parseConfig(path: string, kind: ExecutorKind, id: string): ExecutorConf
   if (typeof o.description !== 'string' || !o.description.trim()) {
     throw new Error(`executor config ${path}: "description" must be a non-empty string`);
   }
-  return { id, kind, projectTypes: o.projectTypes, priority: o.priority, description: o.description };
+  if (o.factsOnly !== undefined && typeof o.factsOnly !== 'boolean') {
+    throw new Error(`executor config ${path}: "factsOnly" must be a boolean when present`);
+  }
+  // `factsOnly` is carried through, not dropped. The config file is the DECLARATION — the doc at the top
+  // of this file says so — and a field the parser silently discards makes the file a lie about behaviour
+  // the code takes from the TS literal instead. Both halves must say the same thing.
+  return {
+    id, kind, projectTypes: o.projectTypes, priority: o.priority, description: o.description,
+    ...(o.factsOnly === true ? { factsOnly: true } : {}),
+  };
 }
 
 /**

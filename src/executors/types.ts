@@ -60,6 +60,15 @@ export interface ExecutorConfig {
   priority: number;
   /** One line, shown by `/executors` and in the plan header — why this handler exists. */
   description: string;
+  /**
+   * This kind's gate is DETERMINISTIC ONLY: stop after the facts, derive no criteria, ask no judge.
+   *
+   * For a project type where the measurable check is the whole point — Unity, where "does the C# compile"
+   * is the floor and everything else the generic gate asked was either wrong for the type or
+   * unmeasurable without launching the editor. Declared in the config so the answer is readable without
+   * a compiler, like every other selection fact here. Only meaningful for `kind: 'qa'`.
+   */
+  factsOnly?: boolean;
 }
 
 /**

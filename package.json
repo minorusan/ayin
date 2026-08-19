@@ -1,6 +1,6 @@
 {
   "name": "ayin",
-  "version": "1.0.371",
+  "version": "1.0.372",
   "license": "MIT",
   "description": "A small, model-agnostic terminal coding agent — an agentic loop in your shell against a self-hosted LLM (Ollama or any OpenAI-compatible endpoint).",
   "type": "module",
@@ -53,7 +53,8 @@
     "check:vision": "node tool/check-vision.mjs",
     "check:parser": "node tool/check-parser.mjs",
     "check:glm": "node tool/check-glm.mjs",
-    "check:rename": "node tool/check-rename.mjs"
+    "check:rename": "node tool/check-rename.mjs",
+    "check:qa-unity": "node tool/check-qa-unity.mjs"
   },
   "dependencies": {
     "blessed": "^0.1.81",
