@@ -1176,7 +1176,31 @@ intent → criteria (once per turn) → probes → review → pass? done
   everything else the generic path asked was either wrong for the type or unmeasurable without launching
   the editor.
 
-  **Three paths, tried in this order** — the first one needs no editor launch at all, which is why it is
+  **Five deterministic facts, and the compile is only one of them** (`executors/qa/unity/shape.ts`). Each
+  is decidable from the repo's own files, which is why the agent is told a CONSEQUENCE rather than asked to
+  consider a possibility. The four `certain` ones are `hard` — the gate fails on them without a judge:
+  - **`unity-asmdef-reference`** — a file compiles into exactly one assembly (nearest ancestor `.asmdef`,
+    else the predefined `Assembly-CSharp`) and a type it names is declared in exactly one assembly, found
+    by scanning declarations. If the second is neither the first nor in the first's `references`, that is
+    CS0246 by construction. Unity's wrinkle is honoured: `autoReferenced` makes an assembly visible to the
+    PREDEFINED assemblies only, never to another asmdef, so the rule differs by which side the file is on.
+  - **`unity-editor-api`** — `using UnityEditor` in a file whose assembly is not `includePlatforms:
+    ["Editor"]`. It compiles in the editor and fails the PLAYER build, which is the expensive way to find
+    out.
+  - **`unity-root-namespace`** — the `.asmdef` declares `rootNamespace`; a file whose namespace is neither
+    it nor a child of it contradicts the assembly's own statement. (Namespace-matches-folder is NOT
+    asserted — Unity does not require it. It is compared against what the sibling files declare and
+    reported as a soft fact.)
+  - **`unity-serialize-field`** — `[SerializeField]`/public on a type Unity cannot store: `Dictionary<,>`,
+    an interface without `[SerializeReference]`, `object`, `System.Type`, a delegate. Unity stores nothing
+    and reports nothing; the field is empty at runtime. Closed set, so membership is a fact.
+  - **`unity-serialized-layout`** (soft, PASSES) — a serialized field was ADDED to a MonoBehaviour or
+    ScriptableObject, and N existing prefabs/scenes/assets carry that script (counted by the GUID in its
+    `.meta`). Those store fields BY NAME, so each takes the default for the new one. What was added comes
+    from `git diff -U0`, so "a field was added this turn" is measured rather than remembered. This is a
+    consequence to state and often a migration to write — not a mistake to block.
+
+  **Three compile paths, tried in this order** — the first one needs no editor launch at all, which is why it is
   first (`executors/qa/unity/compile.ts`):
   - **the GENERATED PROJECT** (`.sln`/`.csproj`). The editor has already written down everything a
     compiler needs — the source list, the reference DLLs with absolute paths, the defines, the language

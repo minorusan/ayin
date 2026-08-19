@@ -47,6 +47,7 @@ import { getConfig } from '../../../prompts.js';
 import {
   buildAsmdefIndex, compiledState, isUnityProject, owningAsmdef, unityHasProjectOpen, unityVersion,
 } from '../../../testrun/asmdef.js';
+import { addedFieldNames, inspectFile, typeOwners } from './shape.js';
 import { unityBinary } from '../../../testrun/run.js';
 import {
   buildSolution, compileWithCsc, generatedProjects, parseCsErrors, projectsCovering, readCsproj, unityCsc,
@@ -88,32 +89,92 @@ export const unityQaExecutor: QaExecutor = {
      * no compiler at all) do the older paths run: batch mode if nothing holds the lock, else the
      * DLL-freshness reading. Each fallback says why it was reached.
      */
+    /**
+     * THE SHAPE FACTS RUN WHATEVER THE COMPILER SAYS, and before it.
+     *
+     * They answer a different question. A compiler tells you the code is wrong NOW, on this machine, with
+     * this editor's assemblies already built; these say what an edit did to the project's own rules —
+     * an asmdef that does not reference the assembly a new field's type lives in, `UnityEditor` in code
+     * that ships to the player, a namespace that contradicts the assembly's `rootNamespace`, a
+     * `[SerializeField]` Unity will silently ignore, a serialized field added to a script that 40 prefabs
+     * already carry. The first three the compiler eventually reports (or the PLAYER build does, which is
+     * worse); the last two it never reports at all, because the damage is to data.
+     *
+     * All of it is decidable from the files, which is why it is a fact and not a criterion for a judge.
+     */
+    const shape = inspectShape(repo, cs);
+
     const fromProject = compileGenerated(repo, cs);
-    if (fromProject) return [fromProject];
+    if (fromProject) return [...shape, fromProject];
 
     // ── the editor is open: read what it compiled, never take the lock from it ──
     if (unityHasProjectOpen(repo)) {
-      return [fromCompiledDlls(repo, cs)];
+      return [...shape, fromCompiledDlls(repo, cs)];
     }
 
     // ── the editor is closed: compile for real ──
     const unity = unityBinary(repo);
     if (!unity) {
       const version = unityVersion(repo) ?? 'unknown version';
-      return [{
+      return [...shape, {
         key: 'unity-compile',
         ok: true,
         hard: false,
         detail: `NOT VERIFIED: no Unity ${version} install found. Point ayin at one with \`/set unity-path <path to the Unity executable>\` — on macOS that is /Applications/Unity/Hub/Editor/<version>/Unity.app/Contents/MacOS/Unity`,
       }];
     }
-    return [batchCompile(repo, unity)];
+    return [...shape, batchCompile(repo, unity)];
   },
 
   /** No criteria: `factsOnly` means the judge is not consulted at all for this project type. */
   criteria(): string[] {
     return [];
   },
+};
+
+/**
+ * The deterministic namespace/asmdef/serialization facts for the changed `.cs` files.
+ *
+ * ONE fact per KIND rather than one per file, so a rename that touches twenty files does not produce
+ * twenty rows of the same sentence — the detail lists the files under a headline that carries the count
+ * (which is also what keeps the operator's card to one line while the agent gets every location).
+ *
+ * `certain` findings become `hard`: they are mechanical consequences, and a model weighing them is how
+ * "enforce" quietly becomes "mention". The rest are reported and pass.
+ */
+function inspectShape(repo: string, cs: ChangedFile[]): ProbeFact[] {
+  if (!cs.length) return [];
+  const index = buildAsmdefIndex(repo);
+  const owners = typeOwners(repo, index);
+  const byKind = new Map<string, { certain: boolean; lines: string[] }>();
+  for (const f of cs) {
+    if (!f.exists) continue;
+    let source = '';
+    try { source = readFileSync(f.path, 'utf-8'); } catch { continue; }
+    const findings = inspectFile({ repo, file: f.path, source, index, owners, addedFields: addedFieldNames(repo, f.path) });
+    for (const fi of findings) {
+      const slot = byKind.get(fi.kind) ?? { certain: fi.certain, lines: [] };
+      slot.certain = slot.certain || fi.certain;
+      slot.lines.push(fi.line);
+      byKind.set(fi.kind, slot);
+    }
+  }
+  return [...byKind.entries()].map(([kind, { certain, lines }]) => ({
+    key: `unity-${kind}`,
+    ok: !certain,
+    hard: certain,
+    detail: [`${HEADLINE[kind] ?? kind}: ${lines.length} place(s)`, ...lines.slice(0, 8).map((l) => `  ${l}`), ...(lines.length > 8 ? [`  … ${lines.length - 8} more`] : [])].join('\n'),
+  }));
+}
+
+/** One line per kind, so the operator's card says what happened without the list. */
+const HEADLINE: Record<string, string> = {
+  'asmdef-reference': 'MISSING ASMDEF REFERENCE',
+  'editor-api': 'UnityEditor IN A RUNTIME ASSEMBLY',
+  'root-namespace': 'NAMESPACE CONTRADICTS THE ASSEMBLY rootNamespace',
+  'serialize-field': 'SERIALIZED FIELD UNITY CANNOT STORE',
+  'serialized-layout': 'SERIALIZED LAYOUT CHANGED',
+  'namespace-sibling': 'namespace differs from its folder',
 };
 
 /**

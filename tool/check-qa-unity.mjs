@@ -18,7 +18,7 @@
  *   · the `error CS…` parser reads real Unity log lines, and reports the file, line and code
  */
 
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -192,6 +192,89 @@ ok(parseCsErrors('X.cs(1,2): error CS0103: nope\nX.cs(1,2): error CS0103: nope')
 ok(unityCsc('/nowhere/Unity.app/Contents/MacOS/Unity') === null, 'no Roslyn under a nonexistent editor is null, not a throw');
 
 rmSync(gen, { recursive: true, force: true });
+
+// ── the deterministic namespace / asmdef / serialization facts ───────────────────
+//
+// Each of these is decidable from the files, which is the whole claim: the agent is told a consequence,
+// not asked to consider a possibility. Built on a synthetic project with two assemblies so the reference
+// rule has something real to be wrong about.
+
+console.log('\nnamespace + asmdef, deterministically');
+const { readCsFacts, isSerialized, inspectFile, typeOwners, visibleAssemblies, addedFieldNames } =
+  await import(`file://${join(ROOT, 'dist', 'executors', 'qa', 'unity', 'shape.js')}`);
+const { buildAsmdefIndex, owningAsmdef } = await import(`file://${join(ROOT, 'dist', 'testrun', 'asmdef.js')}`);
+
+const sp = unityProject();
+// Assembly A (runtime, no reference to B), assembly B (declares Weapon), and an editor-only assembly.
+write(sp, 'Assets/A/A.asmdef', JSON.stringify({ name: 'Game.A', references: [], rootNamespace: 'Game.A' }));
+write(sp, 'Assets/B/B.asmdef', JSON.stringify({ name: 'Game.B', references: [] }));
+write(sp, 'Assets/B/Weapon.cs', 'namespace Game.B { public class Weapon {} }\n');
+write(sp, 'Assets/Ed/Ed.asmdef', JSON.stringify({ name: 'Game.Ed', references: [], includePlatforms: ['Editor'] }));
+
+const player = write(sp, 'Assets/A/Player.cs', [
+  'using UnityEngine;',
+  'using System.Collections.Generic;',
+  'namespace Game.A {',
+  '  public class Player : MonoBehaviour {',
+  '    [SerializeField] private Weapon weapon;',
+  '    [SerializeField] private Dictionary<string,int> loot;',
+  '    public float speed = 3f;',
+  '  }',
+  '}',
+  '',
+].join('\n'));
+write(sp, 'Assets/A/Player.cs.meta', 'guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n');
+
+const csFacts = readCsFacts(readFileSync(player, 'utf-8'));
+ok(csFacts.namespace === 'Game.A', 'the namespace is read', String(csFacts.namespace));
+ok(csFacts.types.length === 1 && csFacts.types[0].base === 'MonoBehaviour', 'the type and its Unity base are read', JSON.stringify(csFacts.types[0]));
+ok(csFacts.fields.length === 3, 'all three fields are read, none of the code around them', String(csFacts.fields.length));
+ok(csFacts.fields.find((f) => f.name === 'weapon')?.attributes.includes('SerializeField'), 'attributes belong to their field');
+ok(csFacts.typeRefs.includes('Weapon'), 'a field TYPE counts as a type reference', JSON.stringify(csFacts.typeRefs));
+ok(isSerialized(csFacts.fields.find((f) => f.name === 'speed')), 'a public field is serialized by Unity without any attribute');
+ok(!isSerialized({ ...csFacts.fields[0], isStatic: true }), 'a static field is not');
+
+const spIndex = buildAsmdefIndex(sp);
+ok(owningAsmdef(spIndex, 'Assets/A/Player.cs')?.name === 'Game.A', 'the file is owned by the nearest asmdef');
+const visSet = visibleAssemblies(spIndex, owningAsmdef(spIndex, 'Assets/A/Player.cs'));
+ok(visSet.has('Game.A') && !visSet.has('Game.B'), 'an asmdef sees itself and its references only — NOT an autoReferenced sibling', [...visSet].join(','));
+ok(visibleAssemblies(spIndex, null).has('Game.B'),
+  'the PREDEFINED assembly does see an autoReferenced one — the two rules differ and both are implemented');
+
+const ownerMap = typeOwners(sp, spIndex);
+ok(ownerMap.owner.get('Weapon') === 'Game.B', 'the assembly declaring a type is found by scanning declarations', ownerMap.owner.get('Weapon'));
+
+const shapeFound = inspectFile({ repo: sp, file: player, source: readFileSync(player, 'utf-8'), index: spIndex, owners: ownerMap, addedFields: new Set(['speed']) });
+const shapeKinds = shapeFound.map((f) => f.kind);
+ok(shapeKinds.includes('asmdef-reference'), 'a type from an unreferenced assembly is REPORTED — this is CS0246 before the compiler says so', shapeKinds.join(','));
+ok(shapeFound.find((f) => f.kind === 'asmdef-reference')?.certain === true, 'and it is certain, so the gate fails on it without a judge');
+ok(/Game\.B/.test(shapeFound.find((f) => f.kind === 'asmdef-reference')?.line ?? ''), 'naming the assembly to add');
+ok(shapeKinds.includes('serialize-field'), 'a [SerializeField] Dictionary is REPORTED — Unity stores nothing and says nothing');
+ok(shapeKinds.includes('root-namespace') === false, 'a namespace matching the asmdef rootNamespace is NOT flagged');
+ok(shapeKinds.includes('serialized-layout'), 'an ADDED serialized field on a MonoBehaviour is reported as a layout change');
+ok(shapeFound.find((f) => f.kind === 'serialized-layout')?.certain === false,
+  'and that one PASSES — a layout change is a consequence to state, not a mistake to block');
+
+// the namespace that contradicts the assembly's own declaration
+const wrongNs = write(sp, 'Assets/A/Other.cs', 'namespace Totally.Else { public class Other {} }\n');
+const nsFound = inspectFile({ repo: sp, file: wrongNs, source: readFileSync(wrongNs, 'utf-8'), index: spIndex, owners: ownerMap, addedFields: new Set() });
+ok(nsFound.some((f) => f.kind === 'root-namespace' && f.certain),
+  'a namespace outside the assembly rootNamespace IS certain — the asmdef states it, so it is not a matter of taste',
+  nsFound.map((f) => f.kind).join(','));
+
+// UnityEditor in a runtime assembly vs in the editor-only one
+const runtimeEditor = write(sp, 'Assets/A/Tool.cs', 'using UnityEditor;\nnamespace Game.A { public class Tool {} }\n');
+const edOk = write(sp, 'Assets/Ed/Tool.cs', 'using UnityEditor;\npublic class EdTool {}\n');
+ok(inspectFile({ repo: sp, file: runtimeEditor, source: readFileSync(runtimeEditor, 'utf-8'), index: spIndex, owners: ownerMap, addedFields: new Set() })
+  .some((f) => f.kind === 'editor-api' && f.certain),
+  'UnityEditor in a runtime assembly is certain — it builds in the editor and fails the player build');
+ok(!inspectFile({ repo: sp, file: edOk, source: readFileSync(edOk, 'utf-8'), index: spIndex, owners: ownerMap, addedFields: new Set() })
+  .some((f) => f.kind === 'editor-api'),
+  'and the SAME using in an includePlatforms:["Editor"] assembly is fine');
+
+ok(addedFieldNames(sp, player) instanceof Set, 'the added-field reader returns a set even outside a git repo');
+
+rmSync(sp, { recursive: true, force: true });
 
 // ── who reads what: the operator gets the headline, the agent gets the errors ────
 //

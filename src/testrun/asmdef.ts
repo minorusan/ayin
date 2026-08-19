@@ -47,6 +47,14 @@ export interface Asmdef {
   precompiled: string[];
   includePlatforms: string[];
   noEngineReferences: boolean;
+  /**
+   * `autoReferenced` (default TRUE): the PREDEFINED assemblies (Assembly-CSharp and friends) reference
+   * this one without saying so. It does NOT make the assembly visible to other asmdefs — those still need
+   * an explicit entry — which is exactly the distinction a "you forgot the reference" check must get right.
+   */
+  autoReferenced: boolean;
+  /** `rootNamespace` (Unity 2020.2+): the namespace this assembly declares for its own scripts. */
+  rootNamespace: string | null;
   /** Carries NUnit — the only reliable marker of a test assembly. */
   isTest: boolean;
   /** `includePlatforms` is exactly `["Editor"]`. PlayMode assemblies list nothing. */
@@ -104,6 +112,10 @@ export function buildAsmdefIndex(repo: string): AsmdefIndex {
       precompiled,
       includePlatforms,
       noEngineReferences: json.noEngineReferences === true,
+      // Unity's default is true, so ABSENT means true — reading it as false would make every unannotated
+      // assembly look invisible to Assembly-CSharp.
+      autoReferenced: json.autoReferenced !== false,
+      rootNamespace: typeof json.rootNamespace === 'string' && json.rootNamespace.trim() ? json.rootNamespace.trim() : null,
       // NUnit is the marker. Naming is not: this project has `*.Tests.Editor`, `*.Tests.Play`,
       // `*.PlayTests`, `*Tests` and `*TestsEditor` — five conventions, and a sixth is one commit away.
       isTest: defineConstraints.includes(TEST_DEFINE)
