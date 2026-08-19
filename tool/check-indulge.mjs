@@ -693,6 +693,43 @@ ok(IX.parseArgs(['--import', './corpus-dir']).args.importFrom === './corpus-dir'
   '--import still takes a path when one is actually given');
 ok(IX.parseArgs(['--server=host:9100']).args.server === 'host:9100', '--server=value form works too');
 
+// ── choosing the server's corpus: the KEY is host-sensitive, the PROJECT is not ───
+//
+// The key is slug-hash8(normalized remote) and the normalized remote keeps the HOST, so an SSH host
+// alias (a `~/.ssh/config` entry for a second account) makes the same project hash differently on two
+// machines. Measured on a real pair: the builder reached the repo through an alias, the importer through
+// github.com, the hashes differed — and a key-equality lookup said "no corpus for this repo" while
+// printing that corpus in the list two lines below.
+
+const remote = (value, key) => ({ kind: 'remote', value, key });
+const served = (key, value) => ({ key, identity: { kind: 'remote', value }, chunks: 1 });
+
+const aliasCase = IX.pickCorpus(
+  remote('github.com/acme/widget', 'widget-e53eb0e8'),
+  [served('widget-92f43114', 'ssh-alias/acme/widget')],
+);
+ok(aliasCase.pick?.key === 'widget-92f43114',
+  'a corpus built through an SSH host ALIAS is still this repo\'s', JSON.stringify(aliasCase.pick?.key));
+ok(aliasCase.viaAlias === true, 'and the mismatch is reported rather than hidden');
+
+const exact = IX.pickCorpus(
+  remote('github.com/a/b', 'b-1234abcd'),
+  [served('b-1234abcd', 'github.com/a/b'), served('b-9999ffff', 'alias/a/b')],
+);
+ok(exact.pick?.key === 'b-1234abcd' && exact.viaAlias === false, 'an exact key match wins outright');
+
+const other = IX.pickCorpus(remote('github.com/acme/utils', 'utils-aaaaaaaa'), [served('utils-bbbbbbbb', 'github.com/other/utils')]);
+ok(!other.pick, 'a DIFFERENT owner with the same repo name is not this project');
+
+const ambiguous = IX.pickCorpus(
+  remote('github.com/a/b', 'b-1234abcd'),
+  [served('b-9999ffff', 'alias1/a/b'), served('b-8888eeee', 'alias2/a/b')],
+);
+ok(!ambiguous.pick && ambiguous.candidates.length === 2,
+  'two corpora for one project is a human decision (--corpus <key>), never "the first one"');
+ok(IX.pickCorpus(remote('github.com/a/b', 'b-1234abcd'), [served('b-9999ffff', 'alias/a/b')], 'b-9999ffff').pick?.key === 'b-9999ffff',
+  '--corpus <key> forces a specific corpus');
+
 // The report re-verifies rather than trusting the flag set when the chunk was stored: "the proof
 // resolved once" and "the proof resolves now" are different claims, and a stale chunk presented as
 // current defeats the document's purpose.

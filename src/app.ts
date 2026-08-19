@@ -1111,6 +1111,16 @@ async function handleInput(text: string): Promise<void> {
         // and anything in the conversation window is re-sent to the model every later round.
         if (tool.slash.secret) forgetEntry(text, cmd);
         busy = true;
+        /**
+         * THE SPINNER MUST STOP WHEN THE ANSWER ARRIVES.
+         *
+         * A slash tool is a CONNECTOR: its `execute` runs an inner agentic loop, so it drives the LLM
+         * and the thinking indicator lights up from that activity. Only `runAgent`'s teardown ever
+         * cleared it, and this path is not `runAgent` — so `/jira` printed its answer and then went on
+         * spinning "thinking··· 23s" with the timer climbing, which reads as a hung turn on a turn that
+         * is finished. Reported from a live session; the answer had been on screen for twenty seconds.
+         */
+        setAgentStatus(`${tool.name}…`);
         try {
           addMessage('system', `${tool.name}…`);
           const out = await tool.execute({ [tool.slash.param]: arg });
@@ -1123,6 +1133,7 @@ async function handleInput(text: string): Promise<void> {
           addMessage('system', `${tool.name} failed: ${err instanceof Error ? err.message : String(err)}`);
         } finally {
           busy = false;
+          setAgentStatus(''); // in `finally`: a connector that THREW must not leave the terminal thinking
         }
         return;
       }

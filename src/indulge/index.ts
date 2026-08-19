@@ -30,7 +30,7 @@ import { recordAnswer, recordPrompt, recordTool } from '../session-record.js';
 import { initSession } from '../session-store.js';
 import { assessChunk } from './staleness.js';
 import { detectVendorRoots } from './vendor.js';
-import { CATEGORIES, openStore, StoreLockedError, type Category, type Manifest, type Stage, sameProject, repoKey } from './store.js';
+import { CATEGORIES, openStore, StoreLockedError, type Category, type Manifest, type Stage, sameProject, repoKey, repoIdentity } from './store.js';
 
 const out = (line = ''): void => { process.stdout.write(`${line}\n`); };
 
@@ -56,6 +56,8 @@ export interface IndulgeArgs {
   /** `host:port` of a corpus server (`GET /corpus`, `GET /corpus/<key>.tgz`). No default: this repo is
    *  public and an address belongs in the operator's config or on their command line, never in source. */
   server?: string;
+  /** `--corpus <key>`: take THIS corpus from the server, whatever the identity match says. */
+  corpusKey?: string;
   maxDepth?: number;
   maxFiles?: number;
   keepVendor?: boolean;
@@ -112,6 +114,7 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--restart': args.restart = true; break;
       case '--import': args.importFrom = optionalValue(); break;
       case '--server': case '--from-server': args.server = value(); break;
+      case '--corpus': args.corpusKey = value(); break;
       case '--embed': args.embedOnly = true; break;
       case '--deep': args.deep = true; break;
       case '--depth': args.maxDepth = num(value(), 'depth'); break;
@@ -466,6 +469,50 @@ function unpacked(from: string): { dir: string; temp?: string } | null {
   return null;
 }
 
+export interface ServedCorpus {
+  key: string;
+  identity?: { kind?: string; value?: string } | null;
+  bytes?: number;
+  chunks?: number;
+  updated?: string;
+}
+
+/**
+ * WHICH of the server's corpora is THIS repo's — and why the key alone is the wrong question.
+ *
+ * The key is `slug-hash8(normalized remote)`, and the normalized remote KEEPS THE HOST. An SSH host
+ * alias is a local convenience — a `~/.ssh/config` entry for a second GitHub account rewrites
+ * `github.com:owner/repo` to `alias:owner/repo` — so the same project hashes differently on two
+ * machines. Measured: the builder reached a repo as
+ * `<ssh-alias>/<owner>/<repo>` and the importing machine as `github.com/<owner>/<repo>`, so the two
+ * keys differed in their hash and a key-equality lookup reported "the server has no corpus for this
+ * repo" while printing that very corpus in the list two lines below.
+ *
+ * `importCorpus` already answers this correctly for a local archive, with `sameProject()` — owner/repo
+ * tail, host ignored, and `acme/utils` still distinct from `other/utils`. This is the same rule applied
+ * one step earlier, at selection, so the two halves of the same feature cannot disagree about what
+ * "this repo" means.
+ *
+ * `wanted` (`--corpus <key>`) is the manual override, and the answer when the tail is ambiguous: two
+ * corpora for one project must be chosen between by a human, never by "the first one".
+ */
+export function pickCorpus(
+  mine: { kind: string; value: string; key: string },
+  corpora: ServedCorpus[],
+  wanted?: string,
+): { pick?: ServedCorpus; candidates: ServedCorpus[]; viaAlias: boolean } {
+  if (wanted) {
+    const forced = corpora.find((c) => c.key === wanted);
+    return { pick: forced, candidates: forced ? [forced] : [], viaAlias: false };
+  }
+  const exact = corpora.find((c) => c.key === mine.key);
+  if (exact) return { pick: exact, candidates: [exact], viaAlias: false };
+  const candidates = corpora.filter((c) => c.identity?.kind && c.identity?.value
+    && sameProject(mine, { kind: c.identity.kind, value: c.identity.value }));
+  if (candidates.length === 1) return { pick: candidates[0], candidates, viaAlias: true };
+  return { candidates, viaAlias: false };
+}
+
 /**
  * Pull this repo's corpus from a corpus SERVER and import it.
  *
@@ -486,11 +533,12 @@ function unpacked(from: string): { dir: string; temp?: string } | null {
  * The archive lands in a temp file and goes through the SAME `importCorpus` a local `--import` uses, so
  * the identity check that refuses another project's corpus still runs. Nothing here trusts the server.
  */
-async function importFromServer(repoPath: string, server: string): Promise<number> {
+async function importFromServer(repoPath: string, server: string, wanted?: string): Promise<number> {
   const base = /^https?:\/\//.test(server) ? server.replace(/\/+$/, '') : `http://${server.replace(/\/+$/, '')}`;
-  const key = repoKey(repoPath);
+  const mine = repoIdentity(repoPath);
   out(`corpus server ${base}`);
-  out(`  this repo's corpus key: ${key}`);
+  out(`  this repo: ${mine.kind} ${mine.value}`);
+  out(`  corpus key here: ${mine.key}`);
 
   interface Listing { corpora?: Array<{ key: string; bytes?: number; chunks?: number; updated?: string; identity?: { value?: string } }> }
   let listing: Listing | null = null;
@@ -502,8 +550,13 @@ async function importFromServer(repoPath: string, server: string): Promise<numbe
     out(`  cannot reach ${base}/corpus — ${e instanceof Error ? e.message : String(e)}`);
     return 2;
   }
-  const mine = listing?.corpora?.find((c) => c.key === key);
-  if (!mine) {
+  const { pick, candidates, viaAlias } = pickCorpus(mine, listing?.corpora ?? [], wanted);
+  if (!pick) {
+    if (candidates.length > 1) {
+      out(`  the server has ${candidates.length} corpora for this project — pick one with --corpus <key>:`);
+      for (const c of candidates) out(`    ${c.key}  ${c.chunks ?? '?'} chunk(s)  ${c.identity?.value ?? ''}`);
+      return 3;
+    }
     out(`  the server has no corpus for this repo.`);
     out(`  it offers:`);
     for (const c of listing?.corpora ?? []) {
@@ -512,7 +565,14 @@ async function importFromServer(repoPath: string, server: string): Promise<numbe
     if (!listing?.corpora?.length) out('    (nothing)');
     return 3;
   }
-  out(`  found: ${mine.chunks ?? '?'} chunk(s), built ${mine.updated ?? 'at an unknown time'}`);
+  const key = pick.key;
+  if (viaAlias) {
+    // Said out loud: the keys differ because the two machines reach the same project through different
+    // remote hosts. Silently importing under a name that does not match the local key would leave the
+    // operator unable to explain their own store.
+    out(`  matched by project, not by key — the builder reaches this repo as ${pick.identity?.value}`);
+  }
+  out(`  found: ${key} · ${pick.chunks ?? '?'} chunk(s), built ${pick.updated ?? 'at an unknown time'}`);
 
   const tmp = join(tmpdir(), `ayin-corpus-${key}-${process.pid}.tgz`);
   try {
@@ -687,7 +747,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
   // `--server` IMPLIES an import: `ayin indulge --import --server host:port` is what the operator types,
   // and `--import` there carries no path. Checked first so a bare `--import` with no value cannot be
   // read as a directory called "--server".
-  if (args.server) return await importFromServer(repoPath, args.server);
+  if (args.server) return await importFromServer(repoPath, args.server, args.corpusKey);
   if (args.importFrom) return importCorpus(repoPath, args.importFrom);
 
   if (args.embedOnly) {
