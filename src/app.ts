@@ -575,27 +575,19 @@ async function handleInput(text: string): Promise<void> {
        * excluded by wipe.ts itself, not by this caller. `/wipe <scope>` skips only the menu.
        */
       /**
-       * `/git-hardreset` and `/git-softreset` — undo what a turn did to the tree, in one keystroke.
+       * `/git-hardreset` — undo what a turn did to the WORKING TREE, in one keystroke.
        *
-       * WHY THESE EXIST. An agent that edits files is wrong sometimes, and the recovery is always the same
-       * two commands. Typing them by hand at 2am is where `git clean -fd` gets run in the wrong directory.
-       *
-       * HARD = `git reset --hard` + `git clean -fd`: tracked files back to HEAD, untracked files DELETED.
-       * SOFT = `git reset --hard` only: tracked files back to HEAD, untracked files KEPT. That is the one
-       * to use when the agent created new files worth reading and mangled the ones that existed.
+       * `git reset --hard` + `git clean -fd`: tracked files back to HEAD, untracked files deleted. It is
+       * the two commands anyone types after a bad turn, and typing them by hand at 2am is where
+       * `clean -fd` gets run in the wrong directory.
        *
        * A STASH IS TAKEN FIRST, ALWAYS, and this is not optional politeness: `clean -fd` deletes work that
-       * no commit and no reflog has ever seen — a new file is simply gone, and this repo's own rule is to
-       * never destroy hours of work without a backup in the same code path. `git stash push -u` captures
-       * tracked AND untracked, leaves the tree clean (which is what was asked for), and prints the ref to
-       * get it back. The literal reset+clean still runs afterwards, so the result is exactly the tree the
-       * operator asked for, and the previous one is one `git stash pop` away.
-       *
-       * Nothing happens without a confirmation naming the counts, because "how much am I about to lose"
-       * is the only question worth asking here and `git status` is what answers it.
+       * no commit and no reflog has ever seen — a file the agent just created is simply gone, and this
+       * repo's own rule is never to destroy hours of work without a backup in the same code path.
+       * `git stash push -u` captures tracked AND untracked, leaves the tree clean (which is what was
+       * asked for), and prints the ref that brings it back. A stash that FAILS aborts the whole thing.
        */
-      case '/git-hardreset': case '/git-softreset': {
-        const hard = cmd === '/git-hardreset';
+      case '/git-hardreset': {
         const status = await runBang('git status --porcelain');
         if (status.exitCode !== 0) {
           addMessage('system', `Not a git repository (or git failed): ${status.output.trim().split('\n')[0] ?? ''}`);
@@ -609,40 +601,111 @@ async function handleInput(text: string): Promise<void> {
         const head = (await runBang('git log --oneline -1')).output.trim();
 
         const pick = await showDialog(
-          hard ? 'Reset tracked files AND delete untracked ones?' : 'Reset tracked files, keep untracked ones?',
+          'Reset tracked files AND delete untracked ones?',
           [
-            { label: hard ? `Yes — reset ${tracked} tracked, delete ${untracked} untracked` : `Yes — reset ${tracked} tracked, keep ${untracked} untracked`, danger: true, note: branch },
+            { label: `Yes — reset ${tracked} tracked, delete ${untracked} untracked`, danger: true, note: branch },
             { label: 'Cancel' },
           ],
-          { subtitle: `HEAD is ${head}. Everything is stashed first — the tree ends clean and \`git stash pop\` brings it back.`, footer: '↑↓ select · Enter confirm · Esc cancel' },
+          { subtitle: `HEAD is ${head}. Everything is stashed first — the tree ends clean and \`git stash pop\` brings it back.` },
         );
         if (pick !== 0) { addMessage('system', 'Reset cancelled — nothing was touched.'); return; }
 
-        setAgentStatus(`${cmd.slice(1)}…`);
+        setAgentStatus('git-hardreset…');
         try {
-          // The stash is the recovery, so a stash that FAILS aborts the whole thing: doing the destructive
-          // half without it is the one outcome this command must never produce.
-          const label = `ayin ${cmd} ${new Date().toISOString()}`;
-          const stash = await runBang(`git stash push ${hard ? '--include-untracked ' : ''}-m ${JSON.stringify(label)}`);
+          const label = `ayin /git-hardreset ${new Date().toISOString()}`;
+          const stash = await runBang(`git stash push --include-untracked -m ${JSON.stringify(label)}`);
           if (stash.exitCode !== 0) {
             addMessage('system', `Stash failed, so NOTHING was reset — your tree is untouched:\n${stash.output.trim()}`);
             return;
           }
           const reset = await runBang('git reset --hard');
-          const cleaned = hard ? await runBang('git clean -fd') : null;
+          const cleaned = await runBang('git clean -fd');
           const after = (await runBang('git status --porcelain')).output.split('\n').filter(Boolean).length;
           addMessage('tool', formatShellForChat(
-            hard ? 'git stash push -u && git reset --hard && git clean -fd' : 'git stash push && git reset --hard',
-            [stash.output.trim(), reset.output.trim(), cleaned?.output.trim() ?? ''].filter(Boolean).join('\n'),
+            'git stash push -u && git reset --hard && git clean -fd',
+            [stash.output.trim(), reset.output.trim(), cleaned.output.trim()].filter(Boolean).join('\n'),
             reset,
           ));
-          addMessage('system', `${tracked} tracked${hard ? ` and ${untracked} untracked` : ''} change(s) reset · ${after} entr(y/ies) left in status`);
+          addMessage('system', `${tracked} tracked and ${untracked} untracked change(s) reset · ${after} entr(y/ies) left in status`);
           addMessage('system', `recover with: git stash pop   (saved as "${label}")`);
         } finally {
           setAgentStatus('');
         }
         return;
       }
+
+      /**
+       * `/git-softreset` — UNDO THE LAST COMMIT, keep its changes.
+       *
+       * `git reset --soft HEAD~1`: HEAD moves back one, the commit's content stays staged in the working
+       * tree. The commit the agent should not have made is gone from history; the work it contained is
+       * still in front of you, ready to be amended, split or thrown away deliberately.
+       *
+       * NO STASH, because nothing is destroyed — that is the whole difference from `--hard`. The recovery
+       * is the old commit's sha, printed before the reset and still reachable through the reflog, so
+       * `git reset --hard <sha>` puts history back exactly as it was.
+       *
+       * TWO REFUSALS AND ONE WARNING, all of them cases where undoing costs more than it looks:
+       *   · a ROOT commit has no parent, so `HEAD~1` does not exist — git fails with a message about an
+       *     ambiguous argument that says nothing about why. Refused with the reason instead.
+       *   · a commit that is already on the REMOTE is shared history. Undoing it locally means the next
+       *     push is a force-push over something someone else may have pulled. Warned, in the dialog,
+       *     because that is the moment the operator can still say no.
+       *   · a MERGE commit resets to its FIRST parent, quietly discarding the other side of the merge from
+       *     history. Said out loud rather than discovered later.
+       */
+      case '/git-softreset': {
+        const head = await runBang('git rev-parse HEAD');
+        if (head.exitCode !== 0) {
+          addMessage('system', `Not a git repository (or no commits yet): ${head.output.trim().split('\n')[0] ?? ''}`);
+          return;
+        }
+        const sha = head.output.trim();
+        const parents = (await runBang('git rev-list --parents -n 1 HEAD')).output.trim().split(/\s+/).slice(1);
+        if (parents.length === 0) {
+          addMessage('system', 'HEAD is the ROOT commit — there is nothing to reset to. `git update-ref -d HEAD` would unmake the repo\'s only commit; do that by hand if you mean it.');
+          return;
+        }
+        const subject = (await runBang('git log --oneline -1')).output.trim();
+        const stat = (await runBang('git show --stat --oneline HEAD')).output.trim();
+        const files = (await runBang('git diff --name-only HEAD~1 HEAD')).output.split('\n').filter(Boolean).length;
+        const branch = (await runBang('git rev-parse --abbrev-ref HEAD')).output.trim();
+        // On a remote already? `--contains` names every remote ref that has this commit.
+        const onRemote = (await runBang(`git branch -r --contains ${sha}`)).output.split('\n').map((l) => l.trim()).filter(Boolean);
+        const isMerge = parents.length > 1;
+
+        const notes: string[] = [];
+        if (onRemote.length) notes.push(`ALREADY PUSHED to ${onRemote.slice(0, 3).join(', ')} — undoing it locally means the next push rewrites shared history`);
+        if (isMerge) notes.push('this is a MERGE commit: --soft resets to its FIRST parent, dropping the other side from history');
+
+        const pick = await showDialog(
+          `Undo the last commit, keeping its ${files} file(s) staged?`,
+          [
+            { label: `Yes — uncommit ${subject}`, danger: true, note: branch, ...(notes.length ? { sub: notes.join(' · ') } : {}) },
+            { label: 'Cancel' },
+          ],
+          { subtitle: `git reset --soft HEAD~1 · nothing is deleted; recover the commit with git reset --hard ${sha.slice(0, 10)}` },
+        );
+        if (pick !== 0) { addMessage('system', 'Uncommit cancelled — history is unchanged.'); return; }
+
+        setAgentStatus('git-softreset…');
+        try {
+          const reset = await runBang('git reset --soft HEAD~1');
+          if (reset.exitCode !== 0) {
+            addMessage('system', `git reset --soft HEAD~1 failed — history is unchanged:\n${reset.output.trim()}`);
+            return;
+          }
+          const staged = (await runBang('git diff --cached --name-only')).output.split('\n').filter(Boolean).length;
+          addMessage('tool', formatShellForChat('git reset --soft HEAD~1', [stat.split('\n')[0] ?? '', reset.output.trim()].filter(Boolean).join('\n'), reset));
+          addMessage('system', `uncommitted ${subject} · ${staged} file(s) now staged, nothing lost`);
+          addMessage('system', `put it back with: git reset --hard ${sha.slice(0, 10)}`);
+          if (onRemote.length) addMessage('system', `note: that commit is still on ${onRemote.slice(0, 3).join(', ')} — a push from here rewrites it`);
+        } finally {
+          setAgentStatus('');
+        }
+        return;
+      }
+
       case '/wipe': {
         const arg = text.slice('/wipe'.length).trim().toLowerCase().replace(/\s+/g, '-');
         const named: Record<string, WipeScope> = {

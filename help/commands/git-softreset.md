@@ -1,10 +1,17 @@
-Reset the files that existed, keep the ones the agent created.
+Undo the last commit and keep everything it contained.
 
-`/git-softreset` runs `git reset --hard` and stops there: tracked files go back to HEAD, untracked files stay exactly where they are. That is the right one after a turn that wrote something worth reading — a new module, a report, a scratch script — while mangling files that were already in the repo.
+`/git-softreset` runs `git reset --soft HEAD~1`: HEAD moves back one commit and that commit's content stays staged in the working tree. The commit that should not have been made is gone from history; the work it held is still in front of you, ready to be amended, split, or thrown away deliberately.
 
-Like `/git-hardreset` it stashes first (tracked changes only, since nothing untracked is at risk), asks before doing anything, names the counts, and prints the `git stash pop` that brings the previous state back. If the stash fails, nothing is reset.
+**Nothing is destroyed, which is why there is no stash here** — that is the whole difference from `/git-hardreset`. The old commit's sha is printed before and after, and it stays reachable through the reflog, so `git reset --hard <sha>` puts history back exactly as it was.
 
-The name is about SCOPE, not about `git reset --soft`: this does not move HEAD and does not touch your commits, it only decides whether untracked files are deleted.
+It asks first, naming the commit and how many files it touched, and it says so in that dialog when:
+
+- the commit is **already on a remote** — undoing it locally means the next push rewrites history someone else may have pulled;
+- HEAD is a **merge commit** — `--soft` resets to its first parent, dropping the other side of the merge from history.
+
+A **root commit** is refused outright: `HEAD~1` does not exist, and git's own error ("ambiguous argument") explains nothing. Unmaking a repository's only commit is `git update-ref -d HEAD`, by hand, if you mean it.
+
+For the working tree rather than history — discard edits, delete new files — use `/git-hardreset`.
 
 ## Examples
 

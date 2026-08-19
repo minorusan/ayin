@@ -155,7 +155,7 @@ export const HELP: HelpEntry[] = [
   },
   { name: '/wipe', kind: 'command', section: 'Session', short: 'Delete saved state — sessions · /wipe all · artifacts · logs · transcripts. Asks first' },
   { name: '/git-hardreset', kind: 'command', section: 'Session', short: 'Undo a turn: reset tracked files to HEAD and DELETE untracked ones — stashed first, so `git stash pop` brings it all back' },
-  { name: '/git-softreset', kind: 'command', section: 'Session', short: 'Same, but KEEPS untracked files — for when the agent made good new files and mangled old ones' },
+  { name: '/git-softreset', kind: 'command', section: 'Session', short: 'Undo the LAST COMMIT and keep its changes staged (git reset --soft HEAD~1) — warns if it is already pushed' },
   { name: '/quit', kind: 'command', section: 'Session', short: 'Exit (/q, /exit)' },
   { name: '/help', kind: 'command', section: 'Session', short: 'This list' },
 

@@ -6,7 +6,7 @@ Undo everything a turn did to the working tree — including files it created.
 
 It asks first, naming how many tracked and untracked changes are about to go and what HEAD is. Esc cancels and touches nothing.
 
-Use `/git-softreset` when the agent created new files worth keeping.
+For history rather than the working tree — undo the last commit but keep its changes — use `/git-softreset`.
 
 ## Examples
 
