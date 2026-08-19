@@ -99,5 +99,24 @@ for (const dir of ['commands', 'cli']) {
 }
 if (!failures.length) ok('no private address or personal path in any written page');
 
+// ── THE AGENT reads the same page ────────────────────────────────────────────────
+// The operator has `ayin --help`; the agent had nothing, so asked how to review a change it invented a
+// command. `ayin_help` must hand back the SAME bytes — a second rendering is a second thing to keep in
+// step, which is the failure this whole file exists to prevent.
+(await import(join(REPO, 'dist/tool-wiring.js'))).ensureToolRuntime();
+const { tool: helpTool } = await import(join(REPO, 'dist/tools/defs/ayin_help.js'));
+const viaTool = await helpTool.execute({});
+if (viaTool !== plain) fail('ayin_help does not return the same bytes as `ayin --help`');
+else ok(`ayin_help returns the plain page verbatim — ${viaTool.length} chars, one call`);
+if (/\x1b\[/.test(viaTool)) fail('ayin_help returned ANSI escapes');
+else ok('and no escape codes reach the model');
+const viaTopic = await helpTool.execute({ topic: '/diff' });
+if (viaTopic !== topicPage('/diff')) fail('ayin_help topic= does not match topicPage()');
+else if (viaTopic.length >= viaTool.length) fail('a topic page is not cheaper than the whole list — the point of the param');
+else ok(`topic= is the cheap case — ${viaTopic.length} chars vs ${viaTool.length}`);
+const viaMiss = await helpTool.execute({ topic: 'definitelynotacommand' });
+if (!/No help topic/.test(viaMiss)) fail('an unknown topic does not say so');
+else ok('an unknown topic is named as unknown, never answered with silence');
+
 console.log(failures.length ? `\nhelp page check: ${failures.length} FAILED` : '\nhelp page check: ok');
 process.exit(failures.length ? 1 : 0);

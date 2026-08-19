@@ -29,7 +29,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { blobSha, type Chunk } from './store.js';
+import { blobSha, citationBase, type Chunk } from './store.js';
 
 export type Freshness = 'fresh' | 'stale' | 'divergent' | 'missing';
 
@@ -103,8 +103,28 @@ export function assessChunk(repoPath: string, chunk: Chunk): Staleness {
   let missing = false;
   for (const c of chunk.citations) {
     let body: Buffer;
-    try { body = readFileSync(join(repoPath, c.path)); } catch { missing = true; changed.push(c.path); continue; }
+    // `changed` holds PATHS: everything below asks git about them (uncommitted?, how big a delta?), and
+    // a label with line numbers in it is not a path git can be asked about.
+    try { body = readFileSync(join(citationBase(repoPath, c), c.path)); } catch { missing = true; changed.push(c.path); continue; }
     if (blobSha(body) !== c.sha && !changed.includes(c.path)) changed.push(c.path);
+  }
+
+  // A TICKET CANNOT BE STALE AGAINST YOUR CHECKOUT. Its words are not in your history, so a commit
+  // comparison says nothing about them, and the freshness question a reader actually has — "is this
+  // still what the ticket says?" — is answerable only by Jira. What this can state is exactly what it
+  // knows: which ticket, and the date the cited words carried when they were read.
+  const tickets = chunk.citations.filter((c) => c.ticket);
+  if (tickets.length && tickets.length === chunk.citations.length) {
+    const named = [...new Set(tickets.map((c) => `${c.ticket}${c.at ? ` as of ${c.at}` : ''}`))].join(', ');
+    return missing
+      ? {
+        state: 'missing', changed, uncommitted: false,
+        label: `[corpus · STALE] ${when} · the corpus copy of ${named} is gone — re-run indulge --jira`,
+      }
+      : {
+        state: 'fresh', changed: [], uncommitted: false,
+        label: `[corpus] from ${named} · read ${day(chunk.createdAt)} — Jira may have moved since`,
+      };
   }
 
   if (missing) {

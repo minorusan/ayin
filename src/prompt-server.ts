@@ -22,6 +22,7 @@ import { log } from './log.js';
 import { resetPromptsToDefaults, getPromptsDir as promptsDir } from './prompts.js';
 import { prompts, writeAtomic } from './prompts-service.js';
 import { handleDiffRequest } from './diff/server.js';
+import { handleSprintRequest } from './sprint/server.js';
 
 const BASE_PORT = 7773;
 const PORT_TRIES = 12;
@@ -296,9 +297,10 @@ export function startPromptServer(cwd = process.cwd()): void {
       }
     }
 
-    // The review page and its comments. Returns true when it answered.
-    void handleDiffRequest(req, res, cwd).then((handled) => {
+    // The review page and its comments, then the sprint board. Each returns true when it answered.
+    void handleDiffRequest(req, res, cwd).then(async (handled) => {
       if (handled) return;
+      if (await handleSprintRequest(req, res)) return;
       routePromptEditor(req, res);
     }).catch((e) => {
       log('WARN', 'diff_route_failed', { error: e instanceof Error ? e.message : String(e) });

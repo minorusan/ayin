@@ -1,0 +1,19 @@
+The ticket {{KEY}}, with line numbers:
+
+```
+{{TICKET}}
+```
+
+Answer this question using only the ticket above.
+
+QUESTION: {{QUESTION}}
+
+State what the ticket requires or decides, in terms an engineer can act on: exact names, values and units
+as they are written. Attribute a decision to the person who made it and the date they made it. If the
+ticket does not settle it, say what it does establish and what is still open.
+
+Then cite the lines the answer rests on. One per line, at the end, in exactly this form:
+
+CITE: {{FILE}}:START-END
+
+Use the line numbers shown above. A citation nobody can resolve discards this whole answer.

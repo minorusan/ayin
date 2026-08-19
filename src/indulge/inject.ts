@@ -29,7 +29,7 @@ import { isCorpusInjection } from '../modes.js';
 import { chunksByIds, embedQuery, hasUsableVectors, loadVectors, vectorSearch, liveVectors, QUERY_TIMEOUT_MS } from './embed.js';
 import { buildLexicon, lookupNames, type NameHit } from './lexicon.js';
 import { assessChunk } from './staleness.js';
-import { openStore, type Chunk } from './store.js';
+import { citeLabel, openStore, type Chunk } from './store.js';
 
 /** Two is a nudge; five is a briefing nobody asked for. */
 const MAX_CHUNKS = 2;
@@ -118,7 +118,7 @@ export function corpusBlockFor(repoPath: string, file: string, range?: LineRange
     lines.push(state.label);
     lines.push(`Q. ${chunk.question}`);
     lines.push(answer);
-    lines.push(`cited: ${chunk.citations.map((c) => `${c.path}:${c.startLine}-${c.endLine}`).join(' · ')}`);
+    lines.push(`cited: ${chunk.citations.map((c) => `${citeLabel(c)}`).join(' · ')}`);
   }
   if (usable.length > budget) {
     lines.push('');
@@ -253,7 +253,7 @@ function render(
     out.push(state.label);
     out.push(`Q. ${chunk.question}`);
     out.push(chunk.answer.length > MAX_ANSWER_CHARS ? `${chunk.answer.slice(0, MAX_ANSWER_CHARS)}\u2026` : chunk.answer);
-    out.push(`cited: ${chunk.citations.map((c) => `${c.path}:${c.startLine}-${c.endLine}`).join(' \u00b7 ')}`);
+    out.push(`cited: ${chunk.citations.map((c) => `${citeLabel(c)}`).join(' \u00b7 ')}`);
   }
   out.push('');
   out.push('Notes from an earlier pass, not the code. Verify anything you act on.');

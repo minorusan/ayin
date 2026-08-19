@@ -480,3 +480,50 @@ of an import says so.
 `--import` uses, so the identity check that refuses another project's corpus still runs, and the
 staleness pass still labels every chunk describing code this checkout has since changed. The address
 lives on the command line or in the operator's config — never in this repo, which is public.
+
+## `--jira <EPIC>` — the half of the answer that is not in the repository
+
+The corpus above is built from code, and code cannot say what the code was supposed to do. The required
+value and its unit, the acceptance criterion, the decision someone made in a comment three weeks ago and
+the reason they gave — that lives in the tracker, and an agent could only reach it by being told. So the
+same three stages run over an epic:
+
+    ayin indulge --jira PROJ-42 [--per-ticket 6] [--max-questions N]
+
+**The tickets become documents INSIDE the corpus.** `<corpus>/jira/<KEY>.md`, one per ticket, rendered by
+a hand-written deterministic renderer — not into the work tree, which would dirty the repo the corpus is
+about, and not into a temp directory, because a corpus travels between machines as one directory
+(`--import`) and the documents its answers cite have to travel with it. Written by identity, so a re-run
+replaces rather than accumulates and an interrupted run leaves nothing to clean up.
+
+**A citation names the ticket and the date.** `jira/PROJ-43.md:19-19` is a claim about a moving target:
+ticket text is edited in place by other people, and a reader cannot tell whether it still says that. Every
+citation from here carries `ticket` and `at` — **the comment's own date** when the cited range is inside a
+comment, the ticket's `updated` when it is in the description — and `citeLabel()` renders both everywhere a
+citation is shown:
+
+    PROJ-43 (2026-08-14):19-19
+
+The date is stamped by the code from the line→date map built while rendering the ticket, never asked of the
+model: a citation whose date the model chose is not evidence.
+
+**Staleness means something different here, so it says something different.** A ticket is not in your git
+history; a commit comparison says nothing about it, and "is this still what the ticket says?" is answerable
+only by Jira. So a chunk citing only tickets reports `[corpus] from PROJ-43 as of 2026-08-14 · read
+2026-08-19 — Jira may have moved since` instead of being called STALE, and re-verification resolves its
+citations against the corpus rather than the repo (`citationBase()`).
+
+**An epic's children are found however this site expresses them.** `parent`, the `Epic Link` custom field,
+and `childIssuesOf()` are each tried, and the one that returned issues is reported — a site holds
+team-managed and company-managed projects at once, so this cannot be configured per site. **"No query
+worked" is not "no children":** if every form is refused the run FAILS with Jira's own status, because
+reporting an empty epic there sends the operator looking for tickets that are in fact present.
+
+Resume is the store's, as everywhere else: questions and chunks are appended under stable ids, so the
+second run of the same command asks the model nothing it already answered. Chunks land under the domain
+`jira` — `--search` and retrieval can ask for that domain by name, and `--embed` vectorises them with
+everything else.
+
+Gate: `npm run check:jira-indulge` — hermetic (stubbed `fetch`, fake model, throwaway corpus root): the
+three child forms, renderer stability, comment-date stamping, corpus-not-repo placement, the two empty
+cases, and that a second run costs zero model calls.

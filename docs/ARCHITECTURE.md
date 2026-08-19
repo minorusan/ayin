@@ -1876,6 +1876,44 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
 Gate: `npm run check:diff` — checks every count against `git diff --numstat`, and escaping against a
 file containing `</script>`.
 
+## `/sprint` — the board in a browser (`src/sprint/`)
+
+`/sprint` serves the operator's current Jira sprint as a simplified kanban page on the session's own
+loopback server: one column per status the SITE reports, one card per ticket, one ticket open at a time.
+
+- **Columns are the workflow's, not a list in the code.** Statuses are invented per project ("Ready For
+  QA", "Ready For Merge"), so the columns are whatever the sprint returned, ordered by Jira's own
+  three-bucket `statusCategory` (To Do → In Progress → Done, unknown last). A hardcoded column set drops
+  the statuses it never heard of, and the ticket disappears from the board while still being in the sprint.
+- **The card is a summary; the drawer is a fetch.** Cards carry only what the sprint search already
+  returned. Clicking one fetches `/api/sprint/ticket/<KEY>` for the description and comments. Twenty
+  detail fetches up front is a minute of waiting for the nineteen nobody opened.
+- **`+` posts a comment to Jira**, as the operator, through `addComment()` — the connector's one write.
+  The body format follows the site's learned flavour (ADF document on v3, plain string on v2); the wrong
+  one is a 400, not a degraded comment. The page appends the comment only after the SERVER confirmed it
+  exists on the ticket — an optimistic append is how an operator closes a tab believing their words were
+  posted.
+- **A comment is refused unless its key was ON THE SERVED BOARD.** The route keeps the keys the last
+  `/sprint` render held, so a page cannot be talked into commenting on an arbitrary ticket. Loopback bind
+  plus the cross-origin refusal that already guards the prompt editor are the other two limits.
+- **No static form.** Unlike `/diff`, there is no `file://` fallback: the cards fetch and the comment box
+  writes, both through routes only a listening session has. A page with two dead affordances is worse than
+  one sentence saying why there is no page. The route re-reads the sprint per request, so a reload is how
+  you see what changed.
+
+Gate: `npm run check:sprint` — hermetic (stubbed `fetch`, env credential): column order and that no status
+is dropped, escaping of a title containing `</script>`, the `+` affordance, both refusals, and the ADF vs
+plain-string body per flavour.
+
+## `ayin_help` — the agent reads its own manual
+
+Everything the operator can type — `!cmd`, `/diff`, `/qa`, `/sprint`, `ayin indulge` — is a capability of
+the system the agent works inside, and the agent had no way to learn any of it: asked how to review a
+change it invented a command. `ayin_help` returns the same bytes `ayin --help` prints (`plainPage()`
+in-process, no second node boot, no escape codes), or one command in full with `topic`. It is a tool rather
+than prompt text because the catalogue is ~6 KB — as prompt text it would be paid on every turn to serve
+the rare turn that needs it. Asserted in `npm run check:helppage`: byte-identical to the CLI page.
+
 ## `ayin launch` — see [`LAUNCH.md`](LAUNCH.md)
 
 `ayin launch` opens a terminal window at the front file-manager directory and runs ayin in it. It is

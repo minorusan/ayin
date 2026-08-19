@@ -899,6 +899,17 @@ async function handleInput(text: string): Promise<void> {
         }
         return;
       }
+      case '/sprint': {
+        // The operator's sprint as a board in the browser. Served by this session, so a card can fetch
+        // its own detail and the + box can post a comment to Jira. See src/sprint/.
+        try {
+          const { openSprintBoard, summariseSprint } = await import('./sprint/index.js');
+          addMessage('system', summariseSprint(openSprintBoard(process.cwd())));
+        } catch (err) {
+          addMessage('system', `/sprint failed — ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
       case '/testrun': {
         // Domain-scoped C# test run. Selection is deterministic (corpus → files → assemblies); the
         // only interactive part is whether Unity may be quit. See src/testrun/.

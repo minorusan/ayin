@@ -36,6 +36,12 @@ export interface JiraIssue {
   key: string;
   title: string;
   status: string;
+  /**
+   * Jira's own three-bucket grouping of `status` — "To Do" / "In Progress" / "Done" — as the site
+   * reports it. A board has as many statuses as its workflow invented ("Ready For QA", "In Code
+   * Review"), and only the site knows which bucket each falls in. Empty when the field is absent.
+   */
+  statusCategory: string;
   priority: string;
   issueType: string;
   updated: string;
@@ -135,7 +141,7 @@ interface RawIssue {
   key: string;
   fields?: {
     summary?: string;
-    status?: { name?: string };
+    status?: { name?: string; statusCategory?: { name?: string } };
     priority?: { name?: string };
     issuetype?: { name?: string };
     reporter?: { displayName?: string };
@@ -151,6 +157,7 @@ function toIssue(raw: RawIssue, detail: boolean): JiraIssue {
     key: raw.key,
     title: f.summary ?? '(no title)',
     status: f.status?.name ?? '?',
+    statusCategory: f.status?.statusCategory?.name ?? '',
     priority: f.priority?.name ?? '?',
     issueType: f.issuetype?.name ?? '?',
     updated: (f.updated ?? '').slice(0, 10),
@@ -168,6 +175,9 @@ function toIssue(raw: RawIssue, detail: boolean): JiraIssue {
 }
 
 const FIELDS = ['summary', 'status', 'priority', 'issuetype', 'updated', 'reporter'];
+
+/** A cap, because an epic is not bounded by anything but a team's habits. Reported when it bites. */
+export const MAX_EPIC_CHILDREN = 200;
 
 /**
  * Run a JQL search, learning the API flavour on the first call.
@@ -334,6 +344,57 @@ export async function issueDetail(key: string): Promise<JiraIssue> {
 }
 
 /**
+ * Post a comment on a ticket. The one WRITE in this connector.
+ *
+ * THE BODY FORMAT IS THE FLAVOUR, and getting it wrong is a 400, not a degraded comment: Cloud's v3 API
+ * takes an ADF document tree and Data Center's v2 takes a plain string. Reading tolerates both because
+ * `bodyText` flattens whatever arrives; writing has to choose, so it writes for whichever flavour served
+ * the read — the same learned value `issueDetail` uses, since it is the same endpoint family.
+ *
+ * NOT SILENT ON FAILURE, and never optimistic: the created comment is returned from Jira's own response,
+ * so a caller that got a value knows the comment exists on the server. Anything else throws with Jira's
+ * status in the message. A page that says "posted" for a comment that was rejected is worse than an error
+ * — the operator closes the tab believing their words are on the ticket.
+ */
+export async function addComment(key: string, text: string): Promise<JiraComment> {
+  const body = text.trim();
+  if (!/^[A-Z][A-Z0-9_]*-\d+$/.test(key.toUpperCase())) throw new JiraError(`${key} is not a ticket key`);
+  if (!body) throw new JiraError('refusing to post an empty comment');
+
+  // The flavour is only known after a read. A comment is always posted from a ticket that was just read,
+  // so this is the normal case; the fallback is a probe, not a guess, because a wrong ADF body is a 400.
+  const order: Array<'3' | '2'> = issueApiVersion
+    ? [issueApiVersion]
+    : apiVersion === '2' ? ['2', '3'] : ['3', '2'];
+
+  let last: unknown = null;
+  for (const v of order) {
+    const payload = v === '3'
+      ? { body: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: body }] }] } }
+      : { body };
+    try {
+      const raw = (await call(`/rest/api/${v}/issue/${encodeURIComponent(key.toUpperCase())}/comment`, {
+        method: 'POST',
+        body: payload,
+      })) as { author?: { displayName?: string }; created?: string; body?: unknown };
+      issueApiVersion = v;
+      return {
+        author: raw.author?.displayName ?? 'you',
+        created: (raw.created ?? '').slice(0, 10),
+        body: bodyText(raw.body) || body,
+      };
+    } catch (err) {
+      last = err;
+      // Only an ambiguous 404 (wrong path vs no such issue) is worth the other flavour. A 400 means the
+      // body shape was refused on a path that exists, and retrying the OTHER shape there would post the
+      // comment twice on the first success — so it is raised.
+      if (!(err instanceof JiraError && err.message.includes('404'))) throw err;
+    }
+  }
+  throw last instanceof Error ? last : new JiraError(`could not comment on ${key}`);
+}
+
+/**
  * Specific keys, self-validating: only the ones that resolve to a real issue come back.
  *
  * NOT sprint-scoped, and deliberately so — this serves `/explain`, whose candidate keys come out of
@@ -351,6 +412,44 @@ export async function issuesByKeys(keys: string[], detail = true): Promise<JiraI
   const fields = detail ? [...FIELDS, 'description', 'comment'] : FIELDS;
   const raw = await search(`key IN (${clean.join(',')})`, fields, clean.length);
   return raw.map((r) => toIssue(r, detail));
+}
+
+/**
+ * An epic and everything under it.
+ *
+ * THERE IS NO ONE WAY TO ASK. How a child points at its epic depends on the site AND on the project:
+ * a team-managed project uses the real `parent` field, a company-managed one uses the `Epic Link`
+ * custom field, and Server/DC installs answer `childIssuesOf()`. A site can hold both project styles at
+ * once, so this cannot be configured per site either. Each form is tried in turn and the first that
+ * RETURNS ISSUES wins; `via` names the one that worked, because "0 tickets" and "asked the wrong way"
+ * are different answers and only one of them is worth acting on.
+ *
+ * An unsupported field is a 400 from Jira, not an empty result, so a form that cannot work here is
+ * skipped rather than mistaken for an empty epic. If every form fails, the last error is raised.
+ */
+export async function epicChildren(epicKey: string): Promise<{ epic: JiraIssue; children: JiraIssue[]; via: string }> {
+  const key = epicKey.trim().toUpperCase();
+  const epic = await issueDetail(key);
+  const fields = [...FIELDS, 'description', 'comment'];
+  const forms: Array<{ via: string; jql: string }> = [
+    { via: 'parent', jql: `parent = ${key} ORDER BY key ASC` },
+    { via: '"Epic Link"', jql: `"Epic Link" = ${key} ORDER BY key ASC` },
+    { via: 'childIssuesOf', jql: `issue in childIssuesOf("${key}") ORDER BY key ASC` },
+  ];
+
+  let last: unknown = null;
+  const tried: string[] = [];
+  for (const f of forms) {
+    try {
+      const raw = await search(f.jql, fields, MAX_EPIC_CHILDREN);
+      tried.push(f.via);
+      if (raw.length) return { epic, children: raw.map((r) => toIssue(r, true)), via: f.via };
+    } catch (err) {
+      last = err;
+    }
+  }
+  if (tried.length === 0 && last) throw last;
+  return { epic, children: [], via: tried.join(', ') };
 }
 
 /** Reset the learned API flavour. For tests and for a credential pointing at a different site. */

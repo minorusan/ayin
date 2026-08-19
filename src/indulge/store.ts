@@ -109,6 +109,28 @@ export interface Citation {
   endLine: number;
   /** git blob sha of the cited FILE at answer time — the line range is checked against these bytes. */
   sha: string;
+  /**
+   * The TICKET this range came from, when the cited document is one (`indulge --jira`).
+   *
+   * A source file is identified by its path and pinned by a commit; a ticket is neither. Its text is
+   * edited in place by other people, so `jira/PERF-1234.md:12-18` is a claim about a moving target and a
+   * reader cannot tell whether it still says that. The pair below is the honest form: WHICH ticket, and
+   * WHEN the cited words were written — the comment's own date when the range is inside a comment, the
+   * ticket's `updated` when it is in the description. Absent on every code citation.
+   */
+  ticket?: string;
+  /** ISO date (YYYY-MM-DD) the cited words were last true. Present exactly when `ticket` is. */
+  at?: string;
+}
+
+/**
+ * One citation as a reader sees it. The only renderer — report, injection and the corpus tool all call
+ * it, so a ticket citation cannot appear as a file path in one place and a ticket in another.
+ */
+export function citeLabel(c: Citation): string {
+  return c.ticket
+    ? `${c.ticket}${c.at ? ` (${c.at})` : ''}:${c.startLine}-${c.endLine}`
+    : `${c.path}:${c.startLine}-${c.endLine}`;
 }
 
 /** Stage 3 — the unit Phase 2 will embed. */
@@ -428,6 +450,32 @@ function pidAlive(pid: number): boolean {
     // EPERM means it exists and belongs to someone else — alive for our purposes.
     return (err as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+/**
+ * Where a citation's bytes live.
+ *
+ * Code is cited in the repo; a TICKET is cited in the corpus's own document store (`<corpus>/jira/`),
+ * because a ticket is not a file in anyone's tree. Every re-verification — the report's "does this still
+ * resolve", injection's staleness label — has to ask the citation which of the two it means, or every
+ * ticket citation reads as a source file that was deleted.
+ *
+ * Memoized: the store constructor touches disk (it adopts a legacy corpus directory), and this is called
+ * per injected chunk.
+ */
+const corpusDirs = new Map<string, string>();
+export function corpusDirFor(repoPath: string): string {
+  const abs = resolve(repoPath);
+  const hit = corpusDirs.get(abs);
+  if (hit) return hit;
+  const dir = new IndulgeStore(abs).dir;
+  corpusDirs.set(abs, dir);
+  return dir;
+}
+
+/** The base a citation resolves against: the repo for code, the corpus for a ticket. */
+export function citationBase(repoPath: string, c: Citation): string {
+  return c.ticket ? corpusDirFor(repoPath) : repoPath;
 }
 
 /**

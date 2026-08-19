@@ -117,7 +117,7 @@ export const HELP: HelpEntry[] = [
   },
   {
     name: 'ayin indulge', kind: 'cli', section: 'Corpus',
-    short: 'Build the per-repo corpus overnight — see docs/INDULGE.md. --domains "<what you work on>" --depth 2',
+    short: 'Build the per-repo corpus overnight — see docs/INDULGE.md. --domains "<what you work on>" · --jira PROJ-42 for an epic',
     tip: 'Leave `ayin indulge --domains "<your feature>"` running overnight and ayin wakes up knowing your repo.',
   },
 
@@ -166,6 +166,11 @@ export const HELP: HelpEntry[] = [
   // ── connectors ─────────────────────────────────────────────────────────────────
   { name: '/jira-auth', kind: 'command', section: 'Connectors', short: 'Store a Jira token + site (verified before saving); bare /jira-auth shows status' },
   { name: '/jira', kind: 'command', section: 'Connectors', short: 'Ask Jira directly — an agentic loop against its API' },
+  {
+    name: '/sprint', kind: 'command', section: 'Connectors',
+    short: 'Your sprint as a board in the browser — click a ticket for its text, + posts a comment to Jira',
+    tip: '/sprint opens your sprint as a kanban board; clicking a ticket shows it, and + comments on it.',
+  },
   { name: '/sentry-auth', kind: 'command', section: 'Connectors', short: 'Store a Sentry token + org slug' },
   { name: '/sentry', kind: 'command', section: 'Connectors', short: 'Ask Sentry directly' },
   { name: '/openai', kind: 'command', section: 'Connectors', short: 'Store and verify an OpenAI key · switching to it is /model openai — two decisions, two commands' },

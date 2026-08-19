@@ -1,0 +1,1 @@
+Read ayin's own help — every slash command, launch flag, key binding and shell trick available in this session, exactly as `ayin --help` prints it. Pass topic (e.g. "/diff", "indulge") for one command in full. Use it before telling the operator how to do something, instead of guessing a command exists.

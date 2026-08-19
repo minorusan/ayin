@@ -29,6 +29,8 @@ import { writeReport } from './report.js';
 import { recordAnswer, recordPrompt, recordTool } from '../session-record.js';
 import { initSession } from '../session-store.js';
 import { assessChunk } from './staleness.js';
+import { JIRA_DOMAIN, runJiraIndulge } from './jira.js';
+import { MAX_EPIC_CHILDREN } from '../tools/connectors/jira/client.js';
 import { detectVendorRoots } from './vendor.js';
 import { CATEGORIES, openStore, StoreLockedError, type Category, type Manifest, type Stage, sameProject, repoKey, repoIdentity } from './store.js';
 
@@ -66,6 +68,10 @@ export interface IndulgeArgs {
   rescanVendor?: boolean;
   maxQuestions?: number;
   categories?: Category[];
+  /** `--jira <EPIC-KEY>`: turn that epic's tickets into corpus under the `jira` domain. */
+  jiraEpic?: string;
+  /** `--per-ticket N` — questions asked of each ticket. */
+  perTicket?: number;
 }
 
 /** `--flag value` and `--flag=value`, both. Unknown flags are reported, never guessed at. */
@@ -123,6 +129,16 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--rescan-vendor': args.rescanVendor = true; break;
       case '--classify-vendor': args.classifyVendor = true; break;
       case '--max-questions': args.maxQuestions = num(value(), 'max-questions'); break;
+      case '--jira': case '--epic': {
+        const v = value().trim().toUpperCase();
+        if (!/^[A-Z][A-Z0-9_]*-\d+$/.test(v)) {
+          errors.push(`--jira needs an epic KEY like PROJ-1234, got "${v || '(nothing)'}"`
+            + ' — a bare number names no project');
+        }
+        args.jiraEpic = v;
+        break;
+      }
+      case '--per-ticket': args.perTicket = num(value(), 'per-ticket'); break;
       case '--categories': {
         // ANY angle, like domains. The five that ship carry tuned prompts; anything else gets a
         // generic frame naming it. What is still refused is a name that cannot be a prompt id or a
@@ -158,7 +174,10 @@ const USAGE = [
   '  ayin indulge --qa-rules      the free half only — no model, instant',
   '  ayin indulge --fix           re-answer what the audit rejected, then re-embed what changed',
   '',
-  '  --import <dir>               install a corpus built elsewhere (nuk overnight -> laptop)',
+  '  ayin indulge --jira PROJ-42  an EPIC' + "'" + `s tickets become corpus under the "jira" domain`,
+  '       --per-ticket N          questions per ticket (default 4)',
+  '',
+  '  --import <dir>               install a corpus built elsewhere (an overnight box -> laptop)',
   '  --deep                       full explore investigation per question (~8x slower, more thorough)',
   '  --restart                    discard the corpus and rebuild (default is RESUME)',
   '  --depth N                    reference-walk depth (default 3)',
@@ -723,6 +742,90 @@ export function indulgeBackend(): { provider: string; model: string } {
   };
 }
 
+/**
+ * `--jira <EPIC>` — the epic's tickets become corpus under the `jira` domain.
+ *
+ * Its own pass rather than a stage inside the code build: the input is Jira, not the working tree, so
+ * discovery has nothing to do and the domains the operator gave do not apply. It shares everything that
+ * makes the build survivable — one lock, a run record, progress on disk AND on the terminal, cooperative
+ * SIGINT — because it is the same kind of job: minutes to hours of model time, unattended.
+ */
+async function runJiraPass(repoPath: string, args: IndulgeArgs): Promise<number> {
+  const epic = args.jiraEpic as string;
+  const store = openStore(repoPath);
+  const runId = `jira-${new Date().toISOString().replace(/[-:.]/g, '').slice(0, 15)}`;
+
+  let stopping = false;
+  const onSignal = (): void => {
+    if (stopping) process.exit(130);
+    stopping = true;
+    out('\nstopping after the current ticket…  (again to exit now)');
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+
+  try {
+    store.beginRun({ runId, domains: [JIRA_DOMAIN], headSha: '', answerBudget: args.maxQuestions });
+  } catch (err) {
+    if (err instanceof StoreLockedError) { out(err.message); return 3; }
+    throw err;
+  }
+
+  const session = await initSession();
+  recordPrompt(`ayin indulge --jira ${epic} --repoPath ${repoPath}`);
+  out(`corpus  ${store.dir}`);
+  out(`epic    ${epic}`);
+
+  const started = Date.now();
+  let lastLine = 0;
+  try {
+    const r = await runJiraIndulge({
+      store,
+      epic,
+      perTicket: args.perTicket,
+      maxQuestions: args.maxQuestions,
+      shouldStop: () => stopping,
+      onStatus: (n) => out(`  ${n}`),
+      // POSITION · ELAPSED · RATE · ETA, on the terminal, throttled. A ticket is several model calls, so
+      // an epic is minutes at best and a silent process is indistinguishable from a hung one.
+      onProgress: (done, total, current) => {
+        store.setProgress({ runId, stage: 'answer', done, total, current, startedAt: new Date(started).toISOString() });
+        const now = Date.now();
+        if (now - lastLine < 3000 && done < total) return;
+        lastLine = now;
+        const elapsed = (now - started) / 1000;
+        const rate = done > 0 ? done / elapsed : 0;
+        const left = rate > 0 ? (total - done) / rate : 0;
+        out(`  ${done}/${total} ticket(s) · ${Math.round(elapsed)}s elapsed`
+          + `${rate > 0 ? ` · ${(rate * 60).toFixed(1)} tickets/min` : ''}`
+          + `${left > 0 && done < total ? ` · ~${hhmm(left * 1000)} left` : ''}`);
+      },
+    });
+
+    out();
+    out(`${r.tickets} ticket(s) via ${r.via || 'no child query worked'} · ${r.questions} question(s) asked`
+      + `${r.duplicates ? ` (${r.duplicates} already known)` : ''}`
+      + ` · ${r.answered} answered · ${r.failed} unproven`
+      + `${r.rejectedCitations ? ` · ${r.rejectedCitations} citation(s) rejected` : ''}`);
+    if (r.capped) out(`  the epic hit the ${MAX_EPIC_CHILDREN}-child cap — some tickets were NOT read`);
+    if (r.tickets === 1 && r.via) out('  the epic itself was read, but it has no children by any of the queries tried');
+    if (r.stopped) out('  stopped early — re-run the same command to continue where it left off');
+    out(`  vectors: run \`ayin indulge --embed\` to make these searchable`);
+    recordAnswer(`indulge --jira ${epic} · ${r.tickets} ticket(s) · ${r.answered} answered · ${r.failed} unproven`);
+    store.endRun(runId, r.stopped ? 'interrupted' : 'finished');
+    out(`session ${session}`);
+    return r.answered === 0 && r.questions > 0 ? 1 : 0;
+  } catch (err) {
+    store.endRun(runId, 'interrupted');
+    out(`indulge --jira failed — ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  } finally {
+    store.releaseLock();
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+  }
+}
+
 export async function runIndulge(argv: string[]): Promise<number> {
   // Help first: asking for help must never be answered with "unknown flag: --help".
   if (argv.includes('--help') || argv.includes('-h')) { out(USAGE); return 0; }
@@ -749,6 +852,8 @@ export async function runIndulge(argv: string[]): Promise<number> {
   // read as a directory called "--server".
   if (args.server) return await importFromServer(repoPath, args.server, args.corpusKey);
   if (args.importFrom) return importCorpus(repoPath, args.importFrom);
+
+  if (args.jiraEpic) return runJiraPass(repoPath, args);
 
   if (args.embedOnly) {
     const store = openStore(repoPath);

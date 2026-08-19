@@ -15,7 +15,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeAtomic } from '../prompts-service.js';
-import { blobSha, type Chunk, type IndulgeStore } from './store.js';
+import { blobSha, citationBase, citeLabel, type Chunk, type IndulgeStore } from './store.js';
 
 export interface ReportOptions {
   store: IndulgeStore;
@@ -37,7 +37,7 @@ export interface ReportResult {
 export function chunkStillResolves(repoPath: string, chunk: Chunk): boolean {
   for (const c of chunk.citations) {
     let body: Buffer;
-    try { body = readFileSync(join(repoPath, c.path)); } catch { return false; }
+    try { body = readFileSync(join(citationBase(repoPath, c), c.path)); } catch { return false; }
     if (blobSha(body) !== c.sha) return false;
     const lineCount = body.toString('utf-8').split('\n').length;
     if (c.startLine < 1 || c.endLine > lineCount || c.endLine < c.startLine) return false;
@@ -103,7 +103,7 @@ export function renderReport(store: IndulgeStore, repoPath: string): { markdown:
         out.push('');
         out.push(esc(c.answer));
         out.push('');
-        out.push(`<sub>${c.citations.map((x) => `\`${x.path}:${x.startLine}-${x.endLine}\``).join(' · ')} — ${c.model}, ${c.createdAt.slice(0, 16)}</sub>`);
+        out.push(`<sub>${c.citations.map((x) => `\`${citeLabel(x)}\``).join(' · ')} — ${c.model}, ${c.createdAt.slice(0, 16)}</sub>`);
         out.push('');
       }
     }

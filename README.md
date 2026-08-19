@@ -265,6 +265,7 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 | `arduino_diagram` | A wiring diagram grounded in the real sketch and the component catalogue | plantuml |
 | `jira` | Ask about your current sprint in plain words — a connector with its own agentic loop; a ticket key in the question is read directly | a Jira token |
 | `jira_ticket` | One ticket by key, in one request — no model, no loop, any sprint | a Jira token |
+| `ayin_help` | ayin's own help — every command, flag and key, the same bytes `ayin --help` prints | — |
 | `jira_auth` | Store that token from a pasted blob; verified before it is saved | — |
 
 **Twelve of the eighteen need nothing but Node and a POSIX shell** — including `naama` and `entangle`,

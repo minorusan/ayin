@@ -12,6 +12,14 @@ from the repo's identity, so no negotiation is needed: if the server has one for
 the same name. Vectors are deliberately left behind (they are only comparable to vectors from the same
 embedding model); run `ayin indulge --embed` afterwards to rebuild them here, which is minutes of CPU.
 
+Half of what an engineer needs tomorrow is not in the repository. `ayin indulge --jira PROJ-42` takes an
+EPIC, reads it and every ticket under it, writes each as a document **inside the corpus** (never into your
+work tree), asks what each ticket answers that the code cannot, and stores the answers under the `jira`
+domain of this repo's corpus — retrievable beside the code they are about. Each citation names the ticket
+and the date those words were written (`PROJ-43 (2026-08-14):19-19`): ticket text is edited in place by
+other people, so a line number alone is a claim about a moving target. Run `--embed` afterwards to make
+them searchable.
+
 ## Options
 
     --domains "<a>,<b>"      comma-separated domains to build (required for a build)
@@ -37,6 +45,8 @@ embedding model); run `ayin indulge --embed` afterwards to rebuild them here, wh
     --max-files <n>          cap discovered files per domain
     --max-questions <n>      cap answers processed this run
     --categories '["a","b"]' angles to ask about; five ship tuned, any other name still works
+    --jira <EPIC-KEY>        read that epic and its tickets into the corpus's "jira" domain
+    --per-ticket <n>         questions asked of each ticket (default 4)
 
 ## Examples
 
@@ -44,3 +54,4 @@ embedding model); run `ayin indulge --embed` afterwards to rebuild them here, wh
     ayin indulge --status
     ayin indulge --search "how does the reward service pick a winner"
     ayin indulge --import --server <host>:<port>
+    ayin indulge --jira PROJ-42 --per-ticket 6

@@ -1,0 +1,21 @@
+You are preparing questions for a corpus an engineer will use tomorrow while working on this ticket.
+
+TICKET: {{KEY}} — {{TITLE}}
+{{STATUS}} · {{TYPE}}/{{PRIORITY}} · updated {{UPDATED}} · epic {{EPIC}}
+
+Write up to {{MAX}} questions that THIS TICKET answers and the code cannot: the behaviour required, an
+exact value or name it specifies, what someone decided in a comment and why, what a change must satisfy
+to be accepted, what the ticket leaves ambiguous.
+
+A question answerable by reading the code is wasted. So is a question about process — who it is assigned
+to, which sprint it is in, when it is due.
+
+Reply with JSON only, no prose and no code fence:
+
+{"questions":["…","…"]}
+
+The ticket, with line numbers:
+
+```
+{{TICKET}}
+```
