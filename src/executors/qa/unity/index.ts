@@ -48,6 +48,10 @@ import {
   buildAsmdefIndex, compiledState, isUnityProject, owningAsmdef, unityHasProjectOpen, unityVersion,
 } from '../../../testrun/asmdef.js';
 import { unityBinary } from '../../../testrun/run.js';
+import {
+  buildSolution, compileWithCsc, generatedProjects, parseCsErrors, projectsCovering, readCsproj, unityCsc,
+  type CompileAttempt, type CsProject,
+} from './compile.js';
 import type { ChangedFile } from '../../../qa/probes.js';
 import type { ExecutorConfig, PrepareResult, ProbeFact, ProjectContext, QaExecutor } from '../../types.js';
 
@@ -58,9 +62,6 @@ const config: ExecutorConfig = {
 
 /** How long a batch-mode compile may take before it is reported as unverified rather than failed. */
 const BATCH_TIMEOUT_MS = () => getConfig('unityCompileTimeoutMs', 20 * 60_000);
-
-/** `error CS1002: ; expected` — the only line shape that matters in a Unity log. */
-const CS_ERROR = /(\S+\.cs)\((\d+),(\d+)\):\s*error\s+(CS\d+):\s*(.+)/g;
 
 export const unityQaExecutor: QaExecutor = {
   config,
@@ -76,6 +77,19 @@ export const unityQaExecutor: QaExecutor = {
       return [{ key: 'unity-compile', ok: true, detail: `${repo} has no ProjectSettings/ProjectVersion.txt — not verified as a Unity project`, hard: false }];
     }
     const cs = files.filter((f) => extname(f.path).toLowerCase() === '.cs');
+
+    /**
+     * FIRST CHOICE: COMPILE THE GENERATED PROJECT. No Unity launch, no project lock, seconds instead of
+     * minutes, and it works while the editor is open — which is when anyone actually needs it. The editor
+     * has already written the source list, the reference paths and the defines into `.sln`/`.csproj`;
+     * compiling from those is reading its homework rather than making it do the work again.
+     *
+     * Only when that is not possible (no generated files, references that do not resolve on this machine,
+     * no compiler at all) do the older paths run: batch mode if nothing holds the lock, else the
+     * DLL-freshness reading. Each fallback says why it was reached.
+     */
+    const fromProject = compileGenerated(repo, cs);
+    if (fromProject) return [fromProject];
 
     // ── the editor is open: read what it compiled, never take the lock from it ──
     if (unityHasProjectOpen(repo)) {
@@ -101,6 +115,92 @@ export const unityQaExecutor: QaExecutor = {
     return [];
   },
 };
+
+/**
+ * Compile the projects Unity generated — the fast path, and the only one that works with the editor open.
+ *
+ * Returns null when this route is not available at all, so the caller falls through to batch mode or the
+ * DLL reading. Everything else — no compiler, unresolvable references, a csproj whose shape was not
+ * understood — comes back as a NON-hard fact that names the reason, because "I could not check" must not
+ * read as "your code is broken".
+ *
+ * WHICH PROJECTS. Only the assemblies that actually contain the changed files, found by matching the
+ * `<Compile Include>` lists. Building every generated project in a large Unity repo is dozens of
+ * assemblies and minutes; the turn changed two files in one of them.
+ */
+function compileGenerated(repo: string, cs: ChangedFile[]): ProbeFact | null {
+  const { sln, csprojs } = generatedProjects(repo);
+  if (!sln && csprojs.length === 0) return null; // never opened in an IDE, or a fresh clone — not this route
+
+  const timeout = BATCH_TIMEOUT_MS();
+  const projects = csprojs.map((p) => {
+    try { return readCsproj(p); } catch { return null; }
+  }).filter((p): p is CsProject => p !== null);
+
+  const targets = cs.length ? projectsCovering(projects, cs.map((f) => f.path)) : projects.slice(0, 1);
+  const missing = targets.flatMap((p) => p.missingReferences);
+  if (targets.length && missing.length) {
+    // The generated files carry ABSOLUTE paths into the editor install and Library/ScriptAssemblies. On a
+    // machine that did not generate them — a different Unity version, a clone never opened — they point
+    // at nothing, and compiling anyway produces a wall of CS0246 that says nothing about the operator's code.
+    return {
+      key: 'unity-compile', ok: true, hard: false,
+      detail: [
+        `NOT VERIFIED: ${missing.length} reference(s) named by the generated project do not exist on this machine —`
+        + ' those paths are absolute and belong to whichever machine generated them.',
+        ...missing.slice(0, 4).map((m) => `  ${m}`),
+        'Open the project in Unity once (it regenerates the .csproj files), then re-run.',
+      ].join('\n'),
+    };
+  }
+
+  // The operator's own toolchain first, if they have one: same build their IDE runs.
+  if (sln) {
+    const built = buildSolution(sln, timeout);
+    if (built && built.errors.length) {
+      return { key: 'unity-compile', ok: false, hard: true, detail: formatCompileErrors(built.errors, unityVersion(repo), built.command) };
+    }
+    if (built && !built.unverified) {
+      return { key: 'unity-compile', ok: true, hard: true, detail: `COMPILES: \`${built.command}\` finished with no C# errors` };
+    }
+    // else: fall through to csc, carrying nothing but the reason
+  }
+
+  const unity = unityBinary(repo);
+  const csc = unity ? unityCsc(unity) : null;
+  if (!csc) {
+    return {
+      key: 'unity-compile', ok: true, hard: false,
+      detail: `NOT VERIFIED: found ${sln ? '1 .sln' : `${csprojs.length} .csproj`} but no compiler — no dotnet/msbuild on PATH, and no Roslyn under the Unity install${unity ? '' : ' (which was not found either; `/set unity-path <path>`)'}`,
+    };
+  }
+  if (!targets.length) {
+    return {
+      key: 'unity-compile', ok: true, hard: false,
+      detail: `NOT VERIFIED: none of the ${projects.length} generated project(s) lists the changed .cs file(s) — the .csproj files are older than this turn's changes. Open the project in Unity once to regenerate them.`,
+    };
+  }
+
+  const attempts: CompileAttempt[] = targets.map((p) => compileWithCsc(p, csc, timeout));
+  const errors = [...new Set(attempts.flatMap((a) => a.errors))];
+  if (errors.length) {
+    return { key: 'unity-compile', ok: false, hard: true, detail: formatCompileErrors(errors, unityVersion(repo), attempts[0].command) };
+  }
+  const unverified = attempts.filter((a) => a.unverified);
+  if (unverified.length === attempts.length) {
+    return {
+      key: 'unity-compile', ok: true, hard: false,
+      detail: [
+        `NOT VERIFIED: ${unverified.length} assembl(y/ies) could not be compiled — ${unverified[0].unverified}`,
+        ...(unverified[0].output ? unverified[0].output.split('\n').slice(0, 4).map((l) => `  ${l}`) : []),
+      ].join('\n'),
+    };
+  }
+  return {
+    key: 'unity-compile', ok: true, hard: true,
+    detail: `COMPILES: ${targets.map((t) => t.assembly).join(', ')} built from the generated project(s) with Unity's own Roslyn — no C# errors`,
+  };
+}
 
 /**
  * The editor-is-open path: is every changed `.cs` covered by an assembly Unity has rebuilt since?
@@ -190,11 +290,10 @@ function batchCompile(repo: string, unity: string): ProbeFact {
       threw = err.signal === 'SIGTERM' ? 'timed out' : (err.message ?? 'failed').split('\n')[0];
     }
     const log = existsSync(logFile) ? readFileSync(logFile, 'utf-8') : '';
-    const errors = [...log.matchAll(CS_ERROR)].map((m) => `${m[1]}(${m[2]},${m[3]}): ${m[4]}: ${m[5]}`);
-    const unique = [...new Set(errors)];
+    const unique = parseCsErrors(log);
 
     if (unique.length) {
-      return { key: 'unity-compile', ok: false, hard: true, detail: formatCompileErrors(unique, unityVersion(repo)) };
+      return { key: 'unity-compile', ok: false, hard: true, detail: formatCompileErrors(unique, unityVersion(repo), 'Unity batch compile') };
     }
     if (threw === 'timed out') {
       return {
@@ -234,9 +333,9 @@ function batchCompile(repo: string, unity: string): ProbeFact {
  *
  * Capped at ten because a fix pass acts on the first few and a hundred errors are usually one cause.
  */
-export function formatCompileErrors(errors: string[], version: string | null): string {
+export function formatCompileErrors(errors: string[], version: string | null, how = 'Unity batch compile'): string {
   return [
-    `DOES NOT COMPILE: ${errors.length} C# error(s) from Unity ${version ?? ''} batch compile`.replace(/\s+$/, ''),
+    `DOES NOT COMPILE: ${errors.length} C# error(s) · Unity ${version ?? ''} · ${how}`.replace(/\s{2,}/g, ' '),
     ...errors.slice(0, 10).map((e) => `  ${e}`),
     ...(errors.length > 10 ? [`  … ${errors.length - 10} more`] : []),
   ].join('\n');

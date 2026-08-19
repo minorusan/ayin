@@ -1176,7 +1176,23 @@ intent → criteria (once per turn) → probes → review → pass? done
   everything else the generic path asked was either wrong for the type or unmeasurable without launching
   the editor.
 
-  **The check has two paths, because on a working machine the editor is usually open:**
+  **Three paths, tried in this order** — the first one needs no editor launch at all, which is why it is
+  first (`executors/qa/unity/compile.ts`):
+  - **the GENERATED PROJECT** (`.sln`/`.csproj`). The editor has already written down everything a
+    compiler needs — the source list, the reference DLLs with absolute paths, the defines, the language
+    version — so compiling from those is reading its homework instead of making it redo the work: seconds,
+    no project lock, and it works WHILE THE EDITOR IS OPEN. `dotnet`/`msbuild` builds the solution if
+    either is installed; otherwise Roslyn **as shipped inside the Unity install** (`Tools/Roslyn/csc.dll`
+    with the editor's own .NET runtime), which is what makes this work on a Mac that has Unity and no .NET
+    SDK. Only the assemblies whose `<Compile Include>` list contains a changed file are built — a large
+    Unity repo has dozens of generated projects and the turn touched two files in one of them. A response
+    file is used because a Unity assembly is routinely a thousand sources and hundreds of references, far
+    past any argv limit. What each missing piece produces: no generated files → this path is skipped;
+    HintPaths that do not resolve here (they are absolute and belong to the machine that generated them)
+    → NOT VERIFIED naming the paths and saying to open the project in Unity once; a `.csproj` whose shape
+    was not understood → NOT VERIFIED, never "no sources, must be fine". `npm run unity:compile [path]`
+    runs exactly this from a shell and prints which branch it took.
+  - **the remaining two paths, because on a working machine the editor is usually open:**
   - **editor CLOSED** → `Unity -batchmode -quit -nographics -projectPath …`, then read the log.
     `error CS…` lines are the verdict, NOT the exit code: Unity exits non-zero for a licence problem or a
     missing module too, so a non-zero exit with no CS errors is reported as unverified *with* the exit

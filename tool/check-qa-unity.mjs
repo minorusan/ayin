@@ -122,6 +122,77 @@ ok(found.length === 2, 'both error lines are read out of a real log shape', Stri
 ok(found[0] === 'Assets/Game/Player.cs(12,9): CS1002: ; expected', 'file, line, column, code and message survive', found[0]);
 ok(!/Refreshing native plugins/.test(found.join(' ')), 'and ordinary log noise is not mistaken for an error');
 
+// ── the generated .csproj: the fast path that needs no editor launch ─────────────
+//
+// THE FIXTURE IS AUTHORED, NOT CAPTURED, and that is stated because it matters: this box has no Unity, so
+// the shape below is written from Unity's generator conventions rather than copied out of a real project.
+// The reader is therefore built to be tolerant and to FAIL LOUD on a shape it did not understand — zero
+// sources is treated as unverified upstream, never as "nothing to compile, must be fine". `npm run
+// unity:compile` on a machine that has Unity is what confirms the real shape.
+
+console.log('\nthe generated csproj reader');
+const { readCsproj, generatedProjects, projectsCovering, parseCsErrors, unityCsc } =
+  await import(`file://${join(ROOT, 'dist', 'executors', 'qa', 'unity', 'compile.js')}`);
+
+const gen = unityProject();
+mkdirSync(join(gen, 'Assets/Game'), { recursive: true });
+write(gen, 'Assets/Game/Player.cs', 'public class Player {}\n');
+write(gen, 'Assets/Game/Enemy.cs', 'public class Enemy {}\n');
+write(gen, 'Library/ScriptAssemblies/Shared.dll', 'MZ');
+const fakeEngine = write(gen, 'FakeUnity/UnityEngine.dll', 'MZ');
+write(gen, 'Assembly-CSharp.csproj', `<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="Current" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <AssemblyName>Assembly-CSharp</AssemblyName>
+    <LangVersion>9.0</LangVersion>
+    <DefineConstants>UNITY_2023_2_22;UNITY_EDITOR;DEBUG;TRACE</DefineConstants>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoStdLib>true</NoStdLib>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Assets/Game/Player.cs" />
+    <Compile Include="Assets\\Game\\Enemy.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="UnityEngine">
+      <HintPath>FakeUnity/UnityEngine.dll</HintPath>
+    </Reference>
+    <Reference Include="Gone">
+      <HintPath>/nowhere/Missing.dll</HintPath>
+    </Reference>
+    <ProjectReference Include="Shared.csproj">
+      <Project>{GUID}</Project>
+    </ProjectReference>
+  </ItemGroup>
+</Project>
+`);
+
+const discovered = generatedProjects(gen);
+ok(discovered.csprojs.length === 1 && /Assembly-CSharp\.csproj$/.test(discovered.csprojs[0]), 'the generated csproj is discovered at the project root');
+const csprojRead = readCsproj(discovered.csprojs[0]);
+ok(csprojRead.assembly === 'Assembly-CSharp', 'AssemblyName is read', csprojRead.assembly);
+ok(csprojRead.sources.length === 2, 'both <Compile Include> items are read', String(csprojRead.sources.length));
+ok(csprojRead.sources.every((p) => p.includes(gen)), 'and resolved to absolute paths');
+ok(csprojRead.sources.some((p) => p.endsWith('Enemy.cs')), 'including one written with WINDOWS separators — Unity emits both');
+ok(csprojRead.references.includes(fakeEngine), 'a HintPath that exists becomes a -reference');
+ok(csprojRead.references.some((r) => r.endsWith('ScriptAssemblies/Shared.dll')),
+  'a ProjectReference resolves to the sibling assembly in Library/ScriptAssemblies — that is where Unity puts it');
+ok(csprojRead.missingReferences.length === 1 && csprojRead.missingReferences[0] === '/nowhere/Missing.dll',
+  'a HintPath that does NOT exist is reported, never silently dropped — absolute paths belong to the machine that generated them',
+  JSON.stringify(csprojRead.missingReferences));
+ok(csprojRead.langVersion === '9.0' && csprojRead.unsafeCode === true && csprojRead.noStdLib === true, 'langversion, unsafe and nostdlib are carried');
+ok(csprojRead.defines.includes('UNITY_EDITOR') && csprojRead.defines.length === 4, 'every define is split out', String(csprojRead.defines.length));
+
+const csprojCovering = projectsCovering([csprojRead], [join(gen, 'Assets/Game/Player.cs')]);
+ok(csprojCovering.length === 1, 'the assembly OWNING a changed file is found by its Compile list — only that one is built');
+ok(projectsCovering([csprojRead], [join(gen, 'Assets/Other/Thing.cs')]).length === 0, 'and a file it does not list does not select it');
+
+ok(parseCsErrors('X.cs(1,2): error CS0103: nope\nX.cs(1,2): error CS0103: nope').length === 1,
+  'duplicate compiler lines collapse — one cause reported once');
+ok(unityCsc('/nowhere/Unity.app/Contents/MacOS/Unity') === null, 'no Roslyn under a nonexistent editor is null, not a throw');
+
+rmSync(gen, { recursive: true, force: true });
+
 // ── who reads what: the operator gets the headline, the agent gets the errors ────
 //
 // The gate puts a fact's FIRST LINE on the chat card (via `issue.problem`) and the WHOLE detail into the
