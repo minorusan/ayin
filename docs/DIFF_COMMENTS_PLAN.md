@@ -1,6 +1,23 @@
 # Plan — in-diff comments, wired to the live agent session
 
-**Status:** not started. Written to be picked up cold, with no memory of the conversation that produced it.
+**Status: BUILT 2026-08-18, with two deliberate deviations and one part not done.** `docs/DIFF.md` describes
+what shipped; this document is kept for the reasoning and for §4, which is still the design to follow.
+
+- **§2 transport — deviated.** POST up, **polling** down (1.2s), not SSE. The plan allowed polling as the
+  fallback and said not to build both; this took the fallback without trying SSE first. Reconsider if the
+  poll shows up in a profile — the state a page waits on changes at most twice per comment.
+- **§4 reply routing — NOT BUILT.** The turn's closing message is attached to every comment that turn
+  absorbed, labelled as shared when there is more than one. `<comment id="…">` markers, generous
+  recognition, strict verification and the unrouted-reply area are all still to do. Ids are `c-<8 hex>`
+  rather than `c1`, `c2` — if the marker scheme is built, shorten them first: the plan's reason for short
+  ids was that a model must echo one without typos, and that reason returns the moment it has to.
+- **§5 versioned pages — deviated, and the plan's own goal is better served.** No `/page?v=<n>`: the route
+  re-collects per request, so the URL is stable and the reload is `location.reload()`. The operator chose
+  this shape explicitly ("let the daemon serve the page and we open the URL"), and it also removes the
+  page-id from the comment store's key.
+- Everything else landed as written, including the content-anchored re-location of §5 and every failure
+  mode in the list at the end. The gate is `npm run check:comments` (the plan called it
+  `check:diff-comments`).
 
 **The mission in one sentence:** every line of the `/diff` page gets a `+comment` button; a comment becomes a
 message to the *running* ayin session; the page shows pending → thinking → answered, and when the model has

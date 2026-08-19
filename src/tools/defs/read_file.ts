@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { basename, extname, join, relative, sep } from 'node:path';
 import { addPendingImage, isImagePath, preprocessImage } from '../../image.js';
 import { corpusBlockFor, chunksForFile } from '../../indulge/inject.js';
+import { log } from '../../log.js';
 import { attributeFile } from '../../indulge/attribution.js';
 
 export const tool: Tool = {
@@ -22,9 +23,37 @@ export const tool: Tool = {
       }
       const ext = extname(resolved).toLowerCase();
       if (ext === '.pdf') {
-        return `Error: PDFs are not natively supported by gemma vision. Rasterize to PNG first, e.g.:\n  pdftoppm -r 200 -png "${resolved}" /tmp/page\n  read_file /tmp/page-1.png`;
+        return `Error: no vision encoder here reads PDF. Rasterize to PNG first, e.g.:\n  pdftoppm -r 200 -png "${resolved}" /tmp/page\n  read_file /tmp/page-1.png`;
       }
       if (isImagePath(resolved)) {
+        /**
+         * ASK BEFORE ATTACHING. An image handed to a model with no vision encoder does not come back
+         * as a worse answer — Ollama refuses the whole request with HTTP 400 "Multimodal data provided,
+         * but model does not support multimodal requests", so the NEXT call the agent makes dies, and
+         * the operator reads a transport error instead of "this model cannot see".
+         *
+         * Verified against the runtime, not inferred: glm-4.7-flash returns exactly that 400.
+         *
+         * Lazy import — `llm/select` reaches the tool registry back through the provider runtime, and a
+         * module-scope edge here half-initializes whichever side loads first.
+         */
+        try {
+          const { llmProvider } = await import('../../llm/select.js');
+          const provider = await llmProvider();
+          const sees = provider.vision ? await provider.vision() : null;
+          if (sees === false) {
+            const status = await provider.status();
+            return `Error: ${basename(resolved)} is an image and the served model`
+              + ` (${status.model ?? 'unknown'}) has no vision capability — attaching it would fail the`
+              + ` next call with "model does not support multimodal requests", not degrade it.\n`
+              + `Switch to a model that can see first (\`/model <name>\`), then read the image again.`;
+          }
+          // `null` means the provider does not publish capabilities. Attach and let it refuse: a
+          // provider that cannot answer the question must not have vision disabled on its behalf.
+        } catch (e) {
+          // The CHECK failing is not the read failing. Say so and carry on to the attach.
+          log('WARN', 'vision_check_failed', { error: e instanceof Error ? e.message : String(e) });
+        }
         try {
           const img = await preprocessImage(resolved);
           addPendingImage(img.base64);

@@ -21,6 +21,7 @@ import {
   screen, addMessage, setStatus, setAgentStatus, clearChat,
   onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
   showAlert, setStickyAlert, clearStickyAlert, registerCommand, formatShellForChat, clearInput,
+  lastAssistantMessage,
 } from './ui.js';
 import { isTranscribing, startTranscript, stopTranscript, transcriptPath, transcriptSize, flush as flushTranscript } from './transcript.js';
 import { executeWipe, humanBytes, planWipe, wipeOverview, type WipeScope } from './wipe.js';
@@ -33,9 +34,11 @@ import { loadHistory, pushEntry, forgetEntry } from './history.js';
 import { forcePlanNextTurn, togglePlanSession } from './plan/index.js';
 import { toggleQaSession, forceQaNextTurn } from './qa/index.js';
 import { togglePresenterSession, forcePresenterNextTurn } from './presenter/index.js';
-import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation, recordSlashTurn } from './agent.js';
+import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation, recordSlashTurn, onQueuedMessagesDrained } from './agent.js';
 import { findToolBySlash, slashTools, loadTools } from './tools.js';
-import { startPromptServer } from './prompt-server.js';
+import { startPromptServer, serverUrl } from './prompt-server.js';
+import { wireDiffComments } from './diff/server.js';
+import { commentIdFromPrompt, getComment, markDone, markFailed, markWorking, reapAbandoned } from './diff/comments.js';
 import { llmProvider } from './llm/select.js';
 import { showIndulgePicker, handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
 import { showDialog } from './dialog.js';
@@ -414,7 +417,59 @@ function relativeWhen(iso: string): string {
 }
 let busy = false;
 
-onInput(async (text: string) => {
+/**
+ * Comments whose answer the review page is still waiting for.
+ *
+ * A comment does not get a turn of its own. If the agent is idle it starts one; if the agent is mid-turn
+ * the text is queued and FOLDED INTO that turn (see agent.ts drainQueuedMessages), which is the right
+ * behaviour — the operator commenting on line 40 while the agent works on line 12 wants one coherent
+ * pass, not two. So the page's status has to be derived from the turn, not from the comment:
+ *
+ *   pending  accepted, but nothing has taken it up yet
+ *   working  a turn has absorbed it and is acting on it
+ *   done     that turn finished; the reply is the agent's last message and the tree has changed
+ *
+ * Only `working` comments are settled when a turn ends. One still `pending` was never absorbed — it is
+ * waiting for the next turn, and calling it done would answer the operator with a reply to someone
+ * else's question.
+ */
+const inFlightComments = new Set<string>();
+
+function settleCommentTurns(error: string | null): void {
+  if (!inFlightComments.size) return;
+  const reply = lastAssistantMessage();
+  const settling = [...inFlightComments]
+    .map((id) => getComment(process.cwd(), id))
+    .filter((c): c is NonNullable<typeof c> => c !== null && c.status === 'working');
+
+  /**
+   * SEVERAL COMMENTS, ONE CLOSING MESSAGE. Comments written while the agent works are folded into the
+   * same turn, so that turn ends with ONE final message for all of them. Copying it under each thread
+   * unchanged would read as an individual answer to each — three different questions, three identical
+   * replies, each looking authoritative.
+   *
+   * Said plainly instead. The real fix is docs/DIFF_COMMENTS_PLAN.md §4: ask the model to wrap the part
+   * of its reply that answers a given comment in <comment id="…">, recognise generously, verify strictly,
+   * and show an unroutable reply rather than guessing which thread it belongs to. Not built yet.
+   */
+  const shared = settling.length > 1
+    ? `\n\n(one turn answered ${settling.length} comments together — this closing message covers all of them)`
+    : '';
+
+  for (const c of settling) {
+    if (error) markFailed(process.cwd(), c.id, error);
+    else markDone(process.cwd(), c.id, (reply || '(the turn produced no closing message — check the chat)') + shared);
+    inFlightComments.delete(c.id);
+  }
+}
+
+/**
+ * ONE PATH FOR EVERY PROMPT. The review page's comments come through here too, which is what makes them
+ * indistinguishable from typing in the chat: same history entry, same `user` bubble, same busy/queue
+ * rules, same agent loop. A second entry point would be a second set of those decisions to keep in
+ * sync, and the first thing to drift would be the one the operator only sees when it breaks.
+ */
+async function handleInput(text: string): Promise<void> {
   if (busy) {
     // A slash command typed while the agent works is REFUSED below, so its argument is never acted on —
     // and an argument that is never acted on has no business being persisted, least of all a credential
@@ -1112,11 +1167,14 @@ onInput(async (text: string) => {
     }
 
     await runAgent(text);
+    settleCommentTurns(null);
   } catch (err) {
     setAgentStatus('');
     const msg = err instanceof Error ? err.message : String(err);
     addMessage('system', `Agent error: ${msg}`);
     log('ERROR', 'agent_error', { error: msg });
+    // The page must never be left spinning on a turn that died.
+    settleCommentTurns(msg);
   }
   // The block belongs to the TURN. Clearing it here is what keeps a lookup made for "how does the
   // reward service work" out of the next turn about something else entirely.
@@ -1125,7 +1183,9 @@ onInput(async (text: string) => {
 
   // Refresh token display
   refreshTokens().catch(() => {});
-});
+}
+
+onInput((text: string) => { void handleInput(text); });
 
 // ── Start ───────────────────────────────────────────────────────────
 
@@ -1148,6 +1208,18 @@ async function main(): Promise<void> {
     // The inverse of `watch`: remove the hooks from a repo and deregister it. See src/watch.ts.
     const { runUnwatch } = await import('./watch.js');
     await runUnwatch(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === 'kill') {
+    // `ayin kill dog` — the hound kill switch. Two words because that is what the operator says out
+    // loud; anything else after `kill` is an error rather than a guess at what was meant.
+    const { runKillDog } = await import('./kill-dog.js');
+    if (process.argv[3] !== 'dog') {
+      process.stderr.write('ayin: the only thing you can kill is the dog — `ayin kill dog [--off | --status]`\n');
+      process.exitCode = 1;
+      return;
+    }
+    process.exitCode = runKillDog(process.argv.slice(4));
     return;
   }
   if (process.argv[2] === 'indulge') {
@@ -1332,6 +1404,33 @@ async function runInteractive(): Promise<void> {
 
   startPromptServer();
 
+  /**
+   * The review page's route into the session. `handleInput` decides whether this starts a turn or joins
+   * the running one; either way the comment shows up in the chat exactly as if it had been typed.
+   */
+  wireDiffComments((id, prompt) => {
+    inFlightComments.add(id);
+    // Idle: this call starts the turn, so the comment is being acted on now. Busy: it goes on the
+    // queue and flips to working when the turn absorbs it (onQueuedMessagesDrained, below).
+    if (!busy) markWorking(process.cwd(), id);
+    void handleInput(prompt);
+  });
+
+  onQueuedMessagesDrained((messages) => {
+    for (const m of messages) {
+      const id = commentIdFromPrompt(m);
+      if (id) markWorking(process.cwd(), id);
+    }
+  });
+
+  // A session killed mid-turn leaves comments nothing will ever answer. Fail them by name at boot
+  // instead of letting a reopened page poll a turn that died with the last process.
+  const reaped = reapAbandoned(process.cwd());
+  if (reaped) addMessage('system', `${reaped} diff comment(s) from a previous session were never answered — re-send them from the page.`);
+
+  const url = serverUrl('/diff');
+  if (url) addMessage('system', `review page: ${url}`);
+
   // Release a booked model (/model qwen) if we're killed — /quit already does this; a hard kill
   // otherwise leaves the grant to TTL-expire on the backend.
   process.on('SIGTERM', () => { void releaseModelHold(); });
@@ -1361,6 +1460,17 @@ async function runInteractive(): Promise<void> {
         addMessage('system', `prompt ${r.id} could no longer carry what the code sends — replaced with the shipped text. Yours: ${r.backupPath}`);
       }
       if (pr.refreshed.length) addMessage('system', `prompt(s) updated to the shipped version: ${pr.refreshed.join(', ')}`);
+
+      // `ayin --debug` — the flag form of `/debug`, applied FROM THE START.
+      //
+      // The bundle's value is a path someone else can read, and the moment you need it is the moment the
+      // session stopped answering — which is also the moment there is no prompt to type `/debug` into.
+      // Writing it at boot means the path exists before anything goes wrong, and `/debug` (or
+      // `ayin debug`) refreshes the same stable directory later. Fired here rather than earlier on
+      // purpose: the session id and the resolved model are what make the bundle worth reading, and both
+      // exist only once `initSession` has answered. A dialect probe still in flight is reported as
+      // provisional by the bundle itself, not guessed at here.
+      if (process.argv.includes('--debug')) void handleInput('/debug');
     }).catch(err => {
       log('WARN', 'session_init_failed', { error: err instanceof Error ? err.message : String(err) });
     });

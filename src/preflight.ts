@@ -46,6 +46,11 @@ const NO_MODEL_NEEDED = new Set([
   'debug',
   // `testrun` drives NUnit/Unity; the model is only consulted through the corpus, which is on disk.
   'testrun',
+  // `kill dog` throws a switch and deletes hook files. Same reasoning as `unwatch`, only sharper: the
+  // hound is most likely to be in the way on a machine whose model has gone away — that is when it
+  // blocks every stop waiting for a skeptic nothing can answer — so "configure a model first" would
+  // gate the one command that makes the machine usable again.
+  'kill',
   // `unwatch` removes git hooks and deregisters a repo. It reads no model and writes no prompt, so
   // gating it behind "configure a model first" stopped an operator from UNDOING a thing on a machine
   // where the model had gone away — which is exactly when they want it undone.

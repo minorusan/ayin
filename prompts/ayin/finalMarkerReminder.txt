@@ -1,0 +1,1 @@
+If this reply completes the task, its FIRST CHARACTER must be $. A reply without it is treated as unfinished and you will be asked to continue.

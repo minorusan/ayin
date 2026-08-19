@@ -4,6 +4,8 @@ Write everything needed to diagnose a session into one directory, with secrets s
 
 This is the same bundle `/debug` writes from inside the TUI, available from a shell for a run nobody was watching. It only reads files that already exist and writes into the destination directory.
 
+`ayin --debug` is the third form — a normal interactive launch that writes the bundle at boot. See `ayin --help "ayin --debug"`.
+
 ## Options
 
     [dir]   destination directory (default: a canonical system temp directory)

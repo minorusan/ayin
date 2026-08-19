@@ -73,11 +73,26 @@ export function onInput(handler: (text: string) => void): void {
   input.handlers({ onSubmit: handler });
 }
 
+/**
+ * The last thing the agent SAID, kept because something outside the terminal has to be able to show it.
+ * A diff-page comment thread reports the reply next to the line it was written on, and the chat widget
+ * renders messages without keeping any addressable copy of them.
+ *
+ * Streaming lands as one `addMessage` plus many `updateLastAssistant` calls, so both write here.
+ */
+let _lastAssistant = '';
+
+export function lastAssistantMessage(): string {
+  return _lastAssistant;
+}
+
 export function addMessage(role: MessageRole, content: string): void {
+  if (role === 'assistant') _lastAssistant = content;
   chat.add(role, content);
 }
 
 export function updateLastAssistant(content: string): void {
+  _lastAssistant = content;
   chat.updateLastAssistant(content);
 }
 

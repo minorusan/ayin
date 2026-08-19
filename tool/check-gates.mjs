@@ -693,7 +693,11 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
 console.log('\nthe prompt editor does not listen to the network');
 {
   const ps = readFileSync(join(DIST, '..', 'src', 'prompt-server.ts'), 'utf-8');
-  ok(/server\.listen\(PORT, '127\.0\.0\.1'/.test(ps), 'bound to loopback');
+  // EVERY listen, not one spelling of it. The port stopped being a constant — a second session must get
+  // its own or its review page cannot take comments — so asserting the literal `PORT` would now pass a
+  // file that had grown a wildcard bind somewhere else in it.
+  const listens = [...ps.matchAll(/\.listen\(([^)]*)\)/g)].map((m) => m[1]);
+  ok(listens.length > 0 && listens.every((args) => /,\s*'127\.0\.0\.1'/.test(args)), 'bound to loopback');
   // CODE lines only: the comment above the fix describes the old bind, and a gate tripping on its own
   // explanation has happened three times today.
   const psCode = ps.split('\n').filter((l) => {
@@ -702,6 +706,13 @@ console.log('\nthe prompt editor does not listen to the network');
   }).join('\n');
   ok(!/0\.0\.0\.0/.test(psCode), 'no wildcard bind in the code');
   ok(/\^\[A-Za-z0-9_-\]\+\$/.test(ps), 'a prompt id is validated — an unsanitized id let `../` escape');
+  // A COMMENT ON A DIFF LINE STARTS AN AGENT TURN, and the agent has a shell. A page on the internet
+  // cannot read a loopback reply, but it does not need to when the POST itself is the effect — so a
+  // request carrying a foreign Origin, or a Host that is not loopback (how DNS rebinding walks past an
+  // address check), is refused before any route sees it.
+  ok(/function crossOriginRefused/.test(ps), 'a foreign Origin is refused, not merely unread');
+  ok(/req\.method !== 'GET' && req\.method !== 'HEAD'[\s\S]{0,500}crossOriginRefused\(req\)/.test(ps),
+    "and on every mutating request, including the prompt editor's own save");
 }
 
 // NAAMAH IS A SUBMODULE, AND RENDERING IS OPTIONAL.

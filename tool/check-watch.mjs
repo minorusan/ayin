@@ -93,6 +93,14 @@ git('add', '-A');
 
 // ── install the real hook and read its facts ─────────────────────────
 
+// The kill switch is GLOBAL (`ayin kill dog` → ~/.ayin-cli/hound.off) and this gate must run a live
+// hound, so point the switch at a path inside the throwaway repo: absent for the assertions below,
+// and created deliberately for the one that pins the instant pass. Without this the gate goes red on
+// any machine whose operator has killed their dog — and the in-process import further down would meet
+// the guard's `process.exit(0)` and end the run early, looking green.
+const OFF_FILE = join(REPO, 'hound.off');
+process.env.AYIN_HOUND_OFF_FILE = OFF_FILE;
+
 const { ensureHoundHook } = await import(`file://${join(ROOT, 'dist', 'watch.js')}`);
 ensureHoundHook(REPO);
 
@@ -100,6 +108,17 @@ const hookPath = join(REPO, '.claude', 'hooks', 'ayin-hound.mjs');
 const settings = JSON.parse(readFileSync(join(REPO, '.claude', 'settings.json'), 'utf-8'));
 ok(settings.hooks?.Stop?.length === 1, 'exactly one Stop-hook group installed');
 ok(/ayin-hound\.mjs/.test(settings.hooks.Stop[0].hooks[0].command), 'Stop hook points at the node hound');
+
+// ── the kill switch (`ayin kill dog`) ────────────────────────────────
+//
+// The guard has to be the FIRST thing the script does, or "disabled" still costs a git walk at the end
+// of every turn.
+ok(readFileSync(hookPath, 'utf-8').includes('AYIN_HOUND_OFF_FILE'),
+  'the generated hook carries the kill-switch constant');
+writeFileSync(OFF_FILE, 'killed by the gate\n');
+const killed = execFileSync('node', [hookPath, '--facts'], { cwd: REPO, encoding: 'utf-8' });
+ok(killed.trim() === '', 'with the switch thrown the hook prints NOTHING and exits 0 — the stop passes instantly');
+rmSync(OFF_FILE);
 
 const out = execFileSync('node', [hookPath, '--facts'], { cwd: REPO, encoding: 'utf-8' });
 const { facts } = JSON.parse(out);

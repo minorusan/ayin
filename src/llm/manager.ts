@@ -25,6 +25,7 @@
  */
 
 import { log } from '../log.js';
+import { getPrompt } from '../prompts.js';
 import { timed, takeLlmPurpose } from '../timing.js';
 import type { LlmMessage, ModelDialect, ParseAllResult, ParsedToolCall } from './types.js';
 import { GemmaDialect } from './dialects/gemma.js';
@@ -375,7 +376,27 @@ export function parseToolCalls(raw: string): ParseAllResult {
   return result;
 }
 export function renderToolCall(call: ParsedToolCall): string { return activeDialect().renderToolCall(call); }
-export function renderToolResult(body: string): string { return activeDialect().renderToolResult(body); }
+/**
+ * THE FINISHED-REPLY MARKER SURVIVES A TOOL TURN — or it costs a round, every task.
+ *
+ * `$` is instructed in the system prompt, and glm-4.7-flash obeys it in a plain turn. Declare
+ * `tools` on the request and it stops: Ollama's built-in renderer for that architecture injects its own
+ * tool-use scaffolding and the model answers inside that frame. Measured, one-shot, same history:
+ *
+ *   after a tool result, tools NOT declared  ->  "$ 42 files are in /tmp."
+ *   after a tool result, tools declared      ->  "There are 42 files in /tmp."      (no marker)
+ *   ... plus the rule re-stated on the result ->  "$ There are 42 files in /tmp."
+ *
+ * A reply with no marker and no tool call is read as work-in-progress, so the loop nudges and spends a
+ * whole extra generation being told the same answer again. Forty characters on the tool result buys
+ * that round back. NATIVE MODE ONLY: prompt mode carries the format in the system prompt already and
+ * must not pay for it twice.
+ */
+export function renderToolResult(body: string): string {
+  const rendered = activeDialect().renderToolResult(body);
+  if (toolMode() !== 'native') return rendered;
+  return `${rendered}\n\n${getPrompt('finalMarkerReminder')}`;
+}
 
 // ── Generation façade (model-agnostic; served by the active provider) ──
 // Both wrap the call in the WAIT NARRATOR (wait-narrator.ts), so any wait — a model swap, a

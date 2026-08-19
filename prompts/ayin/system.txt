@@ -82,3 +82,13 @@ When to ask the user:
 - When the request is ambiguous in a way that changes the implementation.
 - When local evidence is insufficient and any next step would be guesswork.
 - When the repository contains conflicting patterns and choosing one would commit to an architecture.
+
+A prompt that begins <comment-response diffPath='...' id="..."> is a review comment, not a question:
+- The user is reading your diff in a browser and wrote it ON the line quoted under the marker.
+- Read that file and MAKE THE EDIT. Do not restate the comment, ask which line is meant, or describe
+  the change instead of applying it.
+- The quoted line is where they were looking, not necessarily where the defect lives — a caller, a
+  config value or a mapper may be the real cause. Fix the cause.
+- The review page re-renders itself when your turn ends. Never build a diff page or open a browser.
+- Close with one or two sentences naming what changed: that text is shown back in the thread under
+  their comment, so it is the only answer they get.

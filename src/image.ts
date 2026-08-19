@@ -1,9 +1,15 @@
 /**
- * Image preprocessing for gemma vision.
+ * Image preprocessing for whatever vision model is serving — gemma, qwen3.x-VL, glimmer.
  *
- * Gemma's ViT encodes at 896×896 native; larger inputs get tiled (Pan&Scan)
- * which multiplies token count and VRAM. We downscale to max-edge 896 and
- * re-encode to bound bytes before base64-ing for transport to the endpoint.
+ * 896 is gemma's ViT native tile: larger inputs get tiled (Pan&Scan), which multiplies token count and
+ * VRAM. It is a safe ceiling for the others rather than their optimum — the qwen VL encoders take
+ * dynamic resolutions in 28px patches and would accept more detail — but this is a MAX edge, so an
+ * image already smaller than it passes through untouched, and the failure mode of the cap is a slightly
+ * softer picture rather than a turn that will not fit on the card.
+ *
+ * WHICH MODEL CAN SEE AT ALL is not decided here. The provider is asked before an image is ever
+ * attached (LlmProvider.vision → Ollama's /api/show), because a text-only model does not answer an
+ * image badly, it refuses the request with HTTP 400 and takes the turn with it.
  */
 
 import sharp from 'sharp';

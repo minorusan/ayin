@@ -8,9 +8,11 @@ Past the gate, ayin connects to the model, opens a local session record under `~
 
     --dangerously-skip-permissions   auto-approve tool calls for this session (git push/pull/checkout are still confirmed)
     --thinking                       enable thinking-mode output
+    --debug                          write a debug bundle at boot, then run normally (same as typing /debug)
     --help, -h, help                 print the command list and exit (skips the model check)
 
 ## Examples
 
     ayin
     ayin --dangerously-skip-permissions
+    ayin --debug

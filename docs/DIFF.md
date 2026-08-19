@@ -10,10 +10,17 @@ Staged, unstaged **and untracked** changes. Leaving untracked files out is the t
 simplification and it is wrong: a new file is the part of a change most worth reviewing, and a page
 that silently omits it teaches the reader to trust a picture missing its newest half.
 
-The page is written to `~/.ayin-cli/diffs/` and opened with the desktop's default handler. It is one
-self-contained file — no CDN, no font, no fetch — because it opens from `file://` on a machine that
-may have no network, and a stylesheet that fails to load turns a review into a wall of text. The
-palette is naamah's, so the two pages read as siblings.
+**Two pages, one renderer.** With an ayin session open on the repo, that session SERVES the page and
+the browser is pointed at its URL — which is what makes a line commentable (see below). With no
+session listening, the page is written to `~/.ayin-cli/diffs/` and opened from `file://`: one
+self-contained file, no CDN, no font, no fetch, because that page has to open on a machine with no
+network, and a stylesheet that fails to load turns a review into a wall of text. The served page
+writes that snapshot too — the live page dies with the session, and a review worth having is one you
+can still read tomorrow. The palette is naamah's, so the pages read as siblings.
+
+Zero external assets is a rule for both. The comment client is inlined into the served page and
+**omitted entirely** from the static one: an offline document that ships a fetch loop pointing at a
+port that is not there is dead code in the one artifact whose whole promise is self-containment.
 
 ---
 
@@ -63,6 +70,71 @@ which is the single largest source of fake volume in a review page.
 
 ---
 
+## 4 · Comment — the line, and the agent that owns the tree
+
+Hover any line on the served page for a `+`. It opens a git-style box; what you write is sent to the
+session that served the page and enters its chat **as an ordinary prompt** — same history, same `user`
+bubble, same queueing rules as typing it. There is one input path in `app.ts` and comments go down it,
+because a second entry point is a second copy of those decisions and the first thing to drift would be
+the one nobody sees until it breaks.
+
+The agent receives it with a marker naming where it came from:
+
+    <comment-response diffPath='http://127.0.0.1:7773/diff?rev=HEAD' id="c-8685e95b">
+    Assets/…/SpeedsCore.cs:142 (current side of the diff)
+    + int x = (int)cfg.ratio;
+
+    this truncates the float
+
+`prompts/ayin/system.txt` teaches the agent what that means: read the file and MAKE THE EDIT, fix the
+cause rather than the quoted line, and never build a diff page or open a browser — the harness does
+that half, deliberately, because leaving the reload to the model makes it probabilistic.
+
+**The thread on the page shows `pending` → `working` → `done`, with a clock.** A comment written while
+the agent is mid-turn is folded into that turn rather than starting a second one, so it stays
+`pending` until the turn absorbs it. Elapsed time ticks beside the state: "working…" alone looks the
+same after four minutes as after four seconds, and the operator cannot otherwise tell a long edit from
+a dead session. When the turn ends the page reloads **the same URL**, which re-collects from the new
+working tree, and the agent's closing message appears under the comment.
+
+Threads are appended to `~/.ayin-cli/diffs/comments-<repo>.jsonl` — one record per creation, one per
+status change, current state is the fold. A comment is the operator's writing and the answer may take
+minutes, so a browser refresh, a second session or a power cut must not lose it; an interrupted append
+costs the last line, never the thread. A thread still waiting when the page reloads keeps its clock and
+keeps polling. Comments left unanswered by a session that exited are failed **by name** at the next
+boot rather than polled forever.
+
+**Line numbers move**, and that is the point — the fix shifts every line below it. A comment is
+anchored to `{file, side, lineNo, lineText}` and re-attaches only when all four still agree. When they
+do not, the thread is shown at the top of its file with its original coordinates and a note that the
+line has changed, because a comment silently re-pinned to whatever now occupies line 142 attributes
+the operator's words to code they never read.
+
+### What it is not, yet
+
+One turn produces one closing message, so several comments folded into the same turn currently share
+it, labelled as shared. Routing a specific paragraph back to a specific thread is
+`docs/DIFF_COMMENTS_PLAN.md` §4 — the model wraps an answer in `<comment id="…">`, recognised
+generously and verified strictly — and it is not built.
+
+### The endpoint is small on purpose
+
+    GET  /diff?rev=<rev>              the page, re-collected per request
+    POST /api/diff/comment            { rev, file, side, lineNo, lineText, text } → { id, status }
+    GET  /api/diff/comment/<id>       { status, response, error }
+
+Same origin, so nothing about the port is baked into the HTML and there is no CORS to allow. The port
+walks up from 7773 when it is taken: one server per session, published to
+`~/.ayin-cli/daemon-<pid>.json`, so a page always talks to the session that owns its tree — and a
+comment reaching a different repo's agent is not a mistake worth routing around.
+
+**A POST here starts an agent turn, and the agent has a shell.** The bind is loopback-only, and every
+mutating request is refused unless its `Origin` is this session and its `Host` is loopback: a page on
+the internet cannot read a reply from 127.0.0.1, but it does not need to when the POST itself is the
+effect.
+
+---
+
 ## Limits, and why they are reported
 
 Two caps, both **visible on the page**. A truncation the reader cannot see is indistinguishable from
@@ -104,3 +176,11 @@ modification, a deletion, a rename, a binary, a path with a space and untracked 
   that the page stays inside a size a browser can open.
 - asserts the span covers the whole token, that whitespace-only changes are flagged, that the default
   extension set is exactly the five, and that the hidden count is present.
+
+`npm run check:comments` — the comment loop, over a real HTTP server against a real throwaway repo,
+with a stub agent standing in for the TUI. It asserts the parts that only exist at the boundary: the
+page's own javascript **parses** (nothing else here runs it), a foreign `Origin` is refused, a
+wrongly-typed field fails loud naming the field, the marker and id reach the agent and the id survives
+the round trip back out of the prompt text, the state moves `pending`→`working`→`done` as the page
+sees it, and — the one that matters most — after the stub edits the file, **the same URL renders the
+new code** with the thread and the reply still attached and the moved anchor shown as an orphan.

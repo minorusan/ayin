@@ -66,6 +66,38 @@ const PROBE_TIMEOUT_MS = 2_500;
  */
 const QWEN_DEFAULTS = { temperature: 0.7, topP: 0.8, topK: 20 };
 
+/**
+ * What a model can do, from `/api/show`. Cached per model id for the life of the process: it is a
+ * property of the blob on disk, and re-asking on every image read would put a network round trip in
+ * front of a file read.
+ *
+ * Vision is the one that matters here, and it is asked BEFORE an image is attached rather than
+ * discovered as a 400 after — see LlmProvider.vision.
+ */
+const capabilityCache = new Map<string, string[]>();
+
+async function capabilitiesOf(model: string): Promise<string[] | null> {
+  const cached = capabilityCache.get(model);
+  if (cached) return cached;
+  try {
+    const res = await fetch(`${baseUrl()}/api/show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { capabilities?: unknown };
+    if (!Array.isArray(data.capabilities)) return null;
+    const caps = data.capabilities.filter((c): c is string => typeof c === 'string');
+    capabilityCache.set(model, caps);
+    providerLog().info('ollama_capabilities', { model, capabilities: caps.join(',') });
+    return caps;
+  } catch {
+    return null; // unreachable or an older runtime with no /api/show — unknown, not "no"
+  }
+}
+
 function baseUrl(): string {
   return (process.env.AYIN_OLLAMA_URL || providerConfig('ollamaUrl') || DEFAULT_URL).replace(/\/+$/, '');
 }
@@ -265,6 +297,14 @@ export function createOllamaProvider(): LlmProvider {
     },
 
     /** Liveness + which model answers. Never throws: an unreachable runtime is `{ok:false}`. */
+    /** Ollama publishes this, so ayin never has to keep a list of which models can see. */
+    async vision(model?: string): Promise<boolean | null> {
+      const target = model || (await resolveModel());
+      if (!target) return null;
+      const caps = await capabilitiesOf(target);
+      return caps === null ? null : caps.includes('vision');
+    },
+
     async status(): Promise<ProviderStatus> {
       try {
         const res = await fetch(`${baseUrl()}/api/tags`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });

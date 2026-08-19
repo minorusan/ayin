@@ -47,6 +47,11 @@ export function slugFor(name: string): string {
   if (bare.startsWith('!')) return 'bang';
   // `-p` is the headless mode, and a page called `p.md` tells a reader nothing. Named, like `bang`.
   if (bare === '-p' || bare.startsWith('-p ')) return 'headless';
+  // `--debug` is the FLAG form applied to a normal launch; `ayin debug` is the subcommand that writes a
+  // bundle and exits. Both would slug to `debug.md`, and one page cannot honestly describe two
+  // behaviours — check:helppage rejects the collision rather than letting the second entry open a page
+  // about the first.
+  if (bare === '--debug') return 'debug-flag';
   const slug = bare.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   return slug || 'ayin';
 }

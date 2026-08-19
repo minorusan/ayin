@@ -18,7 +18,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { cancelActiveThinking } from './connection.js';
-import { llmChat, parseToolCalls, replyTruncated, renderToolCall, renderToolResult, activeModelId, activeContextTokens } from './llm/manager.js';
+import { llmChat, parseToolCalls, replyTruncated, renderToolCall, renderToolResult, activeModelId, activeContextTokens, toolMode } from './llm/manager.js';
 import { llmCall } from './llm.js';
 import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution, modelTools } from './tools.js';
@@ -63,6 +63,18 @@ const queuedUserInputs: string[] = [];
 export function interruptAgent(): void {
   interrupted = true;
   immediateCancel = cancelActiveThinking() || cancelActiveToolExecution() || immediateCancel;
+}
+
+/**
+ * Told when queued messages are absorbed into the running turn. A diff-page comment that arrives
+ * mid-turn is `pending` until this fires and `working` after — without it the page would show
+ * "pending" for the entire turn that is already acting on it, which is a lie about the state of the
+ * work, not just a cosmetic lag.
+ */
+let onDrained: ((messages: string[]) => void) | null = null;
+
+export function onQueuedMessagesDrained(fn: (messages: string[]) => void): void {
+  onDrained = fn;
 }
 
 export function enqueueAgentMessage(message: string): void {
@@ -793,18 +805,23 @@ export function trimToContext(messages: Message[]): Message[] {
 }
 
 function drainQueuedMessages(): number {
-  let drained = 0;
+  const taken: string[] = [];
   while (queuedUserInputs.length > 0) {
     const message = queuedUserInputs.shift()!;
     currentGoal = message;
     pushToWindow('user', message);
     pushMessage('user', message);
-    drained++;
+    taken.push(message);
   }
-  if (drained > 0) {
-    log('INFO', 'agent_messages_drained', { count: String(drained) });
+  if (taken.length > 0) {
+    log('INFO', 'agent_messages_drained', { count: String(taken.length) });
+    // Never let a listener's failure break the turn that was doing real work.
+    if (onDrained) {
+      try { onDrained(taken); }
+      catch (e) { log('WARN', 'drain_listener_failed', { error: e instanceof Error ? e.message : String(e) }); }
+    }
   }
-  return drained;
+  return taken.length;
 }
 
 /** Truncate goal to a single short line for the summarizer — avoids eating the whole summary budget. */
@@ -1167,7 +1184,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
         // scan. Position is load-bearing in a prompt (the middle gets skimmed), so the way OUT goes first.
         pushToWindow('user',
           `Your reply carried no tool call and no $ marker, so the harness cannot tell whether you are done.\n`
-          + `IF YOU ARE FINISHED: reply with $ followed by your answer. Nothing else is required — do not `
+          + `IF YOU ARE FINISHED: the FIRST CHARACTER of your reply must be $, then your answer. Nothing else is required — do not `
           + `invent further work to justify another turn.\n`
           + `IF YOU ARE NOT FINISHED: take the next concrete step now, rather than describing it.`);
         continue;
@@ -1636,9 +1653,28 @@ async function runAgentTurn(userInput: string): Promise<void> {
 
       drainQueuedMessages();
 
-      const callXml = renderToolCall({ name, params });
-      const assistantTurn = textPrefix ? `${textPrefix}\n\n${callXml}` : callXml;
-      pushToWindow('assistant', assistantTurn);
+      /**
+       * IN NATIVE MODE THE ASSISTANT TURN CARRIES NOTHING TO COPY.
+       *
+       * A model imitates its own previous turns — that is the whole mechanism behind this bug, and it
+       * does not care what the text is. Rendering the call back as ayin XML taught glm-4.7-flash to
+       * write `<function>bash>` (session bdf1463c, round 12). Replacing that with a neutral
+       * `[called read_file(path=…)]` taught it to write THAT instead — verbatim, truncation and all,
+       * as its round-2 reply (session 60316a08). Two shapes, same lesson: any description of a call,
+       * sitting in an assistant turn, is a worked example the model will follow.
+       *
+       * So in native mode the assistant turn holds only what the model actually SAID in prose, and the
+       * call is identified on the RESULT instead — a user-role message, which is not the model's own
+       * voice and is not imitated as output. In prompt mode the XML stays: the model really did write
+       * it, and its transcript must be its own.
+       */
+      const nativeMode = toolMode() === 'native';
+      if (nativeMode) {
+        if (textPrefix) pushToWindow('assistant', textPrefix);
+      } else {
+        const callXml = renderToolCall({ name, params });
+        pushToWindow('assistant', textPrefix ? `${textPrefix}\n\n${callXml}` : callXml);
+      }
 
       if (timeoutResult === 'timeout') {
         const taskId = registerTask(name, paramPreview);
@@ -1726,7 +1762,13 @@ async function runAgentTurn(userInput: string): Promise<void> {
 
       // The guard's note (a polling notice) rides along with the real result — the model gets the
       // information it asked for AND the rule about asking again, in the same message.
-      pushToWindow('user', renderToolResult(clipForWindow(result) + (guard.note ?? '') + editMissNote));
+      /**
+       * The result SAYS WHICH CALL IT ANSWERS, because in native mode the assistant turn no longer does
+       * (see above). This is a user-role message: the model reads it as input, not as an example of its
+       * own output, so naming the call here does not teach a shape to copy.
+       */
+      const resultHead = nativeMode ? `${name}(${paramPreview}) →\n` : '';
+      pushToWindow('user', renderToolResult(resultHead + clipForWindow(result) + (guard.note ?? '') + editMissNote));
       pushMessage('assistant', `[tool: ${name}(${paramPreview})]`);
 
       // CTA just delivered — tell the model it's done. This prevents the

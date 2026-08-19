@@ -1826,6 +1826,19 @@ The moving parts, designed to survive interruption at any point:
   (temp file + rename) — a power cut mid-write can never leave a truncated `settings.json` for the
   next Claude Code turn to choke on (an unparseable file would otherwise be presumed hand-edited
   and left alone forever, exactly the case a self-inflicted truncation must not fall into).
+- **The kill switch — `ayin kill dog`** (`src/kill-dog.ts`, `src/hound-off.ts`): `~/.ayin-cli/hound.off`.
+  While that file exists the hook exits 0 on its FIRST line — before the staged diff, before git,
+  before any model — `ayin watch` installs no hound, and the daemon's self-heal stops re-adding one
+  (`houndInstallAllowed()` is a function, not a constant: the daemon lives for days and the switch is
+  thrown from another process). The command also removes ayin's own hound from every registered repo
+  and from the repo it is standing in, using the SAME `HOUND_MARKERS` identity `unwatch` uses.
+  Why a switch and not an uninstall: `unwatch` can only end a hound ayin installed and registered, so
+  a Stop hook someone added by hand — the actual cause of "unwatch did not stop the dog" — is outside
+  its reach. A foreign hound is REPORTED, never edited; the report prints the one line
+  (`[ -f "$HOME/.ayin-cli/hound.off" ] && exit 0`) that makes any bash hound honour the same switch.
+  A file rather than a config key because the deciding code is a standalone copy in another repo, run
+  by another program, which can import nothing from ayin. `--off` revives, `--status` reports.
+  `AYIN_WATCH_HOUND=0` remains the per-process opt-out.
 - **Guards**: commits touching only `reviews/**` (or a root `AYIN-REPORT-*.md`) are skipped (no
   review-of-review loop); the agent files and everything under `reviews/` are excluded from the
   working-tree fingerprint, the review diff, and auto-staging — so ayin writing its own reports
@@ -2815,6 +2828,13 @@ absence is load-bearing: adding any of them back would break a property the agen
 is needed is the one moment it cannot be produced: a wedged session takes the keystroke, queues it
 behind the turn that is stuck, and writes nothing. A bundle collected from a SECOND terminal holds a
 session seconds old and nothing about the hang.
+
+`ayin --debug` narrows that gap from the other side: the flag runs the same `/debug` at BOOT, once
+`initSession` has answered, so the bundle path exists and is on screen before there is anything to
+diagnose (`app.ts`, `runInteractive`). It is the same stable directory, so `/debug` later refreshes it
+rather than creating a second one to quote. What it cannot do is describe a hang that has not happened
+yet — the model is usually still `unknown` and the dialect provisional in a boot bundle, which the
+manifest states rather than guesses at. Hence, still:
 
 So `live-mirror.ts` writes the evidence continuously, before anyone asks for it, to a path something
 else can read — `/private/tmp/ayin-debug/live` on macOS, `$TMPDIR/ayin-debug/live` elsewhere

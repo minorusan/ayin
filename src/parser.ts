@@ -31,7 +31,46 @@ export interface ParseAllResult {
   toolCalls: ParsedToolCall[];
 }
 
-export function parseResponseAll(raw: string): ParseAllResult {
+/**
+ * THE `=` THE MODEL DROPPED.
+ *
+ * Observed in the wild, not imagined: glm-4.7-flash, session bdf1463c round 12, emitted
+ *
+ *     <function>bash>
+ *     <parameter=command>
+ *     find … -type d -name "*family*"
+ *     </parameter>
+ *     </function>
+ *
+ * where the form it was instructed in is `<function=bash>`. The scan below looks for the literal
+ * `<function=`, so this matched nothing, the round produced no tool call, and the operator was shown a
+ * hand-written tool call as though it were prose. Eleven calls in that same session parsed perfectly —
+ * the drift happens mid-conversation, which is exactly why it cannot be left to the prompt to prevent.
+ *
+ * RECOGNISE GENEROUSLY, VERIFY STRICTLY — the same rule the final marker and the GLM envelope learned.
+ * The repair fires only when the name looks like a tool name AND the block actually closes with
+ * `</function>`, so a sentence containing an angle bracket is never promoted to a call.
+ *
+ * `<function>NAME>` and `<function=NAME>` are the SAME LENGTH, so this rewrite leaves every downstream
+ * index untouched — the text/call split below slices on offsets into this string.
+ */
+/**
+ * THE SHAPES MODELS ACTUALLY EMIT — counted in `~/.ayin-cli/sessions` before any of this was written:
+ * 274 canonical openers, and three mangled families.
+ *
+ *   <function>NAME>            the `=` became `>`   (glm-4.7-flash, session bdf1463c round 12)
+ *   <function/NAME>            the `=` became `/`
+ *   <function>NAME</function>  a closed empty tag, parameters following it as bare tags
+ *
+ * The first version of this recognition REWROTE the reply, normalising every mangled opener to the
+ * canonical one before scanning. That was wrong in a way worth remembering: a `write_file` whose
+ * content DOCUMENTS the mangled shape had its content rewritten too, the documented example became a
+ * second real tool call, and the write lost its body. Recognition must never mutate what the model
+ * wrote — so the scan below finds openers positionally, skips anything inside a parameter value, and
+ * leaves every byte of every value exactly as it arrived.
+ */
+export function parseResponseAll(input: string): ParseAllResult {
+  const raw = input;
   const toolCalls: ParsedToolCall[] = [];
 
   // ── JSON tool calls: <tool_call>{...}</tool_call> (may repeat) ──
@@ -52,24 +91,81 @@ export function parseResponseAll(raw: string): ParseAllResult {
   }
 
   // ── XML tool calls: <function=name> ... </function> (may repeat) ──
-  const funcStarts: number[] = [];
-  for (let i = 0; ; ) {
-    const idx = raw.indexOf('<function=', i);
-    if (idx === -1) break;
-    funcStarts.push(idx);
-    i = idx + '<function='.length;
+  //
+  // A PARAMETER VALUE IS NOT A CALL SITE. write_file'\''s content is arbitrary text, and the moment ayin
+  // learned to recognise mangled openers, a file DOCUMENTING one ("models sometimes emit
+  // <function>read_file>…") parsed as a second call and the write lost its content. The value ranges are
+  // computed first and every opener inside one is ignored — which also closes the same hole for the
+  // canonical form, where it was always open.
+  const valueRanges: Array<[number, number]> = [];
+  {
+    const open = /<parameter(?:=[a-zA-Z_][a-zA-Z0-9_]*|\s+name=["'][^"']+["'])>/g;
+    for (let m = open.exec(raw); m; m = open.exec(raw)) {
+      const from = m.index + m[0].length;
+      const to = raw.indexOf('</parameter>', from);
+      if (to === -1) break;
+      valueRanges.push([from, to]);
+      open.lastIndex = to;
+    }
+  }
+  const insideValue = (at: number): boolean => valueRanges.some(([a, b]) => at >= a && at < b);
+
+  const openers: Array<{ at: number; len: number; name: string }> = [];
+  {
+    // `=` is what the model was told to emit. `>` and `/` are what it emits when it drops the `=`;
+    // both were counted in real sessions before being accepted here.
+    const any = /<function(=|>|\/)([a-z][a-zA-Z0-9_.-]{2,40})>/g;
+    for (let m = any.exec(raw); m; m = any.exec(raw)) {
+      if (insideValue(m.index)) continue;
+      if (m[1] !== '=') {
+        // RECOGNISE GENEROUSLY, VERIFY STRICTLY. A repaired opener must close, and must carry
+        // arguments — `<function>bash>` wrapped around a sentence is a model thinking in the shape of
+        // a tag, and promoting it spends a round running `bash()` with nothing in it.
+        const end = raw.indexOf('</function>', m.index);
+        if (end === -1) continue;
+        const body = raw.slice(m.index + m[0].length, end);
+        if (!/<parameter[=\s]/.test(body) && !/<([a-z][a-z0-9_]*)>[\s\S]*?<\/\1>/.test(body)) continue;
+      }
+      openers.push({ at: m.index, len: m[0].length, name: m[2].trim() });
+    }
+  }
+  /**
+   * `<function>explore</function>` followed by bare parameter tags — the whole call turned inside out.
+   * Strictest of the three: every non-blank byte between the close tag and the next opener must belong
+   * to a complete `<key>…</key>` pair, or this is prose that happens to contain a tag.
+   */
+  {
+    const closed = /<function>([a-z][a-z0-9_]{2,40})<\/function>/g;
+    for (let m = closed.exec(raw); m; m = closed.exec(raw)) {
+      if (insideValue(m.index)) continue;
+      const from = m.index + m[0].length;
+      const nextOpen = raw.indexOf('<function', from);
+      const tail = raw.slice(from, nextOpen === -1 ? raw.length : nextOpen);
+      const params: Record<string, string> = {};
+      let accounted = 0;
+      const pair = /<([a-z][a-z0-9_]*)>\n?([\s\S]*?)\n?<\/\1>/g;
+      for (let p = pair.exec(tail); p; p = pair.exec(tail)) {
+        params[p[1]] = unwrapValue(p[2]);
+        accounted += p[0].replace(/\s+/g, '').length;
+      }
+      if (!Object.keys(params).length) continue;
+      if (accounted !== tail.replace(/\s+/g, '').length) continue;
+      openers.push({ at: m.index, len: m[0].length, name: m[1] });
+      toolCalls.push({ name: m[1], params });
+    }
+    openers.sort((a, b) => a.at - b.at);
   }
 
-  for (let i = 0; i < funcStarts.length; i++) {
-    const start = funcStarts[i];
-    const nextStart = funcStarts[i + 1] ?? raw.length;
+  const funcStarts = openers.map((o) => o.at);
+
+  for (let i = 0; i < openers.length; i++) {
+    if (raw.startsWith(`<function>${openers[i].name}</function>`, openers[i].at)) continue; // handled above
+    const start = openers[i].at;
+    const nextStart = openers[i + 1]?.at ?? raw.length;
     const rest = raw.slice(start, nextStart);
     const closeIdx = rest.indexOf('</function>');
     const block = closeIdx !== -1 ? rest.slice(0, closeIdx + '</function>'.length) : rest;
-
-    const nameMatch = block.match(/^<function=([^\n>]+)>?/);
-    if (!nameMatch) continue;
-    const name = nameMatch[1].trim();
+    const name = openers[i].name;
 
     const params: Record<string, string> = {};
     // Format 1 (canonical): <parameter=key>value</parameter>
@@ -101,6 +197,29 @@ export function parseResponseAll(raw: string): ParseAllResult {
         if (wrap) raw = wrap[1];
         else raw = raw.replace(/<\/?parameter[^>]*>/g, ''); // strip any stray tags
         params[key] = unwrapValue(raw);
+      }
+    }
+
+    // Format 4 (bare child tags): <path>/tmp/x.cs</path> instead of <parameter=path>…</parameter>.
+    // Seen alongside the mangled openers — a model that drops the `=` from <function=> drops it from
+    // <parameter=> too, and the call then arrived with NO arguments at all, which is worse than not
+    // parsing: read_file was invoked with an empty path instead of the path sitting right there.
+    //
+    // VERIFY STRICTLY. Every non-blank byte between the opener and </function> must belong to one of
+    // these pairs, or this is prose that happens to contain a tag and running it would be running a
+    // sentence. Same rule the GLM legacy shape already uses, for the same reason.
+    if (Object.keys(params).length === 0) {
+      const body = block.replace(/^<function(?:=|>|\/)[^\n>]+>?/, '').replace(/<\/function>\s*$/, '');
+      const bare: Record<string, string> = {};
+      const fmt4 = /<([a-z][a-z0-9_]*)>\n?([\s\S]*?)\n?<\/\1>/g;
+      let b: RegExpExecArray | null;
+      let accounted = 0;
+      while ((b = fmt4.exec(body)) !== null) {
+        bare[b[1].trim()] = unwrapValue(b[2]);
+        accounted += b[0].replace(/\s+/g, '').length;
+      }
+      if (Object.keys(bare).length > 0 && accounted === body.replace(/\s+/g, '').length) {
+        Object.assign(params, bare);
       }
     }
 

@@ -230,10 +230,25 @@ export interface LlmProvider {
 
   /** Subscribe to the provider's live events; returns a stop function. Must reconnect on its own. */
   events?(onEvent: (e: LlmEvent) => void): () => void;
+
+  /**
+   * CAN THE SERVED MODEL SEE? `true` / `false`, or `null` when this provider cannot tell.
+   *
+   * Asked before an image is attached, because sending one to a model without a vision encoder does not
+   * degrade — it fails the whole turn. Ollama answers a multimodal request to a text-only model with
+   * HTTP 400 "Multimodal data provided, but model does not support multimodal requests", so the read
+   * that attached the image takes the agent's next call down with it, and the operator sees a network
+   * error rather than "this model cannot look at pictures".
+   *
+   * `null` is not `false`. An endpoint that does not publish capabilities gets the image anyway and is
+   * allowed to refuse it; guessing "no" there would disable vision on every provider that simply does
+   * not answer the question. Never throws.
+   */
+  vision?(model?: string): Promise<boolean | null>;
 }
 
 /** Capability names, for `providerHas()` and for talking about them in messages. */
-export type LlmCapability = 'models' | 'setModel' | 'acquire' | 'authority' | 'telemetry' | 'events';
+export type LlmCapability = 'models' | 'setModel' | 'acquire' | 'authority' | 'telemetry' | 'events' | 'vision';
 
 /** Does this provider implement an optional capability? The one check every consumer makes. */
 export function providerHas(p: LlmProvider | null, cap: LlmCapability): boolean {

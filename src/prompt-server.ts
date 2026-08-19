@@ -1,17 +1,93 @@
 /**
- * Prompt Editor Web UI — serves on port 7773.
- * Reads/writes ~/.ayin-cli/prompts.json.
- * Ayin CLI reads from the same file on every LLM call, so edits are live.
+ * The session's local HTTP surface. Two things live here:
+ *
+ *   /                  the prompt editor — reads/writes the prompt files, live on the next LLM call
+ *   /diff, /api/diff/  the review page and its line comments (see diff/server.ts)
+ *
+ * ONE PORT PER SESSION, NOT ONE PER MACHINE. 7773 was a constant, so the second ayin on the box lost
+ * the bind, logged a warning, and ran with no server at all — and once the review page became a client
+ * of this server, that stopped being cosmetic: a page served by one session while another session owns
+ * the repo would send the operator's comments to an agent sitting in a different tree. So the bind
+ * walks up from 7773 until it finds a free port, and every session publishes what it took to
+ * `~/.ayin-cli/daemon-<pid>.json`. The page is served over the port it was opened from, and its own
+ * relative fetches come back to that same session — there is nothing to route and nothing to guess.
  */
 
 import { createServer } from 'node:http';
-import { existsSync } from 'node:fs';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { log } from './log.js';
 import { resetPromptsToDefaults, getPromptsDir as promptsDir } from './prompts.js';
 import { prompts, writeAtomic } from './prompts-service.js';
+import { handleDiffRequest } from './diff/server.js';
 
-const PORT = 7773;
+const BASE_PORT = 7773;
+const PORT_TRIES = 12;
+
+let chosenPort = 0;
+
+/** The port this session actually got, or 0 before the bind succeeds / in a process with no server. */
+export function serverPort(): number {
+  return chosenPort;
+}
+
+export function serverUrl(path = ''): string {
+  return chosenPort ? `http://127.0.0.1:${chosenPort}${path}` : '';
+}
+
+// ── who is listening, and for which tree ──────────────────────────────────────
+
+export interface DaemonRecord {
+  pid: number;
+  port: number;
+  cwd: string;
+  startedAt: string;
+}
+
+function registryPath(pid: number): string {
+  return join(homedir(), '.ayin-cli', `daemon-${pid}.json`);
+}
+
+function publish(rec: DaemonRecord): void {
+  try {
+    mkdirSync(join(homedir(), '.ayin-cli'), { recursive: true });
+    writeFileSync(registryPath(rec.pid), `${JSON.stringify(rec, null, 2)}\n`, 'utf-8');
+  } catch (e) {
+    log('WARN', 'daemon_publish_failed', { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+function unpublish(pid: number): void {
+  try { rmSync(registryPath(pid), { force: true }); } catch { /* going away anyway */ }
+}
+
+/**
+ * A live session serving `cwd`, if there is one. Used by `ayin diff` from a plain shell: when the
+ * operator has a TUI open on this repo, the CLI hands them that session's interactive page instead of
+ * writing a second, dead copy to disk.
+ *
+ * A record whose process is gone is DELETED here rather than returned. Stale entries are normal — a
+ * session killed with SIGKILL never runs its exit hook — and a caller that trusted one would open a
+ * URL that refuses the connection.
+ */
+export function findSessionServer(cwd: string): DaemonRecord | null {
+  const dir = join(homedir(), '.ayin-cli');
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return null; }
+  for (const name of names) {
+    if (!/^daemon-\d+\.json$/.test(name)) continue;
+    const p = join(dir, name);
+    let rec: DaemonRecord;
+    try { rec = JSON.parse(readFileSync(p, 'utf-8')) as DaemonRecord; } catch { continue; }
+    let alive = false;
+    try { process.kill(rec.pid, 0); alive = true; } catch { alive = false; }
+    if (!alive) { try { rmSync(p, { force: true }); } catch { /* raced another reader */ } continue; }
+    if (rec.cwd === cwd && rec.port > 0) return rec;
+  }
+  return null;
+}
 
 /**
  * Prompt TEXT lives in `~/.ayin-cli/prompts/<namespace>/<id>.txt` (see prompts-service.ts), not in
@@ -188,8 +264,53 @@ const HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-export function startPromptServer(): void {
+/**
+ * A page on the internet can make your browser POST to loopback; it cannot read the reply, but it does
+ * not need to when the POST itself is the effect — and here the effect is an agent turn with a shell.
+ * So a request that carries an Origin must carry OURS, and the Host must be loopback (a name that
+ * resolves to 127.0.0.1 is how DNS rebinding gets past an address check). A request with no Origin at
+ * all is a local tool — curl, a script — and is allowed: that is the operator, not a web page.
+ */
+function crossOriginRefused(req: IncomingMessage): string | null {
+  const host = (req.headers.host ?? '').split(':')[0];
+  if (host && host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]' && host !== '::1') {
+    return `Host ${host} is not loopback`;
+  }
+  const origin = req.headers.origin;
+  if (!origin) return null;
+  const allowed = [`http://127.0.0.1:${chosenPort}`, `http://localhost:${chosenPort}`, `http://[::1]:${chosenPort}`];
+  return allowed.includes(origin) ? null : `Origin ${origin} is not this session`;
+}
+
+export function startPromptServer(cwd = process.cwd()): void {
   const server = createServer((req, res) => {
+    // Every mutating route is behind this, including the prompt editor's own save — it rewrites the
+    // agent's system prompt, which was reachable by any page in the browser until now.
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const refused = crossOriginRefused(req);
+      if (refused) {
+        log('WARN', 'server_request_refused', { reason: refused, url: req.url ?? '' });
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: refused }));
+        return;
+      }
+    }
+
+    // The review page and its comments. Returns true when it answered.
+    void handleDiffRequest(req, res, cwd).then((handled) => {
+      if (handled) return;
+      routePromptEditor(req, res);
+    }).catch((e) => {
+      log('WARN', 'diff_route_failed', { error: e instanceof Error ? e.message : String(e) });
+      if (!res.headersSent) { res.writeHead(500); res.end('diff route failed'); }
+    });
+  });
+
+  bind(server, cwd);
+}
+
+function routePromptEditor(req: IncomingMessage, res: ServerResponse): void {
+  {
     if (req.url === '/' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(HTML);
@@ -234,21 +355,40 @@ export function startPromptServer(): void {
 
     res.writeHead(404);
     res.end('Not found');
+  }
+}
+
+/**
+ * LOOPBACK ONLY. This was a wildcard bind, and the combination was remote code execution enabled by
+ * default on every interactive launch: no auth, no Origin check, and `POST /api/prompts` writes the
+ * agent's OWN system prompt. Anyone on the network could rewrite `prompts/ayin/system.txt`, and `bash`
+ * has no sandbox while headless auto-approves shell commands.
+ *
+ * A prompt editor is a single-operator convenience; a comment endpoint that starts agent turns is more
+ * than that. Both stay on 127.0.0.1, and reaching either from another machine wants a token and an
+ * explicit opt-in, never a wildcard.
+ *
+ * The port is not fixed (see the header): EADDRINUSE walks up, because a second session with no server
+ * is a second session whose review page cannot take comments.
+ */
+function bind(server: import('node:http').Server, cwd: string, port = BASE_PORT, tries = PORT_TRIES): void {
+  server.once('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE' && tries > 1) {
+      log('INFO', 'server_port_taken', { port: String(port) });
+      bind(server, cwd, port + 1, tries - 1);
+      return;
+    }
+    log('WARN', 'prompt_server_error', { error: err.message, port: String(port) });
   });
 
-  // LOOPBACK ONLY. This was a wildcard bind, and the combination was remote code execution enabled by
-  // default on every interactive launch: no auth, no Origin check, and `POST /api/prompts` writes the
-  // agent's OWN system prompt. Anyone on the network could rewrite `prompts/ayin/system.txt`, and `bash`
-  // has no sandbox while headless auto-approves shell commands. The docs already said `localhost:7773`,
-  // which is what any reader assumes; now it is true.
-  //
-  // A prompt editor is a single-operator convenience. Reaching it from another machine wants a token and
-  // an explicit opt-in, never a wildcard.
-  server.listen(PORT, '127.0.0.1', () => {
-    log('INFO', 'prompt_server_started', { port: String(PORT) });
-  });
-
-  server.on('error', (err) => {
-    log('WARN', 'prompt_server_error', { error: err.message });
+  server.listen(port, '127.0.0.1', () => {
+    chosenPort = port;
+    publish({ pid: process.pid, port, cwd, startedAt: new Date().toISOString() });
+    log('INFO', 'prompt_server_started', { port: String(port), cwd });
+    // The record is a claim that this port is live. It must not outlive the process that made it.
+    const clean = () => unpublish(process.pid);
+    process.on('exit', clean);
+    process.on('SIGINT', clean);
+    process.on('SIGTERM', clean);
   });
 }

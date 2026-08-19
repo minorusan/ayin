@@ -122,6 +122,14 @@ check that the provider reports the model you think it does (`/api/status`, or `
 behavioural source of truth. A code change whose docs still describe the old behaviour is not done —
 it is a bug with a passing build.
 
+**And every command, subcommand, flag or key you ADD is written into `help/` and listed in `src/help.ts`
+in the same change.** `ayin --help` and `/help` are the only places a feature can be discovered — a flag
+that works but appears in neither does not exist for anyone who did not write it, and the next agent
+re-implements it. Concretely, adding a surface means all three: the handler, an entry in `src/help.ts`
+(so it prints in the list), and the page under `help/cli/` or `help/commands/` that `--help <topic>`
+opens. `npm run check:help` asserts the list against what `app.ts` actually handles, in both
+directions — a documented no-op fails it just as loudly as an undocumented feature.
+
 ---
 
 ## 3 · Prompts live in files — NEVER inline in source (NON-NEGOTIABLE)

@@ -22,6 +22,72 @@
  */
 
 import type { DiffLine, DiffSet, FileDiff } from './collect.js';
+import type { DiffComment } from './comments.js';
+
+/**
+ * Comments exist only on the SERVED page. A `file://` page has no session to send one to, so the
+ * affordance is absent there rather than present and broken — see diff/server.ts for why the page is
+ * a route at all.
+ */
+export interface RenderOptions {
+  interactive?: boolean;
+  /** The rev this page compares against, echoed back on every comment so a reload re-renders it. */
+  rev?: string;
+  comments?: DiffComment[];
+}
+
+interface Resolved {
+  interactive: boolean;
+  rev: string;
+  /** file → `side:lineNo` → the thread on that line, oldest first. */
+  byFile: Map<string, Map<string, DiffComment[]>>;
+  /** Ids actually placed against a line, so the rest can be shown as orphans instead of vanishing. */
+  placed: Set<string>;
+}
+
+function resolve(opts: RenderOptions): Resolved {
+  const byFile = new Map<string, Map<string, DiffComment[]>>();
+  for (const c of opts.comments ?? []) {
+    let byLine = byFile.get(c.file);
+    if (!byLine) { byLine = new Map(); byFile.set(c.file, byLine); }
+    const key = `${c.side}:${c.lineNo}`;
+    const list = byLine.get(key);
+    if (list) list.push(c); else byLine.set(key, [c]);
+  }
+  return { interactive: opts.interactive === true, rev: opts.rev || 'HEAD', byFile, placed: new Set() };
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  pending: 'pending…', working: 'working…', done: 'done', failed: 'failed',
+};
+
+/**
+ * One thread. `data-cid`/`data-status` are what let a RELOAD resume: a comment still working when the
+ * page reloaded must keep showing its spinner and keep polling, or the operator is left staring at a
+ * thread that looks abandoned while the agent is still editing.
+ */
+function threadHtml(list: DiffComment[]): string {
+  const items = list.map((c) => {
+    // ELAPSED, NOT JUST A STATE. "working…" on its own is the spinner that means nothing: after four
+    // minutes it looks exactly like it did after four seconds, and the operator cannot tell a long
+    // edit from a dead session. The client ticks this while the state is not terminal.
+    const since = c.startedAt || c.createdAt;
+    const age = c.status === 'pending' || c.status === 'working'
+      ? `<span class="age" data-since="${esc(since)}"></span>` : '';
+    const badge = `${age}<span class="badge ${c.status}">${STATUS_LABEL[c.status] ?? esc(c.status)}</span>`;
+    const reply = c.status === 'done' && c.response
+      ? `<div class="cmt reply"><div class="cmt-h"><span class="who">ayin</span></div>`
+        + `<div class="cmt-b">${esc(c.response)}</div></div>`
+      : '';
+    const failed = c.status === 'failed' && c.error
+      ? `<div class="cmt reply err"><div class="cmt-b">${esc(c.error)}</div></div>`
+      : '';
+    return `<div class="cmt" data-cid="${esc(c.id)}" data-status="${esc(c.status)}">`
+      + `<div class="cmt-h"><span class="who">you</span>${badge}</div>`
+      + `<div class="cmt-b">${esc(c.text)}</div></div>${reply}${failed}`;
+  }).join('');
+  return `<div class="thread">${items}</div>`;
+}
 
 /** On by default. Everything else in the tree starts hidden and is one click away. */
 export const DEFAULT_EXTENSIONS = ['.cs', '.asset', '.ts', '.js', '.py'];
@@ -38,7 +104,7 @@ function lineHtml(l: DiffLine): string {
 
 const SIGN: Record<string, string> = { add: '+', del: '−', ctx: ' ' };
 
-function fileBody(f: FileDiff): string {
+function fileBody(f: FileDiff, o: Resolved): string {
   if (f.binary) return `<div class="note">binary · not shown</div>`;
   // The counts in the header are real; only the text was dropped. Saying which is the difference
   // between a reader who knows to open the file and one who thinks nothing changed in it.
@@ -52,14 +118,46 @@ function fileBody(f: FileDiff): string {
       + `</div>`,
     );
     for (const l of h.lines) {
+      // A comment names a SIDE and a number: the removed line and the line that replaced it are two
+      // different things to have an opinion about, and `142` alone does not say which.
+      const side = l.newNo !== null ? 'new' : 'old';
+      const lineNo = l.newNo ?? l.oldNo;
+      const canComment = o.interactive && lineNo !== null;
       parts.push(
-        `<div class="l ${l.kind}${l.wsOnly ? ' ws' : ''}">`
+        `<div class="l ${l.kind}${l.wsOnly ? ' ws' : ''}"`
+        + (lineNo !== null ? ` data-line="${lineNo}" data-side="${side}"` : '')
+        + `>`
         + `<i class="n">${l.oldNo ?? ''}</i><i class="n">${l.newNo ?? ''}</i>`
+        + (canComment ? `<button class="cbtn" title="comment on this line" aria-label="comment on this line">+</button>` : '')
         + `<i class="s">${SIGN[l.kind]}</i><code>${lineHtml(l)}</code></div>`,
       );
+      // The thread goes here only if the anchor still holds — same side, same number, same TEXT. After
+      // a fix every number below the edit has moved, and a thread pinned to whatever now occupies 142
+      // would attribute the operator's words to a line they never read.
+      const list = lineNo === null ? undefined : o.byFile.get(f.path)?.get(`${side}:${lineNo}`);
+      if (list) {
+        const here = list.filter((c) => c.lineText === l.text);
+        if (here.length) {
+          for (const c of here) o.placed.add(c.id);
+          parts.push(threadHtml(here));
+        }
+      }
     }
   }
   if (f.truncated) parts.push(`<div class="note">truncated — too large to read here; open the file</div>`);
+
+  // Threads whose line no longer exists as it was. Shown with their original coordinates at the top of
+  // the file, because the alternative is a comment that silently disappeared the moment it worked.
+  const orphans: DiffComment[] = [];
+  for (const list of o.byFile.get(f.path)?.values() ?? []) {
+    for (const c of list) if (!o.placed.has(c.id)) orphans.push(c);
+  }
+  if (orphans.length) {
+    const blocks = orphans.map((c) =>
+      `<div class="orphan"><div class="oh">${esc(c.file)}:${c.lineNo} · ${c.side === 'old' ? 'removed' : 'current'} side`
+      + ` · this line has changed since the comment was written</div>${threadHtml([c])}</div>`).join('');
+    parts.unshift(blocks);
+  }
   return parts.join('');
 }
 
@@ -72,7 +170,201 @@ function sidebarRow(f: FileDiff, i: number): string {
     + `<span class="ct"><b class="p">+${f.additions}</b><b class="m">−${f.deletions}</b></span></a>`;
 }
 
-export function renderDiffPage(set: DiffSet): string {
+/**
+ * The comment client, emitted ONLY into a served page.
+ *
+ * A `file://` page that carried this would ship a fetch loop pointing at a route that is not there —
+ * dead code in a document whose whole promise is that it is self-contained and offline. The affordance
+ * and the code behind it are absent together, which is also what makes the static page's "comments are
+ * off" line true rather than decorative.
+ */
+function commentClient(o: Resolved): string {
+  return `
+  // ── line comments ──────────────────────────────────────────────────────────
+  // Same-origin by construction: this page was served by the session that owns the repo, so a bare
+  // '/api/…' reaches that session and nothing else. Nothing about the port or the host is baked in.
+  var REV = ${JSON.stringify(o.rev)};
+  var POLL_MS = 1200;
+  var ANCHOR = 'ayin-diff-anchor';
+
+  function rowOf(el){ while (el && !el.classList.contains('l')) el = el.parentNode; return el; }
+  function fileOf(el){ while (el && !el.classList.contains('file')) el = el.parentNode; return el; }
+
+  /** Where the reader was, so a reload after a fix does not throw them back to the top of the page. */
+  function remember(row){
+    var f = fileOf(row);
+    if (!f || !row.dataset.line) return;
+    try {
+      sessionStorage.setItem(ANCHOR, JSON.stringify({
+        path: f.dataset.path, side: row.dataset.side, line: row.dataset.line,
+      }));
+    } catch (e) { /* private mode: losing the scroll position is not worth failing the reload over */ }
+  }
+
+  function restore(){
+    var raw = null;
+    try { raw = sessionStorage.getItem(ANCHOR); sessionStorage.removeItem(ANCHOR); } catch (e) { return; }
+    if (!raw) return;
+    var a; try { a = JSON.parse(raw); } catch (e) { return; }
+    var f = document.querySelector('.file[data-path="' + (a.path || '').replace(/"/g, '\\"') + '"]');
+    if (!f) return;
+    // The line number moved with the fix; the file is the honest anchor. Land on the exact row when it
+    // is still there, on the file when it is not.
+    var row = f.querySelector('.l[data-side="' + a.side + '"][data-line="' + a.line + '"]');
+    (row || f).scrollIntoView({ block: 'center' });
+  }
+
+  function badgeOf(cmt){ return cmt.querySelector('.badge'); }
+
+  /**
+   * pending → working → done. The page owns none of these transitions: it asks, and reloads when the
+   * answer is 'done', because by then the file on disk is not the file this page was rendered from.
+   */
+  function poll(cmt){
+    var id = cmt.dataset.cid;
+    if (!id) return;
+    var timer = setInterval(function(){
+      fetch('/api/diff/comment/' + encodeURIComponent(id)).then(function(r){
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }).then(function(j){
+        if (j.status === cmt.dataset.status) return;
+        cmt.dataset.status = j.status;
+        var b = badgeOf(cmt);
+        if (b) { b.className = 'badge ' + j.status; b.textContent = LABEL[j.status] || j.status; }
+        if (j.status === 'done') { clearInterval(timer); location.reload(); }
+        else if (j.status === 'working') {
+          // The clock restarts when the work does: time spent queued behind another turn is not time
+          // spent on this comment, and reading it as such makes a busy session look like a stuck one.
+          var age = cmt.querySelector('.age');
+          if (age) age.dataset.since = new Date().toISOString();
+        }
+        else if (j.status === 'failed') {
+          clearInterval(timer);
+          var err = document.createElement('div');
+          err.className = 'cmt reply err';
+          err.innerHTML = '<div class="cmt-b"></div>';
+          err.querySelector('.cmt-b').textContent = j.error || 'the turn failed';
+          cmt.parentNode.insertBefore(err, cmt.nextSibling);
+        }
+      }).catch(function(e){
+        // The session exited, or the machine slept. Stop pretending to wait and say so — a spinner
+        // that never resolves is the failure mode this whole status field exists to avoid.
+        clearInterval(timer);
+        var b = badgeOf(cmt);
+        if (b) { b.className = 'badge failed'; b.textContent = 'lost the session'; }
+      });
+    }, POLL_MS);
+  }
+
+  var LABEL = { pending: 'pending\u2026', working: 'working\u2026', done: 'done', failed: 'failed' };
+
+  // One ticker for every waiting thread. An honest "4m 12s" is the difference between a slow edit and
+  // a session that died, and the page cannot tell those apart for the operator any other way.
+  function ago(iso){
+    var secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+    if (secs < 60) return secs + 's';
+    var m = Math.floor(secs / 60);
+    return m < 60 ? m + 'm ' + (secs % 60) + 's' : Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+  }
+  setInterval(function(){
+    [].slice.call(document.querySelectorAll('.age[data-since]')).forEach(function(el){
+      el.textContent = ago(el.dataset.since);
+    });
+  }, 1000);
+
+  function optimistic(row, text, id){
+    var t = document.createElement('div');
+    t.className = 'thread';
+    var cmt = document.createElement('div');
+    cmt.className = 'cmt';
+    cmt.dataset.cid = id;
+    cmt.dataset.status = 'pending';
+    cmt.innerHTML = '<div class="cmt-h"><span class="who">you</span>'
+      + '<span class="age" data-since="' + new Date().toISOString() + '">0s</span>'
+      + '<span class="badge pending">' + LABEL.pending + '</span></div><div class="cmt-b"></div>';
+    cmt.querySelector('.cmt-b').textContent = text;
+    t.appendChild(cmt);
+    row.parentNode.insertBefore(t, row.nextSibling);
+    poll(cmt);
+  }
+
+  function openForm(row){
+    if (row.nextSibling && row.nextSibling.classList && row.nextSibling.classList.contains('cform')) {
+      row.nextSibling.remove();
+      return;
+    }
+    var f = fileOf(row);
+    if (!f) return;
+    var form = document.createElement('div');
+    form.className = 'cform';
+    form.innerHTML = '<textarea placeholder="what should change on this line?"></textarea>'
+      + '<div class="fa"><button class="send">Send</button><button class="cancel">Cancel</button>'
+      + '<span class="hint">\u2318/Ctrl+Enter sends \u00b7 Esc closes</span></div>';
+    row.parentNode.insertBefore(form, row.nextSibling);
+    var ta = form.querySelector('textarea');
+    var send = form.querySelector('.send');
+    ta.focus();
+
+    function submit(){
+      var text = ta.value.trim();
+      if (!text) return;
+      send.disabled = true;
+      send.textContent = 'sending\u2026';
+      var code = row.querySelector('code');
+      fetch('/api/diff/comment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rev: REV,
+          file: f.dataset.path,
+          side: row.dataset.side,
+          lineNo: parseInt(row.dataset.line, 10),
+          lineText: code ? code.textContent : '',
+          text: text,
+        }),
+      }).then(function(r){
+        return r.json().then(function(j){ if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status)); return j; });
+      }).then(function(j){
+        remember(row);
+        form.remove();
+        optimistic(row, text, j.id);
+      }).catch(function(e){
+        // The comment was NOT sent. Say that in the form the operator is still looking at, and keep
+        // their text — a silent failure here loses what they wrote.
+        send.disabled = false;
+        send.textContent = 'Send';
+        var h = form.querySelector('.hint');
+        h.textContent = 'not sent: ' + e.message;
+        h.style.color = 'var(--priv)';
+      });
+    }
+
+    send.onclick = submit;
+    form.querySelector('.cancel').onclick = function(){ form.remove(); };
+    ta.onkeydown = function(e){
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); }
+      else if (e.key === 'Escape') { e.preventDefault(); form.remove(); }
+    };
+  }
+
+  document.getElementById('main').addEventListener('click', function(e){
+    if (!e.target.classList || !e.target.classList.contains('cbtn')) return;
+    var row = rowOf(e.target);
+    if (row) openForm(row);
+  });
+
+  // A thread that was still working when the page reloaded keeps its spinner and keeps asking. This is
+  // what makes the reload-on-done loop safe to run more than once.
+  [].slice.call(document.querySelectorAll('.cmt[data-status="pending"],.cmt[data-status="working"]'))
+    .forEach(poll);
+
+  restore();
+`;
+}
+
+export function renderDiffPage(set: DiffSet, opts: RenderOptions = {}): string {
+  const o = resolve(opts);
   const exts = new Map<string, number>();
   for (const f of set.files) exts.set(f.ext || '(none)', (exts.get(f.ext || '(none)') ?? 0) + 1);
   const chips = [...exts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
@@ -87,14 +379,14 @@ export function renderDiffPage(set: DiffSet): string {
 
   const filesHtml = set.files.map((f, i) => {
     const heading = f.oldPath ? `${esc(f.oldPath)} → ${esc(f.path)}` : esc(f.path);
-    return `<section class="file" id="f${i}" data-i="${i}" data-ext="${esc(f.ext || '(none)')}">`
+    return `<section class="file" id="f${i}" data-i="${i}" data-ext="${esc(f.ext || '(none)')}" data-path="${esc(f.path)}">`
       + `<header class="fh"><span class="st ${f.status}"></span>`
       + `<h2>${heading}</h2>`
       + `<span class="tags">${f.untracked ? '<i class="tag new">untracked</i>' : ''}`
       + `${f.binary ? '<i class="tag">binary</i>' : ''}</span>`
       + `<span class="ct"><b class="p">+${f.additions}</b><b class="m">−${f.deletions}</b></span>`
       + `<button class="fold" title="collapse">–</button></header>`
-      + `<div class="body">${fileBody(f)}</div></section>`;
+      + `<div class="body">${fileBody(f, o)}</div></section>`;
   }).join('');
 
   const notices: string[] = [];
@@ -196,6 +488,47 @@ mark{background:var(--add-mark);color:inherit;border-radius:3px;padding:1px 0}
 .warn{margin:0 0 14px;padding:11px 14px;border:1px solid var(--prot);border-radius:var(--radius);
   color:var(--prot);font-size:12.5px;background:var(--surface)}
 .empty{color:var(--ink-3);padding:40px;text-align:center;font-size:13px}
+/* ── line comments · served page only ── */
+.l{position:relative}
+.cbtn{flex:none;width:17px;height:15px;margin:1px 2px 0 0;padding:0;border:1px solid var(--wire-hot);
+  border-radius:4px;background:var(--wire-hot);color:var(--bg);font:700 11px/13px var(--mono);
+  cursor:pointer;visibility:hidden;align-self:center}
+[data-theme="light"] .cbtn{color:#fff}
+.l:hover .cbtn{visibility:visible}
+.cbtn:hover{filter:brightness(1.15)}
+.thread,.cform{white-space:normal;font-family:var(--ui);margin:7px 0 7px 62px;max-width:760px}
+.cmt{border:1px solid var(--line);border-radius:9px;background:var(--surface-2);margin-bottom:7px;overflow:hidden}
+.cmt-h{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface-3);
+  border-bottom:1px solid var(--line-soft);font-size:11.5px;color:var(--ink-3)}
+.cmt-h .who{font-weight:650;color:var(--ink-2)}
+.cmt-b{padding:9px 11px;font-size:12.5px;line-height:1.55;color:var(--ink);white-space:pre-wrap;word-break:break-word}
+.cmt.reply{border-color:var(--wire-hot)}
+.cmt.reply .cmt-h .who{color:var(--wire-hot)}
+.cmt.reply.err{border-color:var(--priv)}
+.cmt.reply.err .cmt-b{color:var(--priv)}
+.age{margin-left:auto;font:11px/1 var(--mono);color:var(--ink-3);font-variant-numeric:tabular-nums}
+.age+.badge{margin-left:8px}
+.badge{margin-left:auto;font:600 10px/1 var(--mono);padding:3px 6px;border-radius:5px;
+  border:1px solid var(--line);color:var(--ink-3);background:var(--surface)}
+.badge.pending{color:var(--prot);border-color:var(--prot)}
+.badge.working{color:var(--wire-hot);border-color:var(--wire-hot)}
+.badge.done{color:var(--pub);border-color:var(--pub)}
+.badge.failed{color:var(--priv);border-color:var(--priv)}
+.cform{border:1px solid var(--wire-hot);border-radius:9px;background:var(--surface-2);padding:9px}
+.cform textarea{width:100%;min-height:62px;resize:vertical;background:var(--surface);color:var(--ink);
+  border:1px solid var(--line);border-radius:7px;padding:8px 9px;font:12.5px/1.5 var(--ui)}
+.cform textarea:focus{outline:none;border-color:var(--wire-hot)}
+.cform .fa{display:flex;align-items:center;gap:9px;margin-top:8px}
+.cform .hint{color:var(--ink-3);font-size:11px;margin-left:auto}
+.send{font:600 11.5px/1 var(--ui);color:var(--bg);background:var(--wire-hot);border:none;
+  border-radius:7px;padding:7px 13px;cursor:pointer}
+[data-theme="light"] .send{color:#fff}
+.send[disabled]{opacity:.55;cursor:default}
+.cancel{font:11.5px/1 var(--ui);color:var(--ink-3);background:none;border:1px solid var(--line);
+  border-radius:7px;padding:7px 11px;cursor:pointer}
+.orphan{margin:11px 0;padding:9px 12px;border:1px dashed var(--prot);border-radius:9px}
+.orphan .oh{font:11px/1.45 var(--mono);color:var(--prot);margin-bottom:7px}
+.orphan .thread{margin-left:0}
 kbd{font:10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2px;
   border-radius:4px;padding:3px 5px;color:var(--ink-3)}
 </style></head><body>
@@ -205,6 +538,9 @@ kbd{font:10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2
   <span class="stat">
     <b class="p">+${totalAdd}</b><b class="m">−${totalDel}</b>
     <kbd>j</kbd><kbd>k</kbd> file <kbd>t</kbd> theme
+    ${o.interactive
+      ? '<span class="sub">hover a line to comment</span>'
+      : '<span class="sub">read-only page · comments need the session that served it</span>'}
     <button class="act" id="theme">light</button>
   </span>
 </div>
@@ -269,6 +605,10 @@ kbd{font:10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2
   }
   document.onkeydown = function(e){
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // Single-letter shortcuts and a text field cannot share a keyboard. Without this, typing "just"
+    // into a comment jumps two files and toggles the theme.
+    var tn = e.target && e.target.tagName;
+    if (tn === 'TEXTAREA' || tn === 'INPUT') return;
     if (e.key === 'j') { focusFile(cur + 1); e.preventDefault(); }
     else if (e.key === 'k') { focusFile(cur - 1); e.preventDefault(); }
     else if (e.key === 't') { document.getElementById('theme').click(); }
@@ -282,6 +622,8 @@ kbd{font:10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2
   };
 
   apply();
+
+  ${o.interactive ? commentClient(o) : ''}
 })();
 </script></body></html>`;
 }
