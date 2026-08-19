@@ -460,13 +460,88 @@ export interface LlmChatOptions {
   declareTools?: boolean;
 }
 
+/**
+ * WHAT THE LAST CALL COST, and what the material added since the one before it cost.
+ *
+ * Both numbers come from the server (`prompt_eval_count` / `eval_count`, or OpenAI's `usage`) — nothing
+ * here estimates. `growth` is the interesting one and it is a SUBTRACTION OF EXACT NUMBERS, not a guess:
+ *
+ *     growth = in(n) − in(n−1) − out(n−1)
+ *
+ * Between two rounds of one turn the prompt gains exactly two things: the model's own previous reply
+ * (`out(n−1)`, known exactly) and whatever ayin appended — a tool result. Subtracting the reply leaves the
+ * price of that tool result, in the tokenizer of the model that actually read it, without ayin shipping a
+ * tokenizer or spending a second call to count. It is null when there is no previous call, and when the
+ * result is negative — a trimmed or compacted window means the arithmetic no longer describes an addition,
+ * and a wrong number here is worse than none.
+ */
+export interface TurnUsage {
+  in: number;
+  out: number;
+  growth: number | null;
+  /**
+   * True for a round of the AGENT LOOP, false for a sub-call (a connector loop, the critic, explore,
+   * a QA pass). Only a main-loop round has a prompt that is "the previous prompt plus what ayin
+   * appended", so only its growth means anything — and only its cost belongs on a chat message. A
+   * sub-call is still reported, because the log wants every call, but it prices nothing on screen.
+   */
+  main: boolean;
+}
+
+let _lastUsage: TurnUsage | null = null;
+let _prev: { in: number; out: number } | null = null;
+let _usageHook: ((u: TurnUsage) => void) | null = null;
+
+/** Subscribe to per-call usage. The UI registers this; nothing in `llm/` may import the UI. */
+export function onLlmUsage(fn: (u: TurnUsage) => void): void {
+  _usageHook = fn;
+}
+
+export function lastUsage(): TurnUsage | null {
+  return _lastUsage;
+}
+
+/** A new turn: the next call's prompt is not this turn's previous prompt plus a tool result. */
+export function resetUsageBaseline(): void {
+  _prev = null;
+}
+
+/**
+ * The arithmetic, as a pure function so it can be asserted without a model (`npm run check:cost`).
+ *
+ * `prev` is the previous MAIN-loop call. Growth is only meaningful between two rounds of one turn, and
+ * only when it comes out positive — a trimmed or compacted window makes the subtraction describe
+ * something other than an addition, and a wrong number is worse than none.
+ */
+export function computeUsage(
+  prev: { in: number; out: number } | null,
+  u: { in: number; out: number },
+  purpose: string,
+): TurnUsage {
+  // `setLlmPurpose('round N · model')` marks a turn round; everything else defaults to `sub-call`.
+  const main = /^round \d+/.test(purpose);
+  const raw = main && prev && u.in > 0 ? u.in - prev.in - prev.out : null;
+  return { in: u.in, out: u.out, growth: raw !== null && raw >= 0 ? raw : null, main };
+}
+
+function recordUsage(u: { in: number; out: number }, purpose: string): void {
+  const usage = computeUsage(_prev, u, purpose);
+  _lastUsage = usage;
+  // Only a round advances the baseline. A connector's inner loop has its own prompt entirely, and
+  // letting it set the baseline made the next round's "growth" a subtraction of two unrelated prompts.
+  if (usage.main) _prev = { in: u.in, out: u.out };
+  log('INFO', 'llm_usage', { purpose, in: String(u.in), out: String(u.out), growth: String(usage.growth ?? '') });
+  try { _usageHook?.(usage); } catch { /* a display must never break a turn */ }
+}
+
 export async function llmChat(messages: LlmMessage[], opts: LlmChatOptions = {}): Promise<string> {
   // EVERY model call is measured here, at the one funnel they all pass through. Wrapping callers
   // instead left the critic, the arbiters, the goal derivation and every connector loop unmeasured.
-  return timed('llm', takeLlmPurpose(), () => llmChatInner(messages, opts));
+  const purpose = takeLlmPurpose();
+  return timed('llm', purpose, () => llmChatInner(messages, opts, purpose));
 }
 
-async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}): Promise<string> {
+async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}, purpose = 'sub-call'): Promise<string> {
   ensureRefreshed();
   // Declare the tools. A provider that can pass them to the runtime (providers/ollama.ts) gets native
   // tool-calling — the model emits the syntax it was trained on and the runtime parses it — while the
@@ -502,7 +577,11 @@ async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}): 
   const promptChars = messages.reduce((n, m) => n + m.content.length, 0);
   const started = Date.now();
   try {
-    let reply = await narrateWait('thinking', async () => (await provider.generate(messages, tools ? { tools } : undefined)).content);
+    let reply = await narrateWait('thinking', async () => {
+      const r = await provider.generate(messages, tools ? { tools } : undefined);
+      if (r.usage) recordUsage(r.usage, purpose);
+      return r.content;
+    });
 
     // A TOOL-TRAINED MODEL ANSWERS WITH A TOOL CALL EVEN WHEN IT HAS NONE.
     //

@@ -39,7 +39,7 @@
  */
 
 import type {
-  GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ModelEntry, ProviderStatus,
+  GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ModelEntry, ProviderStatus, TokenUsage,
 } from '../provider.js';
 import { providerLog, providerConfig, providerPendingImages, providerLlmState } from './runtime.js';
 
@@ -147,6 +147,9 @@ interface OllamaToolCall {
 interface OllamaChatResponse {
   message?: { content?: string; thinking?: string; tool_calls?: OllamaToolCall[] };
   error?: string;
+  /** Ollama reports both on every reply. They were parsed away with the rest of the envelope. */
+  prompt_eval_count?: number;
+  eval_count?: number;
 }
 
 interface OllamaTagsResponse {
@@ -290,9 +293,13 @@ export function createOllamaProvider(): LlmProvider {
       if (rendered) {
         providerLog().info('ollama_native_tool_calls', { count: String(data.message?.tool_calls?.length ?? 0) });
       }
+      const usage: TokenUsage | undefined = data.prompt_eval_count !== undefined || data.eval_count !== undefined
+        ? { in: data.prompt_eval_count ?? 0, out: data.eval_count ?? 0 }
+        : undefined;
       return {
         content: rendered ? (text ? `${text}\n${rendered}` : rendered) : text,
         ...(data.message?.thinking ? { reasoning: data.message.thinking } : {}),
+        ...(usage ? { usage } : {}),
       };
     },
 

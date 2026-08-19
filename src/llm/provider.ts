@@ -61,10 +61,26 @@ export interface GenerateOptions {
   tools?: ToolSchema[];
 }
 
+/**
+ * What the call cost, as the SERVER counted it — never estimated here.
+ *
+ * Every runtime already reports this and ayin threw it away: Ollama returns `prompt_eval_count` and
+ * `eval_count` on each reply, OpenAI returns `usage`. A tokenizer-free guess (characters ÷ 4) would be a
+ * lie in a precise-looking dress, and the number is on the wire, free, exact for the model that answered.
+ * Absent when a provider or endpoint did not report it — which is different from zero.
+ */
+export interface TokenUsage {
+  /** Prompt tokens the model actually read. */
+  in: number;
+  /** Tokens it generated. */
+  out: number;
+}
+
 export interface GenerateResult {
   content: string;
   /** The thinking block, when the endpoint returns it separately. Usually absent. */
   reasoning?: string;
+  usage?: TokenUsage;
 }
 
 /** Liveness + identity. `model` is what is answering right now, or null when unknown. */

@@ -18,7 +18,7 @@ import { disentangle, entangledTo } from './entangle/index.js';
 ensureToolRuntime();
 
 import {
-  screen, addMessage, setStatus, setAgentStatus, clearChat,
+  screen, addMessage, setStatus, setAgentStatus, clearChat, noteCallCost,
   onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
   showAlert, setStickyAlert, clearStickyAlert, registerCommand, formatShellForChat, clearInput,
   lastAssistantMessage,
@@ -26,7 +26,7 @@ import {
 import { isTranscribing, startTranscript, stopTranscript, transcriptPath, transcriptSize, flush as flushTranscript } from './transcript.js';
 import { executeWipe, humanBytes, planWipe, wipeOverview, type WipeScope } from './wipe.js';
 import { connect, disconnect, onConnectionChange, isConnected, currentRequestId } from './connection.js';
-import { refreshActiveModel, activeModelId } from './llm/manager.js';
+import { refreshActiveModel, activeModelId, onLlmUsage } from './llm/manager.js';
 import { initLlmProvider } from './llm/select.js';
 import { getSummaryText, getSummary, resetSummary } from './summary.js';
 import { estimateSessionTokens } from './tokens.js';
@@ -1555,6 +1555,10 @@ async function runInteractive(): Promise<void> {
 
   addMessage('system', `ayin v${getVersion()}`);
   addMessage('system', process.cwd());
+
+  // EVERY MESSAGE CARRIES ITS PRICE. The manager reports what each call cost (the server's own
+  // counts); the UI is the subscriber because nothing under `llm/` may import the screen.
+  onLlmUsage(noteCallCost);
 
   startPromptServer();
 

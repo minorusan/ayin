@@ -29,7 +29,7 @@ import { log } from '../../log.js';
 import type {
   AcquireOptions, AcquireResult, AuthorityInfo, LlmEvent, LlmProvider, LlmTelemetry, ModelCatalog,
   ProviderStatus,
-  GenerateOptions, GenerateResult, LlmMessage,
+  GenerateOptions, GenerateResult, LlmMessage, TokenUsage,
 } from '../provider.js';
 import { httpGenerate, httpStatus } from './direct.js';
 import { providerConfig } from './runtime.js';
@@ -325,15 +325,17 @@ function nativeToolsEnabled(): boolean {
 async function resourceGenerate(messages: LlmMessage[], opts?: GenerateOptions): Promise<GenerateResult> {
   if (!opts?.tools?.length) return httpGenerate(messages, opts);
   let calls: NativeToolCall[] = [];
+  let usage: TokenUsage | undefined;
   const content = await transportChat(messages, {
     ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
     ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
     tools: opts.tools,
     onToolCalls: (c) => { calls = c; },
+    onUsage: (u) => { usage = u; },
   });
   const rendered = renderNativeCalls(calls);
-  if (!rendered) return { content };
-  return { content: content ? `${content}\n${rendered}` : rendered };
+  const text = rendered ? (content ? `${content}\n${rendered}` : rendered) : content;
+  return usage ? { content: text, usage } : { content: text };
 }
 
 /** `{name, arguments}` → the XML text every dialect parser already reads. */

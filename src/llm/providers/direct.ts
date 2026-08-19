@@ -23,7 +23,7 @@
 
 import { llmBaseUrl, llmChat as transportChat } from '../../connection.js';
 import type {
-  GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ProviderStatus,
+  GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ProviderStatus, TokenUsage,
 } from '../provider.js';
 
 /**
@@ -32,8 +32,9 @@ import type {
  * any of that would be a second, subtly different LLM path — exactly the drift this port removes.
  */
 export async function httpGenerate(messages: LlmMessage[], opts?: GenerateOptions): Promise<GenerateResult> {
-  const content = await transportChat(messages, opts ?? {});
-  return { content };
+  let usage: TokenUsage | undefined;
+  const content = await transportChat(messages, { ...(opts ?? {}), onUsage: (u) => { usage = u; } });
+  return usage ? { content, usage } : { content };
 }
 
 /** `GET /api/status`, for every provider. Never throws — an unreachable endpoint is `{ok:false}`. */

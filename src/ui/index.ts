@@ -98,6 +98,28 @@ export function addMessage(role: MessageRole, content: string, opts?: { interim?
   chat.add(role, content, opts?.interim === true);
 }
 
+/**
+ * TOKEN COST ON EVERY MESSAGE, wired from the LLM manager's usage hook (see `TurnUsage`).
+ *
+ * The UI is the subscriber, not the source: nothing under `llm/` may import this module, and the manager
+ * is the only place that sees every provider's reply. Both numbers are the server's own counts — Ollama's
+ * `prompt_eval_count`/`eval_count`, OpenAI's `usage` — never an estimate made here.
+ */
+export function noteCallCost(usage: { in: number; out: number; growth: number | null; main: boolean }): void {
+  // A sub-call (a connector loop, the critic, a QA pass) prints nothing, so a label for it would land on
+  // whatever message came next and misprice it. Its numbers are in the log.
+  if (!usage.main) return;
+  // A tool result is priced by the NEXT call's prompt, so this lands one round late — which is the
+  // earliest it can be known without shipping a tokenizer or spending a call to count.
+  if (usage.growth !== null) chat.setLastToolCost(`+${tok(usage.growth)} tok into the prompt`);
+  if (usage.in > 0 || usage.out > 0) chat.noteCost(`${tok(usage.in)} in · ${tok(usage.out)} out`);
+}
+
+/** 12 · 1.2k · 42k — a price is read at a glance, and four digits of it are noise. */
+function tok(n: number): string {
+  return n < 1000 ? String(n) : `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+}
+
 export function updateLastAssistant(content: string): void {
   _lastAssistant = content;
   chat.updateLastAssistant(content);

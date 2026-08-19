@@ -69,6 +69,15 @@ export interface Message {
    * is the same text, set one tab further in and paler: still readable, visibly on the way.
    */
   interim?: boolean;
+  /**
+   * What this message cost, in tokens, as the SERVER counted them — never an estimate.
+   *
+   * On a reply it is the call that produced it: the whole prompt the model read, and what it generated.
+   * On a tool result it is what that result added to the next prompt, measured when the next call comes
+   * back (see `TurnUsage.growth`). Absent means "not reported", which a reader must be able to tell from
+   * zero — so nothing is printed rather than a 0.
+   */
+  cost?: string;
 }
 
 export class ChatLog {
@@ -191,8 +200,60 @@ export class ChatLog {
       else process.stderr.write(`[${role}] ${plain}\n`);
       return;
     }
-    this.messages.push({ role, content, ...(interim ? { interim: true } : {}) });
+    const cost = this.takePendingCost(role, content);
+    this.messages.push({ role, content, ...(interim ? { interim: true } : {}), ...(cost ? { cost } : {}) });
     this.redraw();
+  }
+
+  /**
+   * The price of the call that just returned, waiting for the message it produced.
+   *
+   * PENDING, not retroactive: the usage is known when `generate` resolves, which is BEFORE the round's
+   * reply is parsed and printed. The first version walked backwards from the end and found the previous
+   * round's tool card, so every answer went unpriced — visible the first time it was painted in a real
+   * terminal. Whatever this round prints next takes the label: an interim sentence, the answer, or the
+   * tool-call card of a round that said nothing else.
+   */
+  private pendingCost: string | null = null;
+
+  noteCost(label: string): void {
+    this.pendingCost = label;
+  }
+
+  /**
+   * Price the tool results of the PREVIOUS round, now that the next call has reported its prompt size.
+   * Every unpriced result since the last call shares one measurement, so the label goes on the last of
+   * them and says what it covers.
+   */
+  setLastToolCost(label: string): void {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const m = this.messages[i];
+      if (m.role !== 'tool') { if (m.role === 'user') return; continue; }
+      if (m.cost?.includes('into the prompt')) return;   // already priced
+      // The round's own cost may already be here (the call that produced this result). Both facts belong
+      // on one line: what the round cost, and what its result will cost every round after it.
+      m.cost = m.cost ? `${m.cost} · ${label}` : label;
+      this.redraw();
+      return;
+    }
+  }
+
+  /**
+   * Who gets the pending price: the prose a round produced, or — when it produced none — the tool CALL
+   * card, which is the round's only visible output. A tool RESULT never takes it: a result is priced by
+   * what it adds to the next prompt (`setLastToolCost`), and the same round would otherwise be counted
+   * twice on two adjacent lines.
+   */
+  private takePendingCost(role: MessageRole, content: string): string | null {
+    if (!this.pendingCost) return null;
+    // A tool card is TWO messages: the `▸ call` header and the result. The price goes on the RESULT, so
+    // it prints under the card's footer with the growth measured next round — putting it on the header
+    // wedged a line between a card's title and its body, which is where it first landed and read wrong.
+    const takes = role === 'assistant' || (role === 'tool' && !startsToolCard(content));
+    if (!takes) return null;
+    const label = this.pendingCost;
+    this.pendingCost = null;
+    return label;
   }
 
   updateLastAssistant(content: string): void {
@@ -299,6 +360,7 @@ export class ChatLog {
           const glyph = i2 === 0 ? `{${bleached(theme.accent, 0.5)}-fg}\u25E6{/} ` : '  ';
           lines.push(`${TOOL_INDENT}${glyph}{${bleached(theme.text, INTERIM_BLEACH)}-fg}${bleachTags(line, INTERIM_BLEACH)}{/}`);
         });
+        if (msg.cost) lines.push(`${TOOL_INDENT}  {${bleached(theme.subtle, INTERIM_BLEACH)}-fg}${msg.cost}{/}`);
       } else if (msg.role === 'assistant') {
         lines.push('');
         // The goal watermark rides above the answer, so the anchor is in view while READING it.
@@ -311,6 +373,9 @@ export class ChatLog {
         rendered.forEach((line, i2) => {
           lines.push(i2 === 0 ? `{${theme.accent}-fg}◉{/} ${line}` : `${GUTTER}${line}`);
         });
+        // The price, under the answer and quiet: the number is worth having on every message and worth
+        // nobody's attention while reading one.
+        if (msg.cost) lines.push(`${GUTTER}{${theme.subtle}-fg}${msg.cost}{/}`);
       } else if (msg.role === 'tool') {
         // Tool cards sit a tab in from the edge, so machine output is visibly subordinate to the
         // conversation rather than competing with it at the same margin.
@@ -322,6 +387,7 @@ export class ChatLog {
         for (const line of msg.content.split('\n')) {
           lines.push(`${TOOL_INDENT}${line}`);
         }
+        if (msg.cost) lines.push(`${TOOL_INDENT}{${theme.subtle}-fg}${msg.cost}{/}`);
       } else {
         if (speakerChanged) lines.push(''); // system notices shouldn't crowd the answer above them
         // `subtle`, not `dim`. These were the quietest thing on screen by design, and it went too far:

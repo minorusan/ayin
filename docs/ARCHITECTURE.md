@@ -1346,6 +1346,37 @@ Prompts section): `ayin/qaCriteria`, `ayin/qaReview`, `ayin/planTriage`, `ayin/p
 the session toggle on — the only way to exercise either gate headlessly), `AYIN_PLAN_DIR`,
 `AYIN_QA_PORT`, `AYIN_QA_PORT_DENY`, `AYIN_ARDUINO_CLI`, `AYIN_ARDUINO_FQBN`.
 
+### Every message carries its token cost — the server's count, never an estimate
+
+Ollama returns `prompt_eval_count` and `eval_count` on every reply; OpenAI returns `usage`. ayin parsed
+all of it away at four places, and the gateway it actually talks to (`POST /api/generate`) answered
+`{content}` alone, so nothing downstream could say what a turn cost. It now flows: transport (`onUsage`,
+a callback for the same reason `onToolCalls` is one — the contract stays messages → text) → provider
+(`GenerateResult.usage`) → `manager.recordUsage` → a hook the UI subscribes to (nothing under `llm/` may
+import the screen).
+
+- **A reply is labelled with the call that produced it** — `8.9k in · 41 out`, the whole prompt the model
+  read and what it generated.
+- **A tool result is labelled with what it added to the prompt** — `+2.1k tok into the prompt`, measured
+  one round later as `in(n) − in(n−1) − out(n−1)`. Between two rounds the prompt gains exactly the model's
+  previous reply (known exactly) and what ayin appended, so subtracting the reply leaves the price of the
+  tool result **in the tokenizer of the model that read it**, without shipping a tokenizer or spending a
+  second call to count. A shrunk prompt (trimmed or compacted window) prints nothing: the subtraction no
+  longer describes an addition, and a wrong number is worse than none.
+- **The label waits for the message it belongs to.** Usage arrives when `generate` resolves, which is
+  before the reply is parsed and printed — the first version walked backwards from the end, found the
+  previous round's tool card, and left every answer unpriced. Visible the first time it was painted in a
+  real terminal, which is why it is painted.
+- **A sub-call prices nothing.** A connector's inner loop, the critic, explore, a QA pass — their prompts
+  are their own, not this turn's plus a tool result, and they print no message for a label to land on.
+  Only a round (`setLlmPurpose('round N · …')`) advances the baseline or shows a price; the rest is in the
+  log.
+- **Absent means absent.** A provider or endpoint that reports nothing produces no line — "not reported"
+  has to stay distinguishable from zero, and characters ÷ 4 would be a guess wearing a precise costume.
+
+Gate: `npm run check:cost` — the arithmetic as a pure function (`computeUsage`), plus the four providers
+and the placement rules.
+
 ## Tool-call format & parser (`parser.ts`)
 
 ayin uses **text** tool-calls (no native function-calling API required):

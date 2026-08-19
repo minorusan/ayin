@@ -33,7 +33,7 @@
 
 import OpenAI from 'openai';
 import type {
-  GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ModelEntry, ProviderStatus,
+  GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ModelEntry, ProviderStatus, TokenUsage,
 } from '../provider.js';
 import { providerLog, providerCredential } from './runtime.js';
 
@@ -237,7 +237,13 @@ export function createOpenAiProvider(): LlmProvider {
           out: String(completion.usage.completion_tokens ?? 0),
         });
       }
-      return { content: rendered ? (text ? `${text}\n${rendered}` : rendered) : text };
+      // The same numbers that were already being LOGGED, now returned: the operator paying per token is
+      // the one who most needs them on screen, and they were one line away from the display all along.
+      const usage: TokenUsage | undefined = completion.usage
+        ? { in: completion.usage.prompt_tokens ?? 0, out: completion.usage.completion_tokens ?? 0 }
+        : undefined;
+      const body = rendered ? (text ? `${text}\n${rendered}` : rendered) : text;
+      return usage ? { content: body, usage } : { content: body };
     },
 
     /** Never throws. No key is a normal state, not an error: the provider is simply unavailable. */

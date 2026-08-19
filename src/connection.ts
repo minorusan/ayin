@@ -151,6 +151,14 @@ export async function llmChat(
     tools?: NativeToolSchema[];
     /** Called with the endpoint's own parsed calls, when it returned any. */
     onToolCalls?: (calls: NativeToolCall[]) => void;
+    /**
+     * Called with what the call cost, when the endpoint reported it (`promptTokens`/`evalTokens`).
+     *
+     * A callback for the same reason `onToolCalls` is one: this function's contract is messages → text,
+     * ten modules depend on it, and only the caller that DISPLAYS a price cares. An endpoint that predates
+     * the fields simply never triggers it, and "not reported" stays distinguishable from zero.
+     */
+    onUsage?: (usage: { in: number; out: number }) => void;
   } = {},
 ): Promise<string> {
   const { THINKING_MODE } = await import('./ui.js');
@@ -234,9 +242,10 @@ export async function llmChat(
       const bodyText = await res.text();
       fileLog('INFO', 'llm_body_received', { bodyBytes: String(bodyText.length), elapsedMs: String(Date.now() - reqStart) });
 
-      let data: { content?: string; reasoning?: string; toolCalls?: NativeToolCall[] };
+      type Body = { content?: string; reasoning?: string; toolCalls?: NativeToolCall[]; promptTokens?: number; evalTokens?: number };
+      let data: Body;
       try {
-        data = JSON.parse(bodyText) as { content?: string; reasoning?: string; toolCalls?: NativeToolCall[] };
+        data = JSON.parse(bodyText) as Body;
       } catch {
         const preview = bodyText.substring(0, 500);
         fileLog('ERROR', 'llm_body_parse_failed', { preview, bodyBytes: String(bodyText.length) });
@@ -246,6 +255,11 @@ export async function llmChat(
       // returned, so this function's contract (messages → text) is unchanged for every existing
       // caller — only the provider that ASKED for tools looks at them.
       if (data.toolCalls?.length) opts.onToolCalls?.(data.toolCalls);
+      // The counts the runtime already sent. `promptTokens` alone is still worth reporting — a gateway
+      // that streams cannot always know the output count, and half the price is not no price.
+      if (typeof data.promptTokens === 'number' || typeof data.evalTokens === 'number') {
+        opts.onUsage?.({ in: data.promptTokens ?? 0, out: data.evalTokens ?? 0 });
+      }
       let text = data.content || '';
       text = text.replace(/^[\s\S]*<\/think>\s*/g, '').trim();
       fileLog('INFO', 'llm_done', { textBytes: String(text.length), elapsedMs: String(Date.now() - reqStart) });

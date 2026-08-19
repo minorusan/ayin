@@ -18,7 +18,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { cancelActiveThinking } from './connection.js';
-import { llmChat, parseToolCalls, replyTruncated, renderToolCall, renderToolResult, activeModelId, activeContextTokens, toolMode } from './llm/manager.js';
+import { llmChat, parseToolCalls, replyTruncated, renderToolCall, renderToolResult, activeModelId, activeContextTokens, resetUsageBaseline, toolMode } from './llm/manager.js';
 import { llmCall } from './llm.js';
 import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution, modelTools } from './tools.js';
@@ -974,6 +974,9 @@ async function runDiagram(userInput: string): Promise<void> {
  */
 export async function runAgent(userInput: string): Promise<void> {
   resetTurnTimings();
+  // A new turn is not "the last prompt plus a tool result", so the growth arithmetic starts over —
+  // otherwise the first call of turn two would price the whole new prompt as something a tool added.
+  resetUsageBaseline();
   try {
     await runAgentTurn(userInput);
   } finally {
