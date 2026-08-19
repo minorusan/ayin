@@ -205,6 +205,7 @@ workstation is directly usable on a laptop:
 ```bash
 scp -r bigbox:~/.ayin-cli/rag/<key> ~/.ayin-cli/rag/
 ayin indulge --import <dir>     # verifies it is for THIS repo, reports what is already stale
+ayin indulge --import --server <host>:<port>   # the same, fetched from the machine that built it
 ```
 
 Vectors do not travel — they are model-bound. Re-embed on the other machine; it costs minutes on CPU.
@@ -219,6 +220,7 @@ ayin indulge --embed                             # vectorise (CPU, minutes)
 ayin indulge --status                            # how far, still alive?
 ayin indulge --report                            # the audit markdown
 ayin indulge --import <dir>                      # a corpus built elsewhere
+ayin indulge --import --server <host>:<port>      # ...or pulled from a corpus SERVER
 ayin indulge --dry-run                           # what it WOULD do; spends nothing
 ayin indulge --deep                              # full explore per question (~8x slower)
 ```
@@ -448,3 +450,33 @@ a prompt id or a corpus field (letters, digits, `-`, `_`, starting with a letter
 
 `git` remains special in the **answer** stage, where it is grounded in git output rather than source.
 That is a property of how it is answered, not a restriction on what may be asked.
+
+
+## The corpus server — build on the machine with the card, use it everywhere
+
+A corpus is a night of GPU. Only one machine here has a card, so only one machine can afford to build
+one, and every other machine wants the result — which used to mean copying tens of megabytes by hand,
+per repo, per rebuild. That is how a corpus goes stale and stops being trusted.
+
+So the builder SERVES what it has, over two read-only routes:
+
+    GET /corpus              -> {ok, corpora:[{key, identity, chunks, files, bytes, vectorBytes, updated}]}
+    GET /corpus/<key>.tgz    -> the store as a gzipped tar (add ?vectors=1 to include vectors)
+
+and any other machine installs from it:
+
+    ayin indulge --import --server <host>:<port>
+
+**No negotiation is needed, because the key is identity-derived** (`repoKey()`): the corpus this repo
+needs carries the same name on the server as it would here. When the server does not have it, its own
+inventory is printed — "which corpora exist" is the next question anyone would ask.
+
+**Vectors are not shipped by default.** They are derived data, and only comparable to vectors from the
+SAME embedding model: mismatched dimensions crash, matching ones return confident nonsense. `chunks/` is
+the portable asset. Re-embed on arrival (`ayin indulge --embed`) — minutes of CPU, and the closing line
+of an import says so.
+
+**Nothing about the server is trusted.** The download goes through the same `importCorpus` a local
+`--import` uses, so the identity check that refuses another project's corpus still runs, and the
+staleness pass still labels every chunk describing code this checkout has since changed. The address
+lives on the command line or in the operator's config — never in this repo, which is public.

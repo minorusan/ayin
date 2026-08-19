@@ -30,7 +30,7 @@ import { recordAnswer, recordPrompt, recordTool } from '../session-record.js';
 import { initSession } from '../session-store.js';
 import { assessChunk } from './staleness.js';
 import { detectVendorRoots } from './vendor.js';
-import { CATEGORIES, openStore, StoreLockedError, type Category, type Manifest, type Stage, sameProject } from './store.js';
+import { CATEGORIES, openStore, StoreLockedError, type Category, type Manifest, type Stage, sameProject, repoKey } from './store.js';
 
 const out = (line = ''): void => { process.stdout.write(`${line}\n`); };
 
@@ -53,6 +53,9 @@ export interface IndulgeArgs {
   embedOnly: boolean;
   deep: boolean;
   importFrom?: string;
+  /** `host:port` of a corpus server (`GET /corpus`, `GET /corpus/<key>.tgz`). No default: this repo is
+   *  public and an address belongs in the operator's config or on their command line, never in source. */
+  server?: string;
   maxDepth?: number;
   maxFiles?: number;
   keepVendor?: boolean;
@@ -77,6 +80,21 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
   for (let i = 0; i < argv.length; i++) {
     const [flag, inlineValue] = argv[i].includes('=') ? argv[i].split(/=(.*)/s) : [argv[i], undefined];
     const value = (): string => inlineValue ?? argv[++i] ?? '';
+    /**
+     * A value that is OPTIONAL, for a flag that can stand alone.
+     *
+     * `--import --server host:port` is what the operator types: `--import` carries no path there, the
+     * server does. Read with the greedy `value()` above it swallowed `--server`, the address became a
+     * stray positional, and the whole command printed usage instead of importing anything — measured on
+     * the first real run. A flag is never a value, so the next argv is only consumed when it is not one.
+     */
+    const optionalValue = (): string => {
+      if (inlineValue !== undefined) return inlineValue;
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) return '';
+      i++;
+      return next;
+    };
     switch (flag) {
       case '--repoPath': case '--repo': args.repoPath = value(); break;
       case '--domains': case '--domain':
@@ -92,7 +110,8 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--fix': case '--fixembed': args.fix = true; break;
       case '--dry-run': args.dryRun = true; break;
       case '--restart': args.restart = true; break;
-      case '--import': args.importFrom = value(); break;
+      case '--import': args.importFrom = optionalValue(); break;
+      case '--server': case '--from-server': args.server = value(); break;
       case '--embed': args.embedOnly = true; break;
       case '--deep': args.deep = true; break;
       case '--depth': args.maxDepth = num(value(), 'depth'); break;
@@ -447,6 +466,88 @@ function unpacked(from: string): { dir: string; temp?: string } | null {
   return null;
 }
 
+/**
+ * Pull this repo's corpus from a corpus SERVER and import it.
+ *
+ * WHY A SERVER AT ALL. A corpus is a night of GPU — discovery, question generation, a citation-verified
+ * answer per question. One machine here has a card, so one machine can build; every other machine wants
+ * the result. Copying tens of megabytes by hand, per repo, per rebuild, is how a corpus goes stale and
+ * stops being trusted.
+ *
+ * The KEY IS IDENTITY-DERIVED (`repoKey()`), so the corpus this repo needs has the same name on the
+ * server as it does here — no negotiation, no guessing which of the server's corpora is ours. When the
+ * server does not have it, its own list is printed rather than a 404, because "which corpora exist" is
+ * the next question the operator would ask.
+ *
+ * Vectors are NOT part of what a server sends by default: they are only comparable to vectors from the
+ * same embedding model, and re-embedding here costs minutes of CPU (`indulge --embed`). The download is
+ * a fraction of the size for it.
+ *
+ * The archive lands in a temp file and goes through the SAME `importCorpus` a local `--import` uses, so
+ * the identity check that refuses another project's corpus still runs. Nothing here trusts the server.
+ */
+async function importFromServer(repoPath: string, server: string): Promise<number> {
+  const base = /^https?:\/\//.test(server) ? server.replace(/\/+$/, '') : `http://${server.replace(/\/+$/, '')}`;
+  const key = repoKey(repoPath);
+  out(`corpus server ${base}`);
+  out(`  this repo's corpus key: ${key}`);
+
+  interface Listing { corpora?: Array<{ key: string; bytes?: number; chunks?: number; updated?: string; identity?: { value?: string } }> }
+  let listing: Listing | null = null;
+  try {
+    const res = await fetch(`${base}/corpus`, { signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) { out(`  the server answered ${res.status} for /corpus — is that a corpus server?`); return 2; }
+    listing = await res.json() as Listing;
+  } catch (e) {
+    out(`  cannot reach ${base}/corpus — ${e instanceof Error ? e.message : String(e)}`);
+    return 2;
+  }
+  const mine = listing?.corpora?.find((c) => c.key === key);
+  if (!mine) {
+    out(`  the server has no corpus for this repo.`);
+    out(`  it offers:`);
+    for (const c of listing?.corpora ?? []) {
+      out(`    ${c.key}  ${c.chunks ?? '?'} chunk(s)  ${Math.round((c.bytes ?? 0) / 1048576)} MB  ${c.identity?.value ?? ''}`);
+    }
+    if (!listing?.corpora?.length) out('    (nothing)');
+    return 3;
+  }
+  out(`  found: ${mine.chunks ?? '?'} chunk(s), built ${mine.updated ?? 'at an unknown time'}`);
+
+  const tmp = join(tmpdir(), `ayin-corpus-${key}-${process.pid}.tgz`);
+  try {
+    const res = await fetch(`${base}/corpus/${encodeURIComponent(key)}.tgz`, { signal: AbortSignal.timeout(15 * 60_000) });
+    if (!res.ok || !res.body) { out(`  download failed: HTTP ${res.status}`); return 2; }
+    // PROGRESS ON THE TERMINAL. A silent multi-megabyte download over a LAN is indistinguishable from a
+    // hung one, and the only move a watching operator has then is Ctrl+C on a job that was working.
+    let got = 0;
+    let lastAt = 0;
+    const started = Date.now();
+    const chunks: Uint8Array[] = [];
+    for await (const part of res.body as unknown as AsyncIterable<Uint8Array>) {
+      chunks.push(part);
+      got += part.byteLength;
+      if (Date.now() - lastAt > 1500) {
+        lastAt = Date.now();
+        const mb = (got / 1048576).toFixed(1);
+        const rate = (got / 1048576) / Math.max(0.001, (Date.now() - started) / 1000);
+        out(`  downloading… ${mb} MB at ${rate.toFixed(1)} MB/s`);
+      }
+    }
+    writeFileSync(tmp, Buffer.concat(chunks));
+    out(`  downloaded ${(got / 1048576).toFixed(1)} MB in ${Math.round((Date.now() - started) / 1000)}s`);
+  } catch (e) {
+    out(`  download failed — ${e instanceof Error ? e.message : String(e)}`);
+    try { rmSync(tmp, { force: true }); } catch { /* nothing to clean */ }
+    return 2;
+  }
+
+  const code = importCorpus(repoPath, tmp);
+  try { rmSync(tmp, { force: true }); } catch { /* the OS will */ }
+  if (code === 0) out('Vectors were not shipped (they are model-specific) — run `ayin indulge --embed` here.');
+  return code;
+}
+
 function importCorpus(repoPath: string, from: string): number {
   const found = unpacked(from);
   if (!found) {
@@ -583,6 +684,10 @@ export async function runIndulge(argv: string[]): Promise<number> {
   if (args.retryFailed) return runRetryFailed(repoPath, args);
   if (args.qa) return runQaPass(repoPath, args);
   if (args.fix) return runFixPass(repoPath, args);
+  // `--server` IMPLIES an import: `ayin indulge --import --server host:port` is what the operator types,
+  // and `--import` there carries no path. Checked first so a bare `--import` with no value cannot be
+  // read as a directory called "--server".
+  if (args.server) return await importFromServer(repoPath, args.server);
   if (args.importFrom) return importCorpus(repoPath, args.importFrom);
 
   if (args.embedOnly) {

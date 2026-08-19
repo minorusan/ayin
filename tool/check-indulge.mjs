@@ -679,6 +679,20 @@ ok(IX.parseArgs(['--frobnicate']).errors.length === 1, 'an unknown flag is an er
 ok(IX.parseArgs(['--depth', 'lots']).errors.length === 1, 'a non-numeric count is refused');
 ok(IX.parseArgs([]).args.domains.length === 0, 'no domains parses to none (the caller refuses it)');
 
+// ── the corpus SERVER flags ──────────────────────────────────────────────────────
+//
+// `ayin indulge --import --server host:port` is the form the operator types, and it broke on the first
+// real run: the greedy value reader swallowed `--server` as `--import`'s path, the address became a
+// stray positional, and the command printed usage instead of importing. A flag is never a value.
+
+const srv = IX.parseArgs(['--import', '--server', 'host:9100']);
+ok(srv.args.server === 'host:9100', '--server after a bare --import keeps its own value', JSON.stringify(srv.args.server));
+ok(!srv.args.importFrom, '--import consumes NO value when the next argv is a flag', JSON.stringify(srv.args.importFrom));
+ok(srv.errors.length === 0, 'and the pair parses with no errors', srv.errors.join(' '));
+ok(IX.parseArgs(['--import', './corpus-dir']).args.importFrom === './corpus-dir',
+  '--import still takes a path when one is actually given');
+ok(IX.parseArgs(['--server=host:9100']).args.server === 'host:9100', '--server=value form works too');
+
 // The report re-verifies rather than trusting the flag set when the chunk was stored: "the proof
 // resolved once" and "the proof resolves now" are different claims, and a stale chunk presented as
 // current defeats the document's purpose.
