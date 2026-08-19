@@ -489,6 +489,24 @@ similarity floor, labelled as corpus prose rather than file bytes. The reasoning
 choices is in ARCHITECTURE.md under "What the corpus already knows, appended"; the short version is that
 the agent's next question after "where is it" is "what does it do", and that answer already exists.
 
+## Domains, scopes, and the languages a corpus can see
+
+A domain is a phrase; a **scope** (`domain@path`) is where to look for it. Both matter more than they
+look. `languageFor()` decides which files the walk can see at all — C#, TypeScript and **Dart** (see
+ARCHITECTURE.md, "Dart is a language the corpus can SEE") — and inside a scope the seed search matches the
+domain's WORDS against paths, ranked, while unscoped it stays deliberately narrow.
+
+Practical shape, learned on this repo:
+
+- **Name a domain the way the tree is laid out** — `chat`, `diary`, `tasks`, `habits` — not as a sentence.
+  "flutter chat ui" matched nothing; `chat` matched five files.
+- **Scope it to the subtree that owns it.** `chat@client/lib`, `tasks@backend/src/tasks`.
+- **Cap the walk on a densely cross-imported tree** (`--depth 1 --max-files 30`). A Flutter `lib/` has one
+  file importing forty screens, so an uncapped depth-2 walk pulls the whole app into every domain — four
+  domains, one identical 121-file set.
+- **`--dry-run` first.** It discovers, prints the file count per domain and a question estimate, and writes
+  nothing. That is how you find out what a night would cost before spending it.
+
 ## `--jira <EPIC>` — the half of the answer that is not in the repository
 
 The corpus above is built from code, and code cannot say what the code was supposed to do. The required

@@ -193,6 +193,40 @@ design can no longer be moved to meet the code, and an adapter is the only move 
 not merely cost more — it removes the design-change option, which is how an architecture becomes a
 compatibility layer nobody chose.
 
+### Dart is a language the corpus can SEE (`entangle/languages/dart.ts`)
+
+`languageFor()` looks like entangle's business and is not only entangle's: the corpus walk
+(`indulge/discover.ts#walkSources`) uses it to decide which files exist, `targetsFor()` to decide what a
+file declares, and `importEdges` to follow the reference graph. A language it does not know is a language
+the corpus cannot see at all — measured on a real Flutter app, every domain scoped to `client/lib`
+discovered **zero** files, and the build reported "matched nothing", which reads as "there is no such
+feature".
+
+`dart` is the third implementation: `pubspec.yaml` is the dependency unit (name + `dependencies` +
+`dev_dependencies`, read without a YAML parser), a leading underscore is the whole visibility system,
+`mixin` declares a surface, generated `*.g.dart` / `*.freezed.dart` are excluded because a question about
+generated code answers nothing, and the builtin list carries the Flutter furniture (`Widget`,
+`BuildContext`, `Future`) — a false stop on `Widget` would make the tool unusable in the one ecosystem
+this file exists for. Verified against the real app: `_ChatPaneState` with 57 members, `abstract
+ChatTransport` with 4, package refs, and a `.dart` relative import resolving to the file it names.
+
+### A SCOPED domain seeds inside its scope
+
+Two bugs the Flutter run exposed, both of which made a scoped domain meaningless:
+
+- **`explore` searched the whole repo.** Every candidate was then refused for being out of scope, so
+  `chat` scoped to `client/lib` got zero seeds from the search that exists to find them — it had named the
+  backend's chat files. A scope is the operator saying where to look; the search now starts there.
+- **The path-word top-up required the domain name CONCATENATED in a path** (`joined.length < 6` returned
+  nothing for `chat`), and it returned ABSOLUTE paths where every other seed is repo-relative — so when it
+  did fire, later reads resolved nowhere. Inside a scope it now matches the domain's words, ranked (whole
+  name in the path, then most words matched, then shortest path). Unscoped it keeps the narrow
+  concatenation rule, which was measured: word matching across a 3454-file tree returned 67 loose seeds
+  for "reward service", and sixty-seven bad seeds cost a night of questions each.
+
+Together these turn four Flutter domains that discovered the same 18 shortest-path files into `chat` → 35
+files, `diary` → 15, `updates` → 5. Gate: `npm run check:dart`.
+
 ### Language-agnostic by construction
 
 The diagram is universal; enforcement is not. A C# dependency unit is an `.asmdef`, a JS one is a

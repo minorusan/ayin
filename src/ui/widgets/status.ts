@@ -28,7 +28,14 @@ export type LlmPhaseName =
 
 export interface StatusState {
   connection: 'connected' | 'disconnected' | 'connecting';
-  tokens: { used: number; total: number } | null;
+  /**
+   * The context meter. `estimated` marks a GUESS (characters ÷ 4) as one — rendered with a leading `~`.
+   *
+   * It was a guess for its whole life, silently: almost nothing serves `/api/estimate`, so the fallback
+   * WAS the meter. The runtime reports the real prompt size on every reply (`prompt_eval_count`), so
+   * after the first call of a turn this is the model's own count and the tilde disappears.
+   */
+  tokens: { used: number; total: number; estimated?: boolean } | null;
   cwd: string;
   update: string | null; // e.g. "v1.0.30 available"
   /** live LLM phase from the backend llm resource event stream (null = idle, segment hidden).
@@ -135,9 +142,11 @@ export class StatusBar {
     // NO WINDOW REPORTED → say so. A percentage needs a denominator, and inventing one is what this
     // bar did for its whole life: a flat 65536 that matched no model and no setting, so a 16k session
     // read as 25% full when it was already overflowing. `used` is still real and still worth showing.
-    if (!(this.state.tokens.total > 0)) return `${formatTokens(this.state.tokens.used)} tokens / window unknown`;
+    const tilde = this.state.tokens.estimated ? '~' : '';
+    if (!(this.state.tokens.total > 0)) return `${tilde}${formatTokens(this.state.tokens.used)} tokens / window unknown`;
     const pct = Math.round((this.state.tokens.used / this.state.tokens.total) * 100);
-    return `${formatTokens(this.state.tokens.used)} / ${formatTokens(this.state.tokens.total)} tokens (${pct}%)`;
+    return `${tilde}${formatTokens(this.state.tokens.used)} / ${formatTokens(this.state.tokens.total)} tokens (${pct}%)`
+      + (this.state.tokens.estimated ? ' — estimated (characters ÷ 4); the runtime has not reported a prompt size yet' : ' — measured by the model');
   }
 
   getHeight(): number {
@@ -195,12 +204,16 @@ export class StatusBar {
     if (this.state.tokens) {
       // An unknown window gets no percentage and no colour scale — see tokensDisplay(). The `?`
       // is the honest denominator: it prompts the question the invented 65536 suppressed.
+      // A tilde is the whole difference between "your prompt is 12.4k tokens" and "something divided
+      // your characters by four". One character, and it is the one that decides whether the number can
+      // be acted on.
+      const t = this.state.tokens.estimated ? '~' : '';
       if (!(this.state.tokens.total > 0)) {
-        parts.push(`{${theme.warn}-fg}${formatTokens(this.state.tokens.used)}/? tokens{/}`);
+        parts.push(`{${theme.warn}-fg}${t}${formatTokens(this.state.tokens.used)}/? tokens{/}`);
       } else {
         const pct = Math.round((this.state.tokens.used / this.state.tokens.total) * 100);
         const color = pct > 80 ? theme.err : pct > 60 ? theme.warn : theme.ok;
-        parts.push(`{${color}-fg}${formatTokens(this.state.tokens.used)}/${formatTokens(this.state.tokens.total)} tokens{/}`);
+        parts.push(`{${color}-fg}${t}${formatTokens(this.state.tokens.used)}/${formatTokens(this.state.tokens.total)} tokens{/}`);
       }
     }
 

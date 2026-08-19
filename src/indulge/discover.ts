@@ -197,15 +197,48 @@ const MIN_SEEDS = 6;
  * silently adds nothing otherwise. A domain named after a Jira ticket rather than a folder gets no
  * help from here, which is honest — nothing in the code is called that.
  */
-function seedsByPathWords(repoPath: string, domain: string, limit: number, vendorRoots: string[] = []): string[] {
+/** Exported for the gate: seeding is the step that decides whether a domain exists at all. */
+export function seedsByPathWords(
+  repoPath: string, domain: string, limit: number, vendorRoots: string[] = [], scope = '',
+): string[] {
   const joined = domain.toLowerCase().replace(/[^a-z0-9]/g, '');
-  if (joined.length < 6) return [];
-  const out: string[] = [];
-  for (const rel of walkSources(repoPath, 20000, vendorRoots).files) {
-    if (rel.toLowerCase().replace(/[^a-z0-9]/g, '').includes(joined)) out.push(rel);
-    if (out.length >= limit) break;
+  const words = domain.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
+  if (!joined) return [];
+  // The walk returns ABSOLUTE paths; a seed is repo-relative everywhere else, and an absolute one
+  // silently breaks `join(repoPath, file)` at read time. The scope fallback below relativized; this
+  // did not, which is why it never worked when it fired.
+  const files = walkSources(repoPath, 20000, vendorRoots).files.map((abs) => rel(repoPath, abs));
+  const inScope = (f: string): boolean => !scope || f === scope || f.startsWith(`${scope}/`);
+  const flat = (f: string): string => f.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  // ── unscoped: concatenation only, for the reason argued above ──────────────────
+  if (!scope) {
+    if (joined.length < 6) return [];
+    const out: string[] = [];
+    for (const f of files) {
+      if (flat(f).includes(joined)) out.push(f);
+      if (out.length >= limit) break;
+    }
+    return out;
   }
-  return out;
+
+  // ── SCOPED: word matching, ranked ─────────────────────────────────────────────
+  //
+  // The operator already narrowed the field by hand, which is exactly what the concatenation rule was
+  // protecting against doing badly by itself. Inside `client/lib`, "chat" is five files; across a
+  // 3454-file tree it was sixty-seven. So a scope buys word matching, and the ranking keeps the best
+  // first: the whole domain as one word in the path, then the most words matched, then the shortest
+  // path (a `chat_pane.dart` before a `chat_pane_settings_dialog.dart`).
+  const scored = files
+    .filter(inScope)
+    .map((f) => {
+      const k = flat(f);
+      const hits = words.filter((w) => k.includes(w)).length;
+      return { f, score: (k.includes(joined) ? 100 : 0) + hits };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score || a.f.length - b.f.length);
+  return scored.slice(0, limit).map((x) => x.f);
 }
 
 /**
@@ -317,7 +350,10 @@ interface RefIndex {
 }
 
 /** Extensions an extensionless relative specifier may resolve to, in resolution order. */
-const IMPORT_EXTS = ['', '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+// `.dart` is here for the same reason the others are: a Flutter file imports its sibling as
+// `../services/chat_transport.dart`, and without the extension in this list the walk resolves nothing and
+// every Dart domain is a flat list of seeds with no graph.
+const IMPORT_EXTS = ['', '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.dart'];
 
 /**
  * Files this source imports by RELATIVE specifier, resolved to paths that exist.
@@ -512,9 +548,14 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
     candidates = opts.seedsOverride;
   } else {
     onStatus?.(`asking explore which files implement "${domain}"`);
+    // EXPLORE SEARCHES INSIDE THE SCOPE. It used to search the whole repo and every candidate was then
+    // dropped for being out of scope — measured on a Flutter app: "chat" named backend chat files, all
+    // refused, and the domain fell through to a fallback that seeds by shortest path, so four different
+    // domains got the same eighteen files. A scope is the operator saying where to look; the search has
+    // to hear it.
     const answer = await exploreExecute({
       question: indulgePrompts().get('seedQuestion', { DOMAIN: domain }),
-      cwd: repoPath,
+      cwd: scope ? join(repoPath, scope) : repoPath,
       thorough: 'true',
     });
     candidates = extractPaths(answer);
@@ -551,7 +592,7 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
   // after a folder should never come back empty because a model failed to connect the words to it.
   if (!opts.seedsOverride && seeds.length < MIN_SEEDS) {
     const before = seeds.length;
-    for (const p of seedsByPathWords(repoPath, domain, MIN_SEEDS * 3, opts.vendorRoots ?? [])) {
+    for (const p of seedsByPathWords(repoPath, domain, MIN_SEEDS * 3, opts.vendorRoots ?? [], scope)) {
       if (seeds.length >= MIN_SEEDS * 3) break;
       if (!inScope(p)) continue;
       if (!seeds.includes(p)) seeds.push(p);

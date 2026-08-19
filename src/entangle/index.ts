@@ -14,13 +14,21 @@ import { loadDesign } from './design.js';
 import { checkFile, checkAdoption, renderStop } from './check.js';
 import { csharp } from './languages/csharp.js';
 import { typescript } from './languages/typescript.js';
+import { dart } from './languages/dart.js';
 import type { Design, SurfaceLanguage, Violation } from './types.js';
 
 export type { Design, Violation, SurfaceLanguage } from './types.js';
 export { renderStop, checkAdoption } from './check.js';
 
-/** Two implementations for now. A third language is one entry here plus one file. */
-const LANGUAGES: SurfaceLanguage[] = [csharp, typescript];
+/**
+ * Three implementations. A fourth language is one entry here plus one file.
+ *
+ * This list is load-bearing well beyond entangle: `languageFor()` decides which files the CORPUS walk
+ * can see (`indulge/discover.ts#walkSources`), which entities a file declares, and which import edges
+ * are followed. Dart was added because a Flutter app was invisible to all three — every domain scoped to
+ * its `lib/` discovered zero files.
+ */
+const LANGUAGES: SurfaceLanguage[] = [csharp, typescript, dart];
 
 export function languageFor(path: string): SurfaceLanguage | null {
   return LANGUAGES.find((l) => l.handles(path)) ?? null;

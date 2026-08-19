@@ -26,7 +26,7 @@ import {
 import { isTranscribing, startTranscript, stopTranscript, transcriptPath, transcriptSize, flush as flushTranscript } from './transcript.js';
 import { executeWipe, humanBytes, planWipe, wipeOverview, type WipeScope } from './wipe.js';
 import { connect, disconnect, onConnectionChange, isConnected, currentRequestId } from './connection.js';
-import { refreshActiveModel, activeModelId, onLlmUsage } from './llm/manager.js';
+import { refreshActiveModel, activeModelId, activeContextTokens, lastUsage, onLlmUsage } from './llm/manager.js';
 import { initLlmProvider } from './llm/select.js';
 import { getSummaryText, getSummary, resetSummary } from './summary.js';
 import { estimateSessionTokens } from './tokens.js';
@@ -107,9 +107,20 @@ function getNonInteractivePrompt(): string | null {
 
 async function refreshTokens(): Promise<void> {
   try {
+    // MEASURED BEATS ESTIMATED, and the difference is not small. Nothing here serves `/api/estimate`, so
+    // the meter spent its whole life on the characters ÷ 4 fallback — a number that drifts with how a
+    // model tokenises code, punctuation and CJK, in a bar an operator consults to decide whether the
+    // window is about to overflow. Every reply now reports `prompt_eval_count`, which IS the prompt size
+    // in the tokenizer that read it, so the last round of this turn is the honest number. The estimate
+    // remains for the first prompt of a session, marked `~`.
+    const measured = lastUsage();
+    if (measured && measured.in > 0) {
+      setStatus({ tokens: { used: measured.in, total: activeContextTokens() } });
+      return;
+    }
     const s = getSummary();
     const est = await estimateSessionTokens(s.summary, s.recent);
-    setStatus({ tokens: { used: est.promptTokens, total: est.contextWindow } });
+    setStatus({ tokens: { used: est.promptTokens, total: est.contextWindow, estimated: true } });
   } catch { /* silent */ }
 }
 
@@ -1558,7 +1569,12 @@ async function runInteractive(): Promise<void> {
 
   // EVERY MESSAGE CARRIES ITS PRICE. The manager reports what each call cost (the server's own
   // counts); the UI is the subscriber because nothing under `llm/` may import the screen.
-  onLlmUsage(noteCallCost);
+  onLlmUsage((u) => {
+    noteCallCost(u);
+    // The meter tracks the ROUND, not the turn: a tool result that added 20k tokens should move the bar
+    // when it lands, not after the answer. Free now — the measured path is a read, not a request.
+    if (u.main) void refreshTokens();
+  });
 
   startPromptServer();
 
