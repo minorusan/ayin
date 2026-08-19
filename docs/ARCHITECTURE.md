@@ -1343,9 +1343,41 @@ families.
 ## Tools (`tools.ts`, `tools/`)
 
 Each tool is `{ name, description, parameters, execute }`; the model calls it by its unique
-name. **Core** (no external deps): `read_file`, `grep`, `find_files`, `write_file`,
-`str_replace`, `bash`, `explore`, `status`, `arduino_db`. **Optional integrations** (inert unless
+name. **Core** (no external deps): `read_file`, `list_dir`, `grep`, `find_files`, `write_file`,
+`str_replace`, `rename`, `bash`, `explore`, `status`, `arduino_db`. **Optional integrations** (inert unless
 configured): `diagram`, `web_search`, `jira`, `jira_auth`. See the README table.
+
+### The I/O surface is sized from the TRANSCRIPTS, not from taste
+
+`bash` went from 5% of all tool calls to **20%** — measured across 483 recorded sessions and 5158 calls —
+and **573 of its 826 recent calls (69%) were work a tool could have done**: `ls` 177, `grep -r` 149,
+`cd X && …` 126, `find` 76, `mkdir -p` 58, `cat`/`head`/`tail` 65, `wc -l` 19. A second agent's transcript
+said it louder: 55% of its shell commands contained `grep`, **97% of those piped** (1195 into another grep,
+1081 into `head`), with a flag histogram of `-n` 910 · `-vE` 816 · `-c` 297 · `-o` 234 · `-l` 44.
+
+The lesson is not "the model is lazy". **A tool that cannot express what a shell one-liner expresses does
+not get used — it gets worked around, and the workaround is unbounded output through a general shell.** So
+each of those numbers became a parameter:
+
+- **`list_dir` is new** — there was no tool for the single most common shell command in the corpus. Names,
+  dir/file, size and *how long ago each changed* (the mtime is what "which of these did the run touch"
+  needs), directories first, bounded, and it says when it truncated. `recursive=true` goes one level in and
+  never into `node_modules`/`Library`/`dist`.
+- **`grep` gains `exclude` (the second grep of a pipe), `invert`, `count`, `only_matching` and
+  `max_matches` (the `| head -N`)** — and its description now says RECURSIVE, which is why 149 calls went
+  to the shell for something this tool already did. Counting drops the `path:0` lines grep prints, because
+  a zero is not an answer.
+- **`bash` gains `cwd`** — 126 calls were a `cd X && …` prefix, and a bare `cd X` accomplishes nothing at
+  all because the shell exits. A missing `cwd` is REFUSED rather than falling back to the session root: a
+  build run in the wrong tree looks like success.
+- **`read_file` gains `tail`** and now reports the line count and size on EVERY read — a `wc -l` is never
+  its own call, and "show me the end of the log" no longer costs a read to learn the length plus a second
+  read from a computed offset.
+- **`find_files` gains `max_depth`, `modified_since` ("2h", "3d") and `exclude`** — the three reasons a
+  shell `find` was still needed.
+
+Left in `bash` deliberately: `docker`, `arduino-cli`, `dotnet`, `npm`, `which` — that is what a shell is
+for. Gate: `npm run check:io`, which asserts each parameter against the number that produced it.
 
 ### `rename` — the language-split tool (`src/tools/rename/`)
 

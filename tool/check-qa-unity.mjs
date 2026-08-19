@@ -276,6 +276,78 @@ ok(addedFieldNames(sp, player) instanceof Set, 'the added-field reader returns a
 
 rmSync(sp, { recursive: true, force: true });
 
+// ── a MonoBehaviour must be a view: the scanner decides WHO gets asked ───────────
+//
+// The rule is semantic, so a model answers it — but only for files that could possibly fail. What is
+// asserted here is the SPLIT: a behaviour with nothing but fields, properties and one-or-two hierarchy
+// calls is cleared with no model call at all, and anything that branches, computes or carries a real body
+// is sent. Biased toward sending on purpose: a false send costs one call, a false skip is the check
+// silently not happening.
+
+console.log('\nMonoBehaviour: view or logic');
+const { needsLogicReview, monoBodies } = await import(`file://${join(ROOT, 'dist', 'executors', 'qa', 'unity', 'shape.js')}`);
+const { parseLogicVerdict } = await import(`file://${join(ROOT, 'dist', 'executors', 'qa', 'unity', 'index.js')}`);
+
+const viewOnly = [
+  'using UnityEngine;',
+  'public class HealthBar : MonoBehaviour {',
+  '    [SerializeField] private Image fill;',
+  '    [SerializeField] private float max = 100f;',
+  '    public float Max => max;',
+  '    public Image Fill { get; set; }',
+  '    private void Awake() { fill = GetComponentInChildren<Image>(); }',
+  '    private void OnDisable() { }',
+  '}',
+].join('\n');
+const vo = needsLogicReview(viewOnly);
+ok(vo.types.includes('HealthBar'), 'the MonoBehaviour is recognised', vo.types.join(','));
+ok(vo.send === false, 'fields, an expression-bodied getter, an auto-property and ONE GetComponent → no model call', vo.reason);
+
+const withLogic = [
+  'using UnityEngine;',
+  'public class Scorer : MonoBehaviour {',
+  '    [SerializeField] private int perCard = 10;',
+  '    private int total;',
+  '    public void Award(int cards) {',
+  '        if (cards > 3) { total += cards * perCard * 2; } else { total += cards * perCard; }',
+  '    }',
+  '}',
+].join('\n');
+const wl = needsLogicReview(withLogic);
+ok(wl.send === true, 'a branch and arithmetic → SENT to the model', wl.reason);
+ok(/Scorer\.Award/.test(wl.reason), 'and the reason names the member the scanner tripped on', wl.reason);
+
+const longPlumbing = [
+  'using UnityEngine;',
+  'public class Wiring : MonoBehaviour {',
+  '    [SerializeField] private Button ok;',
+  '    private void OnEnable() {',
+  '        ok.onClick.AddListener(Close);',
+  '        transform.SetParent(null);',
+  '        gameObject.SetActive(true);',
+  '    }',
+  '    private void Close() { gameObject.SetActive(false); }',
+  '}',
+].join('\n');
+const lp = needsLogicReview(longPlumbing);
+ok(lp.send === true, 'THREE hierarchy calls is past the trivial allowance → sent, and the model decides it is fine', lp.reason);
+
+const bodies = monoBodies(withLogic);
+ok(bodies.length === 1 && bodies[0].methods.length === 1, 'method bodies are brace-matched, not regex-truncated', JSON.stringify(bodies[0]?.methods));
+ok(bodies[0].methods[0].decisions > 0, 'the branch is counted as a decision');
+ok(monoBodies('public class Plain { void X() { if (true) {} } }').length === 0, 'a class that is NOT a MonoBehaviour is not judged at all');
+
+ok(needsLogicReview('public class NoBehaviour {}').send === false, 'a file with no MonoBehaviour is never sent');
+
+console.log('\nthe verdict parser (no model involved)');
+ok(parseLogicVerdict('{"verdict":"pass","summary":"view only","issues":[]}').verdict === 'pass', 'an explicit pass is a pass');
+const failV = parseLogicVerdict('{"verdict":"fail","summary":"scoring","issues":[{"member":"Scorer.Award","problem":"computes score","fix":"move to a service"}]}');
+ok(failV.verdict === 'fail' && failV.issues[0].member === 'Scorer.Award', 'a fail carries the member, the problem and where it belongs');
+ok(parseLogicVerdict('I think it looks fine to me').verdict === 'unknown',
+  'an unparseable answer is UNKNOWN — not a pass (the check would silently stop existing) and not a fail (a finished answer held hostage by a formatting slip)');
+ok(parseLogicVerdict('{"issues":[{"member":"A.B","problem":"rules"}]}').verdict === 'fail',
+  'issues with no verdict field still fail — the model pointed at something');
+
 // ── who reads what: the operator gets the headline, the agent gets the errors ────
 //
 // The gate puts a fact's FIRST LINE on the chat card (via `issue.problem`) and the WHOLE detail into the

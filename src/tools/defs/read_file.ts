@@ -14,6 +14,7 @@ export const tool: Tool = {
       { name: 'path', type: 'string', description: 'Absolute file path', required: true },
       { name: 'offset', type: 'number', description: 'First line to show, 1-based — paste a grep line number straight in (text only)', required: false },
       { name: 'limit', type: 'number', description: 'Max lines to return (text only; capped per call, the reply says how to continue)', required: false },
+      { name: 'tail', type: 'number', description: 'Return the LAST n lines instead — what a log is read for; no need to learn the length first', required: false },
     ],
     async execute(params) {
       if (!params.path) return 'Error: path required';
@@ -79,14 +80,28 @@ export const tool: Tool = {
       // notice — the model believing it had read a 5000-line file it had seen a fifth of.
       const askedLimit = parseInt(params.limit || '0', 10);
       const lim = Number.isFinite(askedLimit) && askedLimit > 0 ? Math.min(askedLimit, READ_MAX_LINES) : READ_MAX_LINES;
-      const slice = lines.slice(off, off + lim);
+      /**
+       * `tail` — the LAST n lines, which is what a log is ever read for.
+       *
+       * 65 of one project's 826 shell calls were `tail`/`head`/`cat` on a file this tool could already
+       * return, and the ones that genuinely needed a shell were all "what did the run just print". Without
+       * this the model has to read the file to learn its length, then read again from a computed offset:
+       * two calls and a subtraction to answer "show me the end".
+       */
+      const askedTail = parseInt(params.tail || '0', 10);
+      const tailN = Number.isFinite(askedTail) && askedTail > 0 ? Math.min(askedTail, READ_MAX_LINES) : 0;
+      const off2 = tailN > 0 ? Math.max(0, lines.length - tailN) : off;
+      const slice = tailN > 0 ? lines.slice(off2) : lines.slice(off, off + lim);
       if (!slice.length) {
         return `Error: offset ${startLine} is past the end of ${params.path} (${lines.length} lines).`;
       }
-      const numbered = slice.map((l, i) => `${off + i + 1}\t${l}`).join('\n');
-      const lastShown = off + slice.length;
+      const numbered = slice.map((l, i) => `${off2 + i + 1}\t${l}`).join('\n');
+      const lastShown = off2 + slice.length;
       const more = lastShown < lines.length;
-      const header = more || off > 0 ? `(lines ${off + 1}-${lastShown} of ${lines.length})\n` : '';
+      // The COUNTS, always. 19 shell `wc -l` calls existed only because a read never said how big the
+      // file was unless it happened to truncate; now every reply carries it, so "is this file big?" is
+      // never its own call.
+      const header = `(lines ${off2 + 1}-${lastShown} of ${lines.length}${raw.length >= 1024 ? `, ${(raw.length / 1024).toFixed(1)} KB` : `, ${raw.length} B`})\n`;
       const footer = more
         ? `\n(${lines.length - lastShown} more lines — continue with offset=${lastShown + 1}${askedLimit && askedLimit > READ_MAX_LINES ? `; limit is capped at ${READ_MAX_LINES} lines per call` : ''})`
         : '';

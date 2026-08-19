@@ -10,6 +10,81 @@
  * diff add/del colors — these carry green=good / red=bad / red=removed semantics regardless of brand.
  */
 
+/**
+ * BLEACHING — wash a rendered line out toward the panel, keeping its colours.
+ *
+ * Mid-turn prose is set one tab in and paler than the answer (see widgets/chat.ts). Flattening it to one
+ * grey was the first attempt and it threw information away: a code fence, a heading and an inline literal
+ * all became the same colour, so the structure the markdown renderer had just produced was lost exactly
+ * where the reader most needs a hint of it.
+ *
+ * So the colours are KEPT and mixed toward the background instead. `#61AFEF` stays recognisably the code
+ * blue, three-fifths of the way to the panel — present, clearly subordinate, and still telling the reader
+ * what kind of text it is. This is what a real bleach does to a printed page: the hues survive, the
+ * contrast does not.
+ *
+ * Only `{#RRGGBB-fg}` tags and the handful of names blessed accepts are rewritten; anything else is left
+ * exactly as it is, because a tag this does not understand is a tag it must not corrupt.
+ */
+const NAMED: Record<string, string> = {
+  white: '#ffffff', black: '#000000', red: '#cc3333', green: '#33cc66', yellow: '#cccc33',
+  blue: '#3366cc', magenta: '#cc33cc', cyan: '#33cccc', gray: '#808080', grey: '#808080',
+};
+
+function hexOf(colour: string): string | null {
+  const c = colour.trim().toLowerCase();
+  if (/^#[0-9a-f]{6}$/.test(c)) return c;
+  return NAMED[c] ?? null;
+}
+
+/** Mix two hex colours. `t = 0` keeps `a`, `t = 1` becomes `b`. */
+export function blend(a: string, b: string, t: number): string {
+  const ha = hexOf(a);
+  const hb = hexOf(b);
+  if (!ha || !hb) return a;
+  const mix = (i: number): number => {
+    const x = parseInt(ha.slice(1 + i * 2, 3 + i * 2), 16);
+    const y = parseInt(hb.slice(1 + i * 2, 3 + i * 2), 16);
+    return Math.round(x + (y - x) * Math.min(1, Math.max(0, t)));
+  };
+  return `#${[0, 1, 2].map((i) => mix(i).toString(16).padStart(2, '0')).join('')}`;
+}
+
+/**
+ * Every foreground colour in `line`, mixed toward the panel background.
+ *
+ * `amount` is how far: 0.6 is the mid-turn default — washed out, still coloured. The panel background is
+ * the destination rather than black, so the effect is "less ink" rather than "darker ink"; on a light
+ * theme that means fading UP, which is what bleaching means there too.
+ */
+export function bleachTags(line: string, amount = 0.6): string {
+  const base = bleached(theme.text, amount);
+  const out = line.replace(/\{([^}]+)-fg\}/g, (whole, colour: string) => {
+    const hex = hexOf(colour);
+    return hex ? `{${bleached(hex, amount)}-fg}` : whole;
+  });
+  /**
+   * `{/}` CLOSES EVERYTHING, so an outer colour set by the caller dies at the first inline span and the
+   * rest of the line snaps back to the widget default — measured on a real terminal: one bleached inline
+   * literal, then white prose for the remainder of the sentence. Re-opening the base after every reset is
+   * what makes a single line uniformly bleached with its spans still coloured.
+   */
+  return out.replace(/\{\/\}/g, `{/}{${base}-fg}`);
+}
+
+/**
+ * TOWARD `subtle`, NOT TOWARD THE BACKGROUND.
+ *
+ * Mixing to the panel colour is what "washed out" means on paper and the wrong thing on a dark terminal:
+ * it darkens. The first attempt did exactly that and produced #5b615e — which this codebase already has a
+ * comment about, because `dim` at #59685f "reads as black on a real terminal" and made every system notice
+ * invisible. `subtle` is the known-readable pale, so bleaching moves hue toward it and stops there: a code
+ * blue stays blue, quieter, and still legible on both themes.
+ */
+export function bleached(colour: string, amount: number): string {
+  return blend(colour, theme.subtle, amount);
+}
+
 export interface Theme {
   // brand accent (the agent's signature hue)
   accent: string; accentBright: string; accentDim: string;

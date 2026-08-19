@@ -10,7 +10,7 @@ import blessed from 'blessed';
 import { renderMarkdown, inlineFormat } from '../../markdown.js';
 import { HEADLESS, noopBox } from '../headless.js';
 import { screen, render } from '../screen.js';
-import { theme } from '../theme.js';
+import { bleachTags, bleached, blend, theme } from '../theme.js';
 import { ThinkingIndicator, type AgentState } from './thinking.js';
 import { getGoal, onGoalChange } from '../../goal.js';
 import { launchTip } from '../../help.js';
@@ -23,6 +23,11 @@ import { launchTip } from '../../help.js';
  */
 const GUTTER = '  ';
 const TOOL_INDENT = '    ';
+/**
+ * How far mid-turn prose is washed toward `subtle`. Read on a real terminal against the answer above it:
+ * enough that the eye goes to the answer first, not so much that the words have to be looked for.
+ */
+const INTERIM_BLEACH = 0.6;
 
 /** Does this tool message OPEN a card (the `▸ tool · params` header) rather than continue one?
  *  Matched on the glyph after any leading blessed tags, which is what the header always starts with. */
@@ -277,14 +282,22 @@ export class ChatLog {
           lines.push(`{${theme.accent}-fg}▌{/} {bold}${escapeBlessedTags(line)}{/bold}`);
         }
       } else if (msg.role === 'assistant' && msg.interim) {
-        // ON THE WAY, NOT THE ANSWER. A tab in from the answer's margin (level with the tool cards it
-        // introduces, because that is what it is about) and in `subtle` — the same pale the system
-        // notices use, which was chosen because `dim` read as black on a real terminal. Markdown is
-        // deliberately NOT rendered here: it would emit its own colour tags inside this one.
+        /**
+         * ON THE WAY, NOT THE ANSWER: a tab in from the answer's margin (level with the tool cards it
+         * introduces, because that is what it is about) and BLEACHED.
+         *
+         * Bleached, not flattened. The first version replaced every colour with one grey and rendered no
+         * markdown, which threw away what the renderer had just worked out — a code fence, a heading and
+         * an inline literal all came out identical, in the place a reader most needs a hint of structure.
+         * Now the markdown IS rendered and every foreground colour is mixed toward the panel background
+         * (`bleachTags`): the code blue stays recognisably the code blue, three-fifths of the way to the
+         * paper. Hues survive, contrast does not — which is what bleach does to a printed page.
+         */
         lines.push('');
-        msg.content.split('\n').forEach((line, i2) => {
-          const glyph = i2 === 0 ? `{${theme.accentDim}-fg}\u25E6{/} ` : '  ';
-          lines.push(`${TOOL_INDENT}${glyph}{${theme.subtle}-fg}${escapeBlessedTags(line)}{/}`);
+        const rendered = renderMarkdown(msg.content).split('\n');
+        rendered.forEach((line, i2) => {
+          const glyph = i2 === 0 ? `{${bleached(theme.accent, 0.5)}-fg}\u25E6{/} ` : '  ';
+          lines.push(`${TOOL_INDENT}${glyph}{${bleached(theme.text, INTERIM_BLEACH)}-fg}${bleachTags(line, INTERIM_BLEACH)}{/}`);
         });
       } else if (msg.role === 'assistant') {
         lines.push('');

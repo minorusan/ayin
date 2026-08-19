@@ -42,12 +42,15 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { extname, join } from 'node:path';
+import { extname, join, relative } from 'node:path';
 import { getConfig } from '../../../prompts.js';
 import {
   buildAsmdefIndex, compiledState, isUnityProject, owningAsmdef, unityHasProjectOpen, unityVersion,
 } from '../../../testrun/asmdef.js';
-import { addedFieldNames, inspectFile, typeOwners } from './shape.js';
+import { addedFieldNames, inspectFile, needsLogicReview, typeOwners } from './shape.js';
+import { llmChat } from '../../../llm/manager.js';
+import { getPrompt } from '../../../prompts.js';
+import { log } from '../../../log.js';
 import { unityBinary } from '../../../testrun/run.js';
 import {
   buildSolution, compileWithCsc, generatedProjects, parseCsErrors, projectsCovering, readCsproj, unityCsc,
@@ -126,11 +129,137 @@ export const unityQaExecutor: QaExecutor = {
     return [...shape, batchCompile(repo, unity)];
   },
 
-  /** No criteria: `factsOnly` means the judge is not consulted at all for this project type. */
+  /** No criteria: `factsOnly` means the generic judge is not consulted at all for this project type. */
   criteria(): string[] {
     return [];
   },
+
+  /**
+   * THE ONE SEMANTIC QUESTION: does a changed MonoBehaviour contain logic?
+   *
+   * A MonoBehaviour should be a view — serialized fields, properties, and plumbing inside its own
+   * hierarchy — and the rule that it holds no game logic is a JUDGEMENT. No scanner can decide whether a
+   * method decides something; a model reading the file can. So the split is: `needsLogicReview` (a scanner,
+   * in shape.ts) decides WHETHER a file is worth a call, and the model answers the question.
+   *
+   * NOTHING IS SPENT ON A FILE THAT CANNOT FAIL. A type with only fields, properties and one-or-two-line
+   * hierarchy calls is cleared deterministically and reported as such. The pre-filter is biased toward
+   * sending: a false send costs one call, a false skip is the check silently not happening.
+   *
+   * CAPPED AT `unityLogicReviewMax` FILES (default 3). A refactor touching forty MonoBehaviours must not
+   * turn one QA pass into forty model calls on a shared card; what was not looked at is named in the fact,
+   * because a silent cap reads as "all clear".
+   */
+  async review(ctx: ProjectContext, files: ChangedFile[]): Promise<ProbeFact[]> {
+    const cs = files.filter((f) => f.exists && extname(f.path).toLowerCase() === '.cs');
+    if (!cs.length) return [];
+
+    const candidates: Array<{ file: ChangedFile; source: string; reason: string; types: string[] }> = [];
+    const cleared: string[] = [];
+    for (const f of cs) {
+      let source = '';
+      try { source = readFileSync(f.path, 'utf-8'); } catch { continue; }
+      const verdict = needsLogicReview(source);
+      if (!verdict.types.length) continue;                 // no MonoBehaviour here at all
+      if (!verdict.send) { cleared.push(`${relative(ctx.root, f.path)} (${verdict.reason})`); continue; }
+      candidates.push({ file: f, source, reason: verdict.reason, types: verdict.types });
+    }
+    if (!candidates.length) {
+      if (!cleared.length) return [];
+      return [{
+        key: 'unity-mono-logic', ok: true, hard: false,
+        detail: [`MonoBehaviour VIEW-ONLY: ${cleared.length} changed behaviour(s) cleared without a model call`,
+          ...cleared.slice(0, 4).map((c) => `  ${c}`)].join('\n'),
+      }];
+    }
+
+    const max = getConfig('unityLogicReviewMax', 3);
+    const looked = candidates.slice(0, max);
+    const skipped = candidates.slice(max);
+    const issues: string[] = [];
+    let failed = false;
+    let unknown = 0;
+    for (const c of looked) {
+      const rel = relative(ctx.root, c.file.path);
+      try {
+        const raw = await llmChat([{
+          role: 'user',
+          content: getPrompt('unityMonoBehaviourLogic', {
+            FILE: rel,
+            TYPES: c.types.join(', '),
+            REASON: c.reason,
+            SOURCE: c.source.length > 24_000 ? `${c.source.slice(0, 24_000)}\n…(clipped)` : c.source,
+          }),
+        }]);
+        const v = parseLogicVerdict(raw);
+        log('INFO', 'unity_mono_logic', { file: rel, verdict: v.verdict, issues: String(v.issues.length) });
+        if (v.verdict === 'unknown') { unknown++; continue; }
+        if (v.verdict === 'fail') {
+          failed = true;
+          for (const i of v.issues) issues.push(`${rel} · ${i.member}: ${i.problem}${i.fix ? ` → ${i.fix}` : ''}`);
+          if (!v.issues.length) issues.push(`${rel}: ${v.summary || 'logic reported with no member named'}`);
+        }
+      } catch (e) {
+        unknown++;
+        log('WARN', 'unity_mono_logic_failed', { file: rel, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    const tail = [
+      ...(skipped.length ? [`  ${skipped.length} more behaviour(s) NOT looked at (cap ${max}): ${skipped.slice(0, 3).map((c) => relative(ctx.root, c.file.path)).join(', ')}`] : []),
+      ...(unknown ? [`  ${unknown} call(s) gave no usable answer — not treated as clean`] : []),
+      ...(cleared.length ? [`  ${cleared.length} cleared by the scanner without a call`] : []),
+    ];
+
+    if (failed) {
+      // HARD: the rule is the operator's, the evidence is a named member, and a model that pointed at one
+      // is not expressing a preference. Style, naming and null checks are excluded by the prompt itself.
+      return [{
+        key: 'unity-mono-logic', ok: false, hard: true,
+        detail: [`LOGIC IN A MonoBehaviour: ${issues.length} place(s) — a behaviour is a view; this belongs in a service, a model or a ScriptableObject`,
+          ...issues.slice(0, 8).map((i) => `  ${i}`), ...tail].join('\n'),
+      }];
+    }
+    return [{
+      key: 'unity-mono-logic', ok: true, hard: false,
+      detail: [`MonoBehaviour VIEW-ONLY: ${looked.length} behaviour(s) read by the model, no logic reported`, ...tail].join('\n'),
+    }];
+  },
 };
+
+interface LogicVerdict {
+  verdict: 'pass' | 'fail' | 'unknown';
+  summary: string;
+  issues: Array<{ member: string; problem: string; fix: string }>;
+}
+
+/**
+ * Read the model's answer. UNKNOWN IS THE DEFAULT, and that is the whole safety property: a reply this
+ * cannot parse must not become a pass (the check would silently stop existing) nor a fail (a finished
+ * answer held hostage by a formatting slip). Only an explicit verdict counts.
+ */
+export function parseLogicVerdict(raw: string): LogicVerdict {
+  const json = /\{[\s\S]*\}/.exec(raw)?.[0];
+  if (json) {
+    try {
+      const o = JSON.parse(json) as Record<string, unknown>;
+      const v = String(o.verdict ?? '').toLowerCase();
+      const issues = Array.isArray(o.issues)
+        ? o.issues.slice(0, 10).map((i) => {
+          const x = (i ?? {}) as Record<string, unknown>;
+          return {
+            member: String(x.member ?? x.method ?? '?').slice(0, 120),
+            problem: String(x.problem ?? x.issue ?? '').slice(0, 400),
+            fix: String(x.fix ?? '').slice(0, 300),
+          };
+        }).filter((i) => i.problem)
+        : [];
+      if (v === 'pass') return { verdict: 'pass', summary: String(o.summary ?? '').slice(0, 400), issues: [] };
+      if (v === 'fail' || issues.length) return { verdict: 'fail', summary: String(o.summary ?? '').slice(0, 400), issues };
+    } catch { /* not JSON after all */ }
+  }
+  return { verdict: 'unknown', summary: raw.trim().split('\n').filter(Boolean).slice(0, 2).join(' ').slice(0, 300), issues: [] };
+}
 
 /**
  * The deterministic namespace/asmdef/serialization facts for the changed `.cs` files.

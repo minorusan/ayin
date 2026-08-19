@@ -182,6 +182,139 @@ export function declaresUnityAsset(facts: CsFacts): { name: string; base: string
   return null;
 }
 
+/**
+ * DOES THIS MonoBehaviour CARRY LOGIC? — the deterministic half of a semantic question.
+ *
+ * The rule the operator wants enforced is a judgement: a MonoBehaviour should be a view — fields the
+ * inspector fills, properties, and plumbing inside its own hierarchy (`GetComponent`, `transform`,
+ * `SetActive`, wiring a listener) — and nothing that decides anything. Whether a given method "decides
+ * something" is not decidable by a scanner, and pretending otherwise produces either a rule nobody can
+ * satisfy or one that misses everything interesting.
+ *
+ * So this function answers only the part that IS decidable: **is there anything here worth a model's
+ * attention?** A type with nothing but fields, properties and empty or one-line plumbing bodies provably
+ * has no logic and costs nothing to clear; anything else — a branch, a loop, arithmetic, a LINQ chain, a
+ * body over a couple of statements — is HANDED TO THE MODEL, which then answers the semantic question with
+ * the file in front of it.
+ *
+ * BIASED TOWARD SENDING. A false "send" costs one LLM call on a turn that already spent several; a false
+ * "skip" is the whole check silently not happening. So the plumbing allowance is deliberately narrow, and
+ * anything the scanner does not understand counts as a reason to send.
+ */
+
+/** Calls that are hierarchy plumbing rather than decisions — Unity's own view-layer vocabulary. */
+const PLUMBING = new RegExp([
+  'GetComponent(InChildren|InParent)?', 'TryGetComponent', 'gameObject', 'transform', 'SetActive',
+  'SetParent', 'AddListener', 'RemoveListener', 'RemoveAllListeners', 'Instantiate', 'Destroy',
+  'DontDestroyOnLoad', 'SetText', 'SetTrigger', 'SetBool', 'SetFloat', 'Play', 'Stop', 'enabled',
+  'interactable', 'sprite', 'text', 'color', 'Invoke', 'InvokeRepeating', 'StartCoroutine', 'StopCoroutine',
+].join('|'));
+
+/**
+ * Control flow and computation — the shapes that mean "a decision is being made here".
+ *
+ * TWO THINGS DELIBERATELY ABSENT, both of which the gate caught on the first run:
+ *   · a bare `<` or `>`. `GetComponentInChildren<Image>()` is a generic argument, not a comparison, and
+ *     flagging it made every component lookup in the project look like a decision. A real comparison is
+ *     spaced (`a > b`) or compound (`>=`), and one inside an `if` is caught by the keyword anyway.
+ *   · `return <expr>`. A trivial getter is `return field;` — the single most common allowed member in a
+ *     view. Long or computed bodies are caught by the statement count and by the operators below.
+ */
+const DECISION = /\b(if|else|for|foreach|while|switch|case|try|catch|do|goto|yield)\b|==|!=|>=|<=|&&|\|\||\?\?|\+\+|--|[-+*/%]=|\s[<>]\s|\bMath(f)?\./;
+
+export interface MonoBody {
+  /** The declared type. */
+  type: string;
+  /** Method names with a body, and how many statements each carries. */
+  methods: Array<{ name: string; statements: number; decisions: number; plumbingOnly: boolean }>;
+  /** Non-auto property accessors with real bodies. */
+  computedProperties: string[];
+}
+
+/**
+ * Method and property bodies of the MonoBehaviour types in a file, measured.
+ *
+ * Brace-matched rather than regex-captured, because a method body contains braces and a regex that
+ * pretends otherwise stops at the first `}` — which is how "this method has one statement" gets reported
+ * about a forty-line method.
+ */
+export function monoBodies(source: string): MonoBody[] {
+  const code = stripNonCode(source);
+  const out: MonoBody[] = [];
+  const typeRe = /\b(?:class|struct)\s+([A-Za-z_]\w*)(?:\s*<[^>]*>)?\s*:\s*([^\n{]+)\{/g;
+  for (const t of code.matchAll(typeRe)) {
+    if (!UNITY_BASE.test(t[2])) continue;
+    const bodyStart = (t.index ?? 0) + t[0].length - 1;
+    const body = braceBlock(code, bodyStart);
+    const methods: MonoBody['methods'] = [];
+    const computedProperties: string[] = [];
+
+    // `Name(args) {` — a method. `Name {` after a type is a property; `Name { get; set; }` is an auto one.
+    const memberRe = /(?:^|[\s;}])(?:(?:public|private|protected|internal|static|virtual|override|async|sealed|new|abstract|extern|unsafe|partial)\s+)*[A-Za-z_][\w.<>,\[\]?]*\s+([A-Za-z_]\w*)\s*(\([^)]*\))?\s*\{/g;
+    for (const m of body.matchAll(memberRe)) {
+      const at = (m.index ?? 0) + m[0].length - 1;
+      const inner = braceBlock(body, at);
+      if (!m[2]) {
+        // a property: auto-implemented is `get; set;` and nothing else
+        // `{ get; set; }` is an AUTO property — whitespace between the accessors and all four combinations.
+        // Without allowing that space, every auto-property in the project read as computed.
+        if (!/^\s*(?:(?:get|set|init)\s*;\s*)+$/.test(inner)) computedProperties.push(m[1]);
+        continue;
+      }
+      const statements = inner.split(';').filter((x) => x.trim()).length;
+      const decisions = (inner.match(DECISION) ?? []).length;
+      const plumbingOnly = statements > 0 && decisions === 0
+        && inner.split(';').filter((x) => x.trim()).every((st) => PLUMBING.test(st));
+      methods.push({ name: m[1], statements, decisions, plumbingOnly });
+    }
+    out.push({ type: t[1], methods, computedProperties });
+  }
+  return out;
+}
+
+/** The `{ … }` starting at `open`, brace-matched. Empty string when it never closes. */
+function braceBlock(text: string, open: number): string {
+  if (text[open] !== '{') return '';
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}') {
+      depth--;
+      if (depth === 0) return text.slice(open + 1, i);
+    }
+  }
+  return '';
+}
+
+/** How many statements a plumbing-only body may hold and still be obviously a view. */
+const TRIVIAL_STATEMENTS = 2;
+
+/**
+ * Should this file go to the model for the no-logic judgement? With the reason, which becomes the fact's
+ * detail either way — "sent because X" is as much of an answer as "clean".
+ */
+export function needsLogicReview(source: string): { send: boolean; reason: string; types: string[] } {
+  const bodies = monoBodies(source);
+  if (!bodies.length) return { send: false, reason: 'declares no MonoBehaviour', types: [] };
+  const types = bodies.map((b) => b.type);
+  const reasons: string[] = [];
+  for (const b of bodies) {
+    if (b.computedProperties.length) {
+      reasons.push(`${b.type} has ${b.computedProperties.length} computed propert(y/ies) (${b.computedProperties.slice(0, 3).join(', ')})`);
+    }
+    for (const m of b.methods) {
+      if (m.statements === 0) continue;                                  // an empty lifecycle stub decides nothing
+      if (m.decisions > 0) { reasons.push(`${b.type}.${m.name} branches or computes`); continue; }
+      if (m.plumbingOnly && m.statements <= TRIVIAL_STATEMENTS) continue; // one or two hierarchy calls
+      reasons.push(`${b.type}.${m.name} has ${m.statements} statement(s)${m.plumbingOnly ? '' : ' beyond hierarchy plumbing'}`);
+    }
+  }
+  if (!reasons.length) {
+    return { send: false, reason: `${types.join(', ')}: fields, properties and at most ${TRIVIAL_STATEMENTS} hierarchy call(s) per method — no logic to judge`, types };
+  }
+  return { send: true, reason: reasons.slice(0, 4).join('; '), types };
+}
+
 // ── the assembly a NAME lives in ──────────────────────────────────────────────────
 
 export interface TypeOwners {

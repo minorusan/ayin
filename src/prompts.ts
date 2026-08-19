@@ -171,6 +171,10 @@ export const KNOWN_CONFIG_KEYS = [
   // as unverified instead of failed. A first import of a large project can exceed the 20-minute default,
   // and a timeout must never read as "your code does not compile".
   'unityCompileTimeoutMs',
+  // How many changed MonoBehaviours the QA gate may send to the model for the no-logic judgement in one
+  // pass. Default 3: a refactor touching forty behaviours must not become forty model calls on a shared
+  // card, and what was skipped is named in the fact rather than passing silently.
+  'unityLogicReviewMax',
 ];
 
 export function getConfigString(key: string): string | undefined {

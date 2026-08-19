@@ -29,7 +29,7 @@ const NEVER_RECURSE = [
 
 export const tool: Tool = {
     name: 'grep',
-    description: 'Search file contents. The pattern is an EXTENDED regex — alternation (a|b), ?, +, () all work. Returns matching lines with file paths and line numbers.',
+    description: 'Search file contents RECURSIVELY under a directory (or in one file). The pattern is an EXTENDED regex — alternation (a|b), ?, +, () all work. Returns matching lines with file paths and line numbers. Prefer this over a shell grep: it prunes .git/node_modules/Library/dist, caps output, and takes exclude/count/only_matching/invert so a second pass or a pipe is rarely needed.',
     parameters: [
       { name: 'pattern', type: 'string', description: 'Extended-regex pattern, e.g. "IsPickBooster|_skippedBalls"', required: true },
       { name: 'path', type: 'string', description: 'Directory or file to search', required: true },
@@ -38,6 +38,11 @@ export const tool: Tool = {
       { name: 'fixed', type: 'boolean', description: 'Treat the pattern as a literal string, not a regex', required: false },
       { name: 'context', type: 'number', description: 'Also return N lines around each match — read the code without a second call', required: false },
       { name: 'files_only', type: 'boolean', description: 'List only the file paths that match, not the lines — use first to see how widely something spreads', required: false },
+      { name: 'exclude', type: 'string', description: 'Drop matching lines that ALSO match this regex — the second grep of a `grep X | grep -v Y` chain, in one call', required: false },
+      { name: 'invert', type: 'boolean', description: 'Return the lines that do NOT match — for filtering noise out rather than finding something', required: false },
+      { name: 'count', type: 'boolean', description: 'Return per-file MATCH COUNTS instead of lines — how much of this is there, before deciding whether to read it', required: false },
+      { name: 'only_matching', type: 'boolean', description: 'Return only the matched text, not the whole line — how to list every symbol/name a pattern finds', required: false },
+      { name: 'max_matches', type: 'number', description: 'Cap the results at N (default 50, or 30 files) — the `| head -N` of a shell grep', required: false },
     ],
     async execute(params) {
       if (!params.pattern || !params.path) return 'Error: pattern and path required';
@@ -50,22 +55,43 @@ export const tool: Tool = {
       // `files_only` answers "how widely does this spread" in one call; `context` answers "what does
       // the code around it say" without the offset/limit groping that follows every bare match (a real
       // run spent three read_file calls hunting around a line number it already had).
+      /**
+       * THE FLAGS A MODEL ACTUALLY REACHES FOR, measured rather than guessed.
+       *
+       * 1418 of one agent's 2569 shell commands contained `grep`, and 97% of those PIPED it somewhere:
+       * 1195 into a second `grep` (narrowing), 1081 into `head` (capping), and the flag histogram was
+       * `-n` 910 · `-vE` 816 · `-c` 297 · `-oE`/`-o` 234 · `-l` 44. Every one of those is a param here
+       * now — `exclude` is the second grep, `max_matches` is the head, `invert`/`count`/`only_matching`
+       * are the three flags that were missing. A tool that cannot express the thing a shell one-liner
+       * expresses does not get used; it gets worked around, and the workaround is unbounded output.
+       */
       const filesOnly = boolParam(params.files_only);
+      const counting = boolParam(params.count);
+      const onlyMatching = boolParam(params.only_matching);
       const ctxLines = Math.min(Math.max(Number(params.context) || 0, 0), 10);
-      const flags = [filesOnly ? '-rl' : '-rn', boolParam(params.fixed) ? '-F' : '-E'];
+      const mode = counting ? '-rc' : filesOnly ? '-rl' : onlyMatching ? '-ronH' : '-rn';
+      const flags = [mode, boolParam(params.fixed) ? '-F' : '-E'];
       if (boolParam(params.ignore_case)) flags.push('-i');
-      if (ctxLines > 0 && !filesOnly) flags.push(`-C${ctxLines}`);
+      if (boolParam(params.invert)) flags.push('-v');
+      if (ctxLines > 0 && !filesOnly && !counting && !onlyMatching) flags.push(`-C${ctxLines}`);
       const inc = params.include ? ` --include=${shq(String(params.include))}` : '';
       const prune = NEVER_RECURSE.map((d) => ` --exclude-dir=${shq(d)}`).join('');
       // With -C, most returned lines are context, so a flat 50-line cap would show ~8 matches and call
       // it the limit. The cap scales with the context requested; the label below says what was counted.
-      const cap = filesOnly ? FIND_LIMIT : ctxLines > 0 ? GREP_LIMIT * (1 + ctxLines) : GREP_LIMIT;
+      const asked = Math.floor(Number(params.max_matches) || 0);
+      const defaultCap = filesOnly || counting ? FIND_LIMIT : ctxLines > 0 ? GREP_LIMIT * (1 + ctxLines) : GREP_LIMIT;
+      const cap = asked > 0 ? Math.min(asked, 500) : defaultCap;
       // Ask for one line MORE than shown, so truncation can be reported instead of silently cutting.
+      // `exclude` is the `| grep -vE Y` half of the chain this tool exists to replace. Applied after the
+      // search rather than inside it, because grep cannot express "matches X but not Y" in one pass.
+      const excl = params.exclude ? ` | grep -vE -- ${shq(String(params.exclude))}` : '';
+      // Counting prints `path:0` for every file grep looked at; only the non-zero lines are an answer.
+      const zeroes = counting ? " | grep -vE ':0$'" : '';
       const out = await execAsync(
         // `--include` MUST precede `--`: after the terminator grep reads every argument as a file
         // operand, so the filter became a missing filename ("grep: --include=*.cs: No such file")
         // and quietly stopped filtering. Caught by watching a real run, not by the build.
-        `grep ${flags.join(' ')}${inc}${prune} -- ${shq(String(params.pattern))} ${shq(String(params.path))} | head -${cap + 1}`,
+        `grep ${flags.join(' ')}${inc}${prune} -- ${shq(String(params.pattern))} ${shq(String(params.path))}${zeroes}${excl} | head -${cap + 1}`,
         { cwd: CWD },
       );
       const lines = out === '(no output)' ? [] : out.split('\n').filter((l) => l.trim());
@@ -80,8 +106,15 @@ export const tool: Tool = {
       }
       // Say what was counted: with -C most lines are context, and with -l they are files, so calling
       // either "matches" would misstate the result the model reasons from.
-      const unit = filesOnly ? 'file' : ctxLines > 0 ? 'line (incl. context)' : 'match';
-      const plural = (n: number) => (n === 1 ? unit : filesOnly ? 'files' : ctxLines > 0 ? 'lines (incl. context)' : 'matches');
+      // Explicit pairs, because `${unit}s` produced "2 matchs" and "2 file with matchess" — the label is
+      // what the model reasons from, and a mangled one reads as a mangled result.
+      const [one, many] = counting ? ['file with matches', 'files with matches']
+        : filesOnly ? ['file', 'files']
+          : onlyMatching ? ['matched string', 'matched strings']
+            : ctxLines > 0 ? ['line (incl. context)', 'lines (incl. context)']
+              : ['match', 'matches'];
+      const unit = one;
+      const plural = (n: number) => (n === 1 ? one : many);
       if (lines.length > cap) {
         return `${lines.slice(0, cap).join('\n')}\n(showing the first ${cap} ${plural(cap)} — there are MORE; narrow the pattern, add include=, or use files_only=true to see the spread)`;
       }

@@ -351,6 +351,19 @@ export async function qaGate(
      * saved on a turn whose verdict is a compiler's.
      */
     if (executor.config.factsOnly) {
+      /**
+       * A facts gate may still ask ONE question of a model — see `QaExecutor.review`. It is not the generic
+       * judge: the executor picked the files after a deterministic pre-filter and asks its own narrow
+       * question, and what comes back is an ordinary fact. Interruption is honoured before spending it.
+       */
+      if (executor.review && !isInterrupted()) {
+        setActivityDetail(`${ctx.type}: semantic check on the changed files`);
+        try {
+          facts.push(...await executor.review(ctx, files, facts));
+        } catch (e) {
+          log('WARN', 'qa_executor_review_failed', { project: ctx.type, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
       const failures = hardFailingFacts(facts);
       if (failures.length === 0) {
         recordQa('pass', pass, `${ctx.type}: ${facts.map((f) => f.key).join(', ') || 'no facts'}`, 0);

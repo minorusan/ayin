@@ -1,0 +1,31 @@
+A MonoBehaviour is a VIEW. Judge whether this one keeps to that.
+
+ALLOWED, however much of it there is:
+- fields and properties, including [SerializeField] and auto-properties
+- reading and wiring its OWN hierarchy: GetComponent, transform, child lookup, SetActive, enabled,
+  parenting, Instantiate/Destroy of its own prefabs, adding or removing UI/event listeners
+- forwarding: calling a method on an injected service, a model, a controller or a ScriptableObject and
+  passing values through, including passing its own serialized fields
+- Unity lifecycle methods that only do the above (Awake, Start, OnEnable, OnDisable, OnDestroy)
+- trivial getters that return a field, a child component or a simple projection of one
+
+NOT ALLOWED — this is the logic to report:
+- game rules, scoring, validation, state machines, decisions about what SHOULD happen
+- arithmetic beyond trivial layout/positioning, formulas, thresholds, probabilities
+- persistence, network calls, file or PlayerPrefs access, serialization of its own data
+- loops or branches that implement a policy rather than iterate children
+- knowing about another feature's rules, or about data it did not receive
+
+FILE: {{FILE}}
+TYPES: {{TYPES}}
+WHY THIS WAS SENT (a scanner found these, and they may all be innocent): {{REASON}}
+
+{{SOURCE}}
+
+Answer with JSON and nothing else:
+{"verdict":"pass|fail","summary":"one sentence","issues":[{"member":"Type.Method","problem":"what logic it holds","fix":"where it belongs instead"}]}
+
+`fail` only for logic you can point at, with the member named. A method whose statements are all
+hierarchy calls or forwarding is a pass however long it is. Style, naming, ordering and missing null
+checks are NOT this question — reporting them costs the operator a fix pass on something nobody asked
+about, which is worse than missing a borderline case.

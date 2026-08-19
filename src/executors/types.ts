@@ -200,6 +200,19 @@ export interface QaExecutor {
   probe(ctx: ProjectContext, files: ChangedFile[]): Promise<ProbeFact[]>;
   /** Baseline criterion ids this project type adds, on top of what the file kinds already imply. */
   criteria(ctx: ProjectContext, files: ChangedFile[], facts: ProbeFact[]): string[];
+  /**
+   * ONE FOCUSED MODEL CALL, for a question that is genuinely semantic — optional, and not the generic judge.
+   *
+   * `factsOnly` turns off criteria derivation and the reviewer because for such a project type the
+   * measurable checks ARE the gate. But some rules are neither measurable nor a matter of taste: "a
+   * MonoBehaviour must not contain game logic" cannot be decided by a scanner and can be decided by a
+   * model looking at the file. The difference from the generic judge is scope — the executor chooses WHICH
+   * files (after a deterministic pre-filter, so nothing is spent on a file that provably cannot fail), asks
+   * ONE question with its own prompt, and returns ordinary facts. The gate stays a facts gate.
+   *
+   * Returning `[]` is normal: nothing qualified. Never throws — a model failure yields a non-hard fact.
+   */
+  review?(ctx: ProjectContext, files: ChangedFile[], facts: ProbeFact[]): Promise<ProbeFact[]>;
 }
 
 export interface PresentExecutor {
