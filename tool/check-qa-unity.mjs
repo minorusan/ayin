@@ -122,6 +122,27 @@ ok(found.length === 2, 'both error lines are read out of a real log shape', Stri
 ok(found[0] === 'Assets/Game/Player.cs(12,9): CS1002: ; expected', 'file, line, column, code and message survive', found[0]);
 ok(!/Refreshing native plugins/.test(found.join(' ')), 'and ordinary log noise is not mistaken for an error');
 
+// ── who reads what: the operator gets the headline, the agent gets the errors ────
+//
+// The gate puts a fact's FIRST LINE on the chat card (via `issue.problem`) and the WHOLE detail into the
+// agent's fix feedback. So the shape of `detail` is what decides who sees a compiler dump, and that is
+// asserted here rather than left to whoever edits the string next.
+
+console.log('\nheadline for the human, errors for the agent');
+const { formatCompileErrors } = await import(`file://${join(ROOT, 'dist', 'executors', 'qa', 'unity', 'index.js')}`);
+const shaped = formatCompileErrors([
+  'Assets/Game/Player.cs(12,9): CS1002: ; expected',
+  "Assets/Game/Player.cs(18,13): CS0103: The name 'speeed' does not exist in the current context",
+], '2022.3.42f1');
+const [headline, ...rest] = shaped.split('\n');
+ok(/^DOES NOT COMPILE: 2 C# error\(s\)/.test(headline), 'the first line is a headline with the COUNT', headline);
+ok(!/CS1002|CS0103|\.cs\(/.test(headline), 'and carries NO compiler output — that line is what the operator sees', headline);
+ok(rest.length === 2 && rest.every((l) => /^ {2}\S/.test(l)), 'the errors are the following lines, indented', String(rest.length));
+ok(/CS1002: ; expected/.test(rest[0]) && /speeed/.test(rest[1]), 'verbatim, because the agent acts on them');
+const many = formatCompileErrors(Array.from({ length: 25 }, (_, i) => `A.cs(${i},1): CS0103: x`), '6000.1');
+ok(many.split('\n').length === 12 && /… 15 more/.test(many),
+  'capped at ten plus a count — a hundred errors are usually one cause', String(many.split('\n').length));
+
 // ── what is NOT verified here, said out loud ─────────────────────────────────────
 
 console.log('\nnot covered by this gate (needs a real editor)');

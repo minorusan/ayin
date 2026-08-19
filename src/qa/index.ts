@@ -369,7 +369,25 @@ export async function qaGate(
       turn.lastIssues = issues;
       recordQa('fail', pass, verdict.summary, issues.length);
       log('INFO', 'qa_facts_only_fail', { project: ctx.type, keys: failures.map((f) => f.key).join(',') });
-      const card = failCard(pass, maxPasses, verdict, willFix);
+      /**
+       * THE ERRORS GO TO THE AGENT, NOT TO THE OPERATOR.
+       *
+       * A compiler's output is work instructions. Ten `error CS…` lines with file, line and column are
+       * exactly what the fix pass needs and exactly what the human does not want scrolling past — they
+       * asked for a working build, not a build log, and the agent is about to act on it in the same
+       * second. So the CARD keeps the headline (`DOES NOT COMPILE: 7 C# error(s) …`) and says where the
+       * detail went, while `feedback` carries every line verbatim.
+       *
+       * `detail`'s first line is the headline by construction in every fact that has a list: the
+       * executors write "WHAT: n thing(s) — …" first and indent the items below it.
+       */
+      const cardVerdict: QaVerdict = {
+        ...verdict,
+        issues: issues.map((i) => ({ ...i, problem: i.problem, fix: 'sent to the agent' })),
+      };
+      const card = failCard(pass, maxPasses, cardVerdict, willFix);
+      const detailLines = failures.reduce((n, f) => n + Math.max(0, f.detail.split('\n').length - 1), 0);
+      if (detailLines > 0) card.body = [...card.body, `${detailLines} line(s) of tool output went to the agent, not here`];
       if (!willFix) return { action: 'exhausted', pass, maxPasses, verdict, card };
       return {
         action: 'fix', pass, maxPasses, verdict, card,

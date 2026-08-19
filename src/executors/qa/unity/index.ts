@@ -194,17 +194,7 @@ function batchCompile(repo: string, unity: string): ProbeFact {
     const unique = [...new Set(errors)];
 
     if (unique.length) {
-      return {
-        key: 'unity-compile',
-        ok: false,
-        hard: true,
-        detail: [
-          `DOES NOT COMPILE: ${unique.length} C# error(s) from Unity ${unityVersion(repo) ?? ''} batch compile —`
-          + ' fix these, they are the compiler talking:',
-          ...unique.slice(0, 10).map((e) => `  ${e}`),
-          ...(unique.length > 10 ? [`  … ${unique.length - 10} more`] : []),
-        ].join('\n'),
-      };
+      return { key: 'unity-compile', ok: false, hard: true, detail: formatCompileErrors(unique, unityVersion(repo)) };
     }
     if (threw === 'timed out') {
       return {
@@ -231,6 +221,25 @@ function batchCompile(repo: string, unity: string): ProbeFact {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * HEADLINE FIRST, ERRORS BELOW — and that layout is a contract, not formatting.
+ *
+ * The gate puts a fact's FIRST LINE on the operator's card and the WHOLE detail into the agent's fix
+ * feedback (`qa/index.ts`). So a compiler's output has to be shaped for both readers at once: the human
+ * asked for a working build and does not want a build log scrolling past, while the agent is about to act
+ * on every file, line and column in the same second. First line = what happened and how much of it; the
+ * rest = the errors, indented, verbatim.
+ *
+ * Capped at ten because a fix pass acts on the first few and a hundred errors are usually one cause.
+ */
+export function formatCompileErrors(errors: string[], version: string | null): string {
+  return [
+    `DOES NOT COMPILE: ${errors.length} C# error(s) from Unity ${version ?? ''} batch compile`.replace(/\s+$/, ''),
+    ...errors.slice(0, 10).map((e) => `  ${e}`),
+    ...(errors.length > 10 ? [`  … ${errors.length - 10} more`] : []),
+  ].join('\n');
 }
 
 /** The last non-empty lines, for a failure whose cause is in the log rather than in the code. */
