@@ -574,6 +574,75 @@ async function handleInput(text: string): Promise<void> {
        * defaults to Cancel. The live session, the live transcript and this process's log file are
        * excluded by wipe.ts itself, not by this caller. `/wipe <scope>` skips only the menu.
        */
+      /**
+       * `/git-hardreset` and `/git-softreset` — undo what a turn did to the tree, in one keystroke.
+       *
+       * WHY THESE EXIST. An agent that edits files is wrong sometimes, and the recovery is always the same
+       * two commands. Typing them by hand at 2am is where `git clean -fd` gets run in the wrong directory.
+       *
+       * HARD = `git reset --hard` + `git clean -fd`: tracked files back to HEAD, untracked files DELETED.
+       * SOFT = `git reset --hard` only: tracked files back to HEAD, untracked files KEPT. That is the one
+       * to use when the agent created new files worth reading and mangled the ones that existed.
+       *
+       * A STASH IS TAKEN FIRST, ALWAYS, and this is not optional politeness: `clean -fd` deletes work that
+       * no commit and no reflog has ever seen — a new file is simply gone, and this repo's own rule is to
+       * never destroy hours of work without a backup in the same code path. `git stash push -u` captures
+       * tracked AND untracked, leaves the tree clean (which is what was asked for), and prints the ref to
+       * get it back. The literal reset+clean still runs afterwards, so the result is exactly the tree the
+       * operator asked for, and the previous one is one `git stash pop` away.
+       *
+       * Nothing happens without a confirmation naming the counts, because "how much am I about to lose"
+       * is the only question worth asking here and `git status` is what answers it.
+       */
+      case '/git-hardreset': case '/git-softreset': {
+        const hard = cmd === '/git-hardreset';
+        const status = await runBang('git status --porcelain');
+        if (status.exitCode !== 0) {
+          addMessage('system', `Not a git repository (or git failed): ${status.output.trim().split('\n')[0] ?? ''}`);
+          return;
+        }
+        const lines = status.output.split('\n').map((l) => l.trimEnd()).filter(Boolean);
+        if (!lines.length) { addMessage('system', 'The tree is already clean — nothing to reset.'); return; }
+        const untracked = lines.filter((l) => l.startsWith('??')).length;
+        const tracked = lines.length - untracked;
+        const branch = (await runBang('git rev-parse --abbrev-ref HEAD')).output.trim();
+        const head = (await runBang('git log --oneline -1')).output.trim();
+
+        const pick = await showDialog(
+          hard ? 'Reset tracked files AND delete untracked ones?' : 'Reset tracked files, keep untracked ones?',
+          [
+            { label: hard ? `Yes — reset ${tracked} tracked, delete ${untracked} untracked` : `Yes — reset ${tracked} tracked, keep ${untracked} untracked`, danger: true, note: branch },
+            { label: 'Cancel' },
+          ],
+          { subtitle: `HEAD is ${head}. Everything is stashed first — the tree ends clean and \`git stash pop\` brings it back.`, footer: '↑↓ select · Enter confirm · Esc cancel' },
+        );
+        if (pick !== 0) { addMessage('system', 'Reset cancelled — nothing was touched.'); return; }
+
+        setAgentStatus(`${cmd.slice(1)}…`);
+        try {
+          // The stash is the recovery, so a stash that FAILS aborts the whole thing: doing the destructive
+          // half without it is the one outcome this command must never produce.
+          const label = `ayin ${cmd} ${new Date().toISOString()}`;
+          const stash = await runBang(`git stash push ${hard ? '--include-untracked ' : ''}-m ${JSON.stringify(label)}`);
+          if (stash.exitCode !== 0) {
+            addMessage('system', `Stash failed, so NOTHING was reset — your tree is untouched:\n${stash.output.trim()}`);
+            return;
+          }
+          const reset = await runBang('git reset --hard');
+          const cleaned = hard ? await runBang('git clean -fd') : null;
+          const after = (await runBang('git status --porcelain')).output.split('\n').filter(Boolean).length;
+          addMessage('tool', formatShellForChat(
+            hard ? 'git stash push -u && git reset --hard && git clean -fd' : 'git stash push && git reset --hard',
+            [stash.output.trim(), reset.output.trim(), cleaned?.output.trim() ?? ''].filter(Boolean).join('\n'),
+            reset,
+          ));
+          addMessage('system', `${tracked} tracked${hard ? ` and ${untracked} untracked` : ''} change(s) reset · ${after} entr(y/ies) left in status`);
+          addMessage('system', `recover with: git stash pop   (saved as "${label}")`);
+        } finally {
+          setAgentStatus('');
+        }
+        return;
+      }
       case '/wipe': {
         const arg = text.slice('/wipe'.length).trim().toLowerCase().replace(/\s+/g, '-');
         const named: Record<string, WipeScope> = {

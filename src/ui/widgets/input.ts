@@ -25,6 +25,12 @@ export class InputBar {
   private lastKeyAt = 0;
   private active = false;
   private onSubmit: (text: string) => void = () => {};
+  /**
+   * What Tab completes the current text to, or null. Injected rather than imported: the completion
+   * source is the hint PANEL, and a widget reaching into another widget is how two of them end up
+   * disagreeing about what is on screen. Defaults to "no completion" so nothing depends on the wiring.
+   */
+  private complete: (text: string) => string | null = () => null;
   private onChange: (text: string) => void = () => {};
 
   constructor() {
@@ -53,7 +59,8 @@ export class InputBar {
     }
   }
 
-  handlers(handlers: { onSubmit?: (text: string) => void; onChange?: (text: string) => void }): void {
+  handlers(handlers: { onSubmit?: (text: string) => void; onChange?: (text: string) => void; onComplete?: (text: string) => string | null }): void {
+    if (handlers.onComplete) this.complete = handlers.onComplete;
     if (handlers.onSubmit) this.onSubmit = handlers.onSubmit;
     if (handlers.onChange) this.onChange = handlers.onChange;
   }
@@ -158,6 +165,26 @@ export class InputBar {
           this.onChange(''); // hides hints
           this.onSubmit(text);
         }
+        return true;
+      }
+      /**
+       * TAB COMPLETES THE SLASH COMMAND to the first row of the hint panel.
+       *
+       * The panel already lists what matches; without this the operator reads the answer off the screen
+       * and then types it out anyway. A trailing space is added because a command that takes an argument
+       * (`/jira`, `/diff`, `/set`) is mid-sentence after completion, and the panel closes on the space —
+       * which is the correct signal that the command part is settled.
+       *
+       * Falls through to inserting a literal tab ONLY when there is nothing to complete, so Tab in
+       * ordinary prose still behaves like Tab.
+       */
+      case 'tab': {
+        const completion = this.complete(this.buffer);
+        if (!completion) return true;
+        this.buffer = `${completion} `;
+        this.cursor = this.buffer.length;
+        this.redraw();
+        this.onChange(this.buffer);
         return true;
       }
       case 'backspace':

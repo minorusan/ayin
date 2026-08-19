@@ -55,7 +55,11 @@ registerStack(
 relayout();
 
 // input ↔ hints wiring: hints follow whatever is being typed
-input.handlers({ onChange: (text) => hints.update(text) });
+input.handlers({
+  onChange: (text) => hints.update(text),
+  // Tab completes to the panel's first row — one definition of "matching", in the panel that shows it.
+  onComplete: (text) => hints.firstMatch(text),
+});
 
 // ── legacy-compatible function API ────────────────────────────────────
 
