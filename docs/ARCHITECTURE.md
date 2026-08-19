@@ -1276,6 +1276,38 @@ name. **Core** (no external deps): `read_file`, `grep`, `find_files`, `write_fil
 `str_replace`, `bash`, `explore`, `status`, `arduino_db`. **Optional integrations** (inert unless
 configured): `diagram`, `web_search`, `jira`, `jira_auth`. See the README table.
 
+### `rename` — the language-split tool (`src/tools/rename/`)
+
+A rename is not an edit, it is N edits that must all land: the declaration, every reference, and in some
+languages the FILE NAME and a serialization annotation. `str_replace` renames what the agent has read and
+misses the call in the file it never opened; `sed` matches inside `FooBar`, inside strings and inside
+comments. So it is its own tool, with the same shape every language split in this repo uses — an abstract
+`RenameLanguage` (base.ts) holding the scanning, and one subclass per language registered in a `LANGUAGES`
+array, exactly like `entangle`'s `SurfaceLanguage`.
+
+**The base owns what must not be got wrong twice.** Word boundaries (`Foo` must not touch `FooBar`), a
+string/comment scanner (a `"` inside a comment is not a string), back-to-front application so earlier
+edits cannot shift later offsets, and one write per file so a crash leaves whole files. Strings and
+comments are left alone AND REPORTED: a name in a string is often a registry key or a reflection lookup,
+and that is precisely the reference a rename breaks with no compiler error anywhere.
+
+**Subclasses own the traps.** `csharp.ts`: a MonoBehaviour class is renamed WITH its file, because Unity
+binds a component by file name and says nothing when they disagree — and its `.meta` moves with it,
+contents untouched, since the GUID inside is what every prefab and scene points at. A renamed SERIALIZED
+field gets `[UnityEngine.Serialization.FormerlySerializedAs("old")]`, because the old name is the key the
+value is stored under in every asset; without it Unity finds nothing and silently substitutes the default,
+losing whatever a designer set. Verbatim strings (`@"..."`) get their own scanner — treating `\` as an
+escape there swallows the terminator and hides real references behind one giant "string".
+`typescript.ts`: object shorthand `{ Foo }` is a KEY as well as a value, so it is expanded before the
+generic pass (`beforeRewrite`) and restored after (`afterRewrite`) — the value follows the symbol, the key
+does not. Import/export clauses are excluded from that expansion, because `import { Foo }` binds a name
+and `import { Foo: To }` is not TypeScript at all.
+
+**Refusals come first**, before anything is written: a keyword, an invalid identifier, renaming to itself,
+or a new name already declared in that file (a merge, not a rename — and it compiles). `dry_run` produces
+the whole plan and writes nothing. Gate: `npm run check:rename` — 39 assertions against real trees in the
+temp dir, each one a way to corrupt a repo silently.
+
 ### A tool may own a slash command (`Tool.slash`)
 
 A tool declaring `slash: { command, param, usage }` is invoked **directly** by that command, bypassing
