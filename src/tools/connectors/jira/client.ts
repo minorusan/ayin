@@ -21,6 +21,15 @@ const TIMEOUT_MS = 20_000;
 /** Which REST flavour this site speaks. Learned on the first search, then reused for the session. */
 let apiVersion: '3' | '2' | null = null;
 
+/**
+ * The flavour that serves `/issue/{key}`, learned separately from the search flavour above.
+ *
+ * One flag for both was the bug: `issueDetail` read the search one, which is null until a search has
+ * run, so a direct by-key fetch — the first call a coding agent makes — guessed Cloud and 404'd on a
+ * Data Center site with a message that read as "no such ticket".
+ */
+let issueApiVersion: '3' | '2' | null = null;
+
 export class JiraError extends Error {}
 
 export interface JiraIssue {
@@ -280,13 +289,48 @@ export async function currentSprintIssues(): Promise<{ issues: JiraIssue[]; scop
   return { issues: kept, scope: `${sprintName}${pin}` };
 }
 
-/** One issue with its description and comments. */
+/**
+ * One issue with its description and comments, BY KEY — a direct GET on the issue itself.
+ *
+ * Not sprint-scoped and not a search: any key the token can see resolves, open or closed, this sprint or
+ * three years ago. That is the whole point — the operator names a ticket by number and it is fetched,
+ * rather than being told it is not on their board.
+ *
+ * IT LEARNS THE API FLAVOUR RATHER THAN GUESSING IT. This used to read `apiVersion ?? '3'`, which is
+ * correct only after a search has already run. Called first — which is exactly what a direct-by-key path
+ * does — it guessed Cloud, and on a Data Center site the guess is a 404 that reads as "no such ticket".
+ * So a 404 on the untried flavour is retried on the other one, once, and the answer is remembered.
+ *
+ * A 404 from BOTH is the honest not-found, and says both things it can mean: no such key, or a token
+ * without permission to see it. Jira does not distinguish them, and pretending otherwise sends the
+ * caller looking for the wrong problem.
+ */
 export async function issueDetail(key: string): Promise<JiraIssue> {
-  const version = apiVersion ?? '3';
-  const raw = (await call(
-    `/rest/api/${version === '3' ? '3' : '2'}/issue/${encodeURIComponent(key)}?fields=${[...FIELDS, 'description', 'comment'].join(',')}`,
-  )) as RawIssue;
-  return toIssue(raw, true);
+  const path = (v: '3' | '2'): string =>
+    `/rest/api/${v}/issue/${encodeURIComponent(key)}?fields=${[...FIELDS, 'description', 'comment'].join(',')}`;
+  const isNotFound = (err: unknown): boolean => err instanceof JiraError && err.message.includes('404');
+
+  // THE ORDER, and why it is not simply `apiVersion`. The search flavour is a HINT here, never the
+  // answer: the two endpoints are versioned independently, and an install exists where `/api/3/issue`
+  // serves while `/api/3/search/jql` does not. So the search-learned flavour only decides which to try
+  // FIRST — it is never written back, or a successful issue fetch would pin `search` to a path that
+  // 404s with nothing left to fall back to.
+  const order: Array<'3' | '2'> = issueApiVersion
+    ? [issueApiVersion]
+    : apiVersion === '2' ? ['2', '3'] : ['3', '2'];
+
+  for (const v of order) {
+    try {
+      const raw = (await call(path(v))) as RawIssue;
+      issueApiVersion = v;
+      return toIssue(raw, true);
+    } catch (err) {
+      // A 404 on an UNTRIED flavour is ambiguous — wrong path, or no such issue — so the other one is
+      // tried once. Anything else (401, 500, a dead network) is the answer and is raised as it is.
+      if (!isNotFound(err)) throw err;
+    }
+  }
+  throw new JiraError(`no issue ${key} — either it does not exist or this token cannot see it`);
 }
 
 /**
@@ -312,4 +356,5 @@ export async function issuesByKeys(keys: string[], detail = true): Promise<JiraI
 /** Reset the learned API flavour. For tests and for a credential pointing at a different site. */
 export function resetApiVersion(): void {
   apiVersion = null;
+  issueApiVersion = null;
 }

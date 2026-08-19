@@ -1,1 +1,1 @@
-Answer a question about the current Jira sprint for the authenticated user: which tickets are assigned, their status and priority, and what a ticket says or who commented on it. Ask in plain language, not JQL. Scoped to your own tickets in the open sprint.
+Answer a question about Jira for the authenticated user: what is on their current sprint, what a ticket says, who commented on it. Ask in plain language, not JQL. A ticket key in the question (PROJ-123) is read directly, whether or not it is on the sprint.

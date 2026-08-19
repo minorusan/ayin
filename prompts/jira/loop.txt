@@ -11,5 +11,5 @@ Use `open` only when the answer needs a ticket's description or comments.
 {{SPRINT}}
 
 Cite ticket keys. Report what the data says, including "nobody has replied" or "nothing is blocked" —
-NEVER invent a ticket, status, person or comment that is not above. Only these tickets exist; anything
-else is out of scope.
+NEVER invent a ticket, status, person or comment that is not above. A key named in the question, or in a
+ticket you have read, can be opened even when it is not in that list.

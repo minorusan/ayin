@@ -1345,7 +1345,7 @@ families.
 Each tool is `{ name, description, parameters, execute }`; the model calls it by its unique
 name. **Core** (no external deps): `read_file`, `list_dir`, `grep`, `find_files`, `write_file`,
 `str_replace`, `rename`, `bash`, `explore`, `status`, `arduino_db`. **Optional integrations** (inert unless
-configured): `diagram`, `web_search`, `jira`, `jira_auth`. See the README table.
+configured): `diagram`, `web_search`, `jira`, `jira_ticket`, `jira_auth`. See the README table.
 
 ### The I/O surface is sized from the TRANSCRIPTS, not from taste
 
@@ -1437,21 +1437,41 @@ A connector is a tool whose `execute` is **its own agentic loop** against a serv
 asks in plain words; the connector decides how much of the service it must read. The outer agent spends
 no rounds on the service's mechanics and never composes a query language.
 
-**`jira`** — scoped to the **authenticated user's current sprint**:
+**`jira`** — the operator's **current sprint** as context, plus **any ticket by key**:
 
-- Scope is a property of the **query** (`assignee = currentUser() AND sprint IN openSprints()`), not an
-  instruction in a prompt. `open KEY` is refused unless KEY is in the fetched sprint set — a prompt
-  saying "only your sprint" is a request; an unavailable answer is a fact.
-- The sprint list is fetched **once, up front**: most questions about a sprint are answered by the list
-  of tickets in it, so the common case is a single LLM call, and every later round shares one frame of
-  reference. Only a question needing a description or comments costs another round.
+- The sprint list is a property of the **query** (`assignee = currentUser() AND sprint IN openSprints()`),
+  fetched **once, up front**: most questions about a sprint are answered by the list of tickets in it, so
+  the common case is a single LLM call and every later round shares one frame of reference.
+- **A ticket key in the question is an ADDRESS, and is read before the board is.** `PROJ-1234` anywhere in
+  the question is fetched directly — one GET on the issue — whatever the sprint holds, and `open KEY` is
+  never refused for being off the board. The sprint used to be the gate: keys were matched against what
+  the board returned, an off-board key was refused with the board's contents, and an EMPTY board returned
+  "nothing assigned to you" while holding a question that named a specific ticket. The tickets a coding
+  agent needs are mostly closed, someone else's, or two releases old. Jira decides whether a key
+  resolves; a 404 is the answer.
+- **A bare number still needs the board**, and only for disambiguation: `13804` names a ticket but not a
+  project, so it resolves only when exactly one sprint key ends in it. Inventing the prefix would fetch a
+  different ticket that exists — a wrong answer shaped exactly like a right one.
+- The sprint failing to load is **not fatal** once a named ticket is in hand; the board is context, never
+  permission.
 - The inner protocol is **one line** (`open KEY` / `answer <text>`). A small local model asked for JSON
   mid-reasoning produces malformed JSON far more often than a wrong verb. An unmarked reply is taken as
   the answer rather than spending a round correcting protocol.
-- **Cloud and Data Center are detected, not configured** — the search endpoint
-  (`/rest/api/3/search/jql` vs `/rest/api/2/search`) and body format (ADF document tree vs plain text)
-  are both discoverable on the first call. ADF is flattened to text before any model sees it.
+- **Cloud and Data Center are detected, not configured** — the endpoint version and the body format (ADF
+  document tree vs plain text) are both discoverable on the first call. ADF is flattened to text before
+  any model sees it. **Search and issue-by-key learn their flavour SEPARATELY** (`/rest/api/3/search/jql`
+  vs `/rest/api/2/search`; `/rest/api/{3,2}/issue/{key}`): one flag for both meant a by-key fetch read a
+  value only a search could set — so the first call of a headless run guessed Cloud and, on Data Center,
+  404'd with a message that read as "no such ticket". The search-learned flavour is now only a hint about
+  which to try first, never written back.
 - Descriptions and comments are **clipped head-and-tail** with the omission stated.
+
+**`jira_ticket`** — the same ticket, with **no model and no loop**: one parameter (`key`), one GET,
+description + comments + status. It exists because `jira` is `slashOnly` (its `execute` is an agentic
+loop, which an agent must not pay for mid-turn) and nothing replaced it, so a headless run could not read
+the ticket its own task named — it worked from the operator's paraphrase or shelled out to `curl`.
+Reading a ticket whose key you already have needs no reasoning. A bare number is **refused**, naming the
+missing prefix. Gate: `npm run check:jira`.
 
 **`jira_auth`** — fills the credential file from whatever the operator pasted:
 

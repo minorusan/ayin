@@ -1,0 +1,1 @@
+Read one Jira ticket by key (e.g. PROJ-1234): title, status, type, priority, full description and all comments. One request, any ticket the token can see — open or closed, any sprint, any assignee. Use it whenever a task names a ticket key instead of working from a paraphrase of it.

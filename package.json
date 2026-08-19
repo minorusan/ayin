@@ -56,7 +56,8 @@
     "check:rename": "node tool/check-rename.mjs",
     "check:qa-unity": "node tool/check-qa-unity.mjs",
     "unity:compile": "node tool/unity-compile.mjs",
-    "check:io": "node tool/check-io-tools.mjs"
+    "check:io": "node tool/check-io-tools.mjs",
+    "check:jira": "node tool/check-jira.mjs"
   },
   "dependencies": {
     "blessed": "^0.1.81",
