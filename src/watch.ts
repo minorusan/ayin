@@ -40,6 +40,7 @@ import { initLlmProvider } from './llm/select.js';
 import { prompts, packagePath, writeAtomic } from './prompts-service.js';
 import { log } from './log.js';
 import { HOUND_MARKERS, HOUND_SCRIPT_NAME, LEGACY_HOUND_SCRIPT, houndOffPath, isHoundOff } from './hound-off.js';
+import { ensureAccelerator } from './unity-accelerator.js';
 // Re-exported for the callers that had them from here before they moved (see hound-off.ts).
 export { HOUND_MARKERS, HOUND_SCRIPT_NAME, LEGACY_HOUND_SCRIPT };
 
@@ -230,6 +231,13 @@ async function installHook(repo: string): Promise<void> {
     out(`ayin-hound Stop hook set: ${join(repo, '.claude', 'hooks', HOUND_SCRIPT_NAME)}`);
     log('INFO', 'watch_hound_installed', { repo });
   }
+  // The Accelerator, when one is configured AND answering. Reported unless it is simply switched off
+  // or this is not a Unity project: a cache server that silently did not get set is a day of slow
+  // imports nobody attributes to this.
+  {
+    const acc = await ensureAccelerator(repo);
+    if (!/disabled|not a Unity project/.test(acc.why)) out(`Unity Accelerator: ${acc.why}`);
+  }
   // Register the repo (the set the daemon watches + self-heals + reviews the working tree of).
   const repos = existsSync(REPOS_FILE) ? JSON.parse(readFileSync(REPOS_FILE, 'utf-8')) : {};
   repos[repo] = { installedAt: new Date().toISOString() };
@@ -247,7 +255,7 @@ function registeredRepos(): string[] {
 async function selfHealHooks(): Promise<void> {
   const repos = registeredRepos();
   if (repos.length === 0) return;
-  let reinstalled = 0, gone = 0, hound = 0;
+  let reinstalled = 0, gone = 0, hound = 0, accel = 0;
   for (const repo of repos) {
     let wrote = false, missing = false;
     for (const { name, kind } of WATCH_HOOKS) {
@@ -258,34 +266,42 @@ async function selfHealHooks(): Promise<void> {
     if (missing) { gone++; continue; }
     if (wrote) reinstalled++;
     if (houndInstallAllowed() && existsSync(repo) && ensureHoundHook(repo)) hound++;
+    // Re-asserted every pass: Unity rewrites EditorSettings.asset on its own, and a project that lost
+    // the endpoint is a project quietly re-importing everything locally again.
+    if (existsSync(repo) && (await ensureAccelerator(repo)).wrote) accel++;
   }
-  if (reinstalled || gone || hound) {
-    out(`hook self-heal: ${reinstalled} repo(s) re-hooked, ${gone} missing, ${hound} hound-refreshed — of ${repos.length} watched`);
-    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), gone: String(gone), hound: String(hound) });
+  if (reinstalled || gone || hound || accel) {
+    out(`hook self-heal: ${reinstalled} repo(s) re-hooked, ${gone} missing, ${hound} hound-refreshed, ${accel} accelerator-set — of ${repos.length} watched`);
+    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), gone: String(gone), hound: String(hound), accel: String(accel) });
   }
 }
 
 // ── Claude Code hound hook (auto-installed alongside the git hooks) ──
-// A Stop hook written into the watched repo's own .claude/settings.json: at the end of a Claude
-// Code turn, if anything is staged, ayin looks at the index. The script (`assets/ayin-hound.mjs`,
-// shipped with the package and copied in verbatim under a two-constant header) is deliberately
-// two-stage:
+// A Stop hook written into the watched repo's own .claude/settings.json. It asks ONE question, with no
+// model at all: does every C# type this session ADDED appear on the design in this working tree?
 //
-//   FACTS   six mechanical checks computed by git alone — no model. A staged file no commit on this
-//           branch ever touched · a .meta whose `guid:` line actually changed · a serialized field
-//           removed/renamed · enum members inserted rather than appended · an interface that gained
-//           a member · an asmdef reference dropped. Each is true by construction.
-//   VERIFY  ayin itself, read-only (AYIN_READONLY=1 → grep/read only, never edit), capped at a small
-//           round budget (AYIN_MAX_ROUNDS), asked ONLY to grep the repo and say which facts actually
-//           break something. Engine is ayin, not `claude -p` — no LAN address to hardcode, no
-//           separate config; it inherits whatever AYIN_MODEL_URL this install already talks to.
+//   WORKING TREE  `git status`, not `git diff --cached`. An agent that just wrote six new files has
+//                 staged none of them, so an index-only hound saw nothing at the moment it mattered.
+//   ADDED         untracked, or index status `A`. A file whose types are already on the design was
+//                 answered when it landed; editing it is not the moment to ask again. A rename is
+//                 not an add.
+//   THE DESIGN    any `.puml` in the tree that declares a type (the format `naama` writes, `entangle`
+//                 reads and `naamah weave` renders), falling back to a rendered naamah page's graph
+//                 payload. Declaring at least one type is what makes a file a design rather than an
+//                 extension match.
+//   THE ANSWER    a set difference between two regex scans. Nothing to hallucinate, nothing to time
+//                 out, no round budget to spend.
 //
-// The contract is ENFORCED in the script, not requested in the prompt: a finding whose citation does
-// not resolve to a real path is dropped, and `greps_run: 0` forces UNVERIFIED. The previous hound
-// reported greps it never ran and reasoned about files that do not exist; that is now structurally
-// impossible. Blocking the stop costs a whole turn, so it is reserved for a verified, cited finding
-// — deterministic flags, unverified checks and the commit nudge ride out as non-blocking
-// `additionalContext`. AYIN_WATCH_HOUND=0 disables installing it (existing installs are left as-is).
+// It never blocks — a finding rides out as non-blocking `additionalContext`, because "you added a type
+// that is not on the diagram" is a thing to tell the agent, not a thing to cost it a turn for.
+//
+// WHAT THIS REPLACED, so it is not rebuilt. The previous hound ran six mechanical git checks and then
+// paid `ayin -p` up to 240s to judge them. Five of the six were gated on Unity file extensions
+// (`.cs`, `.meta`, `.asmdef`) and the sixth, `staged-foreign`, disabled itself whenever HEAD equalled
+// its base — which is every commit-to-main workflow. Measured on ayin's own repo (0 `.cs`, 222 `.ts`,
+// 261 interfaces): the facts list was structurally always empty, so the only reachable behaviour was
+// one model call that produced a commit-message suggestion. A premortem hound that cannot premortem.
+// AYIN_WATCH_HOUND=0 disables installing it (existing installs are left as-is).
 
 /**
  * May a hound be installed or refreshed right now?
@@ -300,14 +316,14 @@ function houndInstallAllowed(): boolean {
 }
 
 /** The hound script for a repo: the shipped asset, prefixed with the two constants the installer
- *  owns. The prompt text stays in the prompt store (§3) — it arrives here as a JSON string, never
+ *  owns. The nudge text stays in the prompt store (§3) — it arrives here as a JSON string, never
  *  as a literal in the asset. */
 function houndScript(promptText: string): string {
   const body = readFileSync(packagePath('assets', 'ayin-hound.mjs'), 'utf-8');
   return `#!/usr/bin/env node
 // GENERATED by \`ayin watch\` — reinstalling overwrites this file. Edit the prompt, not this script:
-// ~/.ayin-cli/prompts/watch/hound*.txt
-const AYIN_HOUND_INSTRUCTIONS = ${JSON.stringify(promptText)};
+// ~/.ayin-cli/prompts/watch/houndUndesigned.txt
+const AYIN_HOUND_NUDGE = ${JSON.stringify(promptText)};
 // The kill switch (\`ayin kill dog\`). Interpolated as a literal path because this copy runs in
 // another repo, under another program, and can import nothing from ayin.
 const AYIN_HOUND_OFF_FILE = ${JSON.stringify(houndOffPath())};
@@ -351,13 +367,13 @@ function upsertHoundSettings(repo: string): boolean {
 }
 
 /** Write/refresh the hound script + settings.json entry for one repo. Idempotent: only writes when
- *  bytes actually change (Unity-ness is re-checked live, so a repo that grows an Assets/ folder
- *  later gets the Unity-scoped prompt on the next self-heal, no reinstall needed). */
+ *  bytes actually change, so the daemon's five-minute self-heal is free unless the asset or the
+ *  nudge prompt actually moved. */
 export function ensureHoundHook(repo: string): boolean {
-  const unity = isUnityRepo(repo);
-  const promptText = watchPrompts.get(unity ? 'houndUnityChecks' : 'houndGeneralChecks', {
-    CONTRACT: watchPrompts.get('houndContract'),
-  });
+  // The nudge template. Its `{{TYPES}}`/`{{DESIGN}}`/`{{COUNT}}` are filled by the HOOK at run
+  // time — it is the only thing that knows which types were added — so they are left unsubstituted
+  // here on purpose, exactly as the prompt service leaves an unsupplied var visible.
+  const promptText = watchPrompts.get('houndUndesigned');
   const scriptPath = join(repo, '.claude', 'hooks', HOUND_SCRIPT_NAME);
   const desired = houndScript(promptText);
   let wrote = false;
@@ -1035,6 +1051,21 @@ async function reviewWorktree(repo: string, ledger: string[]): Promise<string[]>
   if (plan?.commit?.subject) {
     const gd = await absGitDir(repo);
     if (gd) { try { writeFileSync(join(gd, 'COMMIT_EDITMSG'), commitText(plan.commit)); } catch { /* skip */ } }
+  }
+
+  // THEN the ticket-aware draft, which OVERWRITES the one above when it has something better.
+  //
+  // One slot, not two: `.git/COMMIT_EDITMSG` is what every git client prefills from, so a second file
+  // would mean two drafts that can disagree and an operator who cannot tell which one their editor is
+  // about to show them. The plan's message stays the floor — it is written first and survives whenever
+  // this declines, which it does for free whenever no Jira ticket was confirmed.
+  try {
+    const { draftCommit } = await import('./commit-draft.js');
+    const d = await draftCommit(repo);
+    log('INFO', d.drafted ? 'commit_draft_upgraded' : 'commit_draft_declined',
+      { repo, why: d.why || d.ctx.tickets.map(t => t.key).join(',') });
+  } catch (err) {
+    log('WARN', 'commit_draft_pass_failed', { repo, error: err instanceof Error ? err.message : String(err) });
   }
 
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);

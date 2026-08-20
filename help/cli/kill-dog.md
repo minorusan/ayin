@@ -1,6 +1,6 @@
 Silence every hound, now and after the next reboot.
 
-`ayin kill dog` throws a switch that every hound honours: `~/.ayin-cli/hound.off`. While that file exists, an installed hound Stop hook exits 0 on its first line — before the staged diff, before git, before any model — so the end of a Claude Code turn costs nothing at all. `ayin watch` installs no new hound, and the watch daemon's five-minute self-heal stops putting one back, which is the part that made deleting the hook by hand useless.
+`ayin kill dog` throws a switch that every hound honours: `~/.ayin-cli/hound.off`. While that file exists, an installed hound Stop hook exits 0 on its first line — before git, before any file is read — so the end of a Claude Code turn costs nothing at all. `ayin watch` installs no new hound, and the watch daemon's five-minute self-heal stops putting one back, which is the part that made deleting the hook by hand useless.
 
 It then does the housekeeping: ayin's own `ayin-hound.mjs` (and the older `ayin-hound.sh`) is removed from every repo ayin registered, plus the repo you are standing in, along with its entry in that repo's `.claude/settings.json` — only the entry naming our own script, never anything else in the file.
 

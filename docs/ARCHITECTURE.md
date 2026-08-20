@@ -1983,8 +1983,97 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
   size and truncating kept the noise. A tracked file is a change made on purpose — when something has
   to be dropped, that decides which. Omitted files keep their row and their true counts.
 
-Gate: `npm run check:diff` — checks every count against `git diff --numstat`, and escaping against a
-file containing `</script>`.
+- **Staged and unstaged are TWO diffs, not one labelled diff.** `collectDiff` runs
+  `git diff --cached <rev>` and a bare `git diff` and tags each `FileDiff` with `staged`. A change is
+  not staged or unstaged — the individual hunks are, which is why `git status` reports two columns. So
+  a partially-staged file yields **two entries**, one per side, each carrying only its own hunks. The
+  cheap alternative (one `git diff HEAD` plus the file's index column) would show staged and unstaged
+  hunks under one heading, a diff that exists in neither place. The sidebar splits at that boundary,
+  with per-section counts **recomputed from the filter** — a header reading "Staged 2" above one
+  visible row is the same lie the hidden-file count exists to prevent, and it happened: a
+  `.controller` hidden by the default chips left count and list disagreeing.
+- **Per-file `stage`/`unstage`, and a project-type `Stage` pass** (`src/diff/stage.ts`, served pages
+  only — staging is a git write). One button per card, not two: a change is on exactly one side, so
+  the only move that means anything is the one that crosses. `POST /api/diff/stage|unstage` run
+  `git add` / `git restore --staged` on the session's own repo — the same loopback envelope as the
+  comment route and a *smaller* authority than it, since a comment becomes an agent turn that can run
+  shell commands while these move the index and nothing else. The path is still validated: traversal,
+  absolute and flag-shaped (`--cached`) paths are refused before they reach git.
+
+  `POST /api/diff/autostage` is the project-type pass, and it is **deliberately a second policy**
+  rather than a change to `unityStageReason`. The daemon's allowlist states two things worth keeping —
+  a prefab is never auto-staged, and *"there is no model judgement in this decision, by design"* —
+  both correct for a background process staging while nobody watches, neither correct for a button an
+  operator pressed. The cost is two policies to keep in step; the alternative was changing background
+  behaviour on every watched repo to serve a foreground click. In a Unity repo it stages
+  `.anim`/`.controller` and `.prefab` whole; an `.asset` only under `Assets/` **and** only when its
+  `m_Script` guid resolves to a `.cs` in this project (that guid check is what excludes third-party
+  and package assets; the `Assets/` test is what excludes `ProjectSettings`/`EditorSettings`, which are
+  not third-party but the project's own base config); a `.meta` only when the asset it describes was
+  staged. Everything else is skipped **with a reason on the card** — a file that silently failed to
+  stage is the complaint the whole feature answers. A non-Unity repo returns `policy: 'none'` and
+  stages nothing rather than inventing an allowlist.
+
+  **`.cs` is staged LINE BY LINE.** A model classifies the added lines (`stageDebugLines.txt`,
+  `declareTools: false` — it wants JSON, not work), then the clean lines are rebuilt into a patch and
+  `git apply --cached` puts them in the index while the debug lines stay in the working tree as the
+  file's remaining unstaged change. Hunk headers are **recomputed**, never copied: dropping a `+` line
+  changes the new-side count, and a stale `@@` is a patch git refuses at best and misapplies at worst.
+  A classification that fails holds nothing back and says so — the operator asked for their work to be
+  staged, and a model that could not answer is not a reason to silently drop it. An **untracked** `.cs`
+  is staged whole or not at all: partially staging a brand-new file would put a version in the index
+  that never existed on disk.
+
+  A one-character bug worth remembering: `git status --porcelain` puts the index status in column 1, so
+  an unstaged change begins with a **space**. Trimming that output ate the space off the FIRST line
+  only, which then read as already-staged with the path shifted by one — the animator controller
+  vanished from the pass while its six siblings were judged correctly. Position-dependent and silent.
+  `check:diff` pins it.
+- **The refresh FAB rides the property that already existed.** The served route re-collects the working
+  tree on EVERY `GET /diff`, so "rebuild against fresh state" is `location.reload()` — no path to
+  publish, no cache to invalidate, and the URL never moves. All the button has to do is keep the
+  reader's place, which the post-fix reload already solved: `rememberViewport()` writes the topmost
+  on-screen file to the SAME `sessionStorage` anchor `restore()` reads, with no line, so `restore()`
+  misses the row and falls back to the file — the honest anchor when the tree just changed under it.
+  One anchor, not a second mechanism to keep in step. Clicking disarms the button (`pointer-events:none`)
+  because a re-collect on a large tree is not instant and a dead-looking button gets clicked twice.
+  **A `file://` page gets no FAB at all** — a static snapshot has no server to rebuild from and cannot
+  reach `git`, so the affordance is absent rather than present and broken, the same call the page makes
+  about comments.
+
+- **The commit message is drafted from three sources and shown in the page** (`src/commit-draft.ts`).
+  The expensive half is LAST: changed files come from git, ticket keys from one regex over the branch
+  name, the local Claude Code transcript, the last few commit subjects and the diff's added lines — and
+  every key is then CONFIRMED by `jiraTickets()`. Only if Jira resolves at least one does a model get
+  asked to write anything, so an unconfigured Jira, a branch with no key, or a session that never
+  mentioned one all cost nothing. A ticket SHAPE is not a ticket: the regex is the one
+  `explain/git-history.ts` owns, reused rather than duplicated, and its doc already argues that
+  `PROJECT-123` is structurally identical to a part number or a version string.
+
+  **Measured on a real repo, and it changed the design.** Three of the four candidate sources found
+  nothing — the branch was `feature/<name>/<area>`, the session turns never named a key, the diff
+  carried none — and the commit subjects found everything, because the team's convention puts keys in
+  the subject. Scoping subjects to the branch's own commits sounded right and was WORSE: 100 own
+  commits yielded 14 keys, most of them finished work. A small RECENCY window yielded exactly the
+  tickets the uncommitted change belonged to. What is in flight is near HEAD, not near the fork point.
+
+  The local transcript (`~/.claude/projects/<slug>/*.jsonl`) is read for `type: 'user'` records only,
+  filtered to this `gitBranch` and excluding `isSidechain`/`isMeta` — a subagent's prompts are ayin's
+  own scaffolding, and another branch's session is another feature's reasoning. The diff says what
+  changed; it cannot say why or what is still missing, and the operator already said both out loud
+  while doing the work.
+
+  **One slot, and it is git's.** The draft is written to `.git/COMMIT_EDITMSG`, which `git commit` and
+  every git client already prefill from, so it arrives where the operator was going to type anyway. The
+  page RE-READS that file per request — no cached copy to go stale — and an absent draft is stated
+  ("No draft yet") rather than rendered as an empty panel. The daemon's worktree pass writes its plain
+  message first and this overwrites it only when it has something better, so the plain one is the floor
+  whenever the ticket gate declines. `POST /api/diff/draft` is the same pipeline on demand, and when it
+  declines it answers with WHY plus the candidates it saw — an operator who pressed a button and got
+  nothing needs the reason, not a shrug.
+
+Gate: `npm run check:diff` — checks every count against `git diff --numstat`, escaping against a
+file containing `</script>`, and which of the two page modes carries the refresh FAB.
 
 ## `/sprint` — the board in a browser (`src/sprint/`)
 
@@ -2098,51 +2187,46 @@ The moving parts, designed to survive interruption at any point:
   hook described next.
 - **Claude Code hound hook** (installed alongside the git hooks, self-healed the same way):
   `.claude/hooks/ayin-hound.mjs` + a Stop-hook entry upserted into `.claude/settings.json`
-  (`AYIN_WATCH_HOUND=0` to skip installing it — existing installs are left as-is). The script is
-  the shipped `assets/ayin-hound.mjs` copied in verbatim under a one-constant header carrying the
-  reviewer prompt (which lives in the prompt store, never in the asset). It runs in **two stages**:
+  (`AYIN_WATCH_HOUND=0` to skip installing it — existing installs are left as-is). The script is the
+  shipped `assets/ayin-hound.mjs` copied in verbatim under a two-constant header carrying the nudge
+  text (`prompts/watch/houndUndesigned.txt`, never in the asset) and the kill-switch path.
 
-  **1 · Facts, computed by git, with no model at all.** Six mechanical checks whose answers are
-  true by construction:
-  | check | fires when | why it matters |
-  |---|---|---|
-  | `staged-foreign` | a staged **M/D/R** file no commit on this branch (since its merge-base with `origin/HEAD`/`main`/`master`/`develop`) ever touched | unrelated work swept into the index |
-  | `meta-guid-changed` | a staged `.meta` whose **`guid:` line actually changed** | every asset referencing the old guid is unbound |
-  | `serialized-field-removed` | a `[SerializeField]`/public field present at HEAD and gone in the index | its stored value is dropped from every prefab/scene/asset |
-  | `enum-ordinal-shift` | the old member list is **not a prefix** of the new one (or an explicit value changed) | every serialized int now means a different member |
-  | `interface-member-added` | an `interface I…` body gained a member | every implementer must implement it — and implementers are exactly what the diff cannot show |
-  | `asmdef-reference-removed` | a `.asmdef`'s `references` array lost an entry | that assembly's scripts lose those types |
+  It asks **one question, with no model at all**: does every C# type ADDED in this working tree appear
+  on the design?
 
-  Two of these are deliberately self-silencing, because a hound that barks every batch is a hound
-  nobody hears: newly **added** files are exempt from the provenance check (they are almost always
-  the session's own work), and the check is skipped entirely when *every* staged file is foreign —
-  that means the branch simply hasn't committed in this area yet, and there is no outlier to point
-  at. `.meta` files fire only on a changed `guid:`, never on a touch: Unity rewrites them constantly.
+  | | |
+  |---|---|
+  | **working tree** | `git status --porcelain --untracked-files=all`, *not* `git diff --cached`. An agent that just wrote six new files has staged none of them, so an index-only hound saw nothing at the moment it mattered. `--untracked-files=all` because the default collapses a new directory to its name and misses every file under it. |
+  | **added** | untracked, or index status `A`. A rename or copy is **not** an add — the type already existed and was answered then. A file merely **edited** is never re-asked. |
+  | **not authored** | paths under `obj/ bin/ Library/ Temp/ Build/ Builds/ node_modules/` and `*.designer.cs`/`*.g.cs`/`*.generated.cs` are skipped: generator output is not a design decision, and Unity's `Library/` alone holds thousands of `.cs`. |
+  | **the design** | any `.puml` in the tree that **declares at least one type** — the format `naama` writes, `entangle` reads and `naamah weave` renders. Falls back to a rendered naamah page's `<script id="graph">` payload only when no `.puml` declared anything, which keeps the common case to a handful of small files instead of sniffing every HTML in the repo. Declaring a type is what makes a file a *design* rather than an extension match: a sequence diagram or a coverage report contributes no names and does not make the tree look designed. |
+  | **the answer** | a set difference between two regex scans. The C# declaration regex is deliberately the same shape as `src/entangle/languages/csharp.ts`, and the puml one mirrors `parsePuml` in `src/naama/index.ts` — the only puml parser ayin ships. Nothing to hallucinate, nothing to time out, no round budget to spend. |
 
-  **2 · Verification by ayin itself**, read-only (`AYIN_READONLY=1` → `grep`/`read_file`/`find_files`
-  only, never edit; `bash` denied), capped by `AYIN_MAX_ROUNDS` so it spends its budget on greps
-  instead of deliberating. Each fact carries the **exact ayin tool call** that answers it — `grep
-  pattern="…" path="Assets"` — not a shell command, because the agent has no shell and refused
-  `bash` calls burn the whole budget. Searches are scoped to `Assets/` in a Unity repo: `Library/`
-  is gigabytes of generated cache that git ignores and `grep -r` does not. The engine is ayin, not
-  `claude -p` — no LAN address to hardcode; it inherits whatever `AYIN_MODEL_URL` this install uses.
+  **It never blocks.** A finding rides out as non-blocking `hookSpecificOutput.additionalContext`:
+  "you added a type that is not on the diagram" is a thing to tell the agent, not a thing to cost it
+  a turn for. Four independent early exits keep it silent — no added `.cs`, no design in the tree,
+  every new type already on it, or a repeat of a finding already delivered. An atomic `mkdir` lock
+  hashed over the *finding itself* (undesigned types + design sources) debounces repeats and is swept
+  after a day; fixing the design changes the key, so the next turn is judged fresh. Caps: 80 added
+  `.cs` scanned, 40 designs read, 12MB per design file, 12 types named in one nudge — anything
+  dropped is reported in the nudge rather than silently omitted. `--facts` prints the whole
+  deterministic verdict as JSON without emitting a hook response.
 
-  **The output contract is enforced in the script, not requested in the prompt.** A finding whose
-  citation does not resolve to a real path in the repo is **dropped** (this is what makes an
-  invented `DebugLogger.cs` worthless), `greps_run: 0` **forces** `UNVERIFIED`, and an `ISSUES`
-  verdict with no surviving citation degrades to `UNVERIFIED`. Blocking a stop costs a whole extra
-  turn, so it is reserved for a verified, cited finding (`decision: "block"`); deterministic flags,
-  `UNVERIFIED` results and the commit nudge ride out as non-blocking
-  `hookSpecificOutput.additionalContext`, which Claude reads without being stopped. A missing or
-  unreachable model does **not** silence the hook — the git-computed facts are still true, and go
-  out with the shell commands a human should run. Nothing staged, or no fact and a diff under 80
-  lines → the hook exits silently without a model call at all.
+  **What this replaced, so it is not rebuilt.** The previous hound ran six mechanical git checks over
+  the staged index (`staged-foreign`, `meta-guid-changed`, `serialized-field-removed`,
+  `enum-ordinal-shift`, `interface-member-added`, `asmdef-reference-removed`) and then paid `ayin -p`
+  up to 240s, read-only, to verify them — with the output contract (citation must resolve, `greps_run:
+  0` forces `UNVERIFIED`) enforced in the script. The contract worked. The checks did not: five of the
+  six were gated on Unity file extensions (`.cs`, `.meta`, `.asmdef`), and the sixth disabled itself
+  whenever HEAD equalled its base ref, which is every commit-to-main workflow. Measured on ayin's own
+  repo — 0 `.cs`, 222 `.ts`, 261 interfaces — the facts list was therefore *structurally always
+  empty*, and the only reachable behaviour was one model call producing a commit-message suggestion.
+  A premortem hound that could not premortem. The lesson kept: **a hook that fires at the end of every
+  turn is judged entirely on its false positives**, which is why every branch of the silence above is
+  a separate assertion in `check:watch`.
 
-  Loop-safe and cheap: `stop_hook_active` on the hook payload is honoured (a stop that is already
-  the continuation of a block never blocks again), the recursion guard `AYIN_HOUND=1` is set on the
-  child, and an atomic `mkdir` lock hashed per staged diff debounces repeats (swept after a day).
-  `AYIN_HOUND_SELFTEST=1` stubs the model call; `--facts` prints the deterministic facts as JSON and
-  `--dry` prints the prompt, both without spending a generation. The JSON merge into `settings.json`
+  Loop-safe: `stop_hook_active` on the hook payload is honoured, and reading fd 0 is skipped when it
+  is a TTY so a manual `--facts` run cannot block forever. The JSON merge into `settings.json`
   only ever touches the one Stop-hook group whose command names `ayin-hound.mjs` **or** the
   pre-1.0.224 `ayin-hound.sh` — so an upgrade replaces the old bash hound (and deletes its script)
   instead of running two per stop; every other key, every other Stop entry, every other hook event
@@ -2151,9 +2235,32 @@ The moving parts, designed to survive interruption at any point:
   (temp file + rename) — a power cut mid-write can never leave a truncated `settings.json` for the
   next Claude Code turn to choke on (an unparseable file would otherwise be presumed hand-edited
   and left alone forever, exactly the case a self-inflicted truncation must not fall into).
+- **Unity Accelerator, kept pointed at** (`src/unity-accelerator.ts`): on install and on every
+  self-heal, a watched Unity project's `ProjectSettings/EditorSettings.asset` has
+  `m_CacheServerMode: 1` and `m_CacheServerEndpoint` asserted — a two-line edit, by line, never a YAML
+  round-trip (Unity's `.asset` dialect carries tags and ordering it depends on; re-serializing it is
+  how a settings file comes back subtly different and Unity rewrites half of it).
+
+  Three properties are load-bearing. **The endpoint is CONFIG with an empty default** —
+  `acceleratorEndpoint`, or `AYIN_ACCELERATOR` — and empty means disabled: no probe, no read, no write.
+  A LAN address in source would be a fact about one machine compiled into a public repo (§4) and wrong
+  for every other machine besides. **It is written only while the box ANSWERS**, checked by a TCP
+  connect with a short timeout: Unity pointed at a dead cache server does not fail fast, it waits on
+  every import, so asserting an unreachable endpoint is worse than leaving it unset. **And it never
+  reverts** — when the box stops answering the setting is left alone, because this file is tracked and
+  an automatic revert would mean a daemon adding and removing a line in version control as a laptop
+  moves between networks.
+
+  **Known cost, chosen deliberately.** `EditorSettings.asset` is tracked and shared, so once this
+  writes, the file is dirty until committed — and if it IS committed, every teammate and every CI
+  runner inherits an endpoint that does not resolve for them. The machine-local alternative is Unity's
+  own user preference, which `m_CacheServerMode: 0` already defers to; that trade was raised and the
+  project-settings slot was chosen. Note this argues with the `/diff` Stage policy, which deliberately
+  skips `ProjectSettings/` as project base config — one writes the file, the other refuses to stage it.
+
 - **The kill switch — `ayin kill dog`** (`src/kill-dog.ts`, `src/hound-off.ts`): `~/.ayin-cli/hound.off`.
-  While that file exists the hook exits 0 on its FIRST line — before the staged diff, before git,
-  before any model — `ayin watch` installs no hound, and the daemon's self-heal stops re-adding one
+  While that file exists the hook exits 0 on its FIRST line — before git, before any file is read —
+  `ayin watch` installs no hound, and the daemon's self-heal stops re-adding one
   (`houndInstallAllowed()` is a function, not a constant: the daemon lives for days and the switch is
   thrown from another process). The command also removes ayin's own hound from every registered repo
   and from the repo it is standing in, using the SAME `HOUND_MARKERS` identity `unwatch` uses.
@@ -2588,6 +2695,19 @@ stale chunk does the most damage; it can call `corpus_search` itself instead).
 An embedding model is **not** a chat model: `nomic-embed-text` is ~270 MB against gemma's 15+ GB,
 generates nothing, streams nothing, and returns one 768-float array per input in milliseconds on CPU.
 It does not compete for the card and evicts nothing, which is why this stage takes no LLM authority.
+
+**Where embeddings are asked for is ONE DOOR by default.** `embedUrl()` resolves
+`AYIN_EMBED_URL` → the `embedUrl` config key → `llmBaseUrl()`, and unset means the same endpoint
+everything else uses. It used to fall back to `127.0.0.1:11434`, reaching around whatever serves the
+model to poke Ollama's own port: on a machine talking to a remote endpoint there is nothing there, so
+`--embed` failed with `fetch failed` while generation had worked all night — the failure was the
+design working. The env var and the config key are the two EXPLICIT escape hatches, for the real case
+of a small embedder on the local machine while generation goes to a bigger box; neither is a fallback
+the code reaches for on its own. `embedProvider()` is inferred from the model name (`text-embedding-*`
+→ OpenAI, else the endpoint) rather than configured separately, because one setting that can be wrong
+beats two that can contradict — and the OpenAI path BILLS the operator, so which one is in play is
+worth knowing. Batch size follows from the API, not the model: OpenAI's `input` takes an array (96),
+a local `/api/embeddings` takes one prompt (1).
 
 Two rules make vectors safe to keep. **A vector is only comparable to vectors from the same model** —
 not "worse results", meaningless ones; mismatched dimensions crash (lucky), matching dimensions
@@ -3119,10 +3239,10 @@ tool/
 │                       socket making a live server look dead), so it is NOT in prebuild. Run it
 │                       whenever you touch qa/, plan/ or tool-guard.ts.
 └── check-watch.mjs     `npm run check:watch` — what `ayin watch` writes into a repo, against a
-                        throwaway Unity-ish git repo in the temp dir: the hound's six deterministic
-                        facts (and the two cases where it must stay silent), its anti-fabrication
-                        contract, and the autostage allowlist. No model, no network. Run it
-                        whenever you touch watch.ts or assets/ayin-hound.mjs.
+                        throwaway Unity-ish git repo in the temp dir: every branch of the hound's one
+                        question — the four ways it must stay silent, the nudge it emits, the
+                        rendered-page fallback — and the autostage allowlist. No model, no network.
+                        Run it whenever you touch watch.ts or assets/ayin-hound.mjs.
 ```
 
 ## What ayin deliberately does NOT have

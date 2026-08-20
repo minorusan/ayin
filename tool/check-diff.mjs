@@ -176,6 +176,170 @@ const clean = collect.collectDiff(CLEAN);
 ok(clean.files.length === 0, 'a clean tree collects nothing');
 ok(/Working tree is clean/.test(render.renderDiffPage(clean)), 'and the page says so instead of rendering blank');
 
+// ── 8 · the refresh FAB ──────────────────────────────────────────────────────────
+//
+// A served page re-collects on every GET, so the FAB is a reload. The assertions that matter are
+// which pages GET one: a file:// page has no server to rebuild from, and a refresh button that
+// cannot refresh is worse than no button — the same call the page makes about comments.
+
+console.log('\nrefresh FAB');
+
+const fabSet = collect.collectDiff(CLEAN);
+const served = render.renderDiffPage(fabSet, { interactive: true, rev: 'HEAD', comments: [] });
+const staticPage = render.renderDiffPage(fabSet, { interactive: false, rev: 'HEAD', comments: [] });
+
+ok(/id="refresh"/.test(served), 'a SERVED page carries the FAB');
+ok(!/id="refresh"/.test(staticPage), 'a file:// page does NOT — there is nothing to rebuild from');
+ok(/fab\.onclick/.test(served) && !/fab\.onclick/.test(staticPage),
+  'and the wiring ships only with the page that can use it');
+ok(/aria-label="Rebuild against the current working tree"/.test(served),
+  'the FAB is labelled for a screen reader, not icon-only');
+ok(/function rememberViewport/.test(served), 'it records the reader position before reloading');
+ok(/sessionStorage\.setItem\(ANCHOR/.test(served) && (served.match(/ANCHOR = /g) || []).length === 1,
+  'reusing the post-fix reload anchor — ONE anchor, not a second mechanism');
+ok(/\.fab\.busy\{pointer-events:none/.test(served),
+  'a click disarms the button: a slow re-collect must not be startable twice');
+
+// ── 9 · the index: two diffs, two sections, the buttons ──────────────────────────
+//
+// Staged and unstaged are collected as TWO diffs (`--cached <rev>` and a bare `diff`), so a
+// partially-staged file yields two entries carrying only its own side's hunks. No LLM here: the .cs
+// line-level pass needs a model, so this exercises every branch that does not.
+
+console.log('\nthe index');
+
+const IX = mkdtempSync(join(tmpdir(), 'ayin-diffix-'));
+const g = (...a) => execFileSync('git', a, { cwd: IX, stdio: 'ignore' });
+const w = (rel, body) => {
+  mkdirSync(dirname(join(IX, rel)), { recursive: true });
+  writeFileSync(join(IX, rel), body);
+};
+g('init', '-q', '-b', 'main');
+g('config', 'user.email', 'i@example.invalid'); g('config', 'user.name', 'i');
+mkdirSync(join(IX, 'ProjectSettings'), { recursive: true });
+w('ProjectSettings/ProjectVersion.txt', 'm_EditorVersion: 2022.3.0f1\n');
+w('Assets/Scripts/Cfg.cs', 'public class Cfg { public int A; }\n');
+w('Assets/Scripts/Cfg.cs.meta', 'fileFormatVersion: 2\nguid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n');
+w('Assets/Anim/Hero.controller', 'AnimatorController:\n  m_Name: Hero\n');
+w('Assets/Prefabs/Hero.prefab', '%YAML 1.1\nGameObject:\n  m_Name: Hero\n');
+w('Assets/Data/Good.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}\n');
+w('Assets/ThirdParty/Vendor.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: ffffffffffffffffffffffffffffffff, type: 3}\n');
+w('Assets/Data/Baked.asset', 'LightingData:\n  m_Name: baked\n');
+w('ProjectSettings/EditorSettings.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}\n');
+g('add', '-A'); g('commit', '-qm', 'base');
+
+// One file with BOTH a staged and an unstaged change — the shape the split exists for.
+w('Assets/Data/Good.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}\n  A: 1\n');
+g('add', 'Assets/Data/Good.asset');
+w('Assets/Data/Good.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}\n  A: 1\n  B: 2\n');
+// …and the rest unstaged, animator FIRST in `git status` order so the leading-space bug is covered.
+w('Assets/Anim/Hero.controller', 'AnimatorController:\n  m_Name: Hero\n  m_Speed: 2\n');
+w('Assets/Prefabs/Hero.prefab', '%YAML 1.1\nGameObject:\n  m_Name: Hero\n  m_Layer: 3\n');
+w('Assets/ThirdParty/Vendor.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: ffffffffffffffffffffffffffffffff, type: 3}\n  v: 2\n');
+w('Assets/Data/Baked.asset', 'LightingData:\n  m_Name: baked\n  size: 9\n');
+w('ProjectSettings/EditorSettings.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}\n  p: 1\n');
+
+const ixSet = collect.collectDiff(IX);
+const stagedOf = (p) => ixSet.files.filter((f) => f.path === p && f.staged);
+const unstagedOf = (p) => ixSet.files.filter((f) => f.path === p && !f.staged);
+
+ok(stagedOf('Assets/Data/Good.asset').length === 1 && unstagedOf('Assets/Data/Good.asset').length === 1,
+  'a partially-staged file yields ONE entry per side, not one entry with a label');
+ok(stagedOf('Assets/Data/Good.asset')[0].additions === 1,
+  'the staged entry carries only the staged hunk', String(stagedOf('Assets/Data/Good.asset')[0].additions));
+ok(unstagedOf('Assets/Data/Good.asset')[0].additions === 1,
+  'and the unstaged entry only the unstaged one', String(unstagedOf('Assets/Data/Good.asset')[0].additions));
+ok(ixSet.files.filter((f) => f.staged).length === 1, 'nothing else is on the staged side');
+ok(ixSet.files.every((f) => typeof f.staged === 'boolean'), 'every file states which side it is on');
+
+const ixHtml = render.renderDiffPage(ixSet, { interactive: true, rev: 'HEAD', comments: [] });
+const ixStatic = render.renderDiffPage(ixSet, { interactive: false, rev: 'HEAD', comments: [] });
+ok(/data-staged="true"/.test(ixHtml) && /data-staged="false"/.test(ixHtml),
+  'the sidebar renders both sections');
+ok(/class="ix" data-act="unstage"/.test(ixHtml) && /class="ix" data-act="stage"/.test(ixHtml),
+  'a staged card offers unstage and an unstaged card offers stage');
+ok(/id="autostage"/.test(ixHtml), 'the top panel carries the Stage button');
+ok(!/class="ix"/.test(ixStatic) && !/id="autostage"/.test(ixStatic),
+  'a file:// page carries NO index buttons — staging is a git write and there is no server');
+ok(/querySelectorAll\('\.sect'\)/.test(ixHtml),
+  'section counts are recomputed from the FILTER, so a hidden row cannot inflate them');
+
+// ── the policy, minus the .cs pass (that one needs a model) ──
+const { autoStage } = await import(`file://${join(ROOT, 'dist', 'diff', 'stage.js')}`);
+const res = await autoStage(IX);
+const why = (p) => (res.outcomes.find((o) => o.path === p) || {});
+ok(res.policy === 'unity', 'a Unity repo gets the Unity policy', res.policy);
+// THE REGRESSION THIS GATE EXISTS FOR: `git status --porcelain` puts the index status in column 1, so
+// an unstaged change begins with a SPACE. Trimming the blob ate it off the FIRST line only, which read
+// as already-staged and shifted the path by one — the animator controller silently vanished from the
+// pass while its six siblings were judged correctly.
+ok(res.outcomes.length === 6, 'every changed file gets an outcome, INCLUDING the first status line',
+  `${res.outcomes.length}: ${res.outcomes.map((o) => o.path).join(', ')}`);
+ok(why('Assets/Anim/Hero.controller').staged === true, 'an animator controller is staged');
+ok(why('Assets/Prefabs/Hero.prefab').staged === true, 'a prefab IS staged here — unlike the daemon allowlist');
+ok(why('Assets/Data/Good.asset').staged === true, 'a ScriptableObject of a project script is staged');
+ok(why('Assets/ThirdParty/Vendor.asset').staged === false, 'a third-party asset guid is left alone');
+ok(why('Assets/Data/Baked.asset').staged === false, 'baked data with no m_Script is left alone');
+ok(why('ProjectSettings/EditorSettings.asset').staged === false,
+  'project base config outside Assets/ is left alone', why('ProjectSettings/EditorSettings.asset').why);
+ok(res.outcomes.every((o) => typeof o.why === 'string' && o.why.length > 0),
+  'every outcome carries a reason — a file that silently failed to stage is the complaint this answers');
+
+// ── the path guard on the write routes ──
+const { safeRepoPath } = await import(`file://${join(ROOT, 'dist', 'diff', 'stage.js')}`);
+ok(safeRepoPath(IX, 'Assets/Prefabs/Hero.prefab'), 'a real repo path is accepted');
+ok(!safeRepoPath(IX, '../../../etc/passwd'), 'traversal is refused');
+ok(!safeRepoPath(IX, '--cached'), 'a flag-shaped path is refused before it reaches git');
+ok(!safeRepoPath(IX, '/etc/passwd'), 'an absolute path is refused');
+
+// ── 10 · the commit-message panel and the draft pipeline's deterministic half ────
+//
+// No model and no Jira here. The pipeline is built so the DECISION to spend either is deterministic,
+// which is exactly the part a gate can pin: with no ticket-shaped string anywhere, it must decline
+// before reaching the network.
+
+console.log('\ncommit draft');
+
+const withDraft = render.renderDiffPage(fabSet, {
+  interactive: true, rev: 'HEAD', comments: [], commitDraft: 'feat(scope): a subject\n\nA body line.',
+});
+const noDraft = render.renderDiffPage(fabSet, { interactive: true, rev: 'HEAD', comments: [], commitDraft: null });
+const staticDraft = render.renderDiffPage(fabSet, {
+  interactive: false, rev: 'HEAD', comments: [], commitDraft: 'feat(scope): a subject',
+});
+
+ok(/class="commit"/.test(withDraft), 'the page carries a commit-message panel');
+ok(/feat\(scope\): a subject/.test(withDraft), 'and renders the draft text');
+ok(/\.git\/COMMIT_EDITMSG/.test(withDraft), 'the panel names where the text came from — git, not a copy');
+ok(/No draft yet/.test(noDraft), 'an ABSENT draft is stated, never a blank panel');
+ok(/id="draft"/.test(withDraft) && !/id="draft"/.test(staticDraft),
+  'Draft is served-only — it spends a model call and needs the route');
+
+const { gatherDraftContext, transcriptDir, draftText } = await import(`file://${join(ROOT, 'dist', 'commit-draft.js')}`);
+ok(transcriptDir('/a/b-c').endsWith('-a-b-c'), 'the transcript dir flattens the repo path', transcriptDir('/a/b-c'));
+const C = (key, files, note) => ({ key, files, note });
+ok(draftText({ type: 'fix', scope: 'ui', carries: [C('AB-1', ['a.cs'], 'did a'), C('AB-2', ['b.cs'], 'did b')], summary: 's', other: '' })
+  === 'fix(ui): AB-1,AB-2 - s\n\nAB-1 (a.cs): did a\n\nAB-2 (b.cs): did b\n',
+  'subject is type(scope): KEYS - summary, and each ticket PRINTS its citation');
+ok(draftText({ type: 'fix', scope: '', carries: [], summary: 's', other: '' }) === 'fix: s\n',
+  'no scope, no keys, no body all collapse cleanly');
+ok(draftText({ type: 'chore', scope: 'a', carries: [], summary: 's', other: 'assets only' })
+  === 'chore(a): s\n\nAlso: assets only\n', 'with no ticket carried, Also: is the whole description');
+// The defect this shape exists to prevent: a model formatting its own subject emitted a per-ticket
+// paragraph headed by an EMPTY key, which rendered as a line beginning with a bare colon.
+ok(draftText({ type: 'feat', scope: 'x', carries: [C('', [], ''), C('AB-1', ['a.cs'], 'n')], summary: 's', other: '' })
+  .startsWith('feat(x): AB-1 - s'), 'an empty key cannot reach the subject');
+ok(!draftText({ type: 'feat', scope: 'x', carries: [C('', [], '')], summary: 's', other: '' }).includes(': -'),
+  'and an all-empty list drops the separator rather than leaving a dangling dash');
+
+// A repo with changes but NO ticket shape anywhere: the deterministic gate must refuse before Jira.
+const dctx = await gatherDraftContext(IX);
+ok(dctx.candidates.length === 0, 'no ticket-shaped string in branch, session, subjects or diff', dctx.candidates.join(','));
+ok(dctx.tickets.length === 0 && /no ticket key/.test(dctx.jiraNote),
+  'so it declines with a reason and never reaches the network', dctx.jiraNote);
+ok(dctx.files.length > 0, 'while still reporting the changed files it found', String(dctx.files.length));
+
+rmSync(IX, { recursive: true, force: true });
 rmSync(REPO, { recursive: true, force: true });
 rmSync(CLEAN, { recursive: true, force: true });
 rmSync(HOME, { recursive: true, force: true });

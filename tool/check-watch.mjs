@@ -1,16 +1,15 @@
 #!/usr/bin/env node
 /**
- * check-hound — the Claude Code hound's DETERMINISTIC half, against a real git repo.
+ * check-watch — the Claude Code hound's ONE question, and the autostage allowlist, against a real repo.
  *
- * `npm run check:hound` (needs a build first). No LLM, no network: it builds a throwaway Unity-ish
- * repo in the OS temp dir, stages a batch containing every failure mode the hound claims to catch,
- * installs the real hook, and asserts the facts come out. Then it feeds the fact-verifier a
- * fabricated model answer and asserts the contract discards it.
+ * `npm run check:watch` (needs a build first). No LLM, no network: it builds a throwaway Unity-ish
+ * repo in the OS temp dir, installs the real hook, and drives the hound through every branch of the
+ * one question it asks — does every C# type ADDED in the working tree appear on the design?
  *
- * It exists because the hound's whole value is that its facts are TRUE. A reviewer that reports a
- * grep it never ran, or reasons about a file that does not exist, is worse than silence: it burns
- * the reader's time re-verifying, and once believed it is a bug shipped with confidence. That
- * failure is invisible to a typecheck and obvious to this test.
+ * It exists because a hook that fires at the end of every turn is judged entirely on its false
+ * positives. The nudge has to be silent for a tracked edit, silent for build output, silent when the
+ * tree has no design, and silent when the type IS on the diagram — and it has to fire on an
+ * untracked new type that is not. Each of those is one assertion here and invisible to a typecheck.
  */
 
 // Declare ourselves headless BEFORE importing anything from dist: `watch.js` reaches the llm
@@ -19,7 +18,7 @@
 if (!process.argv.includes('-p')) process.argv.push('-p');
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,68 +37,61 @@ const write = (rel, body) => {
   writeFileSync(join(REPO, rel), body);
 };
 
-// ── a Unity-ish repo with a baseline commit on main ──────────────────
+// ── a Unity-ish repo with a design and a baseline commit ─────────────
 
 git('init', '-q', '-b', 'main', '.');
 git('config', 'user.email', 'hound@test'); git('config', 'user.name', 'hound');
 mkdirSync(join(REPO, 'ProjectSettings'), { recursive: true });
 write('ProjectSettings/ProjectVersion.txt', 'm_EditorVersion: 2022.3.0f1\n');
-write('Assets/Scripts/Card.cs', `using UnityEngine;
-public enum CardKind { Attack, Defend, Skill }
-public interface ICardSink {
-    void Push(int id);
+
+// The design, in the format naama writes and entangle reads. `Ghost` is deliberately NOT on it.
+write('Design/Rewards.puml', `@startuml
+' naamah:title Rewards
+' naamah:domain Rewards refs=NONE sealed
+package "Rewards" {
+  interface IRewardService {
+    +Grant(int id)
+  }
+  class RewardService {
+    +Grant(int id)
+    -_live : List<Entry>
+  }
+  enum RewardKind {
+  }
+  abstract class RewardBase
+  struct Entry
 }
+RewardService ..> IRewardService
+@enduml
+`);
+
+write('Assets/Scripts/Card.cs', `using UnityEngine;
 public class Card : MonoBehaviour {
-    [SerializeField] private int oldPower;
     public string cardName;
 }
 `);
-write('Assets/Scripts/Card.cs.meta', 'fileFormatVersion: 2\nguid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n');
+write('Assets/Scripts/Game.asmdef', '{"name":"Game","references":["Unity.TextMeshPro","Unity.Addressables"]}\n');
 write('Assets/Scripts/Deck.asset', `%YAML 1.1
 MonoBehaviour:
   m_Script: {fileID: 11500000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}
-  size: 30
 `);
-write('Assets/Scripts/Game.asmdef', '{"name":"Game","references":["Unity.TextMeshPro","Unity.Addressables"]}\n');
-write('AndroidManifest.xml', '<manifest android:label="x" />\n');
+write('Assets/Scripts/Card.cs.meta', 'fileFormatVersion: 2\nguid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n');
 git('add', '-A'); git('commit', '-qm', 'baseline');
 
-// A feature branch that has already committed in the area it is working on. The provenance check
-// needs exactly this shape: files the branch demonstrably owns, so an outlier stands out.
-git('checkout', '-qb', 'feat/cards');
-write('Assets/Scripts/Deck.cs', 'public class Deck { }\n');
-write('Assets/Scripts/Card.cs.meta', 'fileFormatVersion: 2\nguid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ntimeCreated: 1\n');
-write('Assets/Scripts/Game.asmdef', '{"name":"Game","references":["Unity.TextMeshPro","Unity.Addressables"] }\n');
-write('Assets/Scripts/Card.cs', readFileSync(join(REPO, 'Assets/Scripts/Card.cs'), 'utf-8') + '// owned by this branch\n');
-git('add', '-A'); git('commit', '-qm', 'add Deck, touch Card');
-
-// ── stage a batch containing every failure mode at once ──────────────
-
-write('Assets/Scripts/Card.cs', `using UnityEngine;
-public enum CardKind { Attack, MoveCardBetweenColumns, Defend, Skill }
-public interface ICardSink {
-    void Push(int id);
-    void Flush();
-}
-public class Card : MonoBehaviour {
-    [SerializeField] private int power;
-    public string cardName;
-}
-`);
-write('Assets/Scripts/Card.cs.meta', 'fileFormatVersion: 2\nguid: cccccccccccccccccccccccccccccccc\n');
-write('Assets/Scripts/Game.asmdef', '{"name":"Game","references":["Unity.TextMeshPro"]}\n');
-write('AndroidManifest.xml', '<manifest />\n'); // unrelated work swept into the index
-git('add', '-A');
-
-// ── install the real hook and read its facts ─────────────────────────
+// ── install the real hook ────────────────────────────────────────────
 
 // The kill switch is GLOBAL (`ayin kill dog` → ~/.ayin-cli/hound.off) and this gate must run a live
 // hound, so point the switch at a path inside the throwaway repo: absent for the assertions below,
 // and created deliberately for the one that pins the instant pass. Without this the gate goes red on
-// any machine whose operator has killed their dog — and the in-process import further down would meet
-// the guard's `process.exit(0)` and end the run early, looking green.
+// any machine whose operator has killed their dog.
 const OFF_FILE = join(REPO, 'hound.off');
 process.env.AYIN_HOUND_OFF_FILE = OFF_FILE;
+// The debounce lock too: keyed on the FINDING, so this fixture produces the same key on every run
+// and the shared OS tmpdir would suppress the nudge for a day after the first green run. Measured —
+// the gate passed once and then reported three failures until the lock aged out.
+const LOCK_DIR = join(REPO, 'locks');
+mkdirSync(LOCK_DIR, { recursive: true });
+process.env.AYIN_HOUND_LOCK_DIR = LOCK_DIR;
 
 const { ensureHoundHook } = await import(`file://${join(ROOT, 'dist', 'watch.js')}`);
 ensureHoundHook(REPO);
@@ -109,74 +101,119 @@ const settings = JSON.parse(readFileSync(join(REPO, '.claude', 'settings.json'),
 ok(settings.hooks?.Stop?.length === 1, 'exactly one Stop-hook group installed');
 ok(/ayin-hound\.mjs/.test(settings.hooks.Stop[0].hooks[0].command), 'Stop hook points at the node hound');
 
+const hookSrc = readFileSync(hookPath, 'utf-8');
+ok(hookSrc.includes('AYIN_HOUND_NUDGE'), 'the generated hook carries the nudge template');
+ok(!/spawnSync\(\s*'ayin'/.test(hookSrc), 'the hook calls NO model — the whole answer is deterministic');
+
+/** The hook's own verdict, as JSON. */
+const facts = (...args) => JSON.parse(execFileSync('node', [hookPath, '--facts', ...args], { cwd: REPO, encoding: 'utf-8' }));
+/** The hook as Claude Code runs it: payload on stdin, JSON or nothing on stdout. */
+const run = () => execFileSync('node', [hookPath], { cwd: REPO, encoding: 'utf-8', input: '{}' });
+
 // ── the kill switch (`ayin kill dog`) ────────────────────────────────
-//
-// The guard has to be the FIRST thing the script does, or "disabled" still costs a git walk at the end
-// of every turn.
-ok(readFileSync(hookPath, 'utf-8').includes('AYIN_HOUND_OFF_FILE'),
-  'the generated hook carries the kill-switch constant');
+// The guard has to be the FIRST thing the script does, or "disabled" still costs a git walk at the
+// end of every turn.
+
+console.log('\nkill switch');
+write('Assets/Scripts/Ghost.cs', 'public class Ghost { }\n');
 writeFileSync(OFF_FILE, 'killed by the gate\n');
-const killed = execFileSync('node', [hookPath, '--facts'], { cwd: REPO, encoding: 'utf-8' });
-ok(killed.trim() === '', 'with the switch thrown the hook prints NOTHING and exits 0 — the stop passes instantly');
-rmSync(OFF_FILE);
+ok(execFileSync('node', [hookPath, '--facts'], { cwd: REPO, encoding: 'utf-8' }).trim() === '',
+  'with the switch thrown the hook prints NOTHING and exits 0 — the stop passes instantly');
+unlinkSync(OFF_FILE);
 
-const out = execFileSync('node', [hookPath, '--facts'], { cwd: REPO, encoding: 'utf-8' });
-const { facts } = JSON.parse(out);
-const kinds = facts.map(f => f.kind);
-const detail = (kind) => facts.find(f => f.kind === kind)?.detail ?? '';
+// ── the one question ─────────────────────────────────────────────────
 
-console.log('\ndeterministic facts');
-const foreign = facts.filter(f => f.kind === 'staged-foreign');
-ok(foreign.length === 1 && foreign[0].path === 'AndroidManifest.xml',
-  'the ONE staged file this branch never touched is flagged, and only it', foreign.map(f => f.path).join(', '));
-ok(kinds.includes('meta-guid-changed'), 'a .meta whose guid: line changed is flagged');
-ok(/aaaaaaaa/.test(detail('meta-guid-changed')) && /cccccccc/.test(detail('meta-guid-changed')),
-  'the guid fact carries both the old and the new guid');
-ok(kinds.includes('serialized-field-removed'), 'a removed [SerializeField] is flagged', detail('serialized-field-removed'));
-ok(kinds.includes('enum-ordinal-shift'), 'an enum member inserted mid-list is flagged', detail('enum-ordinal-shift'));
-ok(kinds.includes('interface-member-added'), 'an interface that gained a member is flagged', detail('interface-member-added'));
-ok(kinds.includes('asmdef-reference-removed'), 'a dropped asmdef reference is flagged', detail('asmdef-reference-removed'));
+console.log('\nan added type that is not on the design');
+let f = facts();
+ok(f.addedCs.includes('Assets/Scripts/Ghost.cs'), 'an UNTRACKED new .cs counts as added', f.addedCs.join(', '));
+ok(f.designSources.includes('Design/Rewards.puml'), 'the .puml design in the tree was found', f.designSources.join(', '));
+ok(f.designedTypes.join(',') === 'Entry,IRewardService,RewardBase,RewardKind,RewardService',
+  'every puml kind is read — class, interface, enum, abstract class, struct', f.designedTypes.join(','));
+ok(f.undesigned.length === 1 && f.undesigned[0].type === 'Ghost', 'the undesigned type is named, with its file',
+  JSON.stringify(f.undesigned));
 
-// ── the checks that must STAY QUIET ──────────────────────────────────
-// A hound that barks every batch is a hound nobody hears. Unity rewrites .meta files constantly;
-// only a changed `guid:` may fire. And appending an enum member is the safe, common case.
+const nudge = JSON.parse(run() || '{}');
+ok(nudge.hookSpecificOutput?.hookEventName === 'Stop', 'the finding rides out as a Stop hook context block');
+ok(!('decision' in nudge), 'it NEVER blocks — a nudge costs no turn');
+ok(/Ghost/.test(nudge.hookSpecificOutput?.additionalContext ?? ''), 'the nudge names the type');
+ok(/Rewards\.puml/.test(nudge.hookSpecificOutput?.additionalContext ?? ''), 'the nudge names the design');
+ok(!/\{\{[A-Z_]+\}\}/.test(nudge.hookSpecificOutput?.additionalContext ?? ''),
+  'every {{VAR}} in the template was filled', nudge.hookSpecificOutput?.additionalContext);
+
+console.log('\ndebounce');
+ok(run().trim() === '', 'the SAME finding a second time is silent — a hound that repeats is unread');
+
+// ── the four ways it must stay silent ────────────────────────────────
+// A hook that fires at the end of every turn is judged on its false positives.
 
 console.log('\nquiet when it should be');
+unlinkSync(join(REPO, 'Assets/Scripts/Ghost.cs'));
+
+write('Assets/Scripts/RewardService.cs', 'public class RewardService { public void Grant(int id) { } }\n');
+ok(facts().undesigned.length === 0, 'a new type that IS on the design is silent');
+ok(run().trim() === '', '…and emits nothing at all');
+unlinkSync(join(REPO, 'Assets/Scripts/RewardService.cs'));
+
+write('Assets/Scripts/Card.cs', readFileSync(join(REPO, 'Assets/Scripts/Card.cs'), 'utf-8') + '// edited\n');
+f = facts();
+ok(f.addedCs.length === 0, 'an EDITED tracked .cs is not an add — Card is never re-asked', f.addedCs.join(', '));
+ok(run().trim() === '', '…and emits nothing at all');
+git('checkout', '-q', '--', 'Assets/Scripts/Card.cs');
+
+write('Library/ScriptAssemblies/Generated.cs', 'public class Generated { }\n');
+write('obj/Debug/Stub.cs', 'public class Stub { }\n');
+write('Assets/Scripts/View.designer.cs', 'public class View { }\n');
+f = facts();
+ok(f.addedCs.length === 0, 'build output and generated .cs are never authored decisions', f.addedCs.join(', '));
+rmSync(join(REPO, 'Library'), { recursive: true, force: true });
+rmSync(join(REPO, 'obj'), { recursive: true, force: true });
+unlinkSync(join(REPO, 'Assets/Scripts/View.designer.cs'));
+
+write('Assets/Scripts/Ghost.cs', 'public class Ghost { }\n');
+const designPath = join(REPO, 'Design/Rewards.puml');
+const designSrc = readFileSync(designPath, 'utf-8');
+rmSync(designPath);
+f = facts();
+ok(f.designSources.length === 0 && f.undesigned.length === 0,
+  'with NO design in the tree there is nothing to be off — silent');
+ok(run().trim() === '', '…and emits nothing at all');
+
+// A .puml that declares no type is a diagram, not a design: it must not make every added type look
+// undesigned. This is what stops a sequence diagram from turning the hook into a firehose.
+write('Design/Flow.puml', '@startuml\nAlice -> Bob: hello\n@enduml\n');
+f = facts();
+ok(f.designSources.length === 0, 'a .puml declaring no type does not count as a design', f.designSources.join(', '));
+rmSync(join(REPO, 'Design/Flow.puml'));
+writeFileSync(designPath, designSrc);
+
+// A rendered naamah page is the fallback when no .puml declares anything.
+console.log('\nthe rendered page as fallback');
+rmSync(designPath);
+write('Design/Rewards.html', '<html><script id="graph" type="application/json">'
+  + JSON.stringify({ nodes: [{ id: 'n1', name: 'RewardService', kind: 'class' }, { id: 'n2', name: 'Aside', kind: 'note' }] })
+  + '</script></html>\n');
+f = facts();
+ok(f.designSources.includes('Design/Rewards.html'), 'a rendered naamah page is read when no .puml declares a type');
+ok(f.designedTypes.join(',') === 'RewardService', 'a note is not a type');
+ok(f.undesigned.some(u => u.type === 'Ghost'), 'the question is still answered against it');
+rmSync(join(REPO, 'Design/Rewards.html'));
+writeFileSync(designPath, designSrc);
+unlinkSync(join(REPO, 'Assets/Scripts/Ghost.cs'));
+
+// ── staged additions, and what is NOT an add ─────────────────────────
+
+console.log('\nthe index half');
+write('Assets/Scripts/Wraith.cs', 'internal sealed partial class Wraith { }\n');
+git('add', 'Assets/Scripts/Wraith.cs');
+f = facts();
+ok(f.addedCs.includes('Assets/Scripts/Wraith.cs'), 'a file STAGED as an addition counts as added');
+ok(f.undesigned.some(u => u.type === 'Wraith'), 'modifiers in any order still yield the name');
+git('rm', '-q', '--cached', 'Assets/Scripts/Wraith.cs'); unlinkSync(join(REPO, 'Assets/Scripts/Wraith.cs'));
+
+git('mv', 'Assets/Scripts/Card.cs', 'Assets/Scripts/PlayingCard.cs');
+f = facts();
+ok(f.addedCs.length === 0, 'a RENAME is not an add — the type was answered under its old path', f.addedCs.join(', '));
 git('reset', '-q', '--hard');
-write('Assets/Scripts/Card.cs.meta', 'fileFormatVersion: 2\nguid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ntimeCreated: 1700000000\n');
-write('Assets/Scripts/Card.cs', readFileSync(join(REPO, 'Assets/Scripts/Card.cs'), 'utf-8')
-  .replace('public enum CardKind { Attack, Defend, Skill }', 'public enum CardKind { Attack, Defend, Skill, Curse }'));
-git('add', '-A');
-const quiet = JSON.parse(execFileSync('node', [hookPath, '--facts'], { cwd: REPO, encoding: 'utf-8' })).facts;
-ok(!quiet.some(f => f.kind === 'meta-guid-changed'), 'a .meta touched WITHOUT a guid change is silent');
-ok(!quiet.some(f => f.kind === 'enum-ordinal-shift'), 'an APPENDED enum member is silent');
-
-// ── the anti-fabrication contract ────────────────────────────────────
-// The hound's own parser is what makes invented evidence worthless. Exercised by running the hook
-// with a stubbed model answer that cites a file which does not exist.
-
-console.log('\ncontract enforcement');
-process.env.CLAUDE_PROJECT_DIR = REPO; // the citation check resolves paths against the hook's repo
-const src = readFileSync(hookPath, 'utf-8');
-const harness = join(REPO, 'contract-harness.mjs');
-writeFileSync(harness, src
-  .replace(/^#!.*\n/, '')
-  .replace(/\nconst argv = process\.argv[\s\S]*$/, '\nexport { parseModelOutput, citedPath };\n'));
-const { parseModelOutput } = await import(`file://${harness}`);
-
-const fabricated = parseModelOutput('greps_run: 2\nDebugLogger.cs:42 — callers break — grep DebugLogger\nVERDICT: ISSUES');
-ok(fabricated.findings.length === 0, 'a finding citing a non-existent file is dropped');
-ok(fabricated.verdict === 'UNVERIFIED', 'ISSUES with no surviving citation degrades to UNVERIFIED');
-
-const noGreps = parseModelOutput('greps_run: 0\nAssets/Scripts/Card.cs:2 — enum shifted — (simulated)\nVERDICT: ISSUES');
-ok(noGreps.verdict === 'UNVERIFIED', 'greps_run: 0 forces UNVERIFIED however confident the report');
-
-const real = parseModelOutput('greps_run: 3\nAssets/Scripts/Card.cs:2 — enum shifted — git grep CardKind\nVERDICT: ISSUES');
-ok(real.verdict === 'ISSUES' && real.findings.length === 1, 'a cited, grepped finding survives');
-ok(real.grepsRun === 3, 'greps_run is parsed');
-
-const clear = parseModelOutput('greps_run: 4\nVERDICT: CLEAR');
-ok(clear.verdict === 'CLEAR' && clear.findings.length === 0, 'CLEAR stays CLEAR');
 
 // ── the autostage allowlist ──────────────────────────────────────────
 // The other half of what `ayin watch` writes into a repo: what it puts in the INDEX. Three kinds

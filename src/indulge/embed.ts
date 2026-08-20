@@ -45,7 +45,7 @@ const DEFAULT_MODEL = 'nomic-embed-text';
  * embedding server.
  */
 function embedUrl(): string {
-  const url = process.env.AYIN_EMBED_URL || llmBaseUrl();
+  const url = process.env.AYIN_EMBED_URL || getConfigString('embedUrl') || llmBaseUrl();
   return url.replace(/\/+$/, '');
 }
 

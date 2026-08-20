@@ -1,0 +1,45 @@
+Draft the commit message for this working tree.
+
+THE DIFF IS THE ONLY EVIDENCE. The ticket list below is a menu of what MIGHT be here, not a
+description of what is. Describe only changes you can point at in these files.
+
+BRANCH
+{{BRANCH}}
+
+TICKETS — confirmed to exist by a Jira lookup. Existing is not the same as being in this diff:
+{{TICKETS}}
+
+WHAT THE OPERATOR SAID WHILE DOING THIS WORK, newest last:
+{{SESSION}}
+
+CHANGED FILES
+{{FILES}}
+
+DIFF
+{{DIFF}}
+
+`carries` names tickets whose work is in the DIFF, and each one must CITE the changed files that
+carry it, copied exactly from CHANGED FILES above. A citation that is not in that list is dropped and
+the ticket with it, so a ticket you cannot point at costs you the ticket. The session above often
+describes work from EARLIER commits — that work has already landed and is not in this diff. An empty
+list is the correct answer for a diff of assets, generated files or config. Use only keys from the
+list.
+
+  "carries": [{"key": "KEY-1", "files": ["exact/path/from/the/list.cs"], "note": "what that file changed"}]
+
+`summary` is ONE sentence covering what the diff does, imperative, under 90 characters, no ticket
+keys and no trailing period.
+
+Each entry in `carries` also carries `note`: one or two sentences on what ITS CITED FILES changed for
+that ticket. Describe those files, nothing else — the note is printed beside the citation, so a note
+about code that is not in the cited files reads as obviously wrong.
+
+`other` is one or two sentences on the changes belonging to no ticket, or empty. When `carries` is
+empty this is the whole description.
+
+`scope` is the sub-domain the change lives in — one lowercase word, the area, not a file name.
+
+Reply with one JSON object and nothing else:
+{"type":"feat|fix|refactor|chore|perf|test|docs","scope":"<sub-domain>","carries":[{"key":"KEY-1","files":["path"],"note":"..."}],"summary":"<one sentence>","other":"..."}
+
+NEVER name a ticket you cannot cite a changed file for.

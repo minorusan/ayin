@@ -31,6 +31,14 @@ import type { DiffComment } from './comments.js';
  */
 export interface RenderOptions {
   interactive?: boolean;
+  /**
+   * The drafted commit message, read from `.git/COMMIT_EDITMSG` by the CALLER.
+   *
+   * Passed in rather than read here: this module renders, and a renderer that reaches into `.git`
+   * cannot be handed a set collected from somewhere else. Absent means no draft exists yet, which is
+   * a state the panel says out loud instead of hiding.
+   */
+  commitDraft?: string | null;
   /** The rev this page compares against, echoed back on every comment so a reload re-renders it. */
   rev?: string;
   comments?: DiffComment[];
@@ -38,6 +46,7 @@ export interface RenderOptions {
 
 interface Resolved {
   interactive: boolean;
+  commitDraft: string | null;
   rev: string;
   /** file → `side:lineNo` → the thread on that line, oldest first. */
   byFile: Map<string, Map<string, DiffComment[]>>;
@@ -54,7 +63,10 @@ function resolve(opts: RenderOptions): Resolved {
     const list = byLine.get(key);
     if (list) list.push(c); else byLine.set(key, [c]);
   }
-  return { interactive: opts.interactive === true, rev: opts.rev || 'HEAD', byFile, placed: new Set() };
+  return {
+    interactive: opts.interactive === true, rev: opts.rev || 'HEAD', byFile, placed: new Set(),
+    commitDraft: opts.commitDraft ?? null,
+  };
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -171,6 +183,39 @@ function sidebarRow(f: FileDiff, i: number): string {
 }
 
 /**
+ * The sidebar, split at the index boundary.
+ *
+ * Two sections, each carrying its own count, because "what a commit would take right now" and "what
+ * it would leave behind" are the two questions this list is read to answer. Rows keep their GLOBAL
+ * index so `#f<i>`, `data-i` and the j/k walk stay one flat sequence across both sections — the split
+ * is presentational, and a second numbering would desynchronise the sidebar from the main column.
+ *
+ * A section with nothing in it says so rather than vanishing: an absent "Staged" heading reads as a
+ * page that does not know about staging, while an empty one reads as an empty index, which is the
+ * fact the operator wanted.
+ */
+function sidebarSections(files: FileDiff[]): string {
+  const rows = files.map((f, i) => ({ f, i }));
+  const part = (staged: boolean, label: string) => {
+    const mine = rows.filter((r) => r.f.staged === staged);
+    const add = mine.reduce((n, r) => n + r.f.additions, 0);
+    const del = mine.reduce((n, r) => n + r.f.deletions, 0);
+    return `<div class="sect" data-staged="${staged}">`
+      + `<div class="shead">${label}<i>${mine.length}</i>`
+      + (mine.length ? `<span class="ct"><b class="p">+${add}</b><b class="m">−${del}</b></span>` : '')
+      + `</div>`
+      + mine.map((r) => sidebarRow(r.f, r.i)).join('')
+      // Always present, hidden while rows are visible. The client re-words it: a section can be empty
+      // because nothing is on that side of the index, or because the extension filter hid all of it,
+      // and those are different facts.
+      + `<div class="sempty"${mine.length ? ' style="display:none"' : ''}>`
+      + `${staged ? 'nothing staged' : 'nothing left unstaged'}</div>`
+      + `</div>`;
+  };
+  return part(true, 'Staged') + part(false, 'Unstaged');
+}
+
+/**
  * The comment client, emitted ONLY into a served page.
  *
  * A `file://` page that carried this would ship a fetch loop pointing at a route that is not there —
@@ -178,6 +223,60 @@ function sidebarRow(f: FileDiff, i: number): string {
  * and the code behind it are absent together, which is also what makes the static page's "comments are
  * off" line true rather than decorative.
  */
+/**
+ * The commit-message panel, at the top of the change it describes.
+ *
+ * The text is git's own: `.git/COMMIT_EDITMSG` is what `git commit` prefills from, so the draft the
+ * page shows is byte-identical to what the operator will find in their editor. Nothing is cached here
+ * and there is no second copy to go stale — the caller re-reads the file on every request, the same
+ * way the diff itself is re-collected.
+ *
+ * An ABSENT draft is stated, not hidden. "No draft yet" plus the reason is actionable; an empty panel
+ * reads as a broken feature.
+ */
+function commitPanel(o: Resolved): string {
+  const draft = (o.commitDraft || '').trim();
+  const body = draft
+    ? `<pre class="cmsg">${esc(draft)}</pre>`
+    : '<div class="cnone">No draft yet — <code>.git/COMMIT_EDITMSG</code> is empty. '
+      + 'A draft is written when the watch pass finds ticket work in this tree, or when you press Draft.</div>';
+  const btn = o.interactive
+    ? '<button class="act" id="draft" title="Draft from the diff, this repo\'s Claude session, and its tickets">Draft</button>'
+    : '';
+  const copy = draft ? '<button class="act" id="cmsgcopy">copy</button>' : '';
+  return `<section class="commit">`
+    + `<header class="chead">Commit message<span class="sub">from <code>.git/COMMIT_EDITMSG</code></span>`
+    + `<span class="cacts">${copy}${btn}</span></header>`
+    + `${body}<div class="cwhy" id="cwhy"></div></section>`;
+}
+
+/**
+ * The per-file index button — served pages ONLY, because staging is a git WRITE.
+ *
+ * One button, not two: a change is on exactly one side of the index, so the only move that means
+ * anything is the one that crosses it. Offering both would make half of every card a no-op.
+ */
+function stageBtn(f: FileDiff): string {
+  const act = f.staged ? 'unstage' : 'stage';
+  return `<button class="ix" data-act="${act}" data-path="${esc(f.path)}"`
+    + ` title="${f.staged ? 'Remove from the index' : 'Add to the index'}">${act}</button>`;
+}
+
+/**
+ * The refresh FAB — served pages ONLY.
+ *
+ * A `file://` page has nothing to rebuild from: the static file is a snapshot, and `git` is not
+ * reachable from a document. So the button is ABSENT there rather than present and dead, which is the
+ * same call the page already makes about the comment affordance.
+ */
+function refreshFab(): string {
+  return '<button class="fab" id="refresh" aria-label="Rebuild against the current working tree"'
+    + ' title="Rebuild against the current working tree">'
+    + '<svg viewBox="0 0 24 24" aria-hidden="true">'
+    + '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3.5V10h-6.5"/>'
+    + '</svg></button>';
+}
+
 function commentClient(o: Resolved): string {
   return `
   // ── line comments ──────────────────────────────────────────────────────────
@@ -213,6 +312,148 @@ function commentClient(o: Resolved): string {
     var row = f.querySelector('.l[data-side="' + a.side + '"][data-line="' + a.line + '"]');
     (row || f).scrollIntoView({ block: 'center' });
   }
+
+  /**
+   * Where the reader is RIGHT NOW — the topmost file still on screen — so a manual refresh lands
+   * where they were instead of at the top of the diff.
+   *
+   * Writes the SAME key restore() already reads, with no line: restore() fails to match a row and
+   * falls back to the file, which is the honest anchor anyway when the tree has just changed under it.
+   * One anchor, one restore, no second mechanism to keep in step.
+   */
+  function rememberViewport(){
+    var fs = document.querySelectorAll('.file'), best = null, bestTop = Infinity;
+    for (var i = 0; i < fs.length; i++) {
+      var r = fs[i].getBoundingClientRect();
+      if (r.bottom < 0) continue;                       // scrolled past
+      if (r.top < bestTop) { bestTop = r.top; best = fs[i]; }
+    }
+    if (!best) return;
+    try {
+      sessionStorage.setItem(ANCHOR, JSON.stringify({ path: best.dataset.path, side: 'new', line: '' }));
+    } catch (e) { /* private mode: losing the position is not worth failing the refresh over */ }
+  }
+
+  // ── the index ──────────────────────────────────────────────────────────────
+  // Every one of these ends in a reload, because the staged/unstaged split IS the page's structure:
+  // moving a file across the index boundary moves it between the two sidebar sections and changes
+  // which hunks belong to which side. Patching that in place would mean re-deriving both diffs in the
+  // browser from data it does not have. The route re-collects anyway, so a reload is both correct and
+  // the cheapest thing to write.
+  function post(url, body){
+    return fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    }).then(function(r){ return r.json().then(function(j){ return { ok: r.ok, j: j }; }); });
+  }
+
+  [].slice.call(document.querySelectorAll('.ix')).forEach(function(btn){
+    btn.onclick = function(e){
+      e.preventDefault(); e.stopPropagation();       // the header is also the fold toggle
+      var act = btn.dataset.act, path = btn.dataset.path;
+      rememberViewport();
+      btn.classList.add('busy');
+      btn.textContent = act === 'stage' ? 'staging…' : 'unstaging…';
+      post('/api/diff/' + act, { path: path }).then(function(r){
+        if (r.ok) { location.reload(); return; }
+        // A failed write must SAY so on the card. Reloading would show an unchanged page and read as
+        // a button that does nothing, which is the same bug wearing a different face.
+        btn.classList.remove('busy');
+        btn.textContent = act;
+        showWhy(btn, false, (r.j && r.j.error) || 'failed');
+      }).catch(function(err){
+        btn.classList.remove('busy'); btn.textContent = act;
+        showWhy(btn, false, String(err));
+      });
+    };
+  });
+
+  /** Put a reason under a file card, and keep it there. */
+  function showWhy(el, staged, text){
+    var card = fileOf(el);
+    if (!card) return;
+    var box = card.querySelector('.why');
+    if (!box) { box = document.createElement('div'); box.className = 'why'; card.appendChild(box); }
+    box.className = 'why' + (staged ? '' : ' skip');
+    box.innerHTML = '<b>' + (staged ? 'staged' : 'not staged') + '</b> — ' + esc(text);
+  }
+
+  function esc(t){ return String(t).replace(/[&<>]/g, function(c){ return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'; }); }
+
+  // ── the commit draft ───────────────────────────────────────────────────────
+  // The panel is git's file rendered; pressing Draft re-runs the pipeline and reloads so the panel
+  // shows what git now holds rather than what the response said. Reporting the DECLINE is the point:
+  // the pipeline refuses on purpose when no ticket was confirmed, and "nothing happened" with no
+  // reason is indistinguishable from a broken button.
+  var dbtn = document.getElementById('draft');
+  var cwhy = document.getElementById('cwhy');
+  if (dbtn) dbtn.onclick = function(){
+    dbtn.classList.add('busy');
+    dbtn.textContent = 'drafting\u2026';
+    if (cwhy) cwhy.textContent = '';
+    post('/api/diff/draft', {}).then(function(r){
+      dbtn.classList.remove('busy');
+      dbtn.textContent = 'Draft';
+      if (!r.ok) { if (cwhy) cwhy.innerHTML = '<b>failed</b> \u2014 ' + esc((r.j && r.j.error) || 'unknown'); return; }
+      if (r.j.drafted) { rememberViewport(); location.reload(); return; }
+      var t = (r.j.tickets || []).map(function(x){ return x.key; }).join(', ');
+      if (cwhy) cwhy.innerHTML = '<b>no draft</b> \u2014 ' + esc(r.j.why || 'declined')
+        + (r.j.candidates && r.j.candidates.length ? ' \u00b7 candidates seen: ' + esc(r.j.candidates.join(', ')) : '')
+        + (t ? ' \u00b7 confirmed: ' + esc(t) : '')
+        + ' \u00b7 ' + (r.j.sessionTurns || 0) + ' session turn(s) read';
+    }).catch(function(err){
+      dbtn.classList.remove('busy'); dbtn.textContent = 'Draft';
+      if (cwhy) cwhy.innerHTML = '<b>failed</b> \u2014 ' + esc(String(err));
+    });
+  };
+
+  var ccopy = document.getElementById('cmsgcopy');
+  if (ccopy) ccopy.onclick = function(){
+    var pre = document.querySelector('.cmsg');
+    if (!pre || !navigator.clipboard) return;
+    navigator.clipboard.writeText(pre.textContent || '').then(function(){
+      ccopy.textContent = 'copied';
+      setTimeout(function(){ ccopy.textContent = 'copy'; }, 1200);
+    }).catch(function(){ ccopy.textContent = 'copy failed'; });
+  };
+
+  // ── the project-type Stage pass ────────────────────────────────────────────
+  // It can spend a model call per changed .cs, so it reports per file and does NOT reload until the
+  // operator has seen what it decided. Every skip carries its reason; that is the point of the button.
+  var auto = document.getElementById('autostage');
+  if (auto) auto.onclick = function(){
+    auto.classList.add('busy');
+    auto.textContent = 'staging…';
+    post('/api/diff/autostage', {}).then(function(r){
+      auto.classList.remove('busy');
+      auto.textContent = 'Stage';
+      if (!r.ok) { auto.textContent = 'Stage — failed'; return; }
+      if (r.j.policy === 'none') { auto.textContent = 'Stage — no policy for this project type'; return; }
+      var outs = r.j.outcomes || [];
+      var staged = 0;
+      outs.forEach(function(o){
+        if (o.staged) staged++;
+        var card = document.querySelector('.file[data-path="' + o.path.replace(/"/g, '\\"') + '"]');
+        if (card) showWhy(card.querySelector('.fh'), o.staged,
+          o.why + (o.heldBack ? ' (' + o.heldBack + ' line(s) held back)' : ''));
+      });
+      auto.textContent = 'Stage — ' + staged + '/' + outs.length;
+      rememberViewport();
+      // Long enough to read a line, then re-collect so the two sections tell the truth again.
+      setTimeout(function(){ location.reload(); }, 2500);
+    }).catch(function(){ auto.classList.remove('busy'); auto.textContent = 'Stage — failed'; });
+  };
+
+  // ── refresh ────────────────────────────────────────────────────────────────
+  // The route re-collects the working tree on EVERY GET, so "rebuild against fresh state" is exactly
+  // a reload: no path to publish, no cache to invalidate, and the URL never moves. Only the reader's
+  // position has to survive, which the anchor above already handles.
+  var fab = document.getElementById('refresh');
+  if (fab) fab.onclick = function(){
+    rememberViewport();
+    fab.classList.add('busy');
+    location.reload();
+  };
 
   function badgeOf(cmt){ return cmt.querySelector('.badge'); }
 
@@ -379,12 +620,13 @@ export function renderDiffPage(set: DiffSet, opts: RenderOptions = {}): string {
 
   const filesHtml = set.files.map((f, i) => {
     const heading = f.oldPath ? `${esc(f.oldPath)} → ${esc(f.path)}` : esc(f.path);
-    return `<section class="file" id="f${i}" data-i="${i}" data-ext="${esc(f.ext || '(none)')}" data-path="${esc(f.path)}">`
+    return `<section class="file" id="f${i}" data-i="${i}" data-ext="${esc(f.ext || '(none)')}" data-path="${esc(f.path)}" data-staged="${f.staged}">`
       + `<header class="fh"><span class="st ${f.status}"></span>`
       + `<h2>${heading}</h2>`
       + `<span class="tags">${f.untracked ? '<i class="tag new">untracked</i>' : ''}`
       + `${f.binary ? '<i class="tag">binary</i>' : ''}</span>`
       + `<span class="ct"><b class="p">+${f.additions}</b><b class="m">−${f.deletions}</b></span>`
+      + (o.interactive ? stageBtn(f) : '')
       + `<button class="fold" title="collapse">–</button></header>`
       + `<div class="body">${fileBody(f, o)}</div></section>`;
   }).join('');
@@ -439,6 +681,62 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
 .act{font:11.5px/1 var(--ui);color:var(--ink-2);background:none;border:1px solid var(--line);
   border-radius:8px;padding:6px 10px;cursor:pointer}
 .act:hover{color:var(--ink);border-color:var(--wire-hot)}
+
+/* ── commit message panel ── */
+.commit{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+  margin:0 0 14px;overflow:hidden}
+.chead{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--surface-2);
+  border-bottom:1px solid var(--line);font:600 11.5px/1 var(--ui);color:var(--ink)}
+.chead .sub{font-weight:400;color:var(--ink-3)}
+.chead .cacts{margin-left:auto;display:flex;gap:6px}
+.cmsg{margin:0;padding:12px;font:12.5px/1.6 var(--mono);color:var(--ink);
+  white-space:pre-wrap;word-break:break-word}
+.cnone{padding:12px;font:11.5px/1.6 var(--ui);color:var(--ink-3)}
+.cnone code,.chead code{font:11px/1 var(--mono);color:var(--ink-2)}
+.cwhy{font:11px/1.5 var(--ui);color:var(--ink-2);padding:0 12px 10px}
+.cwhy:empty{display:none}
+.cwhy b{color:var(--ink)}
+
+/* ── the index: sidebar sections, per-file buttons, Stage ── */
+.sect{margin-bottom:10px}
+.shead{display:flex;align-items:center;gap:6px;padding:6px 6px 5px;
+  font:600 10.5px/1 var(--ui);letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);
+  border-bottom:1px solid var(--line-soft)}
+.shead i{font-style:normal;font:600 10px/1 var(--ui);color:var(--ink-2);
+  background:var(--surface-3);border-radius:999px;padding:3px 6px}
+.shead .ct{margin-left:auto;font:600 10.5px/1 var(--mono)}
+.sempty{padding:8px 7px;font:11.5px/1 var(--ui);color:var(--ink-3);font-style:italic}
+/* The per-file button sits in the header row, left of the fold toggle. */
+.ix{font:600 10px/1 var(--ui);letter-spacing:.04em;text-transform:uppercase;
+  color:var(--ink-2);background:var(--surface-3);border:1px solid var(--line);
+  border-radius:6px;padding:5px 8px;cursor:pointer;margin-right:8px}
+.ix:hover{color:var(--ink);border-color:var(--wire-hot)}
+.ix.busy{pointer-events:none;opacity:.55}
+.act.stage{color:var(--ink);border-color:var(--wire-hot)}
+.act.stage:hover{background:var(--surface-3)}
+.act.stage.busy{pointer-events:none;opacity:.6}
+/* What the Stage pass decided, per file, once it has run. Never a toast: the reason a file was NOT
+   staged is the half worth keeping on screen, and a toast takes it away while it is still being read. */
+.why{font:11px/1.45 var(--ui);color:var(--ink-2);padding:7px 10px;
+  border-top:1px dashed var(--line);background:var(--surface-2)}
+.why b{color:var(--ink)}
+.why.skip b{color:var(--prot)}
+
+/* ── refresh FAB (served pages only) ── */
+/* Fixed, bottom-right, above the sticky header's z-index:2. Every colour is a token, so the light
+   theme is handled by the same :root override as everything else. */
+.fab{position:fixed;right:22px;bottom:22px;width:44px;height:44px;z-index:5;
+  display:grid;place-items:center;cursor:pointer;border-radius:50%;
+  color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line);
+  box-shadow:0 4px 16px rgba(0,0,0,.28)}
+.fab:hover{color:var(--wire-hot);border-color:var(--wire-hot)}
+.fab svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;
+  stroke-linecap:round;stroke-linejoin:round}
+/* A re-collect on a large tree is not instant, and a button that looks dead gets clicked twice —
+   which is a second full collect for nothing. Spin, and stop taking clicks. */
+.fab.busy{pointer-events:none;color:var(--wire-hot)}
+.fab.busy svg{animation:fabspin .8s linear infinite;transform-origin:50% 50%}
+@keyframes fabspin{to{transform:rotate(360deg)}}
 
 /* ── sidebar ── */
 aside{overflow-y:auto;border-right:1px solid var(--line);background:var(--surface);padding:8px}
@@ -548,9 +846,11 @@ kbd{font:10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2
   <span class="count" id="count"></span>
   <button class="act" id="all">show all</button>
   <button class="act" id="none">defaults</button>
+  ${o.interactive ? '<button class="act stage" id="autostage" title="Stage what this project type says is safe to stage">Stage</button>' : ''}
 </div>
-<aside id="side">${set.files.map(sidebarRow).join('')}</aside>
-<main id="main">${omitted}${filesHtml || '<div class="empty">Working tree is clean.</div>'}</main>
+<aside id="side">${sidebarSections(set.files)}</aside>
+<main id="main">${commitPanel(o)}${omitted}${filesHtml || '<div class="empty">Working tree is clean.</div>'}</main>
+${o.interactive ? refreshFab() : ''}
 <script>
 (function(){
   var DEF = ${JSON.stringify(DEFAULT_EXTENSIONS)};
@@ -574,6 +874,33 @@ kbd{font:10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2
     // "the tree is fine" is the most expensive wrong conclusion this page could produce.
     document.getElementById('count').innerHTML =
       '<b>' + shown + '</b> of ' + total + ' files' + (hidden ? ' \\u00b7 ' + hidden + ' hidden' : '');
+
+    // Section counts follow the FILTER, exactly like the global count. A header reading "Staged 2"
+    // above one visible row is the same lie the hidden-file count exists to prevent — measured on a
+    // fixture where a .controller, hidden by the default chips, left the count and the list
+    // disagreeing. Summed from the visible rows themselves, so there is one source of truth.
+    [].slice.call(document.querySelectorAll('.sect')).forEach(function(sect){
+      var all = [].slice.call(sect.querySelectorAll('.row'));
+      var vis = all.filter(function(r){ return r.style.display !== 'none'; });
+      var a = 0, d = 0;
+      vis.forEach(function(r){
+        var pp = r.querySelector('.ct .p'), mm = r.querySelector('.ct .m');
+        a += Math.abs(parseInt((pp && pp.textContent) || '0', 10) || 0);
+        d += Math.abs(parseInt((mm && mm.textContent) || '0', 10) || 0);
+      });
+      var n = sect.querySelector('.shead i');
+      if (n) n.textContent = String(vis.length);
+      var ct = sect.querySelector('.shead .ct');
+      if (ct) ct.innerHTML = vis.length
+        ? '<b class="p">+' + a + '</b><b class="m">\\u2212' + d + '</b>' : '';
+      var empty = sect.querySelector('.sempty');
+      if (empty) {
+        empty.style.display = vis.length ? 'none' : '';
+        empty.textContent = all.length
+          ? 'all ' + all.length + ' hidden by the filters'
+          : (sect.dataset.staged === 'true' ? 'nothing staged' : 'nothing left unstaged');
+      }
+    });
   }
 
   chips.forEach(function(c){
