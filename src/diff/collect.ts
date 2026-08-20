@@ -64,6 +64,16 @@ export interface FileDiff {
   deletions: number;
   binary: boolean;
   untracked: boolean;
+  /**
+   * Are THESE hunks in the index?
+   *
+   * A file is not staged or unstaged — its individual changes are. `git status` reports two columns
+   * for exactly that reason, and a partially-staged file (`MM`) genuinely has both. So one path can
+   * yield TWO FileDiff entries, one per side, each carrying only the hunks that belong to it. Reading
+   * the combined `git diff HEAD` and labelling the file by its index column would show staged and
+   * unstaged hunks under one heading, which is a diff that does not exist in either place.
+   */
+  staged: boolean;
   hunks: Hunk[];
   truncated: boolean;    // hit MAX_LINES_PER_FILE
   bodyOmitted: boolean;  // hit MAX_TOTAL_LINES — counts are real, the text is not rendered
@@ -169,6 +179,8 @@ function parseUnified(raw: string): FileDiff[] {
       file = {
         path: p, status: 'modified', ext: extname(p).toLowerCase(),
         additions: 0, deletions: 0, binary: false, untracked: false, hunks: [], truncated: false, bodyOmitted: false,
+        // Stamped by the caller: parseUnified does not know which of the two diffs it was handed.
+        staged: false,
       };
       continue;
     }
@@ -223,6 +235,7 @@ function untrackedFiles(repo: string, budget: { left: number }): FileDiff[] {
     const f: FileDiff = {
       path: rel, status: 'added', ext: extname(rel).toLowerCase(),
       additions: 0, deletions: 0, binary: false, untracked: true, hunks: [], truncated: false, bodyOmitted: false,
+      staged: false,  // untracked is in no index, by definition
     };
     try {
       const size = statSync(abs).size;
@@ -257,29 +270,38 @@ export function collectDiff(repo: string, against = 'HEAD'): DiffSet {
   const branch = gitQuiet(repo, ['rev-parse', '--abbrev-ref', 'HEAD']) || '(detached)';
   const head = gitQuiet(repo, ['log', '-1', '--format=%h %s']) || '(no commits yet)';
 
+  // TWO diffs, not one. `--cached <rev>` is index-vs-rev and a bare `diff` is worktree-vs-index; they
+  // sum to the worktree-vs-rev this page used to show, but split at the boundary the operator acts
+  // on. The split holds for any rev, not just HEAD, because only the first command takes one.
+  //
   // A repo with no commits has no HEAD to diff against; everything in it is untracked anyway, so the
   // tracked half is simply empty rather than an error the operator has to interpret.
-  let raw = '';
+  let stagedRaw = '', unstagedRaw = '';
   if (head !== '(no commits yet)') {
     // -M finds renames: a moved file rendered as a whole delete plus a whole add is the single
     // largest source of fake volume in a review page.
-    try { raw = git(repo, ['diff', '-M', '--no-color', '--no-ext-diff', against]); } catch { raw = ''; }
+    try { stagedRaw = git(repo, ['diff', '-M', '--no-color', '--no-ext-diff', '--cached', against]); } catch { stagedRaw = ''; }
+    try { unstagedRaw = git(repo, ['diff', '-M', '--no-color', '--no-ext-diff']); } catch { unstagedRaw = ''; }
   }
 
   // Tracked first, and it spends the budget first. A file git already knows about is a change the
   // operator made on purpose; an untracked one may be build output they never looked at. When
   // something has to be dropped, that ordering decides which — and it is the whole reason the first
   // real run rendered 439 generated `.js` files and none of the source.
-  const tracked = parseUnified(raw);
+  const staged = parseUnified(stagedRaw).map((f) => ({ ...f, staged: true }));
+  const unstaged = parseUnified(unstagedRaw).map((f) => ({ ...f, staged: false }));
   const budget = { left: MAX_TOTAL_LINES };
-  for (const f of tracked) for (const h of f.hunks) budget.left -= h.lines.length;
+  for (const f of [...staged, ...unstaged]) for (const h of f.hunks) budget.left -= h.lines.length;
+  // Untracked files are in no index by definition, so they are always the unstaged side.
   const untracked = untrackedFiles(repo, budget);
 
-  let files = [...tracked, ...untracked];
-  // Sort by what a reader triages on — tracked before untracked, then biggest change first, then
-  // path so the order is stable between runs of an unchanged tree.
+  let files = [...staged, ...unstaged, ...untracked];
+  // Sort by what a reader triages on — STAGED first (it is what a commit would take), then tracked
+  // before untracked, then biggest change first, then path so the order is stable between runs of an
+  // unchanged tree.
   files.sort((a, b) =>
-    Number(a.untracked) - Number(b.untracked)
+    Number(b.staged) - Number(a.staged)
+    || Number(a.untracked) - Number(b.untracked)
     || (b.additions + b.deletions) - (a.additions + a.deletions)
     || a.path.localeCompare(b.path));
 

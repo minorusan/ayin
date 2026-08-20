@@ -27,6 +27,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { collectDiff } from './collect.js';
 import { renderDiffPage } from './render.js';
 import { createComment, getComment, readComments } from './comments.js';
+import { autoStage, safeRepoPath, stageOne, unstageOne } from './stage.js';
 import { log } from '../log.js';
 
 /** How a comment reaches the agent. Wired by app.ts at boot; absent in any process without a TUI. */
@@ -120,6 +121,37 @@ async function postComment(req: IncomingMessage, res: ServerResponse, cwd: strin
 }
 
 /**
+ * The index writes the page's buttons make.
+ *
+ * These are `git add` / `git restore --staged` on the session's OWN repo, reached from a page that
+ * session served, over a socket bound to loopback (prompt-server.ts owns the bind). That is the same
+ * envelope the comment route already runs in, and a smaller authority than it: a comment becomes an
+ * agent turn that can run shell commands, whereas these two move the index and nothing else. Both are
+ * reversible by the button beside them, and neither touches the working tree — `restore --staged`
+ * specifically leaves the file on disk exactly as it is.
+ *
+ * The path is still validated. It arrives from a browser, and `git add -- <path>` with an unchecked
+ * argument is how `--something` becomes a flag and `../..` becomes another repo.
+ */
+async function postIndex(req: IncomingMessage, res: ServerResponse, cwd: string, act: 'stage' | 'unstage'): Promise<void> {
+  const raw = await readBody(req);
+  let b: Record<string, unknown>;
+  try { b = JSON.parse(raw) as Record<string, unknown>; }
+  catch { json(res, 400, { error: 'body is not JSON' }); return; }
+  const path = typeof b.path === 'string' ? b.path : '';
+  if (!path) { json(res, 400, { error: 'path: missing' }); return; }
+  if (!safeRepoPath(cwd, path)) { json(res, 400, { error: `path: ${path} is not a file in this repo` }); return; }
+  try {
+    if (act === 'stage') stageOne(cwd, path); else unstageOne(cwd, path);
+    json(res, 200, { path, act });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    log('WARN', 'diff_index_failed', { act, path, error: msg });
+    json(res, 500, { error: msg });
+  }
+}
+
+/**
  * Returns true when the request was ours. Anything else falls through to the prompt editor's routes.
  */
 export async function handleDiffRequest(req: IncomingMessage, res: ServerResponse, cwd: string): Promise<boolean> {
@@ -133,6 +165,32 @@ export async function handleDiffRequest(req: IncomingMessage, res: ServerRespons
     catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log('WARN', 'diff_page_failed', { error: msg });
+      json(res, 500, { error: msg });
+    }
+    return true;
+  }
+
+  if ((path === '/api/diff/stage' || path === '/api/diff/unstage') && req.method === 'POST') {
+    const act = path.endsWith('/stage') ? 'stage' : 'unstage';
+    try { await postIndex(req, res, cwd, act); }
+    catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('WARN', 'diff_index_post_failed', { error: msg });
+      json(res, 400, { error: msg });
+    }
+    return true;
+  }
+
+  // The project-type pass. Slower than the two above — it can spend a model call per changed `.cs` —
+  // so it answers with the OUTCOME PER FILE rather than a count: the reason a file was NOT staged is
+  // the half worth reading, and a bare "staged 7" throws it away.
+  if (path === '/api/diff/autostage' && req.method === 'POST') {
+    try {
+      const { outcomes, policy } = await autoStage(cwd);
+      json(res, 200, { policy, outcomes });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('WARN', 'diff_autostage_failed', { error: msg });
       json(res, 500, { error: msg });
     }
     return true;

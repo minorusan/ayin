@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ayin-hound.mjs\"",
+            "timeout": 300,
+            "statusMessage": "ayin-hound: checking staged changes"
+          }
+        ]
+      }
+    ]
+  }
+}

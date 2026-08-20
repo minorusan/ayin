@@ -1,0 +1,17 @@
+Classify each numbered line as live debug output or not.
+
+Live debug output is a statement whose only effect is printing or breaking for a developer:
+Debug.Log/LogWarning/LogFormat, print, Console.Write*, System.Diagnostics.Debug.*, a bare
+Debug.Break, a temporary stopwatch or frame-time dump that nothing reads.
+
+NOT debug output: error and exception reporting the product relies on (Debug.LogError,
+Debug.LogException, Debug.Assert), a logger the codebase uses as its logging facility, a string
+passed to something other than a printer, and anything inside a comment or a disabled block.
+
+LINES
+{{LINES}}
+
+Reply with one JSON object and nothing else:
+{"debug":[<the numbers that ARE live debug output>]}
+
+An empty list is the correct answer when none are. Never include a number that is not listed above.

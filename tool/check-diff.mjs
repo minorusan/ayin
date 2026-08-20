@@ -200,6 +200,99 @@ ok(/sessionStorage\.setItem\(ANCHOR/.test(served) && (served.match(/ANCHOR = /g)
 ok(/\.fab\.busy\{pointer-events:none/.test(served),
   'a click disarms the button: a slow re-collect must not be startable twice');
 
+// ── 9 · the index: two diffs, two sections, the buttons ──────────────────────────
+//
+// Staged and unstaged are collected as TWO diffs (`--cached <rev>` and a bare `diff`), so a
+// partially-staged file yields two entries carrying only its own side's hunks. No LLM here: the .cs
+// line-level pass needs a model, so this exercises every branch that does not.
+
+console.log('\nthe index');
+
+const IX = mkdtempSync(join(tmpdir(), 'ayin-diffix-'));
+const g = (...a) => execFileSync('git', a, { cwd: IX, stdio: 'ignore' });
+const w = (rel, body) => {
+  mkdirSync(dirname(join(IX, rel)), { recursive: true });
+  writeFileSync(join(IX, rel), body);
+};
+g('init', '-q', '-b', 'main');
+g('config', 'user.email', 'i@example.invalid'); g('config', 'user.name', 'i');
+mkdirSync(join(IX, 'ProjectSettings'), { recursive: true });
+w('ProjectSettings/ProjectVersion.txt', 'm_EditorVersion: 2022.3.0f1\n');
+w('Assets/Scripts/Cfg.cs', 'public class Cfg { public int A; }\n');
+w('Assets/Scripts/Cfg.cs.meta', 'fileFormatVersion: 2\nguid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n');
+w('Assets/Anim/Hero.controller', 'AnimatorController:\n  m_Name: Hero\n');
+w('Assets/Prefabs/Hero.prefab', '%YAML 1.1\nGameObject:\n  m_Name: Hero\n');
+w('Assets/Data/Good.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}\n');
+w('Assets/ThirdParty/Vendor.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: ffffffffffffffffffffffffffffffff, type: 3}\n');
+w('Assets/Data/Baked.asset', 'LightingData:\n  m_Name: baked\n');
+w('ProjectSettings/EditorSettings.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}\n');
+g('add', '-A'); g('commit', '-qm', 'base');
+
+// One file with BOTH a staged and an unstaged change — the shape the split exists for.
+w('Assets/Data/Good.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}\n  A: 1\n');
+g('add', 'Assets/Data/Good.asset');
+w('Assets/Data/Good.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}\n  A: 1\n  B: 2\n');
+// …and the rest unstaged, animator FIRST in `git status` order so the leading-space bug is covered.
+w('Assets/Anim/Hero.controller', 'AnimatorController:\n  m_Name: Hero\n  m_Speed: 2\n');
+w('Assets/Prefabs/Hero.prefab', '%YAML 1.1\nGameObject:\n  m_Name: Hero\n  m_Layer: 3\n');
+w('Assets/ThirdParty/Vendor.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: ffffffffffffffffffffffffffffffff, type: 3}\n  v: 2\n');
+w('Assets/Data/Baked.asset', 'LightingData:\n  m_Name: baked\n  size: 9\n');
+w('ProjectSettings/EditorSettings.asset', '%YAML 1.1\nMonoBehaviour:\n  m_Script: {fileID: 11500000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}\n  p: 1\n');
+
+const ixSet = collect.collectDiff(IX);
+const stagedOf = (p) => ixSet.files.filter((f) => f.path === p && f.staged);
+const unstagedOf = (p) => ixSet.files.filter((f) => f.path === p && !f.staged);
+
+ok(stagedOf('Assets/Data/Good.asset').length === 1 && unstagedOf('Assets/Data/Good.asset').length === 1,
+  'a partially-staged file yields ONE entry per side, not one entry with a label');
+ok(stagedOf('Assets/Data/Good.asset')[0].additions === 1,
+  'the staged entry carries only the staged hunk', String(stagedOf('Assets/Data/Good.asset')[0].additions));
+ok(unstagedOf('Assets/Data/Good.asset')[0].additions === 1,
+  'and the unstaged entry only the unstaged one', String(unstagedOf('Assets/Data/Good.asset')[0].additions));
+ok(ixSet.files.filter((f) => f.staged).length === 1, 'nothing else is on the staged side');
+ok(ixSet.files.every((f) => typeof f.staged === 'boolean'), 'every file states which side it is on');
+
+const ixHtml = render.renderDiffPage(ixSet, { interactive: true, rev: 'HEAD', comments: [] });
+const ixStatic = render.renderDiffPage(ixSet, { interactive: false, rev: 'HEAD', comments: [] });
+ok(/data-staged="true"/.test(ixHtml) && /data-staged="false"/.test(ixHtml),
+  'the sidebar renders both sections');
+ok(/class="ix" data-act="unstage"/.test(ixHtml) && /class="ix" data-act="stage"/.test(ixHtml),
+  'a staged card offers unstage and an unstaged card offers stage');
+ok(/id="autostage"/.test(ixHtml), 'the top panel carries the Stage button');
+ok(!/class="ix"/.test(ixStatic) && !/id="autostage"/.test(ixStatic),
+  'a file:// page carries NO index buttons — staging is a git write and there is no server');
+ok(/querySelectorAll\('\.sect'\)/.test(ixHtml),
+  'section counts are recomputed from the FILTER, so a hidden row cannot inflate them');
+
+// ── the policy, minus the .cs pass (that one needs a model) ──
+const { autoStage } = await import(`file://${join(ROOT, 'dist', 'diff', 'stage.js')}`);
+const res = await autoStage(IX);
+const why = (p) => (res.outcomes.find((o) => o.path === p) || {});
+ok(res.policy === 'unity', 'a Unity repo gets the Unity policy', res.policy);
+// THE REGRESSION THIS GATE EXISTS FOR: `git status --porcelain` puts the index status in column 1, so
+// an unstaged change begins with a SPACE. Trimming the blob ate it off the FIRST line only, which read
+// as already-staged and shifted the path by one — the animator controller silently vanished from the
+// pass while its six siblings were judged correctly.
+ok(res.outcomes.length === 6, 'every changed file gets an outcome, INCLUDING the first status line',
+  `${res.outcomes.length}: ${res.outcomes.map((o) => o.path).join(', ')}`);
+ok(why('Assets/Anim/Hero.controller').staged === true, 'an animator controller is staged');
+ok(why('Assets/Prefabs/Hero.prefab').staged === true, 'a prefab IS staged here — unlike the daemon allowlist');
+ok(why('Assets/Data/Good.asset').staged === true, 'a ScriptableObject of a project script is staged');
+ok(why('Assets/ThirdParty/Vendor.asset').staged === false, 'a third-party asset guid is left alone');
+ok(why('Assets/Data/Baked.asset').staged === false, 'baked data with no m_Script is left alone');
+ok(why('ProjectSettings/EditorSettings.asset').staged === false,
+  'project base config outside Assets/ is left alone', why('ProjectSettings/EditorSettings.asset').why);
+ok(res.outcomes.every((o) => typeof o.why === 'string' && o.why.length > 0),
+  'every outcome carries a reason — a file that silently failed to stage is the complaint this answers');
+
+// ── the path guard on the write routes ──
+const { safeRepoPath } = await import(`file://${join(ROOT, 'dist', 'diff', 'stage.js')}`);
+ok(safeRepoPath(IX, 'Assets/Prefabs/Hero.prefab'), 'a real repo path is accepted');
+ok(!safeRepoPath(IX, '../../../etc/passwd'), 'traversal is refused');
+ok(!safeRepoPath(IX, '--cached'), 'a flag-shaped path is refused before it reaches git');
+ok(!safeRepoPath(IX, '/etc/passwd'), 'an absolute path is refused');
+
+rmSync(IX, { recursive: true, force: true });
 rmSync(REPO, { recursive: true, force: true });
 rmSync(CLEAN, { recursive: true, force: true });
 rmSync(HOME, { recursive: true, force: true });

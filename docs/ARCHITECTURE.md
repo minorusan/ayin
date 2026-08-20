@@ -1970,6 +1970,52 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
   size and truncating kept the noise. A tracked file is a change made on purpose — when something has
   to be dropped, that decides which. Omitted files keep their row and their true counts.
 
+- **Staged and unstaged are TWO diffs, not one labelled diff.** `collectDiff` runs
+  `git diff --cached <rev>` and a bare `git diff` and tags each `FileDiff` with `staged`. A change is
+  not staged or unstaged — the individual hunks are, which is why `git status` reports two columns. So
+  a partially-staged file yields **two entries**, one per side, each carrying only its own hunks. The
+  cheap alternative (one `git diff HEAD` plus the file's index column) would show staged and unstaged
+  hunks under one heading, a diff that exists in neither place. The sidebar splits at that boundary,
+  with per-section counts **recomputed from the filter** — a header reading "Staged 2" above one
+  visible row is the same lie the hidden-file count exists to prevent, and it happened: a
+  `.controller` hidden by the default chips left count and list disagreeing.
+- **Per-file `stage`/`unstage`, and a project-type `Stage` pass** (`src/diff/stage.ts`, served pages
+  only — staging is a git write). One button per card, not two: a change is on exactly one side, so
+  the only move that means anything is the one that crosses. `POST /api/diff/stage|unstage` run
+  `git add` / `git restore --staged` on the session's own repo — the same loopback envelope as the
+  comment route and a *smaller* authority than it, since a comment becomes an agent turn that can run
+  shell commands while these move the index and nothing else. The path is still validated: traversal,
+  absolute and flag-shaped (`--cached`) paths are refused before they reach git.
+
+  `POST /api/diff/autostage` is the project-type pass, and it is **deliberately a second policy**
+  rather than a change to `unityStageReason`. The daemon's allowlist states two things worth keeping —
+  a prefab is never auto-staged, and *"there is no model judgement in this decision, by design"* —
+  both correct for a background process staging while nobody watches, neither correct for a button an
+  operator pressed. The cost is two policies to keep in step; the alternative was changing background
+  behaviour on every watched repo to serve a foreground click. In a Unity repo it stages
+  `.anim`/`.controller` and `.prefab` whole; an `.asset` only under `Assets/` **and** only when its
+  `m_Script` guid resolves to a `.cs` in this project (that guid check is what excludes third-party
+  and package assets; the `Assets/` test is what excludes `ProjectSettings`/`EditorSettings`, which are
+  not third-party but the project's own base config); a `.meta` only when the asset it describes was
+  staged. Everything else is skipped **with a reason on the card** — a file that silently failed to
+  stage is the complaint the whole feature answers. A non-Unity repo returns `policy: 'none'` and
+  stages nothing rather than inventing an allowlist.
+
+  **`.cs` is staged LINE BY LINE.** A model classifies the added lines (`stageDebugLines.txt`,
+  `declareTools: false` — it wants JSON, not work), then the clean lines are rebuilt into a patch and
+  `git apply --cached` puts them in the index while the debug lines stay in the working tree as the
+  file's remaining unstaged change. Hunk headers are **recomputed**, never copied: dropping a `+` line
+  changes the new-side count, and a stale `@@` is a patch git refuses at best and misapplies at worst.
+  A classification that fails holds nothing back and says so — the operator asked for their work to be
+  staged, and a model that could not answer is not a reason to silently drop it. An **untracked** `.cs`
+  is staged whole or not at all: partially staging a brand-new file would put a version in the index
+  that never existed on disk.
+
+  A one-character bug worth remembering: `git status --porcelain` puts the index status in column 1, so
+  an unstaged change begins with a **space**. Trimming that output ate the space off the FIRST line
+  only, which then read as already-staged with the path shifted by one — the animator controller
+  vanished from the pass while its six siblings were judged correctly. Position-dependent and silent.
+  `check:diff` pins it.
 - **The refresh FAB rides the property that already existed.** The served route re-collects the working
   tree on EVERY `GET /diff`, so "rebuild against fresh state" is `location.reload()` — no path to
   publish, no cache to invalidate, and the URL never moves. All the button has to do is keep the
