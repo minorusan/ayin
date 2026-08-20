@@ -154,6 +154,12 @@ export const KNOWN_CONFIG_KEYS = [
   'embedModel',
   // Which service embeds. Normally inferred from embedModel; set only to override that.
   'embedProvider',
+  // Where embeddings are asked for, when that is NOT the endpoint everything else uses. Empty means
+  // one door: the configured llmUrl. This is the setting for a small embedder running BESIDE the
+  // chat model — a local Ollama on this machine while generation goes to a bigger box — and it is an
+  // explicit operator decision, never a fallback the code takes on its own (see indulge/embed.ts,
+  // which deleted exactly such a fallback because it silently reached around a remote endpoint).
+  'embedUrl',
   // Which provider BUILDS a corpus, separately from the one the agent chats through. A build is
   // hours of reading source; a chat turn is seconds. One global choice makes one of them worse.
   'indulgeProvider', 'indulgeModel',
