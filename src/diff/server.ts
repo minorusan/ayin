@@ -27,7 +27,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { collectDiff } from './collect.js';
 import { renderDiffPage } from './render.js';
 import { createComment, getComment, readComments } from './comments.js';
-import { autoStage, safeRepoPath, stageOne, unstageOne } from './stage.js';
+import { autoStage, discardAll, discardOne, previewDiscard, safeRepoPath, stageOne, unstageOne } from './stage.js';
 import { commitStaged, draftCommit, readCommitDraft, rephraseSubject } from '../commit-draft.js';
 import { log } from '../log.js';
 
@@ -252,6 +252,48 @@ export async function handleDiffRequest(req: IncomingMessage, res: ServerRespons
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log('WARN', 'diff_rephrase_failed', { error: msg });
+      json(res, 500, { error: msg });
+    }
+    return true;
+  }
+
+  // The preview is a GET and destroys nothing: the page asks what would die, shows the names in the
+  // confirmation, and only then posts. Splitting them is what makes the confirmation informed rather
+  // than a dialog someone clicks through.
+  if (path === '/api/diff/discard' && req.method === 'GET') {
+    try { json(res, 200, previewDiscard(cwd)); }
+    catch (e) { json(res, 500, { error: e instanceof Error ? e.message : String(e) }); }
+    return true;
+  }
+
+  // THE ONE ROUTE HERE THAT CANNOT BE UNDONE. `clean -fd` deletes untracked files git never had, so
+  // there is no object to recover and no reflog to search. Loopback-bound and this session's own repo,
+  // as with every other write here — but unlike them, nothing brings it back.
+  if (path === '/api/diff/discard' && req.method === 'POST') {
+    try {
+      const r = discardAll(cwd);
+      json(res, r.ok ? 200 : 400, { ok: r.ok, why: r.why, discarded: r.discarded });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('WARN', 'diff_discard_route_failed', { error: msg });
+      json(res, 500, { error: msg });
+    }
+    return true;
+  }
+
+  if (path === '/api/diff/discard-file' && req.method === 'POST') {
+    try {
+      const raw = await readBody(req);
+      let b: Record<string, unknown> = {};
+      try { b = JSON.parse(raw) as Record<string, unknown>; } catch { /* fall through to the guard */ }
+      const p = typeof b.path === 'string' ? b.path : '';
+      if (!p) { json(res, 400, { error: 'path: missing' }); return true; }
+      if (!safeRepoPath(cwd, p)) { json(res, 400, { error: `path: ${p} is not a file in this repo` }); return true; }
+      const r = discardOne(cwd, p);
+      json(res, r.ok ? 200 : 400, { ok: r.ok, why: r.why });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('WARN', 'diff_discard_file_failed', { error: msg });
       json(res, 500, { error: msg });
     }
     return true;

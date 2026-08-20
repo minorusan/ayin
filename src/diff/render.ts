@@ -367,12 +367,43 @@ function stageBtn(f: FileDiff): string {
 }
 
 /**
+ * Per-file discard. Same authority as the page-wide one, one file wide.
+ *
+ * `data-untracked` is what lets the confirmation say the true thing: for a tracked file this restores
+ * it to HEAD, for an untracked one it DELETES a file git has never seen. Those deserve different
+ * words, and the page knows which is which without asking the server.
+ */
+function discardBtn(f: FileDiff): string {
+  return `<button class="ix dz" data-path="${esc(f.path)}" data-untracked="${f.untracked}"`
+    + ` aria-label="Discard changes to ${esc(f.path)}"`
+    + ` title="${f.untracked ? 'Delete this untracked file' : 'Discard changes — restore to HEAD'}">`
+    + '<svg viewBox="0 0 24 24" aria-hidden="true">'
+    + '<path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l1 12.5h9L17.5 7"/></svg></button>';
+}
+
+/**
  * The refresh FAB — served pages ONLY.
  *
  * A `file://` page has nothing to rebuild from: the static file is a snapshot, and `git` is not
  * reachable from a document. So the button is ABSENT there rather than present and dead, which is the
  * same call the page already makes about the comment affordance.
  */
+/**
+ * The discard FAB — served pages only, and the only irreversible control on this page.
+ *
+ * Red, and a different shape from every other button here, because it is not in the same category as
+ * them: staging is undoable with the button beside it, a commit is undoable with `reset --soft`, and
+ * this is undoable with nothing at all. It sits apart from the refresh FAB rather than beside it in a
+ * row, so a mis-aimed click lands on empty space instead of the other one.
+ */
+function discardFab(): string {
+  return '<button class="fab danger" id="discard"'
+    + ' aria-label="Discard all uncommitted changes" title="Discard ALL uncommitted changes — cannot be undone">'
+    + '<svg viewBox="0 0 24 24" aria-hidden="true">'
+    + '<path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l1 12.5h9L17.5 7"/><path d="M10.5 10.5v6M13.5 10.5v6"/>'
+    + '</svg></button>';
+}
+
 function refreshFab(): string {
   return '<button class="fab" id="refresh" aria-label="Rebuild against the current working tree"'
     + ' title="Rebuild against the current working tree">'
@@ -619,6 +650,64 @@ function commentClient(o: Resolved): string {
     }).catch(function(){ auto.classList.remove('busy'); auto.textContent = 'Stage — failed'; });
   };
 
+  // ── discard ────────────────────────────────────────────────────────────────
+  // THE ONLY IRREVERSIBLE CONTROLS ON THIS PAGE, so the confirmation is INFORMED: it asks the server
+  // what would die and names the files, because "discard 4 files" is a number people click past while
+  // four filenames are a decision. Untracked files are called out separately — those are deleted, and
+  // git has no object and no reflog entry to bring them back from.
+  var dz = document.getElementById('discard');
+  if (dz) dz.onclick = function(){
+    dz.classList.add('busy');
+    fetch('/api/diff/discard').then(function(r){ return r.json(); }).then(function(p){
+      dz.classList.remove('busy');
+      var tr = (p.tracked || []), un = (p.untracked || []);
+      if (!tr.length && !un.length) {
+        if (cwhy) cwhy.innerHTML = '<b>nothing to discard</b> \u2014 the working tree is already clean';
+        return;
+      }
+      var lines = [];
+      if (tr.length) lines.push(tr.length + ' tracked file(s) reset to HEAD:\\n  ' + tr.slice(0, 12).join('\\n  ')
+        + (tr.length > 12 ? '\\n  \u2026and ' + (tr.length - 12) + ' more' : ''));
+      if (un.length) lines.push(un.length + ' untracked file(s) DELETED \u2014 git cannot recover these:\\n  '
+        + un.slice(0, 12).join('\\n  ') + (un.length > 12 ? '\\n  \u2026and ' + (un.length - 12) + ' more' : ''));
+      if (!window.confirm('git reset --hard && git clean -fd\\n\\n' + lines.join('\\n\\n')
+        + '\\n\\nThis cannot be undone. Continue?')) return;
+      dz.classList.add('busy');
+      post('/api/diff/discard', {}).then(function(r){
+        dz.classList.remove('busy');
+        if (r.ok && r.j.ok) { rememberViewport(); location.reload(); return; }
+        if (cwhy) cwhy.innerHTML = '<b>not discarded</b> \u2014 ' + esc((r.j && (r.j.why || r.j.error)) || 'failed');
+      }).catch(function(err){
+        dz.classList.remove('busy');
+        if (cwhy) cwhy.innerHTML = '<b>not discarded</b> \u2014 ' + esc(String(err));
+      });
+    }).catch(function(err){
+      dz.classList.remove('busy');
+      if (cwhy) cwhy.innerHTML = '<b>could not read what would be discarded</b> \u2014 ' + esc(String(err));
+    });
+  };
+
+  [].slice.call(document.querySelectorAll('.ix.dz')).forEach(function(btn){
+    btn.onclick = function(e){
+      e.preventDefault(); e.stopPropagation();          // the header is also the fold toggle
+      var path = btn.dataset.path;
+      var untracked = btn.dataset.untracked === 'true';
+      var msg = untracked
+        ? 'DELETE the untracked file\\n\\n  ' + path + '\\n\\nGit has never seen it. This cannot be undone. Continue?'
+        : 'Discard all changes to\\n\\n  ' + path + '\\n\\nIt goes back to HEAD, staged and unstaged alike. Continue?';
+      if (!window.confirm(msg)) return;
+      btn.classList.add('busy');
+      post('/api/diff/discard-file', { path: path }).then(function(r){
+        if (r.ok && r.j.ok) { rememberViewport(); location.reload(); return; }
+        btn.classList.remove('busy');
+        showWhy(btn, false, (r.j && (r.j.why || r.j.error)) || 'failed');
+      }).catch(function(err){
+        btn.classList.remove('busy');
+        showWhy(btn, false, String(err));
+      });
+    };
+  });
+
   // ── refresh ────────────────────────────────────────────────────────────────
   // The route re-collects the working tree on EVERY GET, so "rebuild against fresh state" is exactly
   // a reload: no path to publish, no cache to invalidate, and the URL never moves. Only the reader's
@@ -801,7 +890,7 @@ export function renderDiffPage(set: DiffSet, opts: RenderOptions = {}): string {
       + `<span class="tags">${f.untracked ? '<i class="tag new">untracked</i>' : ''}`
       + `${f.binary ? '<i class="tag">binary</i>' : ''}</span>`
       + `<span class="ct"><b class="p">+${f.additions}</b><b class="m">−${f.deletions}</b></span>`
-      + (o.interactive ? stageBtn(f) : '')
+      + (o.interactive ? stageBtn(f) + discardBtn(f) : '')
       + `<button class="fold" title="collapse">–</button></header>`
       + `<div class="body">${fileBody(f, o)}</div></section>`;
   }).join('');
@@ -904,6 +993,12 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
   border-radius:6px;padding:5px 8px;cursor:pointer;margin-right:8px}
 .ix:hover{color:var(--ink);border-color:var(--wire-hot)}
 .ix.busy{pointer-events:none;opacity:.55}
+/* The per-file discard, red at rest like the page-wide one so the two read as the same authority. */
+.ix.dz{display:grid;place-items:center;padding:4px;color:var(--priv);
+  border-color:color-mix(in srgb, var(--priv) 40%, var(--line))}
+.ix.dz svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.ix.dz:hover{border-color:var(--priv);background:color-mix(in srgb, var(--priv) 12%, var(--surface-3))}
 .act.commit{color:var(--pub);border-color:var(--pub)}
 .act.commit:hover{background:var(--surface-3)}
 .act.commit.busy{pointer-events:none;opacity:.6}
@@ -930,6 +1025,12 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
 /* A re-collect on a large tree is not instant, and a button that looks dead gets clicked twice —
    which is a second full collect for nothing. Spin, and stop taking clicks. */
 .fab.busy{pointer-events:none;color:var(--wire-hot)}
+/* Sits a clear gap ABOVE the refresh FAB, not beside it: a mis-aimed click for refresh must not land
+   on the one control that cannot be undone. Red at rest, not only on hover — this one announces
+   itself before it is touched. */
+.fab.danger{bottom:78px;color:var(--priv);border-color:color-mix(in srgb, var(--priv) 45%, var(--line))}
+.fab.danger:hover{color:var(--priv);border-color:var(--priv);background:color-mix(in srgb, var(--priv) 12%, var(--surface-2))}
+.fab.danger.busy{color:var(--priv)}
 .fab.busy svg{animation:fabspin .8s linear infinite;transform-origin:50% 50%}
 @keyframes fabspin{to{transform:rotate(360deg)}}
 
@@ -1054,7 +1155,7 @@ kbd{font:10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2
 ${iconSprite()}
 <aside id="side">${sidebarSections(set.files)}</aside>
 <main id="main">${commitPanel(o)}${omitted}${filesHtml || '<div class="empty">Working tree is clean.</div>'}</main>
-${o.interactive ? refreshFab() : ''}
+${o.interactive ? discardFab() + refreshFab() : ''}
 <script>
 (function(){
   var DEF = ${JSON.stringify(DEFAULT_EXTENSIONS)};

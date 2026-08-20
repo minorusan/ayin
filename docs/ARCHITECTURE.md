@@ -2046,6 +2046,33 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
   only, which then read as already-staged with the path shifted by one — the animator controller
   vanished from the pass while its six siblings were judged correctly. Position-dependent and silent.
   `check:diff` pins it.
+- **Discard: the only irreversible controls on the page.** A red trashcan FAB runs
+  `git reset --hard && git clean -fd`, and every file card carries its own. Both are served-only and
+  both confirm — but the confirmation is **informed**: a `GET /api/diff/discard` returns the files that
+  would die and the dialog NAMES them, because "discard 4 files" is a number people click past while
+  four filenames are a decision. Untracked files are called out separately, since those are *deleted*
+  and git has no object and no reflog entry to recover them from.
+
+  `-fd` and not `-fdx`: **ignored files survive**. `.claude/`, `reviews/` and ayin's own report files
+  are untouched, which is both the git default and the behaviour that does not delete the operator's
+  tooling along with their work.
+
+  Per-file discard is **four commands, not one**, because firing one at every state silently fails on
+  two: an untracked file is `clean -fd --`, a staged-added file is `rm -f --` (there is nothing in HEAD
+  to restore it from), and a modified or deleted file is
+  `restore --staged --worktree --source=HEAD --` (a bare `checkout --` would leave the staged half
+  behind). An ignored path is refused — it is not in the diff, so a button here cannot mean it.
+
+  A clean tree is **refused** rather than presented as a scary dialog that does nothing. The red FAB
+  sits a clear gap above the refresh FAB rather than beside it, so a mis-aimed click for refresh lands
+  on empty space instead of the one control that cannot be undone.
+
+  Worth noting against `permissions.ts`: its `ALWAYS_CONFIRM_GIT` list exists for operations that
+  *"discard work that was never committed"* and is `push|pull|checkout` — `reset --hard` and `clean -fd`
+  match that rationale and are absent from it. These routes do not pass through `checkPermission` at
+  all (nor do stage/unstage): they are direct writes from a button an operator pressed on a page their
+  own session served, and the confirmation is the gate.
+
 - **The refresh FAB rides the property that already existed.** The served route re-collects the working
   tree on EVERY `GET /diff`, so "rebuild against fresh state" is `location.reload()` — no path to
   publish, no cache to invalidate, and the URL never moves. All the button has to do is keep the

@@ -26,7 +26,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -466,6 +466,76 @@ ok(/the subject is empty/.test(cmHtml),
 const cmStatic = render.renderDiffPage(fabSet, { interactive: false, rev: 'HEAD', comments: [], commitDraft: 'feat: x' });
 ok(!/id="docommit"/.test(cmStatic), 'a file:// page never offers Commit — committing is a git write');
 
+// ── 12 · discard: the only irreversible controls on the page ─────────────────────
+//
+// `clean -fd` deletes untracked files git never had — no object, no reflog, nothing to recover. So the
+// assertions that matter are about what it must NOT touch and what it must REFUSE, not about the happy
+// path: ignored files survive, a clean tree is refused rather than presented as a scary no-op, and each
+// of the four file states gets the command that actually works on it.
+
+console.log('\ndiscard');
+
+const DZ = mkdtempSync(join(tmpdir(), 'ayin-diffdz-'));
+const dg = (...a) => execFileSync('git', a, { cwd: DZ, stdio: 'ignore' });
+dg('init', '-q', '-b', 'main');
+dg('config', 'user.email', 'd@example.invalid'); dg('config', 'user.name', 'd');
+writeFileSync(join(DZ, '.gitignore'), 'build/\n');
+writeFileSync(join(DZ, 'tracked.ts'), 'keep\n');
+writeFileSync(join(DZ, 'gone.ts'), 'bye\n');
+dg('add', '-A'); dg('commit', '-qm', 'base');
+writeFileSync(join(DZ, 'tracked.ts'), 'keep\nmod\n');
+writeFileSync(join(DZ, 'addedme.ts'), 'new\n'); dg('add', 'addedme.ts');
+writeFileSync(join(DZ, 'loose.ts'), 'never seen\n');
+rmSync(join(DZ, 'gone.ts'));
+mkdirSync(join(DZ, 'build'), { recursive: true });
+writeFileSync(join(DZ, 'build', 'out.js'), 'artifact\n');
+
+const { previewDiscard, discardOne, discardAll } = await import(`file://${join(ROOT, 'dist', 'diff', 'stage.js')}`);
+
+const pv = previewDiscard(DZ);
+ok(pv.untracked.includes('loose.ts'), 'the preview names the untracked files that would be DELETED');
+ok(!pv.untracked.includes('build/out.js') && !pv.tracked.includes('build/out.js'),
+  'an IGNORED file is never listed — clean -fd without -x leaves it alone');
+ok(pv.tracked.length === 3, 'and the tracked side counts modified, added and deleted', pv.tracked.join(','));
+
+// Four states, four different correct commands. One command fired at all of them fails on two.
+ok(discardOne(DZ, 'loose.ts').ok && !existsSync(join(DZ, 'loose.ts')),
+  'an untracked file is DELETED from disk');
+ok(discardOne(DZ, 'addedme.ts').ok && !existsSync(join(DZ, 'addedme.ts')),
+  'a staged-added file is removed from index and disk — restore --source=HEAD could not have');
+ok(discardOne(DZ, 'tracked.ts').ok && readFileSync(join(DZ, 'tracked.ts'), 'utf-8') === 'keep\n',
+  'a modified file goes back to HEAD exactly');
+ok(discardOne(DZ, 'gone.ts').ok && existsSync(join(DZ, 'gone.ts')),
+  'a deleted file comes back');
+ok(!discardOne(DZ, 'build/out.js').ok,
+  'an ignored file is REFUSED — it is not in the diff, so a button here cannot mean it');
+ok(existsSync(join(DZ, 'build', 'out.js')), 'and it is still on disk afterwards');
+
+// Page-wide, on a fresh mess.
+writeFileSync(join(DZ, 'tracked.ts'), 'keep\nagain\n');
+writeFileSync(join(DZ, 'loose2.ts'), 'x\n');
+const all = discardAll(DZ);
+ok(all.ok, 'discardAll reports what it destroyed', all.why);
+ok(!existsSync(join(DZ, 'loose2.ts')) && readFileSync(join(DZ, 'tracked.ts'), 'utf-8') === 'keep\n',
+  'the tree is back to HEAD and the untracked file is gone');
+ok(existsSync(join(DZ, 'build', 'out.js')), 'the ignored file survived a page-wide discard too');
+ok(!discardAll(DZ).ok, 'a second discard on a clean tree is REFUSED, not a no-op with a scary dialog');
+
+// The controls exist only where a route does, and the confirmation must name the irreversibility.
+const dzHtml = render.renderDiffPage(fabSet, { interactive: true, rev: 'HEAD', comments: [], commitDraft: null });
+const dzStatic = render.renderDiffPage(fabSet, { interactive: false, rev: 'HEAD', comments: [], commitDraft: null });
+ok(/id="discard"/.test(dzHtml) && !/id="discard"/.test(dzStatic), 'the discard FAB is served-only');
+// A fixture WITH files: fabSet is the clean tree, so it renders no cards to hang a button on.
+const dzRows = render.renderDiffPage(ixSet, { interactive: true, rev: 'HEAD', comments: [], commitDraft: null });
+const dzRowsStatic = render.renderDiffPage(ixSet, { interactive: false, rev: 'HEAD', comments: [], commitDraft: null });
+ok(/class="ix dz"/.test(dzRows) && !/class="ix dz"/.test(dzRowsStatic), 'so is the per-file discard');
+ok(/data-untracked="/.test(dzRows),
+  'each per-file button states whether it deletes or restores — the confirmation needs to say the true thing');
+ok(/cannot be undone/.test(dzHtml), 'the confirmation says it cannot be undone');
+ok(/git cannot recover these/.test(dzHtml), 'and calls out the untracked deletions specifically');
+ok(/fab danger/.test(dzHtml), 'the FAB is marked as dangerous, not styled like the others');
+
+rmSync(DZ, { recursive: true, force: true });
 rmSync(CM, { recursive: true, force: true });
 rmSync(IX, { recursive: true, force: true });
 rmSync(REPO, { recursive: true, force: true });

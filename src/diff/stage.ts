@@ -108,6 +108,119 @@ export function unstageOne(repo: string, path: string): void {
   git(repo, ['restore', '--staged', '--', path]);
 }
 
+// ── discard everything ───────────────────────────────────────────────────────────
+
+/** What a discard would destroy, counted BEFORE it happens so the operator can be told. */
+export interface DiscardPreview {
+  /** Tracked files with changes staged or unstaged — recoverable only from a commit that exists. */
+  tracked: string[];
+  /** Untracked files `clean -fd` will DELETE. Git has never seen these; nothing can bring them back. */
+  untracked: string[];
+}
+
+/**
+ * What `git reset --hard && git clean -fd` would take, listed rather than counted.
+ *
+ * Gathered before anything is destroyed, and handed to the confirmation: "discard 4 files" is a number
+ * someone clicks past, while the names of the four are a decision. Ignored files are NOT listed and
+ * NOT deleted — `clean -fd` without `-x` leaves them alone, which is what keeps `.claude/`, `reviews/`
+ * and the report files out of this.
+ */
+export function previewDiscard(repo: string): DiscardPreview {
+  const tracked = gitRaw(repo, ['-c', 'core.quotepath=false', 'diff', 'HEAD', '--name-only'])
+    .split('\n').map((l) => l.trim()).filter(Boolean);
+  const untracked = gitRaw(repo, ['-c', 'core.quotepath=false', 'ls-files', '-o', '--exclude-standard'])
+    .split('\n').map((l) => l.trim()).filter(Boolean);
+  return { tracked: [...new Set(tracked)], untracked };
+}
+
+/**
+ * Throw away every uncommitted change: `git reset --hard`, then `git clean -fd`.
+ *
+ * THIS IS THE ONE ROUTE ON THIS PAGE THAT CANNOT BE UNDONE. `reset --hard` discards staged and
+ * unstaged edits to tracked files — recoverable only if some commit already holds them — and
+ * `clean -fd` DELETES untracked files outright: git never had them, so there is no object to recover
+ * and no reflog entry to find. That is why the preview is returned to the caller first and why this
+ * refuses on a clean tree rather than presenting a scary no-op.
+ *
+ * `-fd` and not `-fdx`: ignored files are left alone. Anything in `.gitignore` — `.claude/`, `reviews/`,
+ * the report files ayin itself writes — survives, which is both the git default and the behaviour that
+ * does not delete the operator's tooling along with their work.
+ *
+ * It does not run through `checkPermission`. Neither do stage/unstage: these are direct writes made by
+ * a button an operator pressed on a page their own session served, not tool calls an agent proposed.
+ * The confirmation is the gate, and it lives in the page.
+ */
+export function discardAll(repo: string): { ok: boolean; why: string; discarded: DiscardPreview } {
+  const preview = previewDiscard(repo);
+  if (!preview.tracked.length && !preview.untracked.length) {
+    return { ok: false, why: 'working tree is already clean — nothing to discard', discarded: preview };
+  }
+  log('WARN', 'diff_discard_requested', {
+    repo, tracked: String(preview.tracked.length), untracked: String(preview.untracked.length),
+  });
+  try {
+    git(repo, ['reset', '--hard']);
+    git(repo, ['clean', '-fd']);
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    log('WARN', 'diff_discard_failed', { repo, error: detail });
+    return { ok: false, why: detail, discarded: preview };
+  }
+  log('WARN', 'diff_discarded', {
+    repo, tracked: String(preview.tracked.length), untracked: String(preview.untracked.length),
+  });
+  return {
+    ok: true,
+    why: `reset ${preview.tracked.length} tracked file(s) and deleted ${preview.untracked.length} untracked file(s)`,
+    discarded: preview,
+  };
+}
+
+/**
+ * Discard one file's changes. The right command depends on what git thinks the file IS.
+ *
+ * Four cases, and firing one command at all of them silently fails on two:
+ *
+ *   untracked (`??`)   `clean -fd --` DELETES it. Git never had it, so nothing recovers it.
+ *   added to index     `rm -f --` takes it out of the index AND off disk. `restore --source=HEAD`
+ *                      cannot help here: the file is not in HEAD, so there is nothing to restore from.
+ *   modified/deleted   `restore --staged --worktree --source=HEAD` puts index and worktree back to
+ *                      HEAD in one call — a `checkout --` would leave a staged change behind.
+ *   ignored            refused. It is not in the diff, so a button on this page cannot mean it.
+ *
+ * Irreversible for the first two. The caller confirms; this only decides which command is correct.
+ */
+export function discardOne(repo: string, path: string): { ok: boolean; why: string } {
+  const row = gitRaw(repo, ['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-uall', '--', path])
+    .split('\n').find((l) => l.length > 3);
+  if (!row) return { ok: false, why: `${path} has no changes to discard` };
+  const xy = row.slice(0, 2);
+  try {
+    if (xy === '??') {
+      git(repo, ['clean', '-fd', '--', path]);
+      return { ok: true, why: `deleted ${path} — it was untracked` };
+    }
+    if (xy[0] === 'A') {
+      git(repo, ['rm', '-f', '--', path]);
+      return { ok: true, why: `removed ${path} — it was newly added` };
+    }
+    git(repo, ['restore', '--staged', '--worktree', '--source=HEAD', '--', path]);
+    return { ok: true, why: `restored ${path} to HEAD` };
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    log('WARN', 'diff_discard_one_failed', { repo, path, error: detail });
+    return { ok: false, why: detail };
+  }
+}
+
+/** Is this path untracked? The page asks so its confirmation can say "delete" instead of "restore". */
+export function isUntracked(repo: string, path: string): boolean {
+  const row = gitRaw(repo, ['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-uall', '--', path])
+    .split('\n').find((l) => l.length > 3);
+  return row?.slice(0, 2) === '??';
+}
+
 // ── the .cs line-level pass ──────────────────────────────────────────────────────
 
 /** The added lines of a file's UNSTAGED diff, as `{ n, text }` where n indexes into the patch body. */
