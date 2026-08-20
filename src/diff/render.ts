@@ -959,8 +959,10 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
   background:none;border:0;cursor:pointer;color:var(--priv);opacity:0;transition:opacity .12s}
 .chip:hover .cbin,.cbin:focus-visible{opacity:.85}
 .cbin:hover{opacity:1}
-.chip.on .cbin{color:var(--bg)}
-[data-theme="light"] .chip.on .cbin{color:#fff}
+/* Red on the active chip too: it reads against --wire-hot less cleanly than a dark glyph would, but a
+   destructive control that changes colour depending on a filter state is worse than one that is always
+   the same red. */
+.chip.on .cbin{color:var(--priv)}
 .cbin svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.8;
   stroke-linecap:round;stroke-linejoin:round}
 .count{margin-left:auto;font:12px/1 var(--mono);color:var(--ink-2)}
@@ -1182,7 +1184,49 @@ ${o.interactive ? discardFab() + refreshFab() : ''}
 <script>
 (function(){
   var DEF = ${JSON.stringify(DEFAULT_EXTENSIONS)};
-  var on = new Set(DEF);
+
+  // ── the filter, remembered ──────────────────────────────────────────────────
+  // A cookie rather than localStorage because the served page and the operator's browser already agree
+  // on cookies for this origin, and the value is four words long. Scoped to the root path of the
+  // session's own loopback origin, so it does not travel anywhere.
+  //
+  // A SAVED SET WINS OVER THE DEFAULTS, but only when it parses to something: an empty or corrupt
+  // cookie falls back to DEF rather than showing a page with every file hidden, which would read as an
+  // empty diff. An extension that appears LATER and is not in the saved set starts hidden — that is
+  // what remembering a filter means — and the hidden-file count on screen is what keeps it honest.
+  var COOKIE = 'ayin_diff_exts';
+
+  /**
+   * A value that could be a chip. Applied on WRITE and on READ.
+   *
+   * The parens are DOUBLE-escaped on purpose: this whole script is emitted from a template literal, so
+   * a single backslash is eaten before the regex ever exists. It was, and the escaped parens collapsed
+   * into a capture group matching the bare word none — so the extensionless bucket silently failed to
+   * persist while every other extension worked.
+   *
+   * Read is filtered too, so a hand-edited cookie cannot leave the page in a filter state that matches
+   * no chip and shows nothing.
+   */
+  function okExt(x){ return /^(\\(none\\)|\\.[A-Za-z0-9_+-]{1,24})$/.test(x); }
+
+  function saveExts(){
+    try {
+      var v = Array.from(on).filter(okExt);
+      document.cookie = COOKIE + '=' + encodeURIComponent(v.join(',')) + ';path=/;max-age=31536000;samesite=lax';
+    } catch (e) { /* a browser refusing cookies must not break the filter itself */ }
+  }
+
+  function loadExts(){
+    try {
+      var m = document.cookie.match(new RegExp('(?:^|; )' + COOKIE + '=([^;]*)'));
+      if (!m) return null;
+      var v = decodeURIComponent(m[1]).split(',').filter(okExt);
+      return v.length ? v : null;
+    } catch (e) { return null; }
+  }
+
+  var saved = loadExts();
+  var on = new Set(saved || DEF);
   var files = [].slice.call(document.querySelectorAll('.file'));
   var rows  = [].slice.call(document.querySelectorAll('.row'));
   var chips = [].slice.call(document.querySelectorAll('.chip'));
@@ -1197,6 +1241,7 @@ ${o.interactive ? discardFab() + refreshFab() : ''}
       if (vis) shown++;
     });
     chips.forEach(function(c){ c.classList.toggle('on', on.has(c.dataset.ext)); });
+    saveExts();   // apply() is the single funnel every change passes through
     var total = files.length, hidden = total - shown;
     // Always on screen. A filter that defaults to off can make a large diff look small, and
     // "the tree is fine" is the most expensive wrong conclusion this page could produce.
@@ -1289,6 +1334,8 @@ ${o.interactive ? discardFab() + refreshFab() : ''}
   document.getElementById('all').onclick = function(){
     chips.forEach(function(c){ on.add(c.dataset.ext); }); apply();
   };
+  // The defaults button returns to the SHIPPED defaults and overwrites what was remembered —
+  // otherwise the one button that exists to undo a filter would be the only thing unable to.
   document.getElementById('none').onclick = function(){ on = new Set(DEF); apply(); };
 
   files.forEach(function(f){

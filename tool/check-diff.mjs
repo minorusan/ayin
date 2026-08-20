@@ -467,6 +467,71 @@ ok(/the subject is empty/.test(cmHtml),
 const cmStatic = render.renderDiffPage(fabSet, { interactive: false, rev: 'HEAD', comments: [], commitDraft: 'feat: x' });
 ok(!/id="docommit"/.test(cmStatic), 'a file:// page never offers Commit — committing is a git write');
 
+// ── 11b · the filter is remembered, and the helpers are RUN, not grepped ─────────
+//
+// Every "is the code present" check passed while this feature did nothing at all: `[].slice.call(on)`
+// returns [] for a Set — that idiom is used elsewhere here for NodeLists, which ARE array-like — so
+// every apply() wrote an empty cookie. The only way to catch that is to execute the emitted helpers.
+//
+// The second bug the same harness found: this script is built from a template literal, so a single
+// backslash is eaten before any regex exists. The escaped parens collapsed into a capture group
+// matching the bare word "none", and the extensionless bucket silently failed to persist while every
+// other extension round-tripped fine.
+
+console.log('\nfilter memory');
+
+const memHtml = render.renderDiffPage(ixSet, { interactive: true, rev: 'HEAD', comments: [], commitDraft: null });
+const memJs = memHtml.match(/<script>([\s\S]*?)<\/script>/)[1];
+
+/** Lift one function out of the emitted script, braces balanced. */
+const lift = (name) => {
+  const i = memJs.indexOf(`function ${name}(`);
+  if (i === -1) return '';
+  let depth = 0, end = memJs.indexOf('{', i);
+  for (let k = end; k < memJs.length; k++) {
+    if (memJs[k] === '{') depth++;
+    else if (memJs[k] === '}' && --depth === 0) { end = k + 1; break; }
+  }
+  return memJs.slice(i, end);
+};
+
+const cookieApi = (set) => {
+  let jar = '';
+  const doc = { get cookie() { return jar; }, set cookie(v) { jar = v.split(';')[0]; } };
+  const api = new Function('document', 'on', 'COOKIE',
+    `${lift('okExt')}${lift('saveExts')}${lift('loadExts')}; return { saveExts, loadExts };`,
+  )(doc, set, 'ayin_diff_exts');
+  return { api, jar: () => jar, poke: (v) => { jar = `ayin_diff_exts=${v}`; } };
+};
+
+{
+  const c = cookieApi(new Set(['.cs', '.prefab', '(none)']));
+  c.api.saveExts();
+  const back = c.api.loadExts();
+  ok(c.jar().length > 'ayin_diff_exts='.length, 'saveExts writes a NON-EMPTY cookie for a Set', c.jar());
+  ok(JSON.stringify(back) === JSON.stringify(['.cs', '.prefab', '(none)']),
+    'and the whole selection round-trips, extensionless bucket included', JSON.stringify(back));
+
+  c.poke('');
+  ok(c.api.loadExts() === null, 'an empty cookie yields null so the page falls back to the defaults');
+  c.poke('%2E%2E%2Fx');
+  ok(c.api.loadExts() === null, 'a corrupt cookie is rejected on READ, not turned into a filter');
+}
+{
+  const c = cookieApi(new Set(['.cs', '; rm -rf /', '../../etc', '(none)']));
+  c.api.saveExts();
+  const v = decodeURIComponent(c.jar().split('=')[1]);
+  ok(v === '.cs,(none)', 'anything not extension-shaped is dropped on WRITE too', v);
+}
+
+ok(/saveExts\(\);/.test(memJs), 'apply() is where it is saved — the one funnel every change passes');
+ok(/var saved = loadExts\(\)/.test(memJs), 'and the saved set is read before the defaults are used');
+// A backtick inside this script's template literal terminates it and the page's JS dies wholesale.
+// It has happened four times in this file; assert it rather than remember it.
+const litStart = memHtml.indexOf('<script>');
+ok(!memHtml.slice(litStart, memHtml.indexOf('</script>', litStart)).includes('`'),
+  'no backtick survives into the emitted script — one would have ended the literal that built it');
+
 // ── 12 · discard: the only irreversible controls on the page ─────────────────────
 //
 // `clean -fd` deletes untracked files git never had — no object, no reflog, nothing to recover. So the

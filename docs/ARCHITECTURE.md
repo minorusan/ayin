@@ -1983,6 +1983,23 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
   size and truncating kept the noise. A tracked file is a change made on purpose — when something has
   to be dropped, that decides which. Omitted files keep their row and their true counts.
 
+- **The extension filter is remembered, in a cookie.** `ayin_diff_exts`, root path on the session's own
+  loopback origin, written from `apply()` — the one funnel every change passes through. A saved set wins
+  over the shipped defaults, but only when it parses to something: an empty or corrupt cookie falls back
+  to the defaults rather than rendering a page with everything hidden, which would read as an empty
+  diff. Values are shape-checked on write AND on read, so a hand-edited cookie cannot leave the page in
+  a filter state no chip matches. An extension appearing later that is not in the saved set starts
+  hidden — that is what remembering a filter means — and the always-on hidden-file count is what keeps
+  that honest. The `defaults` button overwrites what was remembered, since the one control that exists
+  to undo a filter must not be the only thing unable to.
+
+  Two bugs here were invisible to every "is the code present" check and only fell out of EXECUTING the
+  emitted helpers, which is now what the gate does. `[].slice.call(on)` returns `[]` for a Set — that
+  idiom is used elsewhere in this file for NodeLists, which are array-like — so every apply wrote an
+  empty cookie. And because the script is built from a template literal, a single backslash is eaten
+  before any regex exists: the escaped parens collapsed into a capture group matching the bare word
+  `none`, so the extensionless bucket silently failed to persist while every other extension worked.
+
 - **File-type icons: shape is the type, colour is the status.** The row had one mark — a coloured
   square for added/modified/deleted — and left the type to be read out of the extension. On a Unity
   tree that is the wrong thing to make someone parse: measured on a real project the top extensions
