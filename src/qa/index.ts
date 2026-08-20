@@ -47,6 +47,7 @@ import { describeFile, filesModifiedSince, gatherEvidence, gitDirtySet, probeThi
 import { reviewArtifacts, type QaIssue, type QaVerdict } from './review.js';
 import { detectProject, describeProject } from '../executors/detect.js';
 import { qaExecutorFor } from '../executors/registry.js';
+import { isFullMode } from '../full-mode.js';
 
 export type { QaIssue, QaVerdict };
 
@@ -178,7 +179,7 @@ export function qaEnabled(): boolean {
 /** `AYIN_QA=1` force-enables the session toggle from the environment — the mirror of the existing
  *  `AYIN_QA=0` kill switch, and the only way to exercise the gate headlessly, where there is no TUI
  *  to type `/qa` into. See `plan/index.ts`'s identical note. */
-let sessionEnabled = process.env.AYIN_QA === '1';
+let sessionEnabled = process.env.AYIN_QA === '1' || isFullMode();
 let forceNextTurn = false;
 
 export function toggleQaSession(): boolean {

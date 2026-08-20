@@ -205,6 +205,7 @@ export const HELP: HelpEntry[] = [
   { name: 'ayin -p', kind: 'cli', section: 'From your shell', short: 'Headless: ayin -p "<task>". Auto-approves writes and shell — run it on a tree you can revert' },
   { name: 'ayin debug', kind: 'cli', section: 'From your shell', short: 'ayin debug [dir] — the same bundle without the TUI, for a run nobody was sitting in front of' },
   { name: 'ayin --debug', kind: 'cli', section: 'From your shell', short: 'Start the TUI with /debug already applied — the bundle path exists before anything goes wrong' },
+  { name: 'ayin --full', kind: 'cli', section: 'From your shell', short: 'Everything on for this launch: debug bundle, QA session, permission gate skipped — push/pull still refuse' },
   { name: 'ayin kill dog', kind: 'cli', section: 'From your shell', short: 'Disable every hound Stop hook instantly and persistently — `--off` brings it back' },
   { name: 'ayin update', kind: 'cli', section: 'From your shell', short: 'Self-update from the configured registry' },
 ];

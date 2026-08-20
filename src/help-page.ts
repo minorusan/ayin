@@ -52,6 +52,9 @@ export function slugFor(name: string): string {
   // behaviours — check:helppage rejects the collision rather than letting the second entry open a page
   // about the first.
   if (bare === '--debug') return 'debug-flag';
+  // Same collision as `--debug`: a page called `full.md` would be indistinguishable from a subcommand
+  // page, and this one is specifically about the FLAG applied to a normal launch.
+  if (bare === '--full') return 'full-flag';
   const slug = bare.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   return slug || 'ayin';
 }

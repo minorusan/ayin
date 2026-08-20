@@ -77,5 +77,68 @@ for (const [, name] of (noTui ?? '').matchAll(/'([a-z][a-z-]+)'/g)) {
 }
 if (!failures.length) ok('no exemption points at a subcommand that has been removed');
 
+// ── `--full`, and the flag validation that makes a typo visible ───────────────────
+//
+// `ayin --ful` used to start an ordinary session with none of the three switches on and say nothing —
+// indistinguishable from a working flag until the thing it was meant to enable failed to happen, and
+// one of those things is the permission gate.
+//
+// TWO KINDS OF CHECK, chosen for what each can honestly prove. The three switches are read from argv
+// at MODULE IMPORT, and importing those modules builds a blessed screen at module scope — a spawned
+// probe around them was flaky for reasons that had nothing to do with the flag. So the WIRING is
+// asserted statically, which is exactly the regression worth catching (a call site quietly deleted),
+// and the REJECTION is asserted by launching the real binary, where an exit code is the whole answer.
+
+import { execFileSync } from 'node:child_process';
+
+const fullMode = readFileSync(join(REPO, 'src/full-mode.ts'), 'utf-8');
+if (/argv\.includes\('--full'\)/.test(fullMode)) ok('--full is defined in exactly one place');
+else failures.push('src/full-mode.ts no longer reads --full from argv');
+
+// One call site per switch. Named individually so a failure says WHICH one went missing.
+const wiring = [
+  ['permissions.ts', 'src/permissions.ts', 'the permission gate'],
+  ['qa/index.ts', 'src/qa/index.ts', 'the QA session toggle'],
+  ['app.ts', 'src/app.ts', 'the boot debug bundle'],
+];
+for (const [label, rel, what] of wiring) {
+  const src = readFileSync(join(REPO, rel), 'utf-8');
+  if (/isFullMode\(\)/.test(src)) ok(`--full still reaches ${what} (${label})`);
+  else failures.push(`${label} no longer consults isFullMode() — ${what} is silently off under --full`);
+}
+
+// The guard --full must NOT buy. It runs above every permission rule and denies under any skip flag,
+// because a push is unrecoverable and public.
+const perms = readFileSync(join(REPO, 'src/permissions.ts'), 'utf-8');
+if (/if \(HEADLESS \|\| skipPermissions \|\| READONLY\) \{[\s\S]{0,240}?return 'deny'/.test(perms)) {
+  ok('a dangerous op is still DENIED under a skip flag — no flag turns that off');
+} else {
+  failures.push('the dangerous-op guard no longer denies under skipPermissions');
+}
+
+/** Launch the real binary and report exit code + stderr. */
+function launch(args) {
+  try {
+    execFileSync(process.execPath, [join(REPO, 'dist/index.js'), ...args],
+      { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 25_000 });
+    return { code: 0, err: '' };
+  } catch (e) {
+    return { code: e.status ?? -1, err: String(e.stderr ?? '') };
+  }
+}
+
+const typo = launch(['--ful']);
+if (typo.code === 2 && /unknown option --ful/.test(typo.err)) ok('a mistyped flag exits 2 and names itself');
+else failures.push(`--ful gave code ${typo.code}: ${typo.err.slice(0, 160)}`);
+
+if (/Known options on a bare launch/.test(typo.err)) ok('and the error lists what IS accepted');
+else failures.push('the rejection did not list the known options');
+
+// A subcommand owns its own arguments — a whitelist applied to those would reject flags that are
+// valid one frame down, which is why the check returns early when argv[2] names a subcommand.
+const sub = launch(['indulge', '--status']);
+if (!(sub.code === 2 && /unknown option/.test(sub.err))) ok("a subcommand's own flags are NOT validated here");
+else failures.push('subcommand flags were rejected by the bare-launch whitelist');
+
 console.log(failures.length ? `\ncli check: ${failures.length} FAILED` : '\ncli check: ok');
 process.exit(failures.length ? 1 : 0);

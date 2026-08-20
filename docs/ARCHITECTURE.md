@@ -3276,6 +3276,38 @@ tool/
                         Run it whenever you touch watch.ts or assets/ayin-hound.mjs.
 ```
 
+## `--full`, and why a mistyped flag now fails (`src/full-mode.ts`)
+
+`ayin --full` turns on the three switches an operator most often wants together — the boot debug
+bundle (`--debug`), the QA session toggle (`AYIN_QA=1`) and the permission gate stepped around
+(`--dangerously-skip-permissions`). Each is read by a DIFFERENT module at import time, so the flag has
+to be resolvable from argv alone with no dependencies: otherwise `permissions.ts` would import a module
+that imports it back. One definition, in one file, because three copies of `argv.includes('--full')`
+are three places for the meaning to drift and the one that drifts is the permission gate.
+
+**Session-scoped by construction.** Nothing is written to disk — the flag lives in the command line and
+argv does not survive a restart. That property is the point for the permission gate: `permissions.ts`
+argues that a gate which silently stayed off after a restart is one nobody remembers turning off, and
+the first they learn of it is the thing it would have stopped. A flag typed per launch makes the
+operator re-state the intent every time.
+
+**It does not buy the push/pull/checkout guard.** That check runs above every permission rule and
+returns `deny` under any skip flag rather than allowing, because those actions are unrecoverable and
+public. Verified live: under `--full`, `git push origin main` and `git checkout main` are both denied
+while `ls -la` is allowed. There is no flag that turns that off.
+
+**A mistyped flag now exits 2.** Nothing validated argv, so `ayin --ful` launched an ordinary session
+with none of the switches on and said nothing — indistinguishable from a working flag until the thing
+it was supposed to enable failed to happen. The check is scoped to a BARE LAUNCH and returns
+immediately when `argv[2]` names a subcommand: every subcommand parses its own arguments
+(`indulge --domains`, `diff --no-open`, `watch --repo`), so a whitelist applied to those would reject
+flags that are valid one frame down. Flags that consume the next argument skip it, so `-p "--looks-like-a-flag"`
+is a prompt and not an error.
+
+Gate: `npm run check:cli` — the three call sites are asserted STATICALLY (importing them builds a
+blessed screen at module scope, which made a spawned probe flaky for reasons unrelated to the flag),
+and the rejection is asserted by launching the real binary, where the exit code is the whole answer.
+
 ## What ayin deliberately does NOT have
 
 Each of these is an absence on purpose, not a gap waiting to be filled. They are listed because the

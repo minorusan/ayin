@@ -129,6 +129,7 @@ async function refreshTokens(): Promise<void> {
 import blessed from 'blessed';
 import { startLiveMirror } from './live-mirror.js';
 import { registerShippedPrompts } from './prompts.js';
+import { isFullMode } from './full-mode.js';
 
 let summaryOverlay: blessed.Widgets.BoxElement | null = null;
 
@@ -1644,7 +1645,7 @@ async function runInteractive(): Promise<void> {
       // purpose: the session id and the resolved model are what make the bundle worth reading, and both
       // exist only once `initSession` has answered. A dialect probe still in flight is reported as
       // provisional by the bundle itself, not guessed at here.
-      if (process.argv.includes('--debug')) void handleInput('/debug');
+      if (process.argv.includes('--debug') || isFullMode()) void handleInput('/debug');
     }).catch(err => {
       log('WARN', 'session_init_failed', { error: err instanceof Error ? err.message : String(err) });
     });

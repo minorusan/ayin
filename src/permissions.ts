@@ -19,6 +19,7 @@
 import { showDialog, type DialogOption } from './dialog.js';
 import { log } from './log.js';
 import { HEADLESS } from './ui.js';
+import { isFullMode } from './full-mode.js';
 
 /**
  * Skip the confirmation prompts for this SESSION.
@@ -36,7 +37,7 @@ import { HEADLESS } from './ui.js';
  * and under a skip flag it DENIES rather than allows. Those are unrecoverable and public; the only
  * safe answer with nobody watching is no.
  */
-let skipPermissions = process.argv.includes('--dangerously-skip-permissions');
+let skipPermissions = process.argv.includes('--dangerously-skip-permissions') || isFullMode();
 
 export function isSkippingPermissions(): boolean { return skipPermissions; }
 

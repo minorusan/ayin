@@ -40,6 +40,56 @@ if (NO_OWN_USAGE.has(helpArg ?? '')
   process.exit(runHelp([`ayin ${helpArg}`]));
 }
 
+/**
+ * A MISTYPED FLAG MUST FAIL, not launch a normal session.
+ *
+ * Nothing validated argv, so `ayin --ful` started an ordinary TUI with none of the three switches on
+ * and said nothing about it — indistinguishable from a working flag until the thing it was supposed to
+ * enable failed to happen. `--dangerously-skip-permissions` is in that set, which makes a silent
+ * typo a security-shaped bug rather than an inconvenience.
+ *
+ * SCOPED TO A BARE LAUNCH, and that is the whole subtlety. Every subcommand parses its OWN arguments —
+ * `indulge --domains`, `diff --no-open`, `watch --repo` — so a whitelist applied to those would reject
+ * flags that are perfectly valid one frame down. When argv[2] names a subcommand this returns
+ * immediately and the subcommand stays the authority on its own surface.
+ *
+ * Flags that consume the NEXT argument skip it: `-p "some prompt"` must not have its prompt validated
+ * as a flag, and a prompt beginning with `--` would otherwise be rejected as one.
+ */
+function rejectUnknownFlags(): void {
+  const SUBCOMMANDS = new Set([
+    'watch', 'unwatch', 'kill', 'indulge', 'launch', 'testrun', 'debug', 'diff', 'update',
+    'explain', 'version', 'help', 'sentinaile-supervisor',
+  ]);
+  const args = process.argv.slice(2);
+  if (args.length === 0) return;
+  if (SUBCOMMANDS.has(args[0])) return;                 // the subcommand owns its arguments
+
+  /** Bare-launch flags, each one actually read somewhere in this codebase. */
+  const KNOWN = new Set([
+    '-p', '--prompt', '--non-interactive',              // headless; these take a value
+    '--full', '--debug', '--dangerously-skip-permissions', '--thinking', '--transcribe',
+    '--help', '-h', '--version', '-v',
+  ]);
+  const TAKES_VALUE = new Set(['-p', '--prompt', '--non-interactive']);
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith('--prompt=')) continue;
+    if (KNOWN.has(a)) {
+      if (TAKES_VALUE.has(a)) i++;                      // its value is not a flag
+      continue;
+    }
+    if (!a.startsWith('-')) continue;                   // a bare word is not our business here
+    process.stderr.write(`ayin: unknown option ${a}\n`);
+    process.stderr.write(`Known options on a bare launch: ${[...KNOWN].join(' ')}\n`);
+    process.stderr.write('Subcommands take their own flags — try `ayin <subcommand> --help`.\n');
+    process.exit(2);
+  }
+}
+
+rejectUnknownFlags();
+
 // Returns only when ayin has a model to talk to; exits the process otherwise.
 await preflight();
 
