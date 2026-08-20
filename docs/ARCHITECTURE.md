@@ -94,6 +94,19 @@ Gated (`the paid provider is never reached by accident`).
   `slash.secret` — never reaches the input history or the model's context. Bare `/openai` reports
   status. `/set openai-key` is refused and redirects here: it used to write an unverified secret into
   `prompts.json` beside prompt-tuning numbers.
+- **The GitHub PAT** (`src/tools/credentials/github.ts`) — for reaching GitHub as the operator without
+  a browser and without `gh auth login`, which is interactive and so useless headless. Read in a fixed
+  order: `GITHUB_TOKEN` in the environment → `~/.ayin-cli/github.env` (0600, atomic, via the shared
+  `envfile` helper) → `gh auth token` **last**. The CLI is a convenience for a workstation that already
+  works, never a dependency: it is a subprocess that can hang (bounded to 4 s, probed once per process)
+  and its answer belongs to whichever account someone logged in as, which need not be the one this run
+  wants — a real case, since a stale `gh` login served an EXPIRED token while a good one sat in the
+  file. Hence file-over-CLI. `verifyGithubToken()` checks a token against `/user` and reports the
+  login, because a PAT that is merely PRESENT is worth nothing: the failure it prevents is a stored
+  token that 401s later, mid-task, blamed on the code. `githubSummary()` reports source + a masked
+  token, never bytes. One token, not several — ayin operates on the repo in front of it; point
+  `GITHUB_TOKEN` at a different account if a run needs one. **No slash command** — setting it is a
+  file or an env var, so nothing is owed to `src/help.ts`.
 - **`/model openai`** switches who answers; **`/model local`** switches back. Setting a credential and
   deciding to spend money are two decisions, and the old `/openai` merged them into one keystroke.
   The switch is refused outright when no key is configured — entering a provider that then throws on
