@@ -27,7 +27,10 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { collectDiff } from './collect.js';
 import { renderDiffPage } from './render.js';
 import { createComment, getComment, readComments } from './comments.js';
-import { autoStage, discardAll, discardOne, previewDiscard, safeRepoPath, stageOne, unstageOne } from './stage.js';
+import {
+  autoStage, discardAll, discardByExt, discardOne, previewDiscard, previewDiscardExt,
+  safeRepoPath, stageOne, unstageOne,
+} from './stage.js';
 import { commitStaged, draftCommit, readCommitDraft, rephraseSubject } from '../commit-draft.js';
 import { log } from '../log.js';
 
@@ -276,6 +279,31 @@ export async function handleDiffRequest(req: IncomingMessage, res: ServerRespons
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log('WARN', 'diff_discard_route_failed', { error: msg });
+      json(res, 500, { error: msg });
+    }
+    return true;
+  }
+
+  // Per-extension, preview and act. The extension is operator input from a browser, so it is length-
+  // capped and shape-checked before it reaches a filter — not because it becomes a shell argument (it
+  // does not), but because an unbounded string here would end up in a log line and a dialog.
+  if (path === '/api/diff/discard-ext' && (req.method === 'GET' || req.method === 'POST')) {
+    try {
+      let ext = url.searchParams.get('ext') ?? '';
+      if (req.method === 'POST') {
+        const raw = await readBody(req);
+        try { ext = String((JSON.parse(raw) as { ext?: unknown }).ext ?? ''); } catch { /* keep the query one */ }
+      }
+      if (!/^(\(none\)|\.[A-Za-z0-9_+-]{1,24})$/.test(ext)) {
+        json(res, 400, { error: `ext: ${ext.slice(0, 40)} is not an extension` });
+        return true;
+      }
+      if (req.method === 'GET') { json(res, 200, previewDiscardExt(cwd, ext)); return true; }
+      const r = discardByExt(cwd, ext);
+      json(res, r.ok ? 200 : 400, { ok: r.ok, why: r.why, done: r.done, failed: r.failed });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('WARN', 'diff_discard_ext_failed', { error: msg });
       json(res, 500, { error: msg });
     }
     return true;

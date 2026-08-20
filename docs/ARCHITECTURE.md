@@ -2063,6 +2063,18 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
   `restore --staged --worktree --source=HEAD --` (a bare `checkout --` would leave the staged half
   behind). An ignored path is refused — it is not in the diff, so a button here cannot mean it.
 
+  **And each extension chip carries its own bin**, which discards every changed file of that type —
+  the widest of the three blast radii here, so the same informed confirmation applies and names the
+  files. It runs `discardOne` per file rather than one command with a pathspec, because the four states
+  each need a different command and a pathspec spanning them would silently do nothing for two.
+  `(none)` is a real bucket matching extensionless files and **not** a wildcard: a bucket that matched
+  everything would make one click discard the tree. Containment is what `check:diff` asserts — discard
+  `.cs` and `.ts`, `.prefab` and the extensionless file are all verified untouched.
+
+  A chip is now a `<span role="button">` for the same reason a file card is: it holds a button, and a
+  button inside a button is invalid HTML. Enter and Space are wired in the client, and the bin's click
+  is stopped from bubbling so discarding a type does not also toggle the filter it is shown under.
+
   A clean tree is **refused** rather than presented as a scary dialog that does nothing. The red FAB
   sits a clear gap above the refresh FAB rather than beside it, so a mis-aimed click for refresh lands
   on empty space instead of the one control that cannot be undone.

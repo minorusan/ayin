@@ -133,8 +133,9 @@ ok(html.includes('&lt;/script&gt;'), 'it is present as escaped text — escaping
 
 ok(JSON.stringify(render.DEFAULT_EXTENSIONS) === JSON.stringify(['.cs', '.asset', '.ts', '.js', '.py']),
   'default-on extensions are exactly .cs .asset .ts .js .py');
-ok(/class="chip on" data-ext="\.cs"/.test(html), '.cs starts enabled');
-ok(/class="chip" data-ext="\.md"/.test(html) || !html.includes('data-ext=".md"'),
+// The chip carries role/tabindex now, so the attributes sit between the class and data-ext.
+ok(/class="chip on"[^>]*data-ext="\.cs"/.test(html), '.cs starts enabled');
+ok(/class="chip"[^>]*data-ext="\.md"/.test(html) || !html.includes('data-ext=".md"'),
   '.md starts disabled — everything outside the default set is one click away');
 ok(html.includes("id=\"count\""), 'the hidden-file count element is present');
 ok(/hidden/.test(html), 'the page says how many files a filter is hiding — a filter that hides silently lies');
@@ -535,6 +536,54 @@ ok(/cannot be undone/.test(dzHtml), 'the confirmation says it cannot be undone')
 ok(/git cannot recover these/.test(dzHtml), 'and calls out the untracked deletions specifically');
 ok(/fab danger/.test(dzHtml), 'the FAB is marked as dangerous, not styled like the others');
 
+// ── per-extension discard ────────────────────────────────────────────────────────
+//
+// The chip's bin discards a whole TYPE, which is the widest of the three blast radii on this page. The
+// assertions that matter are containment: exactly that extension, nothing else, and the empty
+// extension is a real bucket rather than a hole that matches everything.
+
+const EX = mkdtempSync(join(tmpdir(), 'ayin-diffex-'));
+const eg = (...a) => execFileSync('git', a, { cwd: EX, stdio: 'ignore' });
+eg('init', '-q', '-b', 'main');
+eg('config', 'user.email', 'e@example.invalid'); eg('config', 'user.name', 'e');
+for (const [f, c] of [['a.cs', 'a\n'], ['keep.ts', 'k\n'], ['x.prefab', 'p\n']]) writeFileSync(join(EX, f), c);
+eg('add', '-A'); eg('commit', '-qm', 'base');
+writeFileSync(join(EX, 'a.cs'), 'a\nmod\n');
+writeFileSync(join(EX, 'b.cs'), 'untracked\n');
+writeFileSync(join(EX, 'keep.ts'), 'k\nmod\n');
+writeFileSync(join(EX, 'x.prefab'), 'p\nmod\n');
+writeFileSync(join(EX, 'README'), 'no extension\n');
+
+const { previewDiscardExt, discardByExt } = await import(`file://${join(ROOT, 'dist', 'diff', 'stage.js')}`);
+
+const pvCs = previewDiscardExt(EX, '.cs');
+ok(pvCs.tracked.join() === 'a.cs' && pvCs.untracked.join() === 'b.cs',
+  'the per-type preview picks exactly that extension, both sides',
+  JSON.stringify(pvCs));
+// `(none)` is what the chip calls the empty extension. It must match extensionless files and NOT act
+// as a wildcard — a bucket that matched everything would make one click discard the whole tree.
+const pvNone = previewDiscardExt(EX, '(none)');
+ok(pvNone.untracked.join() === 'README' && pvNone.tracked.length === 0,
+  '(none) matches extensionless files and nothing else', JSON.stringify(pvNone));
+
+const byExt = discardByExt(EX, '.cs');
+ok(byExt.ok && byExt.done.length === 2, 'discarding a type takes every file of it', byExt.why);
+ok(readFileSync(join(EX, 'a.cs'), 'utf-8') === 'a\n', 'its tracked file is back at HEAD');
+ok(!existsSync(join(EX, 'b.cs')), 'its untracked file is gone');
+ok(readFileSync(join(EX, 'keep.ts'), 'utf-8') === 'k\nmod\n', 'another type is UNTOUCHED');
+ok(readFileSync(join(EX, 'x.prefab'), 'utf-8') === 'p\nmod\n', 'and so is a third');
+ok(existsSync(join(EX, 'README')), 'and the extensionless file too');
+ok(!discardByExt(EX, '.cs').ok, 'a second pass on that type is refused');
+
+const chipHtml2 = render.renderDiffPage(ixSet, { interactive: true, rev: 'HEAD', comments: [], commitDraft: null });
+const chipStatic = render.renderDiffPage(ixSet, { interactive: false, rev: 'HEAD', comments: [], commitDraft: null });
+ok(!/<button class="chip/.test(chipHtml2), 'a chip is NOT a button — it has to contain one');
+ok(/<span class="chip[^"]*" role="button" tabindex="0"/.test(chipHtml2), 'it is a span with the button role');
+ok(/class="cbin"/.test(chipHtml2) && !/class="cbin"/.test(chipStatic), 'the chip bin is served-only');
+ok(/e\.stopPropagation\(\)/.test(chipHtml2),
+  'its click is stopped — discarding a type must not also toggle the filter it is shown under');
+
+rmSync(EX, { recursive: true, force: true });
 rmSync(DZ, { recursive: true, force: true });
 rmSync(CM, { recursive: true, force: true });
 rmSync(IX, { recursive: true, force: true });

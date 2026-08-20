@@ -30,7 +30,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { llmChat } from '../llm/manager.js';
 import { log } from '../log.js';
 import { prompts, packagePath } from '../prompts-service.js';
@@ -212,6 +212,47 @@ export function discardOne(repo: string, path: string): { ok: boolean; why: stri
     log('WARN', 'diff_discard_one_failed', { repo, path, error: detail });
     return { ok: false, why: detail };
   }
+}
+
+/**
+ * The changed files of ONE extension, split the way the confirmation needs them.
+ *
+ * `extname` is used rather than a hand-rolled split so this agrees exactly with what the page put on
+ * the chip: `FileDiff.ext` comes from `extname()` too, which means `.gitignore` is extensionless to
+ * both of them rather than an `.gitignore` type to one and nothing to the other. The empty extension
+ * is a real bucket — the chip calls it `(none)` — so it is matched, not skipped.
+ */
+export function previewDiscardExt(repo: string, ext: string): DiscardPreview {
+  const want = ext === '(none)' ? '' : ext.toLowerCase();
+  const all = previewDiscard(repo);
+  const mine = (p: string): boolean => extname(p).toLowerCase() === want;
+  return { tracked: all.tracked.filter(mine), untracked: all.untracked.filter(mine) };
+}
+
+/**
+ * Discard every changed file of one extension, file by file through `discardOne`.
+ *
+ * NOT a single `clean`/`restore` with a pathspec: the four file states each need a different command
+ * (see discardOne), and a pathspec that spans them would silently do nothing for two of them. Failures
+ * are collected rather than thrown — one unreadable file must not leave the other nine untouched with
+ * no explanation.
+ */
+export function discardByExt(repo: string, ext: string): { ok: boolean; why: string; done: string[]; failed: string[] } {
+  const pv = previewDiscardExt(repo, ext);
+  const paths = [...pv.tracked, ...pv.untracked];
+  if (!paths.length) return { ok: false, why: `no changed ${ext} files to discard`, done: [], failed: [] };
+  log('WARN', 'diff_discard_ext_requested', { repo, ext, files: String(paths.length) });
+  const done: string[] = [];
+  const failed: string[] = [];
+  for (const p of paths) {
+    if (discardOne(repo, p).ok) done.push(p); else failed.push(p);
+  }
+  log('WARN', 'diff_discard_ext_done', { repo, ext, done: String(done.length), failed: String(failed.length) });
+  return {
+    ok: done.length > 0,
+    why: `${done.length} ${ext} file(s) discarded${failed.length ? `, ${failed.length} could not be` : ''}`,
+    done, failed,
+  };
 }
 
 /** Is this path untracked? The page asks so its confirmation can say "delete" instead of "restore". */

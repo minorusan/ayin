@@ -877,9 +877,20 @@ export function renderDiffPage(set: DiffSet, opts: RenderOptions = {}): string {
   const totalAdd = set.files.reduce((n, f) => n + f.additions, 0);
   const totalDel = set.files.reduce((n, f) => n + f.deletions, 0);
 
+  // A chip is a SPAN with a button role, for the same reason a file card is: it now holds its own
+  // discard button, and a button inside a button is invalid HTML — the parser lifts the inner one out
+  // of the outer and the chip stops laying out, silently. Enter and Space are wired in the client to
+  // replace what a real button gave for free. The bin is served-only: it is a git write.
   const chipHtml = chips.map(([ext, n]) => {
     const on = DEFAULT_EXTENSIONS.includes(ext);
-    return `<button class="chip${on ? ' on' : ''}" data-ext="${esc(ext)}">${esc(ext)}<i>${n}</i></button>`;
+    const bin = o.interactive
+      ? `<button class="cbin" data-ext="${esc(ext)}" aria-label="Discard all changed ${esc(ext)} files"`
+        + ` title="Discard changes in every ${esc(ext)} file">`
+        + '<svg viewBox="0 0 24 24" aria-hidden="true">'
+        + '<path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l1 12.5h9L17.5 7"/></svg></button>'
+      : '';
+    return `<span class="chip${on ? ' on' : ''}" role="button" tabindex="0" data-ext="${esc(ext)}">`
+      + `${esc(ext)}<i>${n}</i>${bin}</span>`;
   }).join('');
 
   const filesHtml = set.files.map((f, i) => {
@@ -940,6 +951,18 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
 .chip.on{color:var(--bg);background:var(--wire-hot);border-color:var(--wire-hot);font-weight:650}
 [data-theme="light"] .chip.on{color:#fff}
 .chip:hover{border-color:var(--wire-hot)}
+.chip:focus-visible{outline:2px solid var(--wire-hot);outline-offset:1px}
+/* The chip's own discard. Quiet until the chip is hovered, because a row of a dozen chips each
+   carrying a permanent red bin reads as a threat rather than a filter bar — and unlike the file cards,
+   these are always all on screen at once. */
+.cbin{display:grid;place-items:center;padding:0;margin:-2px -3px -2px 1px;width:15px;height:15px;
+  background:none;border:0;cursor:pointer;color:var(--priv);opacity:0;transition:opacity .12s}
+.chip:hover .cbin,.cbin:focus-visible{opacity:.85}
+.cbin:hover{opacity:1}
+.chip.on .cbin{color:var(--bg)}
+[data-theme="light"] .chip.on .cbin{color:#fff}
+.cbin svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.8;
+  stroke-linecap:round;stroke-linejoin:round}
 .count{margin-left:auto;font:12px/1 var(--mono);color:var(--ink-2)}
 .count b{color:var(--ink)}
 .act{font:11.5px/1 var(--ui);color:var(--ink-2);background:none;border:1px solid var(--line);
@@ -1207,6 +1230,55 @@ ${o.interactive ? discardFab() + refreshFab() : ''}
       }
     });
   }
+
+  // A chip is a span with role=button now, so Enter and Space are ours to handle.
+  chips.forEach(function(c){
+    c.addEventListener('keydown', function(e){
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      c.click();
+    });
+  });
+
+  // ── discard every file of one type ─────────────────────────────────────────
+  // stopPropagation first: the bin lives inside the chip's own click target, and without it discarding
+  // a type would also toggle the filter that type is shown under.
+  [].slice.call(document.querySelectorAll('.cbin')).forEach(function(btn){
+    btn.onclick = function(e){
+      e.preventDefault(); e.stopPropagation();
+      var ext = btn.dataset.ext;
+      btn.classList.add('busy');
+      fetch('/api/diff/discard-ext?ext=' + encodeURIComponent(ext))
+        .then(function(r){ return r.json(); })
+        .then(function(p){
+          btn.classList.remove('busy');
+          var tr = p.tracked || [], un = p.untracked || [];
+          if (!tr.length && !un.length) {
+            if (cwhy) cwhy.innerHTML = '<b>nothing to discard</b> \\u2014 no changed ' + esc(ext) + ' files';
+            return;
+          }
+          var lines = [];
+          if (tr.length) lines.push(tr.length + ' tracked ' + ext + ' file(s) reset to HEAD:\\n  '
+            + tr.slice(0, 12).join('\\n  ') + (tr.length > 12 ? '\\n  \\u2026and ' + (tr.length - 12) + ' more' : ''));
+          if (un.length) lines.push(un.length + ' untracked ' + ext + ' file(s) DELETED \\u2014 git cannot recover these:\\n  '
+            + un.slice(0, 12).join('\\n  ') + (un.length > 12 ? '\\n  \\u2026and ' + (un.length - 12) + ' more' : ''));
+          if (!window.confirm('Discard every changed ' + ext + ' file\\n\\n' + lines.join('\\n\\n')
+            + '\\n\\nThis cannot be undone. Continue?')) return;
+          btn.classList.add('busy');
+          post('/api/diff/discard-ext', { ext: ext }).then(function(r){
+            if (r.ok && r.j.ok) { rememberViewport(); location.reload(); return; }
+            btn.classList.remove('busy');
+            if (cwhy) cwhy.innerHTML = '<b>not discarded</b> \\u2014 ' + esc((r.j && (r.j.why || r.j.error)) || 'failed');
+          }).catch(function(err){
+            btn.classList.remove('busy');
+            if (cwhy) cwhy.innerHTML = '<b>not discarded</b> \\u2014 ' + esc(String(err));
+          });
+        }).catch(function(err){
+          btn.classList.remove('busy');
+          if (cwhy) cwhy.innerHTML = '<b>could not read what would be discarded</b> \\u2014 ' + esc(String(err));
+        });
+    };
+  });
 
   chips.forEach(function(c){
     c.onclick = function(){
