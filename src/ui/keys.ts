@@ -42,10 +42,34 @@ export function installKeyRouter(opts: {
     if (key.full === 'S-up') { opts.chat.scrollLine(-1); return; }
     if (key.full === 'S-down') { opts.chat.scrollLine(1); return; }
 
+    // TYPING IS THE WAY BACK DOWN. Reading history and then starting to type is unambiguous: the
+    // attention is on the prompt, so the prompt is what must be on screen. Nothing else re-engages
+    // follow on its own — that is the whole point of the lock — so without this the only exit from a
+    // scrolled-up view is scrolling all the way back down (Shift+↓ / PgDn; `end` is the input
+    // cursor, not the transcript), and a user who scrolled up to read and then answered would be
+    // typing into a prompt they could not see.
+    //
+    // A PRINTABLE character only. Control and meta combos are commands, arrows are history, and
+    // Enter is about to redraw at the bottom anyway; snapping on those would drag the view around
+    // while the user is still navigating.
+    if (isPrintable(ch, key) && opts.chat.isScrolledUp()) opts.chat.scrollToBottom();
+
     opts.input.handleKey(ch, key);
   });
 
   installMouseRouter(opts.chat, opts.input);
+}
+
+/**
+ * One character the user actually typed, as opposed to a key they pressed.
+ *
+ * `ch` is present for control keys too (Enter carries \r, Backspace \x7f), so a length check alone
+ * would snap the view on navigation. Anything below 0x20, DEL, and any ctrl/meta combo are out.
+ */
+function isPrintable(ch: string | undefined, key: blessed.Widgets.Events.IKeyEventArg): boolean {
+  if (!ch || ch.length !== 1 || key.ctrl || key.meta) return false;
+  const code = ch.charCodeAt(0);
+  return code >= 0x20 && code !== 0x7f;
 }
 
 /** Lines per wheel notch — the conventional three, so a flick moves a readable amount. */

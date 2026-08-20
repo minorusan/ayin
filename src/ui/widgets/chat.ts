@@ -84,9 +84,10 @@ export class ChatLog {
   readonly box: blessed.Widgets.BoxElement;
   readonly indicator: ThinkingIndicator;
   private messages: Message[] = [];
-  // Follow the live bottom until the user scrolls up; re-engages when they scroll back to the bottom.
-  // Without this, every redraw (new message, goal change, thinking-indicator tick) snapped to the
-  // bottom and it was nearly impossible to scroll up while anything was happening.
+  // Follow the live bottom until the user scrolls up. Once they do, NOTHING moves the view until
+  // they scroll back to the bottom, press End, or type a character — every redraw (new message, goal
+  // change, thinking-indicator tick) leaves it exactly where it was. See atBottom() for the rounding
+  // bug that used to defeat this.
   private stick = true;
 
   constructor() {
@@ -287,27 +288,50 @@ export class ChatLog {
     this.box.bottom = row;
   }
 
-  /** True when the view is following live output: either the content fits (nothing to scroll) or
-   *  we're at the bottom. Content-fits must count as "at bottom" — else getScrollPerc returns 0 and
-   *  we'd wrongly disengage follow on a short transcript. */
+  /**
+   * True when the view is at the live bottom — measured in LINES, never in percent.
+   *
+   * `getScrollPerc()` was the bug that made the transcript feel unscrollable. blessed computes it as
+   * `childBase / (total - height)`, so on a long transcript one wheel notch is a fraction of a
+   * percent: scrolling up three lines out of a thousand still reported 99.7, the `>= 99` test read
+   * that as "at the bottom", follow stayed engaged, and the very next redraw — a thinking-indicator
+   * tick, which happens several times a second — snapped the view back. The user could not out-scroll
+   * the rounding. A line comparison has no threshold to be wrong about.
+   *
+   * Content that FITS counts as at-bottom: there is nothing to scroll, so follow should stay on.
+   */
   private atBottom(): boolean {
-    const b = this.box as unknown as { getScrollPerc?: () => number; getScrollHeight?: () => number; height?: number; iheight?: number };
-    const viewH = (Number(b.height ?? 0)) - (Number(b.iheight ?? 0));
-    if ((b.getScrollHeight?.() ?? 0) <= viewH) return true; // fits → always following
-    return (b.getScrollPerc?.() ?? 100) >= 99;
+    const b = this.box as unknown as { getScrollHeight?: () => number; childBase?: number; height?: number; iheight?: number };
+    const viewH = Number(b.height ?? 0) - Number(b.iheight ?? 0);
+    const total = b.getScrollHeight?.() ?? 0;
+    if (total <= viewH) return true;
+    return Number(b.childBase ?? 0) >= total - viewH;
+  }
+
+  /**
+   * Scrolling UP disengages follow unconditionally and the view then STAYS put — no redraw may move
+   * it again. Only arriving back at the true bottom re-engages, so live output resumes exactly when
+   * the user has asked to see it and never a moment before.
+   */
+  private moveBy(delta: number, dir: 1 | -1): void {
+    this.box.scroll(delta);
+    this.stick = dir > 0 ? this.atBottom() : false;
+    render();
   }
 
   scrollHalfPage(dir: 1 | -1): void {
-    this.box.scroll(dir * Math.floor((this.box.height as number) / 2));
-    this.stick = this.atBottom(); // re-engage follow ONLY when scrolled back to the bottom
-    render();
+    this.moveBy(dir * Math.floor((this.box.height as number) / 2), dir);
   }
 
   /** Line-granular scroll: Shift+↑/↓ moves one line, a wheel notch moves `lines`. */
   scrollLine(dir: 1 | -1, lines = 1): void {
-    this.box.scroll(dir * Math.max(1, lines));
-    this.stick = this.atBottom();
-    render();
+    this.moveBy(dir * Math.max(1, lines), dir);
+  }
+
+  /** Is the view currently parked away from the bottom? The key router asks before snapping back,
+   *  so an ordinary keystroke in an already-followed transcript costs no scroll work at all. */
+  isScrolledUp(): boolean {
+    return !this.stick;
   }
 
   /** Jump to the newest message and resume following live output. */
