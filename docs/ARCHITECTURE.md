@@ -1983,6 +1983,23 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
   size and truncating kept the noise. A tracked file is a change made on purpose — when something has
   to be dropped, that decides which. Omitted files keep their row and their true counts.
 
+- **File-type icons: shape is the type, colour is the status.** The row had one mark — a coloured
+  square for added/modified/deleted — and left the type to be read out of the extension. On a Unity
+  tree that is the wrong thing to make someone parse: measured on a real project the top extensions
+  are 12,484 `.meta`, 3,101 `.cs`, 2,682 `.png`, 978 `.prefab`, 828 `.anim`, 695 `.asset`. Shape is
+  the stronger channel so it goes to what is being scanned for; colour keeps the meaning it already
+  had, so nothing is re-learned and no second mark is added to the row. Fourteen families grouped by
+  what a file is FOR (`.anim` and `.controller` share a glyph; `.mat` and `.shader` share another),
+  with a plain document as the honest fallback rather than a fifteenth invented shape.
+
+  **One `<symbol>` sprite, every row a `<use>`** — a 500-file diff would otherwise carry 500 copies of
+  the path data, and this page already has a hard line budget it spends on diff text.
+
+  Three shapes were reworked after looking at them rendered rather than reasoning about them: the
+  script family was braces that drew as `()` and collided with C#'s `<>` at 15px (now `>_`), the scene
+  was a framed horizon in the same silhouette family as the image frame (now stacked layers), and the
+  animation glyph was a motion arc whose arrowhead never rendered as one (now a keyframe on a track).
+
 - **Staged and unstaged are TWO diffs, not one labelled diff.** `collectDiff` runs
   `git diff --cached <rev>` and a bare `git diff` and tags each `FileDiff` with `staged`. A change is
   not staged or unstaged — the individual hunks are, which is why `git status` reports two columns. So

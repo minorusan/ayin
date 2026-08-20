@@ -173,11 +173,90 @@ function fileBody(f: FileDiff, o: Resolved): string {
   return parts.join('');
 }
 
+/**
+ * FILE-TYPE ICONS: shape carries the type, colour keeps carrying git status.
+ *
+ * The row already had one mark — a coloured square for added/modified/deleted — and the type was left
+ * to the reader parsing the extension out of the filename. In a Unity tree that is the wrong thing to
+ * make someone read: measured on a real project, the top extensions are 12,484 `.meta`, 3,101 `.cs`,
+ * 2,682 `.png`, 978 `.prefab`, 828 `.anim`, 695 `.asset`. A sidebar of those is a wall of near-identical
+ * rows distinguished only by a word ending.
+ *
+ * TWO CHANNELS, TWO FACTS, ONE GLYPH. Shape is the stronger channel and it goes to the thing being
+ * scanned for (`where are the prefabs`); colour stays on status, which is what it already meant, so
+ * nothing has to be re-learned and no second mark is added to the row. A `.cs` added and a `.cs`
+ * modified are the same silhouette in different colours; a `.cs` and a `.prefab` both modified are the
+ * same colour in different silhouettes.
+ *
+ * ONE SPRITE, NOT ONE COPY PER ROW. The paths live in `<symbol>` elements emitted once and every row is
+ * a `<use>`. A 500-file diff would otherwise carry 500 copies of the path data, and this page already
+ * has a hard line budget it spends on actual diff text.
+ *
+ * Families are grouped by WHAT THE FILE IS FOR, not by extension, so `.anim` and `.controller` share a
+ * glyph and `.mat` and `.shader` share another. Fourteen shapes is near the limit of what stays
+ * learnable; anything not matched falls back to a plain document rather than inventing a fifteenth.
+ */
+const ICONS: Array<{ id: string; exts: string[]; path: string }> = [
+  // `< >` — C#. The angle brackets read as "source" without spelling out a language.
+  { id: 'code', exts: ['.cs'], path: '<path d="M9 5 4 8l5 3"/><path d="M13 5l5 3-5 3"/>' },
+  // `{ }` — the web/script family, deliberately a different bracket from C#.
+  // `>_` — a prompt. The first attempt was braces, which rendered as `()` and read as the same
+  // two-facing-brackets silhouette as C#'s `<>` at 15px; these are the two most common code types in
+  // any tree ayin looks at, so they must not converge.
+  { id: 'braces', exts: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'], path: '<path d="M5 6l4 4-4 4"/><path d="M11 16h7"/>' },
+  // an isometric cube — a prefab IS an object.
+  { id: 'cube', exts: ['.prefab'], path: '<path d="M11.5 3.2 18 6.6v6.8l-6.5 3.4L5 13.4V6.6z"/><path d="M5 6.6l6.5 3.4 6.5-3.4M11.5 10v6.8"/>' },
+  // a framed horizon — a scene is a world you look into.
+  // stacked layers — a scene is a composition of things. It was a framed horizon, which is the same
+  // silhouette family as the image frame and confusable with it in a list of both.
+  { id: 'scene', exts: ['.unity', '.scene'], path: '<path d="M11.5 3.5 19 7.5l-7.5 4L4 7.5z"/><path d="M4 11.5l7.5 4 7.5-4"/><path d="M4 15.5l7.5 4 7.5-4"/>' },
+  // stacked discs — a ScriptableObject is data at rest.
+  { id: 'data', exts: ['.asset', '.assetbundle', '.bundle'], path: '<ellipse cx="11.5" cy="6.5" rx="7" ry="2.8"/><path d="M4.5 6.5v5c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8v-5"/><path d="M4.5 11.5v4c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8v-4"/>' },
+  // a motion arc with a head — animation and the controllers that drive it.
+  // keyframes on a track — what an .anim actually is. The first attempt was a motion arc whose
+  // arrowhead did not read as one, leaving a stray hook.
+  { id: 'anim', exts: ['.anim', '.controller', '.overridecontroller', '.playable'], path: '<path d="M3 11.5h5.5M14.5 11.5h5.5"/><path d="M11.5 5.5 17 11.5l-5.5 6L6 11.5z" fill="currentColor" stroke="none"/>' },
+  // a frame with a sun — an image.
+  { id: 'image', exts: ['.png', '.jpg', '.jpeg', '.tga', '.psd', '.exr', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.svg'], path: '<rect x="3.5" y="4.5" width="16" height="14" rx="2"/><circle cx="8" cy="9" r="1.6"/><path d="M3.5 16l5-4.5 4 3.5 3-2.5 3.5 3"/>' },
+  // waveform bars — audio.
+  { id: 'audio', exts: ['.wav', '.mp3', '.ogg', '.aiff', '.aif', '.flac', '.m4a'], path: '<path d="M5 10v4M8.5 7v10M12 5v14M15.5 8v8M19 11v2"/>' },
+  // a lit sphere — materials and shaders.
+  { id: 'shade', exts: ['.mat', '.shader', '.shadergraph', '.cginc', '.hlsl', '.glsl', '.shadervariants'], path: '<circle cx="11.5" cy="11.5" r="7.5"/><path d="M6.5 15.5a7.5 7.5 0 0 1 9-9"/>' },
+  // a tag on a string — a .meta is a sidecar that only exists to name something else.
+  { id: 'meta', exts: ['.meta'], path: '<path d="M12.5 3.5H18a1.5 1.5 0 0 1 1.5 1.5v5.5L11 19.5 3.5 12z"/><circle cx="15.5" cy="7.5" r="1.2"/>' },
+  // sliders — configuration and manifests.
+  { id: 'config', exts: ['.json', '.xml', '.yaml', '.yml', '.asmdef', '.asmref', '.csproj', '.sln', '.ini', '.cfg', '.toml', '.plist', '.props'], path: '<path d="M4 7h9M17 7h2M4 12h4M12 12h7M4 17h11M18 17h1"/><circle cx="15" cy="7" r="1.8"/><circle cx="10" cy="12" r="1.8"/><circle cx="16.5" cy="17" r="1.8"/>' },
+  // ruled lines — prose.
+  { id: 'doc', exts: ['.md', '.txt', '.rst', '.adoc'], path: '<path d="M6.5 3.5h7l4.5 4.5v11a1.5 1.5 0 0 1-1.5 1.5H6.5A1.5 1.5 0 0 1 5 19V5a1.5 1.5 0 0 1 1.5-1.5z"/><path d="M13 3.5V8h4.5M8 12h7M8 15.5h7"/>' },
+  // a chip — a compiled blob nobody reviews line by line.
+  { id: 'bin', exts: ['.dll', '.so', '.dylib', '.a', '.lib', '.bin', '.exe', '.pdb', '.aar', '.jar', '.zip', '.unitypackage'], path: '<rect x="6" y="6" width="11" height="11" rx="1.5"/><path d="M9 3.5V6M14 3.5V6M9 17v2.5M14 17v2.5M3.5 9H6M3.5 14H6M17 9h2.5M17 14h2.5"/>' },
+  // a plain page — the honest answer for anything unmatched.
+  { id: 'file', exts: [], path: '<path d="M6.5 3.5h7l4.5 4.5v11a1.5 1.5 0 0 1-1.5 1.5H6.5A1.5 1.5 0 0 1 5 19V5a1.5 1.5 0 0 1 1.5-1.5z"/><path d="M13 3.5V8h4.5"/>' },
+];
+
+const ICON_BY_EXT = new Map<string, string>();
+for (const ic of ICONS) for (const e of ic.exts) ICON_BY_EXT.set(e, ic.id);
+
+/** The sprite, emitted once. `currentColor` is what lets one symbol be four status colours. */
+function iconSprite(): string {
+  const symbols = ICONS.map((ic) =>
+    `<symbol id="i-${ic.id}" viewBox="0 0 23 23" fill="none" stroke="currentColor"`
+    + ` stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${ic.path}</symbol>`).join('');
+  return `<svg class="sprite" aria-hidden="true" width="0" height="0">${symbols}</svg>`;
+}
+
+/** Type glyph for a path, coloured by git status. `title` names both, for a reader who hovers. */
+function typeIcon(f: FileDiff): string {
+  const id = ICON_BY_EXT.get(f.ext.toLowerCase()) ?? 'file';
+  return `<svg class="ic ${f.status}" aria-hidden="true" title="${esc(f.ext || 'no extension')} · ${f.status}">`
+    + `<use href="#i-${id}"/></svg>`;
+}
+
 function sidebarRow(f: FileDiff, i: number): string {
   const name = f.path.split('/').pop() ?? f.path;
   const dir = f.path.slice(0, f.path.length - name.length);
   return `<a class="row" href="#f${i}" data-i="${i}" data-ext="${esc(f.ext || '(none)')}">`
-    + `<span class="st ${f.status}" title="${f.status}"></span>`
+    + typeIcon(f)
     + `<span class="nm"><b>${esc(name)}</b><em>${esc(dir)}</em></span>`
     + `<span class="ct"><b class="p">+${f.additions}</b><b class="m">−${f.deletions}</b></span></a>`;
 }
@@ -717,7 +796,7 @@ export function renderDiffPage(set: DiffSet, opts: RenderOptions = {}): string {
   const filesHtml = set.files.map((f, i) => {
     const heading = f.oldPath ? `${esc(f.oldPath)} → ${esc(f.path)}` : esc(f.path);
     return `<section class="file" id="f${i}" data-i="${i}" data-ext="${esc(f.ext || '(none)')}" data-path="${esc(f.path)}" data-staged="${f.staged}">`
-      + `<header class="fh"><span class="st ${f.status}"></span>`
+      + `<header class="fh">${typeIcon(f)}`
       + `<h2>${heading}</h2>`
       + `<span class="tags">${f.untracked ? '<i class="tag new">untracked</i>' : ''}`
       + `${f.binary ? '<i class="tag">binary</i>' : ''}</span>`
@@ -865,6 +944,14 @@ aside{overflow-y:auto;border-right:1px solid var(--line);background:var(--surfac
 .nm em{font-style:normal;font-size:10.5px;color:var(--ink-3);overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
 .ct{font-family:var(--mono);font-size:10.5px;display:flex;gap:5px;white-space:nowrap}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+/* 15px is the smallest these silhouettes stay readable at; below it the cube and the sphere converge. */
+.ic{width:15px;height:15px;flex:none;display:block}
+/* Colour is STATUS, unchanged from the square it replaces — nothing to re-learn. Shape is the type. */
+.ic.added{color:var(--pub)} .ic.deleted{color:var(--priv)}
+.ic.modified{color:var(--prot)} .ic.renamed{color:var(--wire-hot)}
+.fh .ic{width:16px;height:16px}
+/* Kept for anything still rendering a bare status square. */
 .st{width:7px;height:7px;border-radius:2px;flex:none}
 .st.added{background:var(--pub)} .st.deleted{background:var(--priv)}
 .st.modified{background:var(--prot)} .st.renamed{background:var(--wire-hot)}
@@ -964,6 +1051,7 @@ kbd{font:10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2
   <button class="act" id="none">defaults</button>
   ${o.interactive ? '<button class="act stage" id="autostage" title="Stage what this project type says is safe to stage">Stage</button>' : ''}
 </div>
+${iconSprite()}
 <aside id="side">${sidebarSections(set.files)}</aside>
 <main id="main">${commitPanel(o)}${omitted}${filesHtml || '<div class="empty">Working tree is clean.</div>'}</main>
 ${o.interactive ? refreshFab() : ''}

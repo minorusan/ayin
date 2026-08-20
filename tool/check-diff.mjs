@@ -347,6 +347,55 @@ ok(dctx.tickets.length === 0 && /no ticket key/.test(dctx.jiraNote),
   'so it declines with a reason and never reaches the network', dctx.jiraNote);
 ok(dctx.files.length > 0, 'while still reporting the changed files it found', String(dctx.files.length));
 
+// ── 10a · file-type icons ────────────────────────────────────────────────────────
+//
+// Shape carries the TYPE, colour keeps carrying git status. The regression worth catching is a family
+// silently falling back to the plain document glyph — the sidebar still renders, every count is still
+// right, and a Unity tree just quietly loses the distinction it was scanned for.
+
+console.log('\nfile-type icons');
+
+const iconFiles = [
+  ['a.cs', 'i-code'], ['a.ts', 'i-braces'], ['Hero.prefab', 'i-cube'], ['Main.unity', 'i-scene'],
+  ['R.asset', 'i-data'], ['W.anim', 'i-anim'], ['H.controller', 'i-anim'], ['i.png', 'i-image'],
+  ['c.wav', 'i-audio'], ['C.mat', 'i-shade'], ['B.shader', 'i-shade'], ['a.cs.meta', 'i-meta'],
+  ['G.asmdef', 'i-config'], ['R.md', 'i-doc'], ['N.dll', 'i-bin'], ['odd.qqq', 'i-file'],
+];
+const iconSet = {
+  repo: '.', branch: 'b', against: 'HEAD', head: 'h', filesOmitted: 0, bodiesOmitted: 0,
+  generatedAt: '2026-01-01T00:00:00Z',
+  files: iconFiles.map(([path]) => ({
+    path, status: 'modified', ext: path.slice(path.lastIndexOf('.')),
+    additions: 1, deletions: 0, binary: false, untracked: false, hunks: [],
+    truncated: false, bodyOmitted: false, staged: true,
+  })),
+};
+const iconHtml = render.renderDiffPage(iconSet, { interactive: true, rev: 'HEAD', comments: [], commitDraft: null });
+
+ok((iconHtml.match(/<symbol id="i-/g) || []).length === 14, 'the sprite defines all 14 families once',
+  String((iconHtml.match(/<symbol id="i-/g) || []).length));
+// One sprite, not one copy of the path data per row: a 500-file diff would otherwise carry 500 copies.
+ok((iconHtml.match(/<svg class="sprite"/g) || []).length === 1, 'and it is emitted exactly once');
+
+for (const [path, want] of iconFiles) {
+  const ext = path.slice(path.lastIndexOf('.'));
+  const one = render.renderDiffPage(
+    { ...iconSet, files: [iconSet.files.find((f) => f.path === path)] },
+    { interactive: true, rev: 'HEAD', comments: [], commitDraft: null },
+  );
+  const used = [...one.matchAll(/<use href="#(i-[a-z]+)"\/>/g)].map((m) => m[1]);
+  ok(used.length > 0 && used.every((u) => u === want), `${ext} → ${want}`, used.join(','));
+}
+
+// Colour still says status, which is what the square it replaced already meant.
+const statusIcon = (st) => render.renderDiffPage(
+  { ...iconSet, files: [{ ...iconSet.files[0], status: st }] },
+  { interactive: true, rev: 'HEAD', comments: [], commitDraft: null },
+);
+for (const st of ['added', 'modified', 'deleted', 'renamed']) {
+  ok(new RegExp(`class="ic ${st}"`).test(statusIcon(st)), `colour still encodes status: ${st}`);
+}
+
 // ── 10b · the page's OWN JavaScript must parse ───────────────────────────────────
 //
 // tsc checks the module that BUILDS the page, never the string it emits. A template literal turns

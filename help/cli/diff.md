@@ -12,6 +12,8 @@ At the top of the page sit two editable fields — **Subject** and **Description
 
 A message git left behind from an earlier `git commit` is not treated as a draft: ayin stamps which HEAD its draft describes, so once you commit, the panel goes back to saying there is none.
 
+In the file list each row carries a small icon: the **shape** says what kind of file it is — code, prefab, scene, ScriptableObject, animation, image, audio, material, `.meta` sidecar, config, prose, compiled blob — and the **colour** says its git status, green added, amber modified, red deleted, blue renamed. Hovering names both.
+
 The file list is split into **Staged** and **Unstaged**, each with its own count, and a file with changes on both sides appears in both — the diff you see under each heading is only that side's hunks. Every file card carries one index button (`stage` on an unstaged card, `unstage` on a staged one), and the top panel has a **Stage** button that applies your project type's policy.
 
 In a Unity repo that policy stages `.anim`/`.controller` and `.prefab` whole; an `.asset` only when it lives under `Assets/` and is a ScriptableObject of a script in this project, so third-party assets and `ProjectSettings`/`EditorSettings` are left alone; a `.meta` only when its asset was staged; and a `.cs` **line by line** — a model picks out live debug output (`Debug.Log`, `print`, `Console.Write`, but not `Debug.LogError`), the rest is staged, and the debug lines stay behind as that file's remaining unstaged change. Every file it skipped says why, on the card. A non-Unity repo has no policy yet and the button stages nothing rather than guessing.
