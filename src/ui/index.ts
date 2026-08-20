@@ -29,6 +29,7 @@ import { CmdHints, registerCommand, type SlashCommand } from './widgets/hints.js
 import { StatusBar, type StatusState } from './widgets/status.js';
 import { AlertRow, type Alert, type AlertLevel } from './widgets/alert.js';
 import type { AgentState } from './widgets/thinking.js';
+import { noteAgentState } from '../agent-activity.js';
 
 export { HEADLESS, THINKING_MODE, screen, registerCommand, formatToolResultForChat, formatToolCallForChat, formatGateCardForChat, formatShellForChat, escapeBlessedTags, stripBlessedTags, toItalic };
 export type { SlashCommand, StatusState, AgentState, MessageRole, Alert, AlertLevel };
@@ -138,6 +139,9 @@ export function setAgentStatus(text: string): void {
 
 /** Explicit stateful variant — pick the animation state directly. */
 export function setAgentState(state: AgentState, label?: string): void {
+  // Recorded BEFORE the widget, so a headless run — which has no widget — still reports what it is
+  // doing to anything that asks. This is the single funnel every caller goes through.
+  noteAgentState(state, label ?? '');
   chat.setAgentState(state, label);
 }
 

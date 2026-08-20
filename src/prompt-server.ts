@@ -23,6 +23,7 @@ import { resetPromptsToDefaults, getPromptsDir as promptsDir } from './prompts.j
 import { prompts, writeAtomic } from './prompts-service.js';
 import { handleDiffRequest } from './diff/server.js';
 import { handleSprintRequest } from './sprint/server.js';
+import { agentActivity } from './agent-activity.js';
 
 const BASE_PORT = 7773;
 const PORT_TRIES = 12;
@@ -295,6 +296,16 @@ export function startPromptServer(cwd = process.cwd()): void {
         res.end(JSON.stringify({ error: refused }));
         return;
       }
+    }
+
+    // What the agent is doing, for any page that wants to show progress rather than a spinner. Cheap
+    // enough to poll every second: one object, no work, no I/O.
+    if (req.method === 'GET' && (req.url ?? '').split('?')[0] === '/api/agent/state') {
+      const a = agentActivity();
+      const body = JSON.stringify({ ...a, elapsedMs: Date.now() - a.since });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(body);
+      return;
     }
 
     // The review page and its comments, then the sprint board. Each returns true when it answered.

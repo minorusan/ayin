@@ -2244,6 +2244,21 @@ payload, and no way for the two to disagree about whether an answer exists — t
 `size-mtime` version stamp and re-renders when the file grew. Polling stops when the drawer closes, and
 gives up after three minutes of a quiet file so a forgotten tab does not poll forever.
 
+While a turn is in flight the drawer shows a **progress row** (`src/agent-activity.ts`,
+`GET /api/agent/state`): what the agent is doing and how long it has been doing it —
+`tool · Running grep(ScoringId, Assets/Scripts) … 1m 24s`. The state is the one the TUI indicator
+already paints; `setAgentState` records it into a HOLDER (one current value, no history) before it
+paints, so a headless `-p` run reports too. `since` moves on a STATE change and holds across a label
+change, because a tool label updates several times inside one thinking phase and resetting the clock
+each time would make a long wait look like a series of short ones.
+
+The row stops on the signal the thread already has — the newest turn being `ayin` — and on the drawer
+closing. No second completion mechanism, so there is nothing for the two to disagree about. `idle`
+while the page is still waiting is reported as **queued**, not as a confident spinner: the turn is
+behind something else in the session, or it finished without writing, and both are worth saying. The
+refresh FAB is hidden while the drawer is open — it is fixed to the same corner the elapsed clock
+lands in.
+
 The thread lives **outside the repo**: a discussion about a ticket is not a change to the project, and
 writing it into the working tree would put it in the next diff, the next commit, and eventually
 someone's review. The key is validated before it becomes a filename — it arrives from a browser, and a

@@ -311,5 +311,51 @@ ok(/<p>/.test(got.turns[0].html), 'turns come back as rendered HTML, not raw mar
 
 rmSync(chat.chatPath(KEY), { force: true });
 
+// ── live progress ────────────────────────────────────────────────────────────────
+//
+// A spinner cannot tell four seconds from four minutes, and the session already knows the answer —
+// `setAgentState` carries `tool · Running grep(...)`. What has to hold: the recorder's clock is
+// honest, the row is hidden until something is actually asked, and it STOPS. A progress row that
+// keeps pulsing after the answer landed is worse than none, because it makes the answer look absent.
+
+console.log('\nlive progress');
+
+const act = await import(`file://${join(ROOT, 'dist', 'agent-activity.js')}`);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+act.noteAgentState('idle');
+const turns0 = act.agentActivity().turns;
+act.noteAgentState('thinking');
+const t0 = act.agentActivity().since;
+await sleep(25);
+act.noteAgentState('thinking', 'Running grep(ScoringId)');
+ok(act.agentActivity().since === t0,
+  'the clock HOLDS across a label change — a tool label moves several times inside one phase, and resetting it would make a long wait look like a series of short ones');
+ok(act.agentActivity().label === 'Running grep(ScoringId)', 'while the label is the new one');
+await sleep(25);
+act.noteAgentState('tool', 'Running read_file(x)');
+ok(act.agentActivity().since > t0, 'and MOVES when the state changes');
+ok(act.agentActivity().turns === turns0 + 1,
+  'one turn was counted for the whole idle→active→… run, not one per state', String(act.agentActivity().turns));
+act.noteAgentState('idle');
+ok(act.agentActivity().state === 'idle' && act.agentActivity().label === '',
+  'going idle clears the label rather than leaving the last tool call on screen forever');
+
+// The page side. The row is markup plus a poll; both are in the emitted page.
+ok(/id="d-prog"[^>]*hidden/.test(page),
+  'the row ships HIDDEN — it appears when something was asked, not on every page load');
+ok(/id="d-what"/.test(page) && /id="d-el"/.test(page),
+  'and carries both slots: what the agent is doing, and how long it has been doing it');
+ok(/fetch\('\/api\/agent\/state'\)/.test(page),
+  'it reads the session\'s own state over a relative route — nothing about the port is baked in');
+ok(/last\.who === 'ayin'\) stopProg\(\)/.test(page),
+  'it STOPS when the answer lands — the same file-grew signal the thread already uses, not a second completion mechanism');
+ok(/function stopChat\(\)[\s\S]{0,200}stopProg\(\)/.test(page),
+  'and when the drawer closes, so a closed ticket leaves no timer running');
+ok(/queued/.test(page) && /stalled/.test(page),
+  'idle while we are still waiting says QUEUED rather than pulsing confidently — the turn is behind something else');
+ok(/\.drawer\.open ~ \.fab\{display:none\}/.test(page),
+  'the refresh FAB steps aside for an open drawer — it sat on top of the elapsed clock');
+
 console.log(fails ? `\nsprint check: ${fails} FAILURE(S)\n` : '\nsprint check: ok\n');
 process.exit(fails ? 1 : 0);

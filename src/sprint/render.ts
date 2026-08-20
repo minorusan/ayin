@@ -136,6 +136,20 @@ body{display:flex;flex-direction:column;height:100vh;overflow:hidden;
   color:var(--ink-3);margin:0 0 6px}
 .turn.ayin>.who{color:var(--wire-hot)}
 .post.ask{background:var(--wire-hot);border-color:var(--wire-hot)}
+/* ── live progress ── */
+/* What it is DOING, not that it is doing something: a spinner and a four-minute wait look identical,
+   which is the complaint this answers. */
+.prog{display:flex;align-items:center;gap:8px;margin:8px 0 0;padding:7px 10px;
+  background:var(--surface-2);border:1px solid var(--line);border-radius:9px;
+  font:11.5px/1.4 var(--ui);color:var(--ink-2)}
+.prog[hidden]{display:none}
+.prog .dot{width:7px;height:7px;border-radius:50%;background:var(--wire-hot);flex:none;
+  animation:pulse 1.1s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.25;transform:scale(.8)}50%{opacity:1;transform:scale(1)}}
+.prog .what{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-family:var(--mono);font-size:11px;color:var(--ink)}
+.prog .el{font:600 11px/1 var(--mono);color:var(--ink-3);flex:none}
+.prog.stalled .dot{background:var(--prot);animation:none}
 h3 .hint{margin-left:auto;font:400 10.5px/1 var(--mono);color:var(--ink-3);text-transform:none;letter-spacing:0}
 /* markdown inside a turn */
 .turn .md>*:first-child{margin-top:0}
@@ -165,6 +179,11 @@ h3 .hint{margin-left:auto;font:400 10.5px/1 var(--mono);color:var(--ink-3);text-
 .fab.busy{pointer-events:none;color:var(--wire-hot)}
 .fab.busy svg{animation:fabspin .8s linear infinite;transform-origin:50% 50%}
 @keyframes fabspin{to{transform:rotate(360deg)}}
+/* The drawer fills the right edge, so the FAB sat ON TOP of its bottom-right corner. That was always
+   true and never mattered until the progress row put the elapsed clock there. An open drawer covers
+   the board anyway — refreshing behind it buys nothing — so the FAB steps aside rather than the row
+   being padded around a button that is in the wrong place. */
+.drawer.open ~ .fab{display:none}
 .drawer{position:fixed;inset:0 0 0 auto;width:min(620px,100%);background:var(--surface);
   border-left:1px solid var(--line);display:none;flex-direction:column;box-shadow:-24px 0 60px #0006}
 .drawer.open{display:flex}
@@ -224,6 +243,7 @@ textarea:focus{outline:none;border-color:var(--wire-hot)}
     <div class="compose open">
       <textarea id="d-ask" placeholder="Ask about this ticket and the codebase. ayin searches, then answers here."></textarea>
       <div class="row"><button class="post ask" id="d-send">ask ayin</button><span class="say" id="d-asay"></span></div>
+      <div class="prog" id="d-prog" hidden><span class="dot"></span><span class="what" id="d-what"></span><span class="el" id="d-el"></span></div>
     </div>
   </div>
 </aside>
@@ -264,9 +284,14 @@ async function pollChat(key, force) {
     const j = await r.json();
     if (!r.ok) return;
     if (force || j.version !== chatVer) {
+      const had = chatVer;
       chatVer = j.version;
       chatIdle = 0;
       paintChat(j.turns);
+      // The answer landing is the file growing AFTER we asked. That is the only completion signal in
+      // this design, and it is a real one — nothing marks a turn done because nothing needs to.
+      const last = (j.turns || [])[(j.turns || []).length - 1];
+      if (had !== null && last && last.who === 'ayin') stopProg();
     } else {
       chatIdle++;
     }
@@ -291,6 +316,7 @@ function startChat(key) {
 
 function stopChat() {
   if (chatTimer) { clearInterval(chatTimer); chatTimer = null; }
+  stopProg();
 }
 
 {
@@ -310,16 +336,70 @@ function stopChat() {
       if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
       $('d-ask').value = '';
       // The operator turn is already in the file; show it at once and let the poll bring the answer.
-      $('d-asay').textContent = 'ayin is looking…';
+      $('d-asay').textContent = '';
       chatIdle = 0;
       await pollChat(key, true);
       startChat(key);
+      startProg();
     } catch (e) {
       $('d-asay').textContent = String(e.message || e);
     } finally {
       send.disabled = false;
     }
   });
+}
+
+// ── live progress ──────────────────────────────────────────────────────────────
+// Two facts, both honest and both cheap: WHAT the agent is doing, straight from the state the TUI
+// indicator already shows, and HOW LONG this turn has been going. A bare spinner cannot tell four
+// seconds from four minutes, which is the whole reason this exists.
+let progTimer = null;
+let askedAt = 0;
+
+function fmtEl(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  return m + 'm ' + String(s % 60).padStart(2, '0') + 's';
+}
+
+function showProg(on) {
+  const box = $('d-prog');
+  if (box) box.hidden = !on;
+  if (!on) { $('d-what').textContent = ''; $('d-el').textContent = ''; box && box.classList.remove('stalled'); }
+}
+
+async function tickProg() {
+  const box = $('d-prog');
+  if (!box || box.hidden) return;
+  $('d-el').textContent = fmtEl(Date.now() - askedAt);
+  try {
+    const r = await fetch('/api/agent/state');
+    if (!r.ok) return;
+    const a = await r.json();
+    // Idle while we are still waiting means the turn is queued behind something else, or finished
+    // without writing — say which rather than showing a confident spinner either way.
+    if (a.state === 'idle') {
+      $('d-what').textContent = 'queued — the session is between turns';
+      box.classList.add('stalled');
+      return;
+    }
+    box.classList.remove('stalled');
+    $('d-what').textContent = a.label ? a.state + ' · ' + a.label : a.state;
+  } catch (e) { /* a dropped poll is not worth a message */ }
+}
+
+function startProg() {
+  stopProg();
+  askedAt = Date.now();
+  showProg(true);
+  void tickProg();
+  progTimer = setInterval(tickProg, 1000);
+}
+
+function stopProg() {
+  if (progTimer) { clearInterval(progTimer); progTimer = null; }
+  showProg(false);
 }
 
 // ── refresh ────────────────────────────────────────────────────────────────────
