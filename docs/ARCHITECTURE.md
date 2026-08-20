@@ -507,6 +507,63 @@ exposes `activeContextTokens()`, which both `tokens.ts` and `indulge/budget.ts` 
 unknown window as `12k/? tokens` rather than a percentage of an invented denominator: a meter that
 invents its scale is worse than no meter, because it gets consulted.
 
+#### Compression fires on the BUDGET, never on message age
+
+The window was starved while it sat empty. Every `<tool_response>` older than the four most recent was
+rewritten down to 2,000 characters, permanently, on every round — a rule that asked about MESSAGE AGE
+and never about the window. Measured on one real session on a 65k model: the prompt climbed to 21.4k
+tokens by round 5, dropped to 15.7k at round 6 as the first results aged out, and sat near 13.8k for ten
+more rounds. Thirty-six tool calls' worth of evidence shredded with **42,000 tokens of headroom
+unused**, after which the agent re-ran greps whose answers it had already been given and thrown away.
+
+`compressOldest` now triggers on the budget: nothing is touched until the prompt passes 75% of it, and
+then only the oldest results, only until the prompt is back under 60%. On a 65k window that threshold is
+~47k tokens — above every interactive round this machine has produced, so in practice full history now
+reaches the model and the function does nothing. The four most recent messages are a floor it never
+touches; what actually decides how much history stays verbatim is the budget, which stops as soon as the
+prompt fits.
+
+Compression is still **written back** into the window, one-way. A message compressed this round must
+arrive compressed next round or every token after it moves and the server re-prefills the whole prompt.
+Demand-driven compression is *kinder* to that cache than the old rule, which re-compressed a
+newly-aged message every round or two and churned the prefix each time.
+
+The order is deliberate — compress, then let `trimToContext` evict. Losing the middle of an old result
+is a smaller loss than losing the whole message, so eviction is the last resort and not the first thing
+the budget reaches for. Gate: `npm run check:window` asserts that a window which FITS is not touched at
+all (the starvation bug), and that one which does not is cut oldest-first, stops early, and spares the
+tail.
+
+#### The calls already made are in the prompt, always
+
+Nothing carried them. `recordTool` and `transcribeTool` both write to disk — for the operator and the QA
+gate — and are never read back to the model; `gatheredFacts` carries explore results only;
+`guardDirective` carries the calls that were BLOCKED. The set of calls that ran and *worked* lived
+nowhere but the history, and history is exactly what gets compressed and evicted. From the model's side
+a result that scrolled out is indistinguishable from a call it never made.
+
+So `buildMessages` rebuilds a ledger into the volatile block every round: one line per call — the call,
+and enough of the outcome to know whether asking again could possibly help. It survives every
+compression and eviction below it by not living in the history at all. The render is bounded to the 60
+most recent with a seam naming what was omitted, because "what did I just try" is asked far more often
+than "what did I try first", and a 300-call turn would otherwise put 13k tokens of its own bookkeeping
+in front of the model — this fix in reverse.
+
+#### The token estimate is MEASURED, not assumed
+
+Every budget above divided characters by a flat `CHARS_PER_TOKEN = 3`, chosen pessimistically because
+guessing low overruns the model and an overrun is a failed call rather than a worse answer. The
+reasoning was right and the number was wrong by 40%: `promptChars` is known before a call and
+`prompt_eval_count` comes back with the reply, so the true ratio was free all along. Measured here:
+**4.27**. Every window the agent thought it had was a third smaller than the one it was spending.
+
+`charsPerToken()` (llm/manager.ts) averages the last few accepted samples. Rejected, because each would
+lie: sub-calls (a critic prompt is prose, a round is source), prompts under 2,000 characters (the chat
+template dominates), and any ratio outside 2.5–5.5 — a vision call's image is not in `promptChars` at
+all, so its ratio collapses toward zero and is thrown away rather than clamped. Three samples are
+required before it is trusted, and it resets with the provider *and* the model, because a different
+tokenizer is a different number.
+
 #### What the prompt is MADE of — `prompt_coverage`
 
 `llm_usage` reports the prompt's exact size (`prompt_eval_count`) after the call, which answers "how

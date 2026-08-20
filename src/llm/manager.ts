@@ -170,6 +170,7 @@ function ensureRefreshed(): void {
 export function resetModelResolution(): void {
   cachedModelId = '';
   cachedContextTokens = 0; // a different provider grants a different window; never carry the old one
+  resetTokenRatio();        // and a different tokenizer packs a different number of chars per token
   cachedDialect = adapterOverride ? cachedDialect : DEFAULT;
   modelAttempts = 0;
   modelLastAttemptAt = 0;
@@ -226,6 +227,9 @@ export async function refreshActiveModel(): Promise<void> {
     const modelId = s.ok ? String(s.model ?? '') : '';
     if (!modelId || modelId === cachedModelId) return;
     cachedModelId = modelId;
+    // A preset swap mid-session changes the tokenizer under a running agent. The ratio measured from
+    // the old model describes nothing about the new one.
+    resetTokenRatio();
     const next = pickDialect(modelId);
     if (next.id !== cachedDialect.id) {
       log('INFO', 'llm_dialect_switch', { model: modelId, dialect: next.id });
@@ -492,6 +496,77 @@ let _lastUsage: TurnUsage | null = null;
 let _prev: { in: number; out: number } | null = null;
 let _usageHook: ((u: TurnUsage) => void) | null = null;
 
+/**
+ * HOW MANY CHARACTERS THIS MODEL PUTS IN A TOKEN, learned from it rather than assumed.
+ *
+ * Every budget in the agent divides characters by a constant 3 to guess tokens. Measured against the
+ * server's own count on this workload the guess runs ~40% high — 21,209 characters of prompt that the
+ * constant calls 7,054 tokens are 5,037 tokens in fact. Guessing high is the safe direction and it is
+ * still a 30% haircut on every window the agent thinks it has, applied to a window that is already
+ * mostly empty.
+ *
+ * The exact ratio is free: `promptChars` is known before the call and `prompt_eval_count` comes back
+ * with the reply. So it is measured, not tuned.
+ *
+ * WHAT IS REJECTED, AND WHY EACH ONE WOULD LIE:
+ *   · sub-calls — a critic prompt is prose and a round is source code, and they tokenize differently.
+ *     This number is spent budgeting the MAIN loop's window, so only main rounds may set it.
+ *   · short prompts — the ratio is dominated by the chat template's own tokens below a few thousand
+ *     characters.
+ *   · anything outside 2.5–5.5 — an implausible ratio is not a dense prompt, it is a call whose
+ *     characters do not describe its tokens. A vision call is the real case: the image is not in
+ *     `promptChars` at all, so the ratio collapses toward zero. Rejected rather than clamped, so one
+ *     screenshot cannot drag the average it is not evidence about.
+ *
+ * Averaged over the last few accepted samples so one dense grep result cannot move it far, and reset
+ * with the model — a different tokenizer is a different number, and carrying the old one is the same
+ * class of bug as carrying the old window.
+ */
+const RATIO_FALLBACK = 3;
+const RATIO_MIN = 2.5;
+const RATIO_MAX = 5.5;
+const RATIO_MIN_CHARS = 2_000;
+const RATIO_MIN_SAMPLES = 3;
+const RATIO_WINDOW = 8;
+let ratioAvg = 0;
+let ratioSamples = 0;
+
+/**
+ * Characters per token for the live model, or the pessimistic constant until it is known.
+ *
+ * NEVER extrapolated from one call: three accepted samples are required, because the first prompt of a
+ * session is the most atypical one there is — almost entirely the fixed prefix.
+ */
+export function charsPerToken(): number {
+  return ratioSamples >= RATIO_MIN_SAMPLES && ratioAvg > 0 ? ratioAvg : RATIO_FALLBACK;
+}
+
+/** For the debug manifest and the gate: is this measured yet, and from how many calls? */
+export function tokenRatio(): { charsPerToken: number; samples: number; measured: boolean } {
+  const measured = ratioSamples >= RATIO_MIN_SAMPLES && ratioAvg > 0;
+  return { charsPerToken: measured ? ratioAvg : RATIO_FALLBACK, samples: ratioSamples, measured };
+}
+
+export function resetTokenRatio(): void {
+  ratioAvg = 0;
+  ratioSamples = 0;
+}
+
+export function noteTokenRatio(promptChars: number, tokensIn: number, main: boolean): void {
+  if (!main || tokensIn <= 0 || promptChars < RATIO_MIN_CHARS) return;
+  const r = promptChars / tokensIn;
+  if (r < RATIO_MIN || r > RATIO_MAX) {
+    log('DEBUG', 'token_ratio_rejected', { ratio: r.toFixed(2), chars: String(promptChars), tokens: String(tokensIn) });
+    return;
+  }
+  const n = Math.min(RATIO_WINDOW, ratioSamples + 1);
+  ratioAvg = ratioSamples === 0 ? r : ratioAvg + (r - ratioAvg) / n;
+  ratioSamples++;
+  if (ratioSamples === RATIO_MIN_SAMPLES) {
+    log('INFO', 'token_ratio_measured', { charsPerToken: ratioAvg.toFixed(2), was: String(RATIO_FALLBACK) });
+  }
+}
+
 /** Subscribe to per-call usage. The UI registers this; nothing in `llm/` may import the UI. */
 export function onLlmUsage(fn: (u: TurnUsage) => void): void {
   _usageHook = fn;
@@ -524,9 +599,12 @@ export function computeUsage(
   return { in: u.in, out: u.out, growth: raw !== null && raw >= 0 ? raw : null, main };
 }
 
-function recordUsage(u: { in: number; out: number }, purpose: string): void {
+function recordUsage(u: { in: number; out: number }, purpose: string, promptChars = 0): void {
   const usage = computeUsage(_prev, u, purpose);
   _lastUsage = usage;
+  // The one place both numbers for the SAME call are in scope. Anywhere else would be pairing a
+  // character count with some other call's token count.
+  noteTokenRatio(promptChars, u.in, usage.main);
   // Only a round advances the baseline. A connector's inner loop has its own prompt entirely, and
   // letting it set the baseline made the next round's "growth" a subtraction of two unrelated prompts.
   if (usage.main) _prev = { in: u.in, out: u.out };
@@ -579,7 +657,7 @@ async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}, p
   try {
     let reply = await narrateWait('thinking', async () => {
       const r = await provider.generate(messages, tools ? { tools } : undefined);
-      if (r.usage) recordUsage(r.usage, purpose);
+      if (r.usage) recordUsage(r.usage, purpose, promptChars);
       return r.content;
     });
 

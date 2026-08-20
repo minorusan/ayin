@@ -18,7 +18,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { cancelActiveThinking } from './connection.js';
-import { llmChat, parseToolCalls, replyTruncated, renderToolCall, renderToolResult, activeModelId, activeContextTokens, resetUsageBaseline, toolMode } from './llm/manager.js';
+import { llmChat, parseToolCalls, replyTruncated, renderToolCall, renderToolResult, activeModelId, activeContextTokens, charsPerToken, resetUsageBaseline, toolMode } from './llm/manager.js';
 import { llmCall } from './llm.js';
 import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution, modelTools } from './tools.js';
@@ -157,14 +157,18 @@ function getWindowSize(): number { return getConfig('windowSize', 0); }
 const WINDOW_HARD_MAX = 600;
 
 /**
- * Characters per token, deliberately PESSIMISTIC.
+ * Characters per token — MEASURED from the live model, not assumed.
  *
- * The usual rule of thumb is ~4 for English prose, but this window is mostly source code and grep
- * output, which tokenize far denser. Guessing high costs a little unused context; guessing low
- * overruns the model, and an overrun is not a degraded answer — it is a failed call or a silently
- * truncated prompt whose missing part is the oldest, most load-bearing history.
+ * This was a flat 3, chosen pessimistically because guessing low overruns the model and an overrun is
+ * not a degraded answer but a failed call or a silently truncated prompt. The reasoning was right and
+ * the number was still wrong by 40%: the server reports `prompt_eval_count` on every reply and
+ * `promptChars` is known before the call, so the true ratio was measurable all along and nothing
+ * measured it. On this workload it is ~4.2, which means every budget below was quietly a third smaller
+ * than the window it was spending.
+ *
+ * `charsPerToken()` falls back to the same pessimistic 3 until three main-loop calls have confirmed a
+ * plausible ratio, so the first rounds of a session behave exactly as before. See llm/manager.ts.
  */
-const CHARS_PER_TOKEN = 3;
 
 /** Room kept for the reply and for anything the caller appends after the window. */
 const RESPONSE_RESERVE_TOKENS = 2_000;
@@ -173,7 +177,7 @@ const RESPONSE_RESERVE_TOKENS = 2_000;
 const CONSERVATIVE_CONTEXT = 16_384;
 
 function approxTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN);
+  return Math.ceil(text.length / charsPerToken());
 }
 /**
  * How many rounds the loop may run. **Unlimited by default** — it works until it is done or the
@@ -654,6 +658,14 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     });
   }
 
+  // What has already run. Same reasoning as the blocked list below, applied to the calls that
+  // SUCCEEDED — a result that scrolled out of the window is indistinguishable, from the model's side,
+  // from a call it never made.
+  const ledger = renderCallLedger();
+  if (ledger) {
+    volatile += `\n\n${ledger}`;
+  }
+
   // Blocked / denied calls — a refusal that only lives in a tool_response scrolls out of the window
   // and the model tries again. Here it is present every round for as long as the turn lasts.
   const blockedDirective = guardDirective();
@@ -713,43 +725,18 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     ? { role: 'user', content: `<session-context>\n${volatile.trim()}\n</session-context>` }
     : null;
 
-  // Observation masking: keep last 4 messages verbatim, compress older ones.
-  // tool_responses → 1-line stub; assistant tool calls → tool name + param preview.
-  const VERBATIM_TAIL = 4;
-  const maskStart = Math.max(0, conversationWindow.length - VERBATIM_TAIL);
-  let maskedCount = 0;
-  let maskedCharsDropped = 0;
-  for (let i = 0; i < conversationWindow.length; i++) {
-    const msg = conversationWindow[i];
-    if (i >= maskStart) {
-      messages.push(msg);
-      continue;
-    }
-    // No truncation — with 65K context, let the model see full history.
-    // Only compress very old tool responses to save some space.
-    if (msg.role === 'user' && msg.content.startsWith('<tool_response>') && msg.content.length > 2000) {
-      // Keep first meaningful chunk — truncate at last newline before 2000 chars
-      const cut = msg.content.lastIndexOf('\n', 2000);
-      const trimmed = cut > 100 ? msg.content.substring(0, cut) : msg.content.substring(0, 2000);
-      // Written BACK into the window: compression is one-way. Recomputing it each round meant a
-      // message sent verbatim last round arrived compressed this round, moving every token after it.
-      const was = msg.content.length;
-      msg.content = trimmed + '\n</tool_response>';
-      maskedCount++;
-      maskedCharsDropped += was - msg.content.length;
-      messages.push(msg);
-    } else {
-      messages.push(msg);
-    }
-  }
+  // Compression is ON DEMAND, not on a schedule. See `compressOldest`.
+  const fixed = approxTokens(systemContent) + approxTokens(volatileTurn?.content ?? '');
+  const masked = compressOldest(conversationWindow, fixed);
+  for (const msg of conversationWindow) messages.push(msg);
   if (volatileTurn) messages.push(volatileTurn);
   logCoverage({
     round,
     system: systemContent,
     history: messages.slice(1, volatileTurn ? messages.length - 1 : messages.length),
     volatile: volatileTurn?.content ?? '',
-    maskedCount,
-    maskedCharsDropped,
+    maskedCount: masked.count,
+    maskedCharsDropped: masked.dropped,
   });
   return trimToContext(messages);
 }
@@ -800,6 +787,76 @@ function logCoverage(c: {
     headroomEst: ctx ? String(ctx - RESPONSE_RESERVE_TOKENS - used) : '',
     usedPct: ctx ? (100 * used / ctx).toFixed(1) : '',
   });
+}
+
+/**
+ * Never compress the four most recent messages. A floor, not a policy — what actually decides how much
+ * history stays verbatim is the budget below, which stops the moment the prompt fits.
+ */
+const VERBATIM_TAIL = 4;
+
+/** What one compressed tool result keeps. Only ever applied to a result the budget cannot afford. */
+const COMPRESS_TO_CHARS = 2_000;
+
+/**
+ * COMPRESS ONLY WHEN THE WINDOW IS ACTUALLY FULL — and it almost never is.
+ *
+ * This used to compress every `<tool_response>` older than the four most recent, down to 2,000
+ * characters, permanently, on every round. It fired on MESSAGE AGE and asked nothing about the window,
+ * which on a 65k model meant the agent was starved while the window sat empty. Measured on one real
+ * session: the prompt climbed to 21.4k tokens by round 5, dropped to 15.7k at round 6 as the first
+ * results aged out, and sat near 13.8k for ten more rounds — 36 tool calls' worth of evidence being
+ * shredded with 42,000 tokens of headroom unused. The agent then re-ran greps whose answers it had
+ * already been given and thrown away.
+ *
+ * So the trigger is the BUDGET. Nothing is compressed until the prompt passes `COMPRESS_ABOVE` of it,
+ * and then only the oldest results, only until the prompt fits again. On a 65k window that threshold is
+ * ~47k tokens — above every interactive round this machine has ever produced, so in practice full
+ * history now reaches the model and this function does nothing.
+ *
+ * WRITTEN BACK, STILL. Compression stays one-way: a message compressed this round must arrive
+ * compressed next round, or every token after it moves and the server re-prefills the whole prompt.
+ * Demand-driven compression is strictly kinder to that cache than the old rule, which re-compressed a
+ * newly-aged message every round or two and churned the prefix each time it did.
+ *
+ * The order is deliberate: compress, THEN let `trimToContext` evict. Losing the middle of an old result
+ * is a smaller loss than losing the whole message, so eviction must be the last resort and not the
+ * first thing the budget reaches for.
+ */
+const COMPRESS_ABOVE = 0.75;
+const COMPRESS_UNTIL = 0.6;
+
+export function compressOldest(window: Message[], fixedTokens: number): { count: number; dropped: number } {
+  const ctx = activeContextTokens() || CONSERVATIVE_CONTEXT;
+  const budget = ctx - RESPONSE_RESERVE_TOKENS;
+  let total = fixedTokens + window.reduce((n, m) => n + approxTokens(m.content), 0);
+  if (budget <= 0 || total <= budget * COMPRESS_ABOVE) return { count: 0, dropped: 0 };
+
+  const target = budget * COMPRESS_UNTIL;
+  const last = window.length - VERBATIM_TAIL;
+  let count = 0;
+  let dropped = 0;
+  for (let i = 0; i < last && total > target; i++) {
+    const msg = window[i];
+    if (msg.role !== 'user' || !msg.content.startsWith('<tool_response>')) continue;
+    if (msg.content.length <= COMPRESS_TO_CHARS) continue;
+    const cut = msg.content.lastIndexOf('\n', COMPRESS_TO_CHARS);
+    const kept = cut > 100 ? msg.content.slice(0, cut) : msg.content.slice(0, COMPRESS_TO_CHARS);
+    const was = msg.content.length;
+    const before = approxTokens(msg.content);
+    msg.content = `${kept}\n\u2026 [older result compressed \u2014 the window was full. Re-run narrowed if you need the rest.]\n</tool_response>`;
+    total -= before - approxTokens(msg.content);
+    dropped += was - msg.content.length;
+    count++;
+  }
+  if (count) {
+    log('INFO', 'history_compressed', {
+      results: String(count), droppedChars: String(dropped),
+      estTokens: String(Math.round(total)), ctxTokens: String(ctx),
+      thresholdTokens: String(Math.round(budget * COMPRESS_ABOVE)),
+    });
+  }
+  return { count, dropped };
 }
 
 /**
@@ -1049,9 +1106,62 @@ export async function runAgent(userInput: string): Promise<void> {
 /** How often the loop-breaker fires for one tool within a turn. */
 const LOOP_NUDGE_EVERY = 8;
 
+/**
+ * WHAT HAS ALREADY BEEN RUN THIS TURN — in the prompt, every round, from the first call to the last.
+ *
+ * Nothing carried this. `recordTool` and `transcribeTool` both write to disk, for the operator and the
+ * QA gate, and are never read back to the model. `gatheredFacts` carries explore results only;
+ * `guardDirective` carries the calls that were BLOCKED. The set of calls that ran and worked was
+ * nowhere, so a turn's own history was the only record — and history is exactly what gets compressed
+ * and evicted. Measured: a 36-call turn re-grepping identifiers whose results it had already been
+ * given, because the message carrying them had been cut to 2,000 characters eleven rounds earlier.
+ *
+ * A LEDGER IS NOT A TRANSCRIPT. One line per call — the call, and enough of the outcome to know
+ * whether asking again could possibly help. It survives every compression and eviction below because
+ * it is rebuilt into the volatile block each round rather than living in the history at all, which is
+ * the whole point: the cheapest thing in this file, and the only one that cannot be thrown away.
+ */
+interface RanCall { tool: string; params: string; ok: boolean; gist: string }
+const callLedger: RanCall[] = [];
+
+/** Cleared at the start of every turn. Exported for `check:window`, which cannot run a turn. */
+export function resetCallLedger(): void { callLedger.length = 0; }
+
+/**
+ * Lines rendered. The full ledger is kept — only the RENDER is bounded, and by the tail, because "what
+ * did I just try" is asked far more often than "what did I try first". A 300-call turn would otherwise
+ * put 13k tokens of its own bookkeeping in front of the model, which is the failure this fixes in
+ * reverse.
+ */
+const LEDGER_LINES = 60;
+/** Enough of an outcome to decide whether a repeat could help. Not enough to be a second copy of it. */
+const LEDGER_GIST_CHARS = 100;
+
+export function noteRanCall(tool: string, params: string, ok: boolean, outcome: string): void {
+  const gist = outcome.split('\n').map((l) => l.trim()).find((l) => l.length > 0) ?? '';
+  callLedger.push({
+    tool, params, ok,
+    gist: gist.length > LEDGER_GIST_CHARS ? `${gist.slice(0, LEDGER_GIST_CHARS - 1)}\u2026` : gist,
+  });
+}
+
+/** The ledger as prompt text, or '' when nothing has run yet. Exported for `check:window`. */
+export function renderCallLedger(): string {
+  if (callLedger.length === 0) return '';
+  const shown = callLedger.slice(-LEDGER_LINES);
+  const omitted = callLedger.length - shown.length;
+  const lines = shown.map((c, i) => {
+    const n = omitted + i + 1;
+    return `${n}. ${c.tool}(${c.params}) \u2192 ${c.ok ? '' : 'FAILED: '}${c.gist || (c.ok ? 'ok' : 'no detail')}`;
+  });
+  const head = omitted > 0 ? [`[${omitted} earlier call(s) not listed]`, ...lines] : lines;
+  return getPrompt('callLedger', { CALLS: head.join('\n') });
+}
+
 async function runAgentTurn(userInput: string): Promise<void> {
   // Per TURN, not per session: a second question legitimately searches again from scratch.
   const toolUseCounts = new Map<string, number>();
+  resetCallLedger();
   // Discovery, once. Idempotent, so every entry point can insist rather than assume.
   await loadTools();
   currentGoal = userInput;
@@ -1515,6 +1625,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
         addMessage('system', `${name}: operator-only, not called`);
         log('INFO', 'slash_only_tool_refused', { tool: name });
         pushToWindow('assistant', textPrefix ? `${textPrefix}\n[Called ${name}]` : `[Called ${name}]`);
+        noteRanCall(name, JSON.stringify(params).slice(0, 80), false, msg);
         pushToWindow('user', renderToolResult(`Error: ${msg}`));
         continue;
       }
@@ -1544,6 +1655,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
         const errMsg = `Missing required parameter(s) for ${name}: ${missingNames}. Use: <function=${name}>\n<parameter=${missingRequired[0]}>\nvalue\n</parameter>\n...\n</function>`;
         addMessage('system', `${name}: missing ${missingNames}`);
         pushToWindow('assistant', textPrefix ? `${textPrefix}\n[${name}: missing ${missingNames}]` : `[${name}: missing ${missingNames}]`);
+        noteRanCall(name, `missing ${missingNames}`, false, 'required parameter(s) not supplied');
         pushToWindow('user', renderToolResult(errMsg));
         log('WARN', 'missing_required_params', { tool: name, missing: missingNames });
         continue;
@@ -1557,6 +1669,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
         setAgentStatus('');
         addMessage('system', `${name}: ${guard.label ?? 'blocked'}`);
         pushToWindow('assistant', textPrefix ? `${textPrefix}\n[${name}: ${guard.label ?? 'blocked'}]` : `[${name}: ${guard.label ?? 'blocked'}]`);
+        noteRanCall(name, JSON.stringify(params).slice(0, 80), false, guard.label ?? 'blocked');
         pushToWindow('user', renderToolResult(guard.note ?? 'This call was blocked.'));
         continue;
       }
@@ -1585,6 +1698,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
           addMessage('system', `Denied (read-only): ${name}`);
           const denyCall = renderToolCall({ name, params });
           pushToWindow('assistant', textPrefix ? `${textPrefix}\n\n${denyCall}` : denyCall);
+          noteRanCall(name, JSON.stringify(params).slice(0, 80), false, 'denied: read-only session');
           pushToWindow('user', renderToolResult(getPrompt('readonlyDenied', { TOOL: name })));
           continue roundLoop;
         }
@@ -1748,6 +1862,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
         log('INFO', 'tool_backgrounded', { tool: name, taskId });
 
         pushToWindow('user', renderToolResult(`${name} is still running in the background (task ${taskId}). It started ${BACKGROUND_TIMEOUT / 1000}s ago. You can call the \`status\` tool to check progress, or continue with other work — the result will also arrive automatically.`));
+        noteRanCall(name, paramPreview, true, `still running in the background as task ${taskId}`);
         pushMessage('assistant', `[tool: ${name}(${paramPreview}) → backgrounded, task ${taskId}]`);
 
         toolPromise.then(r => {
@@ -1834,6 +1949,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * own output, so naming the call here does not teach a shape to copy.
        */
       const resultHead = nativeMode ? `${name}(${paramPreview}) →\n` : '';
+      noteRanCall(name, paramPreview, true, result);
       pushToWindow('user', renderToolResult(resultHead + clipForWindow(result) + (guard.note ?? '') + editMissNote));
       pushMessage('assistant', `[tool: ${name}(${paramPreview})]`);
 

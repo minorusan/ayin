@@ -2284,8 +2284,29 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
     ok(/WINDOW_HARD_MAX/.test(push),
       'pushToWindow bounds MEMORY only; what fits the model is decided at build time, not at push time');
   }
-  ok(/const CHARS_PER_TOKEN = 3;/.test(winSrc),
-    'the char-per-token estimate is pessimistic — code tokenizes denser than prose, and guessing low overruns');
+  // The chars-per-token figure every budget above divides by. It WAS a flat pessimistic 3 asserted as a
+  // literal here; it is now measured from the server's own `prompt_eval_count`, which on this workload
+  // is ~4.2 — so the literal was costing a third of every window it was protecting. The property the
+  // assertion existed for is unchanged and is what is checked: NEVER GUESS LOW. An overrun is not a
+  // degraded answer, it is a failed call or a silently truncated prompt.
+  ok(/charsPerToken\(\)/.test(winSrc) && !/const CHARS_PER_TOKEN = 3;/.test(winSrc),
+    'the estimate is MEASURED from the live model, not a constant guessed in this file');
+  {
+    const mgr = readFileSync(join(DIST, '..', 'src', 'llm', 'manager.ts'), 'utf-8');
+    ok(/const RATIO_FALLBACK = 3;/.test(mgr),
+      'until it is measured the fallback is the same pessimistic 3 — a fresh session behaves exactly as before');
+    ok(/RATIO_MIN_SAMPLES = 3/.test(mgr) && /ratioSamples >= RATIO_MIN_SAMPLES/.test(mgr),
+      'and one call never sets it — the first prompt of a session is almost entirely the fixed prefix');
+    const bounds = /const RATIO_MIN = ([\d.]+);[\s\S]{0,80}?const RATIO_MAX = ([\d.]+);/.exec(mgr);
+    ok(!!bounds && Number(bounds[1]) >= 2.5,
+      'a measured ratio below 2.5 is REJECTED, not used — that is the one direction that overruns the model',
+      bounds ? `min=${bounds[1]}` : '(no bounds found)');
+    ok(!!bounds && Number(bounds[2]) <= 6,
+      'and an implausibly high one is rejected too — a vision call has tokens that are not in promptChars at all',
+      bounds ? `max=${bounds[2]}` : '(no bounds found)');
+    ok(/resetTokenRatio\(\)/.test(mgr) && (mgr.match(/resetTokenRatio\(\);/g) || []).length >= 2,
+      'and it is reset when the provider OR the model changes — a different tokenizer is a different number');
+  }
 
   // The agent loop must be untouched: there, a tool call is the point.
   ok(/const declared = toolMode\(\) === 'native' && opts\.declareTools !== false;/.test(mgrSrc),
