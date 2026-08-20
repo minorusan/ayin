@@ -1,35 +1,40 @@
 /**
  * ayin-hound — Claude Code `Stop` hook, generated into a watched repo by `ayin watch` at
- * `.claude/hooks/ayin-hound.mjs`. One constant is prepended at install time:
+ * `.claude/hooks/ayin-hound.mjs`. Two constants are prepended at install time:
  *
- *   AYIN_HOUND_INSTRUCTIONS   the reviewer prompt (owned by the ayin prompt store, never inlined
- *                             here), Unity-flavoured or general depending on the repo
+ *   AYIN_HOUND_NUDGE          the nudge text (owned by the ayin prompt store, never inlined here)
+ *   AYIN_HOUND_OFF_FILE       the kill switch `ayin kill dog` creates
  *
- * WHY THIS SHAPE. The previous hound read the staged diff, called a model, and reported whatever the
- * model said — including greps it never ran and files that do not exist. Blast radius lives in what
- * is ABSENT from a diff (callers, implementers, prefab bindings), so a diff-only reviewer either
- * stays silent or invents. This version inverts the roles:
+ * ONE QUESTION, NO MODEL: does every C# type this session ADDED appear on the design?
  *
- *   1. FACTS are computed here, by git, with no model at all. Six mechanical checks whose answers
- *      are true or the tool is broken — nothing to hallucinate.
- *   2. The MODEL's only job is to VERIFY those facts against the repo with greps and say what
- *      actually breaks. It is capped at a small round budget so it spends, not deliberates.
- *   3. The CONTRACT is enforced here, not requested politely: a finding whose citation does not
- *      resolve to a real file is dropped, and `greps_run: 0` forces UNVERIFIED. Fabrication cannot
- *      reach the user.
+ * That question is the only drift a Stop hook can answer for free. The answer is a set difference
+ * between two regex scans of files already on disk — nothing to hallucinate, nothing to time out,
+ * no round budget to spend. The previous hound ran six mechanical checks and then paid a model up to
+ * 240s to judge them; five of those checks were gated on Unity file extensions and the sixth
+ * (`staged-foreign`) disabled itself on any branch level with its base, so on a non-Unity repo the
+ * facts list was structurally always empty and the only surviving behaviour was a commit-message
+ * suggestion. A hound that asks a model to judge will get an invention when the model cannot judge.
  *
- * Cost discipline: blocking a stop is expensive (it costs a whole extra turn), so it is reserved for
- * a verified, cited finding. Everything else — deterministic flags, unverified checks, the commit
- * nudge — rides out as non-blocking `additionalContext`, which Claude reads without being stopped.
+ * WORKING TREE, NOT THE INDEX. The old hound read `git diff --cached`, so it saw nothing until
+ * something was staged — and an agent that just wrote six new files has staged none of them.
+ *
+ * ADDED, NOT EDITED. A file whose types are already on the design was answered when it landed;
+ * editing it is not the moment to ask again. Only an untracked file, or one the index records as
+ * `A`, is a new type making its first appearance.
+ *
+ * SILENT BY DEFAULT, AND IT NEVER BLOCKS. No added `.cs` → exit. No design in the tree → exit. Every
+ * new type already on it → exit. A finding rides out as non-blocking `additionalContext`: blocking a
+ * stop costs a whole extra turn, and "you added a type that is not on the diagram" is a thing to
+ * tell the agent, not a thing to stop it for.
  */
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 
-// THE KILL SWITCH, FIRST — before the diff, before git, before any model.
+// THE KILL SWITCH, FIRST — before git, before any file read.
 //
 // `ayin kill dog` creates the file named by AYIN_HOUND_OFF_FILE (interpolated by the installer). A
 // disabled hound must cost nothing at all: exiting 0 here means the Stop hook passes instantly, with
@@ -40,17 +45,20 @@ if (typeof AYIN_HOUND_OFF_FILE === 'string' && AYIN_HOUND_OFF_FILE && existsSync
 }
 
 const REPO = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-const MAX_DIFF_CHARS = 24_000;
-const MAX_FACTS = 12;
-const MAX_FINDINGS = 3;
-const BIG_DIFF_LINES = 80;    // below this, a facts-free diff is not worth a model call
-const MODEL_TIMEOUT_MS = 240_000;
-const ROUND_BUDGET = '10';    // AYIN_MAX_ROUNDS — force spending on greps, not deliberating
+
+/** New `.cs` files read per run. A bulk import of a whole SDK must not spend a turn's tail on regex. */
+const MAX_CS_SCANNED = 80;
+/** Designs read per run, and the byte ceiling on one. A naamah page is self-contained and can be
+ *  megabytes; a repo's `coverage/index.html` is bigger still and is not a design. */
+const MAX_DIAGRAMS = 40;
+const MAX_DIAGRAM_BYTES = 12 * 1024 * 1024;
+/** Type names named in one nudge. Beyond this the count carries the message better than the list. */
+const MAX_NUDGE_TYPES = 12;
 
 // ── git plumbing ─────────────────────────────────────────────────────
 
 /** Run git in the repo. Never throws: a failed command answers '' — every caller treats an
- *  unanswerable question as "no fact", which is the only safe default for a hook. */
+ *  unanswerable question as "nothing found", which is the only safe default for a hook. */
 function git(...args) {
   try {
     return execFileSync('git', ['-C', REPO, ...args], {
@@ -59,392 +67,136 @@ function git(...args) {
   } catch { return ''; }
 }
 
-const hasHead = () => git('rev-parse', '--verify', 'HEAD').trim() !== '';
-// A big staged batch costs one `git show` per (revision, file) per check — three checks read the
-// same two blobs. Caching turns 6 spawns per .cs into 2; the cap keeps a 500-file batch from
-// spending a minute of a hook's budget on plumbing. Skipped files are reported as a note, never
-// silently dropped: a bounded scan that LOOKS exhaustive is how a missed fact becomes a shipped bug.
-const MAX_CS_SCANNED = 60;
-const blobCache = new Map();
-/** Where a reference search should start. Unity's `Library/` is gigabytes of generated cache that
- *  git ignores and `grep -r` does not — scoping to `Assets` is the difference between a two-second
- *  grep and a hung hook. */
-const SEARCH_ROOT = existsSync(join(REPO, 'Assets')) ? 'Assets' : '.';
-/** The exact ayin tool call that answers a fact. The hound's agent is READ-ONLY: it has grep,
- *  read_file and find_files, and `bash` is denied — so handing it a shell command (`git grep …`)
- *  spends its whole round budget on refused calls. Give it the tool and its parameters, verbatim. */
-const grepCall = (pattern, include) =>
-  `grep pattern="${pattern}" path="${SEARCH_ROOT}"${include ? ` include="${include}"` : ''}`;
-/** File content at a revision (`HEAD`, or `''` for the index via `:path`), or null if absent. */
-function blob(rev, path) {
-  const spec = rev ? `${rev}:${path}` : `:${path}`;
-  if (blobCache.has(spec)) return blobCache.get(spec);
-  const text = git('show', spec);
-  const value = text === '' ? null : text;
-  blobCache.set(spec, value);
-  return value;
-}
-
-/** The staged C# files the per-file checks will read, bounded. */
-function csTargets(staged, notes, skipStatuses = 'AD') {
-  const all = staged.filter(f => f.path.endsWith('.cs') && !skipStatuses.includes(f.status));
-  if (all.length > MAX_CS_SCANNED) notes.push(`${all.length - MAX_CS_SCANNED} of ${all.length} staged .cs files not scanned (cap ${MAX_CS_SCANNED})`);
-  return all.slice(0, MAX_CS_SCANNED);
-}
-
-/** Staged files as `{ path, status }`, renames resolved to their new path. */
-function stagedFiles() {
-  const raw = git('diff', '--cached', '--name-status', '-M', '-z');
-  const parts = raw.split('\0').filter(Boolean);
+/**
+ * The working tree as `{ path, x, y }` — index status and worktree status, git's own two columns.
+ *
+ * `--untracked-files=all` rather than the default `normal`: normal collapses a new directory to the
+ * directory name, so six new `.cs` under a fresh `Assets/Rewards/` arrive as one entry called
+ * `Assets/Rewards/` and every one of them is missed.
+ */
+function workingTree() {
+  const raw = git('status', '--porcelain', '-z', '--untracked-files=all');
+  const parts = raw.split('\0');
   const files = [];
   for (let i = 0; i < parts.length; i++) {
-    const status = parts[i][0];
-    if (status === 'R' || status === 'C') { files.push({ path: parts[i + 2], status }); i += 2; }
-    else { files.push({ path: parts[i + 1], status }); i += 1; }
+    const entry = parts[i];
+    if (!entry || entry.length < 4) continue;
+    const [x, y] = entry;
+    // A rename/copy entry is `XY to NUL from NUL` — the `from` half is a separate NUL field, and
+    // failing to skip it reads a path as if it were a status line.
+    if (x === 'R' || x === 'C') i += 1;
+    files.push({ path: entry.slice(3), x, y });
   }
   return files.filter(f => f.path);
 }
 
-// ── comment / brace helpers (C#) ─────────────────────────────────────
+/** Untracked, or staged as an addition. A rename is not an add — the type already existed under
+ *  another path and was answered then. Nor is a copy. */
+const isAdded = (f) => (f.x === '?' && f.y === '?') || f.x === 'A';
 
-/** Strip `//` and `/* *​/` comments so a member scan cannot trip over commented-out code. String
- *  literals are not tracked — a `//` inside a string is rare in a type declaration and the worst
- *  case is one extra grep suggestion. */
+/** Build output and code-generator output are not design decisions, and nudging about them is how a
+ *  hound loses its reader. Unity's `Library/` alone can hold thousands of generated `.cs`. */
+const NOT_AUTHORED = /(^|\/)(obj|bin|Library|Temp|Build|Builds|node_modules)\//i;
+const GENERATED_CS = /\.(designer|g|generated)\.cs$/i;
+
+// ── declarations ─────────────────────────────────────────────────────
+
+/** Strip `//` and block comments so a commented-out declaration cannot be read as a real one. */
 function stripComments(text) {
   return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 }
 
-/** The balanced-brace body starting at the first `{` at or after `from`, or null. */
-function braceBody(text, from) {
-  const open = text.indexOf('{', from);
-  if (open === -1) return null;
-  let depth = 0;
-  for (let i = open; i < text.length; i++) {
-    if (text[i] === '{') depth++;
-    else if (text[i] === '}' && --depth === 0) return text.slice(open + 1, i);
-  }
-  return null;
-}
+/** `public sealed partial class Foo : Bar` → `Foo`. Modifiers in any order, as C# allows. Kept
+ *  deliberately identical in shape to `src/entangle/languages/csharp.ts` — the gate and the hook
+ *  must agree on what counts as a declaration. */
+const CS_DECL = /^\s*(?:\[[^\]]*\]\s*)*(?:(?:public|internal|private|protected|abstract|sealed|static|partial|readonly|unsafe|new|ref)\s+)*(?:class|interface|struct|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)/;
 
-// ── check 1: staged files this branch never touched ──────────────────
-// The one heuristic that needs no judgement and catches the whole class of "unrelated work got
-// swept into the index" — a Unity-rewritten .meta, a manifest someone else edited, a stray asset.
-// Restricted to modified/deleted/renamed files: a newly ADDED file is almost always this session's
-// own work and would flood the report.
-
-function baseRef() {
-  const symbolic = git('symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD').trim();
-  const candidates = [
-    symbolic.replace(/^refs\/remotes\//, ''),
-    'origin/main', 'origin/master', 'main', 'master', 'develop',
-  ].filter(Boolean);
-  const head = git('rev-parse', 'HEAD').trim();
-  for (const ref of candidates) {
-    const sha = git('rev-parse', '--verify', `${ref}^{commit}`).trim();
-    if (sha && sha !== head) return ref;
-  }
-  return null;
-}
-
-function foreignStagedFacts(staged, notes) {
-  const base = baseRef();
-  if (!base) { notes.push('no base branch found (origin/HEAD, main, master, develop) — provenance check skipped'); return []; }
-  const mergeBase = git('merge-base', 'HEAD', base).trim();
-  if (!mergeBase) { notes.push(`no merge-base with ${base} — provenance check skipped`); return []; }
-  const own = new Set(git('log', '--format=', '--name-only', `${mergeBase}..HEAD`).split('\n').map(s => s.trim()).filter(Boolean));
-  if (own.size === 0) { notes.push(`branch has no commits of its own beyond ${base} — provenance check skipped`); return []; }
-  const candidates = staged.filter(f => 'MDR'.includes(f.status));
-  const foreign = candidates.filter(f => !own.has(f.path));
-  // Every single staged file being "foreign" means the branch simply has not committed in this area
-  // yet — the check has no signal to give and would fire on the first commit of every branch. It
-  // earns its keep only when a few outliers sit among files this branch demonstrably owns.
-  if (!foreign.length || foreign.length === candidates.length) {
-    if (foreign.length) notes.push(`all ${foreign.length} modified staged file(s) are new to this branch — provenance check has no outlier to point at`);
-    return [];
-  }
-  return foreign
-    .slice(0, 5)
-    .map(f => ({
-      kind: 'staged-foreign',
-      path: f.path,
-      detail: `staged (${f.status}) but no commit on this branch since ${base} ever touched it — unrelated work may have been staged by accident`,
-      tool: `read_file path="${f.path}"`,
-      verify: `git log --oneline ${mergeBase}..HEAD -- ${f.path}`,
-    }));
-}
-
-// ── check 2: a .meta whose guid changed ──────────────────────────────
-// Every reference to an asset is by GUID. A rewritten .meta silently unbinds every prefab, scene
-// and asset that pointed at it. Triggers ONLY on a changed `guid:` line — Unity rewrites .meta
-// files constantly, and "any .meta touched" fires on every single batch.
-
-function metaGuidFacts(staged) {
-  const facts = [];
-  for (const f of staged) {
-    if (!f.path.endsWith('.meta')) continue;
-    const patch = git('diff', '--cached', '-U0', '--', f.path);
-    const before = patch.match(/^-guid:\s*([0-9a-f]{32})/m);
-    const after = patch.match(/^\+guid:\s*([0-9a-f]{32})/m);
-    if (!before || !after || before[1] === after[1]) continue;
-    facts.push({
-      kind: 'meta-guid-changed',
-      path: f.path,
-      detail: `guid changed ${before[1]} → ${after[1]} — every asset referencing the old guid is now unbound`,
-      tool: grepCall(before[1]),
-      verify: `git grep -l ${before[1]} -- '*.prefab' '*.unity' '*.asset' '*.mat' '*.controller'`,
-    });
-  }
-  return facts;
-}
-
-// ── check 3: a serialized field disappeared ──────────────────────────
-// A renamed or removed `[SerializeField]`/public field drops its value out of every prefab, scene
-// and asset that stored it. The compiler is perfectly happy; QA finds it.
-
-function serializedFields(text) {
+/** The type names a C# source declares. */
+function declaredTypes(source) {
   const names = new Set();
-  const lines = stripComments(text).split('\n');
-  let attributed = false;
-  for (const line of lines) {
-    const t = line.trim();
-    if (!t) continue;
-    const hasSerialize = /\[\s*SerializeField/.test(t);
-    const decl = t.match(/^(?:\[[^\]]*\]\s*)*(?:(public|protected internal|protected|internal|private)\s+)?(?:(static|const)\s+)?(?:readonly\s+)?[\w.<>\[\],?]+\s+([A-Za-z_]\w*)\s*(?:=[^;]*)?;$/);
-    if (decl && !decl[2] && (hasSerialize || attributed || decl[1] === 'public')) names.add(decl[3]);
-    attributed = hasSerialize && !decl;
+  for (const line of stripComments(source).split('\n')) {
+    const m = CS_DECL.exec(line);
+    if (m) names.add(m[1]);
   }
   return names;
 }
 
-function serializedFieldFacts(staged, notes) {
-  const facts = [];
-  for (const f of csTargets(staged, notes, 'A')) {
-    const before = blob('HEAD', f.path);
-    const after = f.status === 'D' ? '' : blob('', f.path);
-    if (before == null || after == null) continue;
-    const kept = serializedFields(after); // parsed ONCE, not once per candidate name
-    const gone = [...serializedFields(before)].filter(n => !kept.has(n));
-    for (const name of gone.slice(0, 4)) {
-      facts.push({
-        kind: 'serialized-field-removed',
-        path: f.path,
-        detail: `serialized field \`${name}\` removed or renamed — its stored value is dropped from every prefab/scene/asset holding it`,
-        tool: grepCall(`${name}:`),
-        verify: `git grep -n ' ${name}:' -- '*.prefab' '*.unity' '*.asset'`,
-      });
+/** `class Foo {`, `interface "IBar"`, `abstract class Baz` → the designed name. Mirrors the decl
+ *  branch of `parsePuml` in `src/naama/index.ts`, which is the only puml parser ayin ships. */
+const PUML_DECL = /^(?:abstract class|class|interface|enum|struct)\s+"?([A-Za-z_][A-Za-z0-9_]*)"?/;
+
+/** Designed type names in a `.puml`. A `'` line is a comment — including the `' naamah:` directives
+ *  that carry the machine-readable half — and never a declaration. */
+function pumlTypes(text) {
+  const names = new Set();
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith("'")) continue;
+    const m = PUML_DECL.exec(line);
+    if (m) names.add(m[1]);
+  }
+  return names;
+}
+
+/** Designed type names in a rendered naamah page, from the graph payload `mount()` reads. */
+function naamahPageTypes(text) {
+  const m = /<script id="graph" type="application\/json">([\s\S]*?)<\/script>/.exec(text);
+  if (!m) return new Set();
+  try {
+    const g = JSON.parse(m[1]);
+    return new Set((g.nodes ?? []).filter(n => n.kind !== 'note' && n.name).map(n => n.name));
+  } catch { return new Set(); }
+}
+
+// ── the design in this working tree ──────────────────────────────────
+
+/** Tracked + untracked paths matching a glob, honouring `.gitignore`. This is the "quick grep": one
+ *  git call, no directory walk of our own, and `Library/` never enumerated. */
+function candidates(...globs) {
+  const raw = git('ls-files', '-co', '--exclude-standard', '-z', '--', ...globs);
+  return raw.split('\0').filter(Boolean);
+}
+
+/** Read a file only if it is small enough to be worth reading. */
+function readBounded(rel) {
+  const abs = join(REPO, rel);
+  try {
+    if (statSync(abs).size > MAX_DIAGRAM_BYTES) return null;
+    return readFileSync(abs, 'utf-8');
+  } catch { return null; }
+}
+
+/**
+ * Every type the design in this tree declares, and which files it was read from.
+ *
+ * `.puml` first and alone when it answers: it is the format naama writes, `entangle` reads and
+ * `naamah weave` renders — the source, where a rendered page is an artifact of it. Falling through
+ * to `.html` only when no `.puml` declared anything keeps the common case to a handful of small
+ * files instead of sniffing every HTML in the repo.
+ *
+ * A file counts as a design only if it declares at least one type. That is what makes "contains a
+ * naamah diagram" a real test rather than an extension match: a sequence diagram, a README snippet
+ * or a coverage report contributes no names and does not make the tree look designed.
+ */
+function design() {
+  const types = new Set();
+  const sources = [];
+  const harvest = (rels, extract) => {
+    for (const rel of rels.slice(0, MAX_DIAGRAMS)) {
+      const text = readBounded(rel);
+      if (!text) continue;
+      const found = extract(text);
+      if (!found.size) continue;
+      sources.push(rel);
+      for (const n of found) types.add(n);
     }
-  }
-  return facts;
-}
-
-// ── check 4: enum ordinals shifted ───────────────────────────────────
-// Unity serializes an enum as its int. Appending a member is safe; inserting, removing or
-// reordering one silently re-points every serialized value in every prefab and scene. Invisible,
-// brutal, and purely mechanical to detect: the old member list must be a PREFIX of the new one.
-
-function enums(text) {
-  const found = new Map();
-  const clean = stripComments(text);
-  const re = /\benum\s+([A-Za-z_]\w*)/g;
-  let m;
-  while ((m = re.exec(clean))) {
-    const body = braceBody(clean, m.index);
-    if (body == null) continue;
-    const members = [];
-    for (const raw of body.split(',')) {
-      const t = raw.replace(/\[[^\]]*\]/g, '').trim();
-      if (!t) continue;
-      const mm = t.match(/^([A-Za-z_]\w*)\s*(?:=\s*(.+))?$/s);
-      if (mm) members.push({ name: mm[1], value: mm[2] ? mm[2].trim() : null });
-    }
-    if (members.length) found.set(m[1], members);
-  }
-  return found;
-}
-
-function enumFacts(staged, notes) {
-  const facts = [];
-  for (const f of csTargets(staged, notes)) {
-    const before = blob('HEAD', f.path);
-    const after = blob('', f.path);
-    if (before == null || after == null) continue;
-    const oldEnums = enums(before);
-    const newEnums = enums(after);
-    for (const [name, oldMembers] of oldEnums) {
-      const newMembers = newEnums.get(name);
-      if (!newMembers) continue;
-      // All members carry an explicit value in both revisions → ordinals are pinned, so only a
-      // changed or dropped value can shift serialized data.
-      const pinned = oldMembers.every(x => x.value) && newMembers.every(x => x.value);
-      let detail = null;
-      if (pinned) {
-        const after_ = new Map(newMembers.map(x => [x.name, x.value]));
-        const broken = oldMembers.filter(x => after_.has(x.name) && after_.get(x.name) !== x.value);
-        const dropped = oldMembers.filter(x => !after_.has(x.name));
-        if (broken.length) detail = `explicit value of \`${broken[0].name}\` changed (${broken[0].value} → ${after_.get(broken[0].name)})`;
-        else if (dropped.length) detail = `member \`${dropped[0].name}\` removed`;
-      } else {
-        const oldNames = oldMembers.map(x => x.name);
-        const newNames = newMembers.map(x => x.name);
-        const isPrefix = oldNames.every((n, i) => newNames[i] === n);
-        if (!isPrefix) {
-          const at = oldNames.findIndex((n, i) => newNames[i] !== n);
-          detail = `member order changed at index ${at} (\`${oldNames[at]}\` → \`${newNames[at] ?? '(gone)'}\`) — not an append`;
-        }
-      }
-      if (!detail) continue;
-      facts.push({
-        kind: 'enum-ordinal-shift',
-        path: f.path,
-        detail: `enum \`${name}\`: ${detail}. Every serialized int for this enum now means something else.`,
-        tool: grepCall(name, '*.cs'),
-        verify: `git grep -n '${name}' -- '*.cs'`,
-      });
-    }
-  }
-  return facts;
-}
-
-// ── check 5: an interface gained a member ────────────────────────────
-// Every implementer must now implement it. Pure mechanics — and exactly the kind of blast radius a
-// diff cannot show, because the implementers are the files that did NOT change.
-
-function interfaceMembers(text) {
-  const found = new Map();
-  const clean = stripComments(text);
-  const re = /\binterface\s+(I[A-Za-z_]\w*)/g;
-  let m;
-  while ((m = re.exec(clean))) {
-    const body = braceBody(clean, m.index);
-    if (body == null) continue;
-    const members = new Set();
-    for (const line of body.split(/;|\n/)) {
-      const t = line.replace(/\{[^}]*\}/g, '').replace(/\s+/g, ' ').trim();
-      if (t && /[A-Za-z_]\w*\s*[({]?/.test(t) && t.length < 200) members.add(t);
-    }
-    found.set(m[1], members);
-  }
-  return found;
-}
-
-function interfaceFacts(staged, notes) {
-  const facts = [];
-  for (const f of csTargets(staged, notes)) {
-    const before = blob('HEAD', f.path);
-    const after = blob('', f.path);
-    if (before == null || after == null) continue;
-    const oldIfaces = interfaceMembers(before);
-    for (const [name, newMembers] of interfaceMembers(after)) {
-      const oldMembers = oldIfaces.get(name);
-      if (!oldMembers) continue;
-      const added = [...newMembers].filter(s => !oldMembers.has(s));
-      if (!added.length) continue;
-      facts.push({
-        kind: 'interface-member-added',
-        path: f.path,
-        detail: `interface \`${name}\` gained \`${added[0]}\`${added.length > 1 ? ` (+${added.length - 1} more)` : ''} — every implementer must implement it`,
-        tool: grepCall(name, '*.cs'),
-        verify: `git grep -ln '${name}' -- '*.cs'`,
-      });
-    }
-  }
-  return facts;
-}
-
-// ── check 6: an asmdef reference was removed ─────────────────────────
-// The assembly's scripts lose every type from the dropped reference.
-
-function asmdefFacts(staged) {
-  const facts = [];
-  for (const f of staged) {
-    if (!f.path.endsWith('.asmdef') || f.status !== 'M') continue;
-    let before, after;
-    try {
-      before = JSON.parse(blob('HEAD', f.path) ?? '{}');
-      after = JSON.parse(blob('', f.path) ?? '{}');
-    } catch { continue; }
-    const removed = (before.references || []).filter(r => !(after.references || []).includes(r));
-    if (!removed.length) continue;
-    facts.push({
-      kind: 'asmdef-reference-removed',
-      path: f.path,
-      detail: `assembly reference(s) removed: ${removed.join(', ')} — scripts in this assembly lose every type those define`,
-      tool: `find_files path="${f.path.replace(/\/?[^/]+$/, '') || '.'}" pattern="*.cs"`,
-      verify: `git grep -ln 'using ' -- '${f.path.replace(/[^/]+$/, '')}*.cs'`,
-    });
-  }
-  return facts;
-}
-
-// ── facts + rendering ────────────────────────────────────────────────
-
-function gatherFacts(staged) {
-  const notes = [];
-  const facts = [
-    ...foreignStagedFacts(staged, notes),
-    ...metaGuidFacts(staged),
-    ...serializedFieldFacts(staged, notes),
-    ...enumFacts(staged, notes),
-    ...interfaceFacts(staged, notes),
-    ...asmdefFacts(staged),
-  ];
-  return { facts: facts.slice(0, MAX_FACTS), truncated: facts.length > MAX_FACTS, notes: [...new Set(notes)] };
-}
-
-/** `for: 'agent'` renders the ayin tool call to make; `for: 'human'` renders the shell command,
- *  which is what a person reading an UNVERIFIED report actually wants to paste. */
-function renderFacts(facts, notes, who = 'agent') {
-  const lines = facts.map((f, i) => `${i + 1}. [${f.kind}] ${f.path} — ${f.detail}\n   ${
-    who === 'agent' ? `run: ${f.tool}` : `verify with: ${f.verify}`}`);
-  const noteLines = notes.length ? `\n(skipped: ${notes.join('; ')})` : '';
-  const head = who === 'agent'
-    ? 'FACTS — computed by git, not by you. Each is TRUE. Your job is to find out whether it BREAKS anything.'
-    : 'FACTS — computed by git. Each is TRUE; none was verified against the repo.';
-  return `${head}\n${lines.join('\n')}${noteLines}`;
-}
-
-// ── contract enforcement ─────────────────────────────────────────────
-
-/** A finding survives only if it cites a path that EXISTS in this repo. This is what makes
- *  fabrication structurally impossible: an invented `DebugLogger.cs` fails the check and is
- *  dropped before anyone reads it. */
-function citedPath(line) {
-  for (const token of line.match(/[\w./\\-]+\.[A-Za-z][\w]{0,11}(?::\d+)?/g) || []) {
-    const path = token.split(':')[0].replace(/^\.\//, '');
-    if (existsSync(join(REPO, path))) return path;
-  }
-  return null;
-}
-
-function parseModelOutput(raw) {
-  const grepsMatch = raw.match(/greps?_run\s*:\s*(\d+)/i);
-  const grepsRun = grepsMatch ? parseInt(grepsMatch[1], 10) : 0;
-  const verdictMatches = raw.match(/VERDICT\s*:\s*(CLEAR|ISSUES|UNVERIFIED)/gi) || [];
-  const last = verdictMatches[verdictMatches.length - 1];
-  let verdict = last ? last.split(':')[1].trim().toUpperCase() : 'UNVERIFIED';
-
-  const findings = [];
-  const dropped = [];
-  for (const line of raw.split('\n')) {
-    const t = line.trim().replace(/^[-*\d.)\s]+/, '');
-    if (!t || /^VERDICT\s*:/i.test(t) || /^greps?_run\s*:/i.test(t) || /^findings?\b/i.test(t)) continue;
-    if (!/\s[—-]\s/.test(t)) continue;            // the contract's `<file>:<line> — <what breaks>` shape
-    if (citedPath(t)) findings.push(t); else dropped.push(t);
-  }
-
-  // The two rules that make confident storytelling worthless: no greps → nothing was checked, and
-  // an ISSUES verdict with no surviving citation is an opinion, not a finding.
-  if (grepsRun === 0) verdict = 'UNVERIFIED';
-  if (verdict === 'ISSUES' && findings.length === 0) verdict = 'UNVERIFIED';
-  return { verdict, grepsRun, findings: findings.slice(0, MAX_FINDINGS), dropped };
+  };
+  harvest(candidates('*.puml'), pumlTypes);
+  if (!types.size) harvest(candidates('*.html', '*.htm'), naamahPageTypes);
+  return { types, sources };
 }
 
 // ── output ───────────────────────────────────────────────────────────
-
-function emitBlock(reason) {
-  process.stdout.write(JSON.stringify({ decision: 'block', reason }));
-  process.exit(0);
-}
 
 function emitContext(context, systemMessage) {
   process.stdout.write(JSON.stringify({
@@ -454,132 +206,98 @@ function emitContext(context, systemMessage) {
   process.exit(0);
 }
 
+/** One pass, same rule as the prompt service: `{{UPPER_SNAKE}}` replaced by value, nothing
+ *  re-expanded. An unsupplied var stays visible rather than blanking. */
+function fill(template, vars) {
+  let out = template;
+  for (const [k, v] of Object.entries(vars)) out = out.split(`{{${k}}}`).join(v);
+  return out;
+}
+
 // ── main ─────────────────────────────────────────────────────────────
 
 const argv = process.argv.slice(2);
-const factsOnly = argv.includes('--facts');   // debugging: print the deterministic facts, no model
-const dryRun = argv.includes('--dry');        // debugging: print what would be emitted, no model
+const factsOnly = argv.includes('--facts');   // debugging: print the deterministic verdict as JSON
 
-if (process.env.AYIN_HOUND && !factsOnly && !dryRun) process.exit(0); // recursion guard
-
-// Claude Code pipes the hook payload on stdin. `stop_hook_active` is true when this stop is ALREADY
-// the continuation of a previous block — blocking again is how a hook loops forever.
 // Claude Code pipes the payload on stdin. Reading fd 0 when it is a TTY blocks forever, so a manual
-// `--facts` run must never reach it.
+// `--facts` run must never reach it. `stop_hook_active` marks a stop that is already the
+// continuation of a block — this hound never blocks, so it can only be someone else's.
 let payload = {};
-if (!factsOnly && !dryRun && !process.stdin.isTTY) {
+if (!factsOnly && !process.stdin.isTTY) {
   try { payload = JSON.parse(readFileSync(0, 'utf-8')); } catch { /* no payload — proceed */ }
 }
 if (payload.stop_hook_active) process.exit(0);
 
+// NO WORKING TREE, NOTHING TO ASK. Not a repo, or a clean tree, and the hook is done.
 if (!existsSync(REPO) || git('rev-parse', '--is-inside-work-tree').trim() !== 'true') process.exit(0);
-if (!hasHead()) process.exit(0);
 
-let diff = git('diff', '--cached');
-if (!diff.trim()) process.exit(0);
+const tree = workingTree();
+const addedCs = tree
+  .filter(isAdded)
+  .filter(f => f.path.endsWith('.cs'))
+  .filter(f => !NOT_AUTHORED.test(f.path) && !GENERATED_CS.test(f.path))
+  .map(f => f.path);
 
-const staged = stagedFiles();
-const { facts, truncated, notes } = gatherFacts(staged);
+const scanned = addedCs.slice(0, MAX_CS_SCANNED);
+const notes = addedCs.length > scanned.length
+  ? [`${addedCs.length - scanned.length} of ${addedCs.length} added .cs files not scanned (cap ${MAX_CS_SCANNED})`]
+  : [];
+
+// Where every early exit is decided, in the order the question is actually asked.
+const { types: designed, sources } = scanned.length ? design() : { types: new Set(), sources: [] };
+
+/** Added type → the file that declares it, for every type the design does not name. */
+const undesigned = [];
+if (scanned.length && designed.size) {
+  for (const rel of scanned) {
+    const text = readBounded(rel);
+    if (text == null) continue;
+    for (const name of declaredTypes(text)) {
+      if (!designed.has(name)) undesigned.push({ type: name, path: rel });
+    }
+  }
+}
 
 if (factsOnly) {
-  process.stdout.write(JSON.stringify({ staged, facts, truncated, notes }, null, 2) + '\n');
+  process.stdout.write(`${JSON.stringify({
+    addedCs, scanned, designSources: sources, designedTypes: [...designed].sort(), undesigned, notes,
+  }, null, 2)}\n`);
   process.exit(0);
 }
 
-const diffLines = diff.split('\n').length;
-// Nothing mechanical to chase and nothing substantial staged → say nothing. A hound that barks
-// every batch is a hound nobody hears.
-if (facts.length === 0 && diffLines < BIG_DIFF_LINES) process.exit(0);
+if (!scanned.length) process.exit(0);      // nothing added
+if (!designed.size) process.exit(0);       // no design in this tree to be off
+if (!undesigned.length) process.exit(0);   // every new type is on it
 
-// Debounce per staged-diff content: the same index reviewed twice costs a model call and says the
-// same thing. An atomic mkdir is the lock; stale locks are swept after a day.
-if (!dryRun) {
-  const key = createHash('sha1').update(diff).digest('hex').slice(0, 20);
-  const lock = join(tmpdir(), `ayin-hound.${key}.lock`);
-  try { mkdirSync(lock); } catch { process.exit(0); }
-  try {
-    for (const name of readdirSync(tmpdir())) {
-      if (!/^ayin-hound\..*\.lock$/.test(name)) continue;
-      const p = join(tmpdir(), name);
-      if (Date.now() - statSync(p).mtimeMs > 86_400_000) rmSync(p, { recursive: true, force: true });
-    }
-  } catch { /* sweeping is best effort */ }
-}
+// Debounce on the finding itself: the same new types against the same design say the same thing
+// every turn, and a hound that repeats is a hound nobody reads. Fixing the design changes the key,
+// so the next turn is judged fresh. Atomic mkdir is the lock; stale locks are swept after a day.
+//
+// AYIN_HOUND_LOCK_DIR relocates it for the same reason AYIN_HOUND_OFF_FILE exists: a TEST HARNESS
+// runs the same fixture twice and the second run would be debounced by the first one's lock, in the
+// shared OS tmpdir, for a day — a gate that passes once and then fails until tomorrow.
+const lockDir = process.env.AYIN_HOUND_LOCK_DIR || tmpdir();
+const key = createHash('sha1')
+  .update(JSON.stringify([undesigned.map(u => `${u.path}#${u.type}`).sort(), sources.sort()]))
+  .digest('hex').slice(0, 20);
+const lock = join(lockDir, `ayin-hound.${key}.lock`);
+try { mkdirSync(lock, { recursive: false }); } catch { process.exit(0); }
+try {
+  for (const name of readdirSync(lockDir)) {
+    if (!/^ayin-hound\..*\.lock$/.test(name)) continue;
+    const p = join(lockDir, name);
+    if (Date.now() - statSync(p).mtimeMs > 86_400_000) rmSync(p, { recursive: true, force: true });
+  }
+} catch { /* sweeping is best effort */ }
 
-if (diff.length > MAX_DIFF_CHARS) diff = diff.slice(0, MAX_DIFF_CHARS) + '\n[…diff truncated…]';
+const shown = undesigned.slice(0, MAX_NUDGE_TYPES);
+const overflow = undesigned.length - shown.length;
+const context = fill(AYIN_HOUND_NUDGE, {
+  TYPES: shown.map(u => `- \`${u.type}\` — ${u.path}`).join('\n')
+    + (overflow ? `\n- …and ${overflow} more` : '')
+    + (notes.length ? `\n(${notes.join('; ')})` : ''),
+  DESIGN: sources.join(', '),
+  COUNT: String(undesigned.length),
+});
 
-const factsBlock = facts.length
-  ? renderFacts(facts, notes)
-  : 'FACTS: none — the mechanical checks found nothing. Judge only whether this staged diff is one complete idea worth committing now.';
-const prompt = `${AYIN_HOUND_INSTRUCTIONS.trim()}\n\n${factsBlock}\n\nSTAGED DIFF:\n${diff}`;
-
-const factsContext = () =>
-  `ayin-hound could not verify these mechanically-detected facts — run the commands yourself:\n\n${renderFacts(facts, notes, 'human')}`;
-
-if (dryRun) {
-  process.stdout.write(`${prompt}\n`);
-  process.exit(0);
-}
-
-let raw = '';
-if (process.env.AYIN_HOUND_SELFTEST) {
-  raw = `greps_run: 1\n${staged[0]?.path ?? 'README.md'}:1 — stub finding — selftest\nVERDICT: ISSUES`;
-} else {
-  const res = spawnSync('ayin', ['-p', prompt], {
-    cwd: REPO,
-    encoding: 'utf-8',
-    timeout: MODEL_TIMEOUT_MS,
-    maxBuffer: 8 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'ignore'],
-    env: {
-      ...process.env,
-      AYIN_HOUND: '1',          // recursion guard for any nested Stop hook
-      AYIN_READONLY: '1',       // grep/read only — the hound nudges, it never edits
-      AYIN_ACQUIRE_LLM: '1',    // one door: take the llm authority rather than side-dooring the GPU
-      AYIN_MAX_ROUNDS: ROUND_BUDGET,
-    },
-  });
-  raw = res.stdout || '';
-}
-
-// No model (ayin absent, offline, timed out) does NOT mean no signal: the facts were computed by
-// git and are still true. Hand them over with the commands a human should run.
-if (!raw.trim()) {
-  if (!facts.length) process.exit(0);
-  emitContext(factsContext(), `ayin-hound: ${facts.length} unverified flag(s) — model unavailable`);
-}
-
-const { verdict, grepsRun, findings, dropped } = parseModelOutput(raw);
-
-if (verdict === 'ISSUES') {
-  const body = findings.map(f => `- ${f}`).join('\n');
-  const extra = facts.length ? `\n\nMechanical facts behind this (git-computed):\n${renderFacts(facts, notes, 'human')}` : '';
-  emitBlock(`ayin-hound — ${findings.length} verified finding(s) after ${grepsRun} grep(s):\n\n${body}${extra}`);
-}
-
-if (verdict === 'UNVERIFIED') {
-  const why = grepsRun === 0
-    ? 'the reviewer ran no greps, so nothing it said was checked'
-    : `${dropped.length} claim(s) cited files that do not exist and were dropped`;
-  if (!facts.length) process.exit(0); // nothing verified AND nothing mechanical — stay silent
-  emitContext(`${factsContext()}\n\n(ayin-hound verdict: UNVERIFIED — ${why}.)`,
-    `ayin-hound: UNVERIFIED — ${facts.length} mechanical flag(s) left unchecked`);
-}
-
-// CLEAR. The facts-free path had one job: judge commit-worthiness. A nudge never blocks.
-if (!facts.length) {
-  const nudge = raw.split('\n').map(s => s.trim()).find(s => /^commit-suggestion\s*:/i.test(s));
-  if (nudge) emitContext(`ayin-hound: this staged diff looks like one complete idea — ${nudge}`, 'ayin-hound: commit-worthy');
-  process.exit(0);
-}
-
-// Deterministic facts still ride out as context — a grep can refute "this GUID is referenced", it
-// cannot refute "this file is not part of your branch's work".
-const foreign = facts.filter(f => f.kind === 'staged-foreign');
-if (foreign.length) {
-  emitContext(
-    `ayin-hound: ${foreign.length} staged file(s) that no commit on this branch ever touched — check they belong in your commit:\n` +
-    foreign.map(f => `- ${f.path} (${f.detail})`).join('\n'),
-    `ayin-hound: ${foreign.length} possibly-unrelated staged file(s)`);
-}
-process.exit(0);
+emitContext(context, `ayin-hound: ${undesigned.length} new C# type(s) not on ${sources[0]}`);

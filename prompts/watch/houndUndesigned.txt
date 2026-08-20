@@ -1,0 +1,6 @@
+{{COUNT}} C# type(s) you added are not on the design ({{DESIGN}}):
+
+{{TYPES}}
+
+Either put each on the design, or say why it does not belong there. A type that exists in code and
+not on the diagram is drift: the next reader trusts the diagram and does not find it.
