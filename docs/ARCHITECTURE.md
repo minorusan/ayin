@@ -1970,8 +1970,20 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
   size and truncating kept the noise. A tracked file is a change made on purpose — when something has
   to be dropped, that decides which. Omitted files keep their row and their true counts.
 
-Gate: `npm run check:diff` — checks every count against `git diff --numstat`, and escaping against a
-file containing `</script>`.
+- **The refresh FAB rides the property that already existed.** The served route re-collects the working
+  tree on EVERY `GET /diff`, so "rebuild against fresh state" is `location.reload()` — no path to
+  publish, no cache to invalidate, and the URL never moves. All the button has to do is keep the
+  reader's place, which the post-fix reload already solved: `rememberViewport()` writes the topmost
+  on-screen file to the SAME `sessionStorage` anchor `restore()` reads, with no line, so `restore()`
+  misses the row and falls back to the file — the honest anchor when the tree just changed under it.
+  One anchor, not a second mechanism to keep in step. Clicking disarms the button (`pointer-events:none`)
+  because a re-collect on a large tree is not instant and a dead-looking button gets clicked twice.
+  **A `file://` page gets no FAB at all** — a static snapshot has no server to rebuild from and cannot
+  reach `git`, so the affordance is absent rather than present and broken, the same call the page makes
+  about comments.
+
+Gate: `npm run check:diff` — checks every count against `git diff --numstat`, escaping against a
+file containing `</script>`, and which of the two page modes carries the refresh FAB.
 
 ## `/sprint` — the board in a browser (`src/sprint/`)
 

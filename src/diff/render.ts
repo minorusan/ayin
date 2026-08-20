@@ -178,6 +178,21 @@ function sidebarRow(f: FileDiff, i: number): string {
  * and the code behind it are absent together, which is also what makes the static page's "comments are
  * off" line true rather than decorative.
  */
+/**
+ * The refresh FAB — served pages ONLY.
+ *
+ * A `file://` page has nothing to rebuild from: the static file is a snapshot, and `git` is not
+ * reachable from a document. So the button is ABSENT there rather than present and dead, which is the
+ * same call the page already makes about the comment affordance.
+ */
+function refreshFab(): string {
+  return '<button class="fab" id="refresh" aria-label="Rebuild against the current working tree"'
+    + ' title="Rebuild against the current working tree">'
+    + '<svg viewBox="0 0 24 24" aria-hidden="true">'
+    + '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3.5V10h-6.5"/>'
+    + '</svg></button>';
+}
+
 function commentClient(o: Resolved): string {
   return `
   // ── line comments ──────────────────────────────────────────────────────────
@@ -213,6 +228,38 @@ function commentClient(o: Resolved): string {
     var row = f.querySelector('.l[data-side="' + a.side + '"][data-line="' + a.line + '"]');
     (row || f).scrollIntoView({ block: 'center' });
   }
+
+  /**
+   * Where the reader is RIGHT NOW — the topmost file still on screen — so a manual refresh lands
+   * where they were instead of at the top of the diff.
+   *
+   * Writes the SAME key restore() already reads, with no line: restore() fails to match a row and
+   * falls back to the file, which is the honest anchor anyway when the tree has just changed under it.
+   * One anchor, one restore, no second mechanism to keep in step.
+   */
+  function rememberViewport(){
+    var fs = document.querySelectorAll('.file'), best = null, bestTop = Infinity;
+    for (var i = 0; i < fs.length; i++) {
+      var r = fs[i].getBoundingClientRect();
+      if (r.bottom < 0) continue;                       // scrolled past
+      if (r.top < bestTop) { bestTop = r.top; best = fs[i]; }
+    }
+    if (!best) return;
+    try {
+      sessionStorage.setItem(ANCHOR, JSON.stringify({ path: best.dataset.path, side: 'new', line: '' }));
+    } catch (e) { /* private mode: losing the position is not worth failing the refresh over */ }
+  }
+
+  // ── refresh ────────────────────────────────────────────────────────────────
+  // The route re-collects the working tree on EVERY GET, so "rebuild against fresh state" is exactly
+  // a reload: no path to publish, no cache to invalidate, and the URL never moves. Only the reader's
+  // position has to survive, which the anchor above already handles.
+  var fab = document.getElementById('refresh');
+  if (fab) fab.onclick = function(){
+    rememberViewport();
+    fab.classList.add('busy');
+    location.reload();
+  };
 
   function badgeOf(cmt){ return cmt.querySelector('.badge'); }
 
@@ -440,6 +487,22 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
   border-radius:8px;padding:6px 10px;cursor:pointer}
 .act:hover{color:var(--ink);border-color:var(--wire-hot)}
 
+/* ── refresh FAB (served pages only) ── */
+/* Fixed, bottom-right, above the sticky header's z-index:2. Every colour is a token, so the light
+   theme is handled by the same :root override as everything else. */
+.fab{position:fixed;right:22px;bottom:22px;width:44px;height:44px;z-index:5;
+  display:grid;place-items:center;cursor:pointer;border-radius:50%;
+  color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line);
+  box-shadow:0 4px 16px rgba(0,0,0,.28)}
+.fab:hover{color:var(--wire-hot);border-color:var(--wire-hot)}
+.fab svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;
+  stroke-linecap:round;stroke-linejoin:round}
+/* A re-collect on a large tree is not instant, and a button that looks dead gets clicked twice —
+   which is a second full collect for nothing. Spin, and stop taking clicks. */
+.fab.busy{pointer-events:none;color:var(--wire-hot)}
+.fab.busy svg{animation:fabspin .8s linear infinite;transform-origin:50% 50%}
+@keyframes fabspin{to{transform:rotate(360deg)}}
+
 /* ── sidebar ── */
 aside{overflow-y:auto;border-right:1px solid var(--line);background:var(--surface);padding:8px}
 .row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:9px;
@@ -551,6 +614,7 @@ kbd{font:10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2
 </div>
 <aside id="side">${set.files.map(sidebarRow).join('')}</aside>
 <main id="main">${omitted}${filesHtml || '<div class="empty">Working tree is clean.</div>'}</main>
+${o.interactive ? refreshFab() : ''}
 <script>
 (function(){
   var DEF = ${JSON.stringify(DEFAULT_EXTENSIONS)};

@@ -176,6 +176,30 @@ const clean = collect.collectDiff(CLEAN);
 ok(clean.files.length === 0, 'a clean tree collects nothing');
 ok(/Working tree is clean/.test(render.renderDiffPage(clean)), 'and the page says so instead of rendering blank');
 
+// ── 8 · the refresh FAB ──────────────────────────────────────────────────────────
+//
+// A served page re-collects on every GET, so the FAB is a reload. The assertions that matter are
+// which pages GET one: a file:// page has no server to rebuild from, and a refresh button that
+// cannot refresh is worse than no button — the same call the page makes about comments.
+
+console.log('\nrefresh FAB');
+
+const fabSet = collect.collectDiff(CLEAN);
+const served = render.renderDiffPage(fabSet, { interactive: true, rev: 'HEAD', comments: [] });
+const staticPage = render.renderDiffPage(fabSet, { interactive: false, rev: 'HEAD', comments: [] });
+
+ok(/id="refresh"/.test(served), 'a SERVED page carries the FAB');
+ok(!/id="refresh"/.test(staticPage), 'a file:// page does NOT — there is nothing to rebuild from');
+ok(/fab\.onclick/.test(served) && !/fab\.onclick/.test(staticPage),
+  'and the wiring ships only with the page that can use it');
+ok(/aria-label="Rebuild against the current working tree"/.test(served),
+  'the FAB is labelled for a screen reader, not icon-only');
+ok(/function rememberViewport/.test(served), 'it records the reader position before reloading');
+ok(/sessionStorage\.setItem\(ANCHOR/.test(served) && (served.match(/ANCHOR = /g) || []).length === 1,
+  'reusing the post-fix reload anchor — ONE anchor, not a second mechanism');
+ok(/\.fab\.busy\{pointer-events:none/.test(served),
+  'a click disarms the button: a slow re-collect must not be startable twice');
+
 rmSync(REPO, { recursive: true, force: true });
 rmSync(CLEAN, { recursive: true, force: true });
 rmSync(HOME, { recursive: true, force: true });

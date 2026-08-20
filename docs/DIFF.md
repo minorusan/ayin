@@ -97,6 +97,17 @@ same after four minutes as after four seconds, and the operator cannot otherwise
 a dead session. When the turn ends the page reloads **the same URL**, which re-collects from the new
 working tree, and the agent's closing message appears under the comment.
 
+**And the operator can ask for that reload directly.** A refresh FAB in the bottom-right corner does
+what the post-turn reload does — same URL, same re-collect — for the case the agent was never involved
+in: an edit made in an editor, a `git add`, a stash. It reuses the anchor rather than adding a second
+one: `rememberViewport()` stores the topmost on-screen file under the same key `restore()` reads, with
+no line number, so `restore()` fails to match a row and falls back to the file. That fallback is the
+correct behaviour here, not a compromise — after a refresh the line numbers are exactly what moved.
+The button disarms itself on click, because a re-collect on a large tree is not instant and a
+dead-looking button gets clicked twice, which is a second full collect for nothing. A `file://` page
+has no server to re-collect from, so it carries no FAB — absent rather than broken, the same call this
+page makes about comments.
+
 Threads are appended to `~/.ayin-cli/diffs/comments-<repo>.jsonl` — one record per creation, one per
 status change, current state is the fold. A comment is the operator's writing and the answer may take
 minutes, so a browser refresh, a second session or a power cut must not lose it; an interrupted append
