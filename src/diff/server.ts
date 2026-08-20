@@ -28,6 +28,7 @@ import { collectDiff } from './collect.js';
 import { renderDiffPage } from './render.js';
 import { createComment, getComment, readComments } from './comments.js';
 import { autoStage, safeRepoPath, stageOne, unstageOne } from './stage.js';
+import { draftCommit, readCommitDraft } from '../commit-draft.js';
 import { log } from '../log.js';
 
 /** How a comment reaches the agent. Wired by app.ts at boot; absent in any process without a TUI. */
@@ -79,6 +80,10 @@ function servePage(res: ServerResponse, cwd: string, rev: string): void {
     interactive: true,
     rev,
     comments: readComments(cwd),
+    // Re-read per request, from git, for the same reason the diff is re-collected: the operator may
+    // have edited the message in their client since the last render, and a cached copy would show
+    // them their own stale draft.
+    commitDraft: readCommitDraft(cwd),
   });
   res.writeHead(200, {
     'Content-Type': 'text/html; charset=utf-8',
@@ -191,6 +196,25 @@ export async function handleDiffRequest(req: IncomingMessage, res: ServerRespons
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log('WARN', 'diff_autostage_failed', { error: msg });
+      json(res, 500, { error: msg });
+    }
+    return true;
+  }
+
+  // Drafting spends a model call and only when Jira confirmed a ticket, so it answers with WHY when it
+  // declined — an operator who pressed a button and got nothing needs the reason, not a shrug.
+  if (path === '/api/diff/draft' && req.method === 'POST') {
+    try {
+      const r = await draftCommit(cwd);
+      json(res, 200, {
+        drafted: r.drafted, text: r.text, why: r.why,
+        tickets: r.ctx.tickets.map((t) => ({ key: t.key, status: t.status, title: t.title })),
+        candidates: r.ctx.candidates,
+        sessionTurns: r.ctx.session.turns.length,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('WARN', 'diff_draft_failed', { error: msg });
       json(res, 500, { error: msg });
     }
     return true;

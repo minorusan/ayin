@@ -154,6 +154,10 @@ export const KNOWN_CONFIG_KEYS = [
   'embedModel',
   // Which service embeds. Normally inferred from embedModel; set only to override that.
   'embedProvider',
+  // `host:port` of a Unity Accelerator. EMPTY means disabled — no probe, no read, no write. A LAN
+  // address is a fact about one machine and never belongs in source (CLAUDE.md §4), so this is the
+  // only place it may live. See unity-accelerator.ts for why it is asserted only while reachable.
+  'acceleratorEndpoint',
   // Where embeddings are asked for, when that is NOT the endpoint everything else uses. Empty means
   // one door: the configured llmUrl. This is the setting for a small embedder running BESIDE the
   // chat model — a local Ollama on this machine while generation goes to a bigger box — and it is an

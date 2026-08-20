@@ -4,9 +4,12 @@ Useful for anything you'd otherwise pass as an environment variable every launch
 
 `embed-url` is worth knowing about: embeddings normally go to the same endpoint as everything else (one door), and this is how you point them somewhere else on purpose — a small embedding model running locally while generation goes to a bigger box. Unset means one door. Changing `embed-model` invalidates every vector in a corpus, because a vector is only comparable to vectors from the same model, so it means re-embedding.
 
+`accelerator-endpoint` is `host:port` of a Unity Accelerator. Empty means disabled. When it is set and the box answers, `ayin watch` keeps every watched Unity project's `ProjectSettings/EditorSettings.asset` pointed at it — that file is tracked, so expect it to stay dirty, and do not commit it unless your whole team reaches the same address.
+
 ## Examples
 
     /set llm-url http://localhost:9100
     /set embed-url http://127.0.0.1:11434
     /set embed-model nomic-embed-text
+    /set accelerator-endpoint cache.example.lan:10080
     /set terminal-command "wt.exe {{SCRIPT}}"

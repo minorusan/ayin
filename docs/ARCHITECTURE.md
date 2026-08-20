@@ -2028,6 +2028,37 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
   reach `git`, so the affordance is absent rather than present and broken, the same call the page makes
   about comments.
 
+- **The commit message is drafted from three sources and shown in the page** (`src/commit-draft.ts`).
+  The expensive half is LAST: changed files come from git, ticket keys from one regex over the branch
+  name, the local Claude Code transcript, the last few commit subjects and the diff's added lines — and
+  every key is then CONFIRMED by `jiraTickets()`. Only if Jira resolves at least one does a model get
+  asked to write anything, so an unconfigured Jira, a branch with no key, or a session that never
+  mentioned one all cost nothing. A ticket SHAPE is not a ticket: the regex is the one
+  `explain/git-history.ts` owns, reused rather than duplicated, and its doc already argues that
+  `PROJECT-123` is structurally identical to a part number or a version string.
+
+  **Measured on a real repo, and it changed the design.** Three of the four candidate sources found
+  nothing — the branch was `feature/<name>/<area>`, the session turns never named a key, the diff
+  carried none — and the commit subjects found everything, because the team's convention puts keys in
+  the subject. Scoping subjects to the branch's own commits sounded right and was WORSE: 100 own
+  commits yielded 14 keys, most of them finished work. A small RECENCY window yielded exactly the
+  tickets the uncommitted change belonged to. What is in flight is near HEAD, not near the fork point.
+
+  The local transcript (`~/.claude/projects/<slug>/*.jsonl`) is read for `type: 'user'` records only,
+  filtered to this `gitBranch` and excluding `isSidechain`/`isMeta` — a subagent's prompts are ayin's
+  own scaffolding, and another branch's session is another feature's reasoning. The diff says what
+  changed; it cannot say why or what is still missing, and the operator already said both out loud
+  while doing the work.
+
+  **One slot, and it is git's.** The draft is written to `.git/COMMIT_EDITMSG`, which `git commit` and
+  every git client already prefill from, so it arrives where the operator was going to type anyway. The
+  page RE-READS that file per request — no cached copy to go stale — and an absent draft is stated
+  ("No draft yet") rather than rendered as an empty panel. The daemon's worktree pass writes its plain
+  message first and this overwrites it only when it has something better, so the plain one is the floor
+  whenever the ticket gate declines. `POST /api/diff/draft` is the same pipeline on demand, and when it
+  declines it answers with WHY plus the candidates it saw — an operator who pressed a button and got
+  nothing needs the reason, not a shrug.
+
 Gate: `npm run check:diff` — checks every count against `git diff --numstat`, escaping against a
 file containing `</script>`, and which of the two page modes carries the refresh FAB.
 
@@ -2191,6 +2222,29 @@ The moving parts, designed to survive interruption at any point:
   (temp file + rename) — a power cut mid-write can never leave a truncated `settings.json` for the
   next Claude Code turn to choke on (an unparseable file would otherwise be presumed hand-edited
   and left alone forever, exactly the case a self-inflicted truncation must not fall into).
+- **Unity Accelerator, kept pointed at** (`src/unity-accelerator.ts`): on install and on every
+  self-heal, a watched Unity project's `ProjectSettings/EditorSettings.asset` has
+  `m_CacheServerMode: 1` and `m_CacheServerEndpoint` asserted — a two-line edit, by line, never a YAML
+  round-trip (Unity's `.asset` dialect carries tags and ordering it depends on; re-serializing it is
+  how a settings file comes back subtly different and Unity rewrites half of it).
+
+  Three properties are load-bearing. **The endpoint is CONFIG with an empty default** —
+  `acceleratorEndpoint`, or `AYIN_ACCELERATOR` — and empty means disabled: no probe, no read, no write.
+  A LAN address in source would be a fact about one machine compiled into a public repo (§4) and wrong
+  for every other machine besides. **It is written only while the box ANSWERS**, checked by a TCP
+  connect with a short timeout: Unity pointed at a dead cache server does not fail fast, it waits on
+  every import, so asserting an unreachable endpoint is worse than leaving it unset. **And it never
+  reverts** — when the box stops answering the setting is left alone, because this file is tracked and
+  an automatic revert would mean a daemon adding and removing a line in version control as a laptop
+  moves between networks.
+
+  **Known cost, chosen deliberately.** `EditorSettings.asset` is tracked and shared, so once this
+  writes, the file is dirty until committed — and if it IS committed, every teammate and every CI
+  runner inherits an endpoint that does not resolve for them. The machine-local alternative is Unity's
+  own user preference, which `m_CacheServerMode: 0` already defers to; that trade was raised and the
+  project-settings slot was chosen. Note this argues with the `/diff` Stage policy, which deliberately
+  skips `ProjectSettings/` as project base config — one writes the file, the other refuses to stage it.
+
 - **The kill switch — `ayin kill dog`** (`src/kill-dog.ts`, `src/hound-off.ts`): `~/.ayin-cli/hound.off`.
   While that file exists the hook exits 0 on its FIRST line — before git, before any file is read —
   `ayin watch` installs no hound, and the daemon's self-heal stops re-adding one

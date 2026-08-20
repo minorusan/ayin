@@ -40,6 +40,7 @@ import { initLlmProvider } from './llm/select.js';
 import { prompts, packagePath, writeAtomic } from './prompts-service.js';
 import { log } from './log.js';
 import { HOUND_MARKERS, HOUND_SCRIPT_NAME, LEGACY_HOUND_SCRIPT, houndOffPath, isHoundOff } from './hound-off.js';
+import { ensureAccelerator } from './unity-accelerator.js';
 // Re-exported for the callers that had them from here before they moved (see hound-off.ts).
 export { HOUND_MARKERS, HOUND_SCRIPT_NAME, LEGACY_HOUND_SCRIPT };
 
@@ -230,6 +231,13 @@ async function installHook(repo: string): Promise<void> {
     out(`ayin-hound Stop hook set: ${join(repo, '.claude', 'hooks', HOUND_SCRIPT_NAME)}`);
     log('INFO', 'watch_hound_installed', { repo });
   }
+  // The Accelerator, when one is configured AND answering. Reported unless it is simply switched off
+  // or this is not a Unity project: a cache server that silently did not get set is a day of slow
+  // imports nobody attributes to this.
+  {
+    const acc = await ensureAccelerator(repo);
+    if (!/disabled|not a Unity project/.test(acc.why)) out(`Unity Accelerator: ${acc.why}`);
+  }
   // Register the repo (the set the daemon watches + self-heals + reviews the working tree of).
   const repos = existsSync(REPOS_FILE) ? JSON.parse(readFileSync(REPOS_FILE, 'utf-8')) : {};
   repos[repo] = { installedAt: new Date().toISOString() };
@@ -247,7 +255,7 @@ function registeredRepos(): string[] {
 async function selfHealHooks(): Promise<void> {
   const repos = registeredRepos();
   if (repos.length === 0) return;
-  let reinstalled = 0, gone = 0, hound = 0;
+  let reinstalled = 0, gone = 0, hound = 0, accel = 0;
   for (const repo of repos) {
     let wrote = false, missing = false;
     for (const { name, kind } of WATCH_HOOKS) {
@@ -258,10 +266,13 @@ async function selfHealHooks(): Promise<void> {
     if (missing) { gone++; continue; }
     if (wrote) reinstalled++;
     if (houndInstallAllowed() && existsSync(repo) && ensureHoundHook(repo)) hound++;
+    // Re-asserted every pass: Unity rewrites EditorSettings.asset on its own, and a project that lost
+    // the endpoint is a project quietly re-importing everything locally again.
+    if (existsSync(repo) && (await ensureAccelerator(repo)).wrote) accel++;
   }
-  if (reinstalled || gone || hound) {
-    out(`hook self-heal: ${reinstalled} repo(s) re-hooked, ${gone} missing, ${hound} hound-refreshed — of ${repos.length} watched`);
-    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), gone: String(gone), hound: String(hound) });
+  if (reinstalled || gone || hound || accel) {
+    out(`hook self-heal: ${reinstalled} repo(s) re-hooked, ${gone} missing, ${hound} hound-refreshed, ${accel} accelerator-set — of ${repos.length} watched`);
+    log('INFO', 'watch_hook_selfheal', { watched: String(repos.length), reinstalled: String(reinstalled), gone: String(gone), hound: String(hound), accel: String(accel) });
   }
 }
 
@@ -1040,6 +1051,21 @@ async function reviewWorktree(repo: string, ledger: string[]): Promise<string[]>
   if (plan?.commit?.subject) {
     const gd = await absGitDir(repo);
     if (gd) { try { writeFileSync(join(gd, 'COMMIT_EDITMSG'), commitText(plan.commit)); } catch { /* skip */ } }
+  }
+
+  // THEN the ticket-aware draft, which OVERWRITES the one above when it has something better.
+  //
+  // One slot, not two: `.git/COMMIT_EDITMSG` is what every git client prefills from, so a second file
+  // would mean two drafts that can disagree and an operator who cannot tell which one their editor is
+  // about to show them. The plan's message stays the floor — it is written first and survives whenever
+  // this declines, which it does for free whenever no Jira ticket was confirmed.
+  try {
+    const { draftCommit } = await import('./commit-draft.js');
+    const d = await draftCommit(repo);
+    log('INFO', d.drafted ? 'commit_draft_upgraded' : 'commit_draft_declined',
+      { repo, why: d.why || d.ctx.tickets.map(t => t.key).join(',') });
+  } catch (err) {
+    log('WARN', 'commit_draft_pass_failed', { repo, error: err instanceof Error ? err.message : String(err) });
   }
 
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);

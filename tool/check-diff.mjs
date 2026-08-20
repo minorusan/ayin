@@ -292,6 +292,43 @@ ok(!safeRepoPath(IX, '../../../etc/passwd'), 'traversal is refused');
 ok(!safeRepoPath(IX, '--cached'), 'a flag-shaped path is refused before it reaches git');
 ok(!safeRepoPath(IX, '/etc/passwd'), 'an absolute path is refused');
 
+// ── 10 · the commit-message panel and the draft pipeline's deterministic half ────
+//
+// No model and no Jira here. The pipeline is built so the DECISION to spend either is deterministic,
+// which is exactly the part a gate can pin: with no ticket-shaped string anywhere, it must decline
+// before reaching the network.
+
+console.log('\ncommit draft');
+
+const withDraft = render.renderDiffPage(fabSet, {
+  interactive: true, rev: 'HEAD', comments: [], commitDraft: 'feat(scope): a subject\n\nA body line.',
+});
+const noDraft = render.renderDiffPage(fabSet, { interactive: true, rev: 'HEAD', comments: [], commitDraft: null });
+const staticDraft = render.renderDiffPage(fabSet, {
+  interactive: false, rev: 'HEAD', comments: [], commitDraft: 'feat(scope): a subject',
+});
+
+ok(/class="commit"/.test(withDraft), 'the page carries a commit-message panel');
+ok(/feat\(scope\): a subject/.test(withDraft), 'and renders the draft text');
+ok(/\.git\/COMMIT_EDITMSG/.test(withDraft), 'the panel names where the text came from — git, not a copy');
+ok(/No draft yet/.test(noDraft), 'an ABSENT draft is stated, never a blank panel');
+ok(/id="draft"/.test(withDraft) && !/id="draft"/.test(staticDraft),
+  'Draft is served-only — it spends a model call and needs the route');
+
+const { gatherDraftContext, transcriptDir, draftText } = await import(`file://${join(ROOT, 'dist', 'commit-draft.js')}`);
+ok(transcriptDir('/a/b-c').endsWith('-a-b-c'), 'the transcript dir flattens the repo path', transcriptDir('/a/b-c'));
+ok(draftText({ type: 'fix', scope: 'ui', subject: 's', body: 'b' }) === 'fix(ui): s\n\nb\n',
+  'the message is assembled as conventional-commit text');
+ok(draftText({ type: 'fix', scope: '', subject: 's', body: '' }) === 'fix: s\n',
+  'an empty scope and body collapse cleanly');
+
+// A repo with changes but NO ticket shape anywhere: the deterministic gate must refuse before Jira.
+const dctx = await gatherDraftContext(IX);
+ok(dctx.candidates.length === 0, 'no ticket-shaped string in branch, session, subjects or diff', dctx.candidates.join(','));
+ok(dctx.tickets.length === 0 && /no ticket key/.test(dctx.jiraNote),
+  'so it declines with a reason and never reaches the network', dctx.jiraNote);
+ok(dctx.files.length > 0, 'while still reporting the changed files it found', String(dctx.files.length));
+
 rmSync(IX, { recursive: true, force: true });
 rmSync(REPO, { recursive: true, force: true });
 rmSync(CLEAN, { recursive: true, force: true });

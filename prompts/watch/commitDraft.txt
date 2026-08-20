@@ -1,0 +1,23 @@
+Draft the commit message for this working tree.
+
+BRANCH
+{{BRANCH}}
+
+TICKETS — each one confirmed to exist by a Jira lookup, not guessed from a string shape:
+{{TICKETS}}
+
+WHAT THE OPERATOR SAID WHILE DOING THIS WORK, newest last:
+{{SESSION}}
+
+CHANGED FILES
+{{FILES}}
+
+DIFF
+{{DIFF}}
+
+Write the subject from what the DIFF does, not from what the tickets ask for — a ticket states an
+intent, the diff is what actually landed, and they differ. Name a ticket only where the diff carries
+work for it, and say per ticket what remains when the diff is short of the ticket.
+
+Reply with one JSON object and nothing else:
+{"type":"feat|fix|refactor|chore|perf|test|docs","scope":"<area or empty>","subject":"<one line, imperative, under 72 chars>","body":"<the description: what changed and why, one blank line between paragraphs, ticket keys inline where they apply>"}

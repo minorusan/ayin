@@ -31,6 +31,14 @@ import type { DiffComment } from './comments.js';
  */
 export interface RenderOptions {
   interactive?: boolean;
+  /**
+   * The drafted commit message, read from `.git/COMMIT_EDITMSG` by the CALLER.
+   *
+   * Passed in rather than read here: this module renders, and a renderer that reaches into `.git`
+   * cannot be handed a set collected from somewhere else. Absent means no draft exists yet, which is
+   * a state the panel says out loud instead of hiding.
+   */
+  commitDraft?: string | null;
   /** The rev this page compares against, echoed back on every comment so a reload re-renders it. */
   rev?: string;
   comments?: DiffComment[];
@@ -38,6 +46,7 @@ export interface RenderOptions {
 
 interface Resolved {
   interactive: boolean;
+  commitDraft: string | null;
   rev: string;
   /** file → `side:lineNo` → the thread on that line, oldest first. */
   byFile: Map<string, Map<string, DiffComment[]>>;
@@ -54,7 +63,10 @@ function resolve(opts: RenderOptions): Resolved {
     const list = byLine.get(key);
     if (list) list.push(c); else byLine.set(key, [c]);
   }
-  return { interactive: opts.interactive === true, rev: opts.rev || 'HEAD', byFile, placed: new Set() };
+  return {
+    interactive: opts.interactive === true, rev: opts.rev || 'HEAD', byFile, placed: new Set(),
+    commitDraft: opts.commitDraft ?? null,
+  };
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -212,6 +224,33 @@ function sidebarSections(files: FileDiff[]): string {
  * off" line true rather than decorative.
  */
 /**
+ * The commit-message panel, at the top of the change it describes.
+ *
+ * The text is git's own: `.git/COMMIT_EDITMSG` is what `git commit` prefills from, so the draft the
+ * page shows is byte-identical to what the operator will find in their editor. Nothing is cached here
+ * and there is no second copy to go stale — the caller re-reads the file on every request, the same
+ * way the diff itself is re-collected.
+ *
+ * An ABSENT draft is stated, not hidden. "No draft yet" plus the reason is actionable; an empty panel
+ * reads as a broken feature.
+ */
+function commitPanel(o: Resolved): string {
+  const draft = (o.commitDraft || '').trim();
+  const body = draft
+    ? `<pre class="cmsg">${esc(draft)}</pre>`
+    : '<div class="cnone">No draft yet — <code>.git/COMMIT_EDITMSG</code> is empty. '
+      + 'A draft is written when the watch pass finds ticket work in this tree, or when you press Draft.</div>';
+  const btn = o.interactive
+    ? '<button class="act" id="draft" title="Draft from the diff, this repo\'s Claude session, and its tickets">Draft</button>'
+    : '';
+  const copy = draft ? '<button class="act" id="cmsgcopy">copy</button>' : '';
+  return `<section class="commit">`
+    + `<header class="chead">Commit message<span class="sub">from <code>.git/COMMIT_EDITMSG</code></span>`
+    + `<span class="cacts">${copy}${btn}</span></header>`
+    + `${body}<div class="cwhy" id="cwhy"></div></section>`;
+}
+
+/**
  * The per-file index button — served pages ONLY, because staging is a git WRITE.
  *
  * One button, not two: a change is on exactly one side of the index, so the only move that means
@@ -340,6 +379,43 @@ function commentClient(o: Resolved): string {
   }
 
   function esc(t){ return String(t).replace(/[&<>]/g, function(c){ return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'; }); }
+
+  // ── the commit draft ───────────────────────────────────────────────────────
+  // The panel is git's file rendered; pressing Draft re-runs the pipeline and reloads so the panel
+  // shows what git now holds rather than what the response said. Reporting the DECLINE is the point:
+  // the pipeline refuses on purpose when no ticket was confirmed, and "nothing happened" with no
+  // reason is indistinguishable from a broken button.
+  var dbtn = document.getElementById('draft');
+  var cwhy = document.getElementById('cwhy');
+  if (dbtn) dbtn.onclick = function(){
+    dbtn.classList.add('busy');
+    dbtn.textContent = 'drafting\u2026';
+    if (cwhy) cwhy.textContent = '';
+    post('/api/diff/draft', {}).then(function(r){
+      dbtn.classList.remove('busy');
+      dbtn.textContent = 'Draft';
+      if (!r.ok) { if (cwhy) cwhy.innerHTML = '<b>failed</b> \u2014 ' + esc((r.j && r.j.error) || 'unknown'); return; }
+      if (r.j.drafted) { rememberViewport(); location.reload(); return; }
+      var t = (r.j.tickets || []).map(function(x){ return x.key; }).join(', ');
+      if (cwhy) cwhy.innerHTML = '<b>no draft</b> \u2014 ' + esc(r.j.why || 'declined')
+        + (r.j.candidates && r.j.candidates.length ? ' \u00b7 candidates seen: ' + esc(r.j.candidates.join(', ')) : '')
+        + (t ? ' \u00b7 confirmed: ' + esc(t) : '')
+        + ' \u00b7 ' + (r.j.sessionTurns || 0) + ' session turn(s) read';
+    }).catch(function(err){
+      dbtn.classList.remove('busy'); dbtn.textContent = 'Draft';
+      if (cwhy) cwhy.innerHTML = '<b>failed</b> \u2014 ' + esc(String(err));
+    });
+  };
+
+  var ccopy = document.getElementById('cmsgcopy');
+  if (ccopy) ccopy.onclick = function(){
+    var pre = document.querySelector('.cmsg');
+    if (!pre || !navigator.clipboard) return;
+    navigator.clipboard.writeText(pre.textContent || '').then(function(){
+      ccopy.textContent = 'copied';
+      setTimeout(function(){ ccopy.textContent = 'copy'; }, 1200);
+    }).catch(function(){ ccopy.textContent = 'copy failed'; });
+  };
 
   // ── the project-type Stage pass ────────────────────────────────────────────
   // It can spend a model call per changed .cs, so it reports per file and does NOT reload until the
@@ -606,6 +682,21 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
   border-radius:8px;padding:6px 10px;cursor:pointer}
 .act:hover{color:var(--ink);border-color:var(--wire-hot)}
 
+/* ── commit message panel ── */
+.commit{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+  margin:0 0 14px;overflow:hidden}
+.chead{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--surface-2);
+  border-bottom:1px solid var(--line);font:600 11.5px/1 var(--ui);color:var(--ink)}
+.chead .sub{font-weight:400;color:var(--ink-3)}
+.chead .cacts{margin-left:auto;display:flex;gap:6px}
+.cmsg{margin:0;padding:12px;font:12.5px/1.6 var(--mono);color:var(--ink);
+  white-space:pre-wrap;word-break:break-word}
+.cnone{padding:12px;font:11.5px/1.6 var(--ui);color:var(--ink-3)}
+.cnone code,.chead code{font:11px/1 var(--mono);color:var(--ink-2)}
+.cwhy{font:11px/1.5 var(--ui);color:var(--ink-2);padding:0 12px 10px}
+.cwhy:empty{display:none}
+.cwhy b{color:var(--ink)}
+
 /* ── the index: sidebar sections, per-file buttons, Stage ── */
 .sect{margin-bottom:10px}
 .shead{display:flex;align-items:center;gap:6px;padding:6px 6px 5px;
@@ -758,7 +849,7 @@ kbd{font:10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2
   ${o.interactive ? '<button class="act stage" id="autostage" title="Stage what this project type says is safe to stage">Stage</button>' : ''}
 </div>
 <aside id="side">${sidebarSections(set.files)}</aside>
-<main id="main">${omitted}${filesHtml || '<div class="empty">Working tree is clean.</div>'}</main>
+<main id="main">${commitPanel(o)}${omitted}${filesHtml || '<div class="empty">Working tree is clean.</div>'}</main>
 ${o.interactive ? refreshFab() : ''}
 <script>
 (function(){
