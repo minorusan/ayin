@@ -317,10 +317,20 @@ ok(/id="draft"/.test(withDraft) && !/id="draft"/.test(staticDraft),
 
 const { gatherDraftContext, transcriptDir, draftText } = await import(`file://${join(ROOT, 'dist', 'commit-draft.js')}`);
 ok(transcriptDir('/a/b-c').endsWith('-a-b-c'), 'the transcript dir flattens the repo path', transcriptDir('/a/b-c'));
-ok(draftText({ type: 'fix', scope: 'ui', subject: 's', body: 'b' }) === 'fix(ui): s\n\nb\n',
-  'the message is assembled as conventional-commit text');
-ok(draftText({ type: 'fix', scope: '', subject: 's', body: '' }) === 'fix: s\n',
-  'an empty scope and body collapse cleanly');
+const C = (key, files, note) => ({ key, files, note });
+ok(draftText({ type: 'fix', scope: 'ui', carries: [C('AB-1', ['a.cs'], 'did a'), C('AB-2', ['b.cs'], 'did b')], summary: 's', other: '' })
+  === 'fix(ui): AB-1,AB-2 - s\n\nAB-1 (a.cs): did a\n\nAB-2 (b.cs): did b\n',
+  'subject is type(scope): KEYS - summary, and each ticket PRINTS its citation');
+ok(draftText({ type: 'fix', scope: '', carries: [], summary: 's', other: '' }) === 'fix: s\n',
+  'no scope, no keys, no body all collapse cleanly');
+ok(draftText({ type: 'chore', scope: 'a', carries: [], summary: 's', other: 'assets only' })
+  === 'chore(a): s\n\nAlso: assets only\n', 'with no ticket carried, Also: is the whole description');
+// The defect this shape exists to prevent: a model formatting its own subject emitted a per-ticket
+// paragraph headed by an EMPTY key, which rendered as a line beginning with a bare colon.
+ok(draftText({ type: 'feat', scope: 'x', carries: [C('', [], ''), C('AB-1', ['a.cs'], 'n')], summary: 's', other: '' })
+  .startsWith('feat(x): AB-1 - s'), 'an empty key cannot reach the subject');
+ok(!draftText({ type: 'feat', scope: 'x', carries: [C('', [], '')], summary: 's', other: '' }).includes(': -'),
+  'and an all-empty list drops the separator rather than leaving a dangling dash');
 
 // A repo with changes but NO ticket shape anywhere: the deterministic gate must refuse before Jira.
 const dctx = await gatherDraftContext(IX);

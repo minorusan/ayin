@@ -194,17 +194,48 @@ export async function gatherDraftContext(repo: string): Promise<DraftContext> {
 
 // ── the draft ────────────────────────────────────────────────────────────────────
 
+/** One ticket the diff carries, with the changed files that prove it. */
+export interface Carried {
+  key: string;
+  /** Cited paths, already filtered to ones actually in the diff. */
+  files: string[];
+  note: string;
+}
+
 export interface CommitDraft {
   type: string;
   scope: string;
-  subject: string;
-  body: string;
+  /** Jira-confirmed AND citing at least one changed file. */
+  carries: Carried[];
+  /** One sentence covering all the changes. No keys — those are prepended here. */
+  summary: string;
+  /** Changes belonging to no ticket. */
+  other: string;
 }
 
-/** `type(scope): subject` + body — the text git will prefill. */
+/**
+ * `type(scope): KEY-1,KEY-2 - summary` + body — assembled HERE, not by the model.
+ *
+ * The shape is the operator's convention, so it is built deterministically: a model asked to format
+ * its own subject drifts, and it drifted into a real defect — a per-ticket paragraph headed by an
+ * EMPTY key, rendering as a line that began with a bare colon. Keys cannot be empty on this path
+ * because the array is filtered before it gets here, and the separator only appears when at least one
+ * key survives.
+ */
 export function draftText(d: CommitDraft): string {
-  const head = `${d.type || 'chore'}${d.scope ? `(${d.scope})` : ''}: ${d.subject}`;
-  return d.body ? `${head}\n\n${d.body.trim()}\n` : `${head}\n`;
+  const keys = d.carries.map((c) => c.key).filter(Boolean);
+  const scope = d.scope ? `(${d.scope})` : '';
+  const lead = keys.length ? `${keys.join(',')} - ` : '';
+  const head = `${d.type || 'chore'}${scope}: ${lead}${d.summary}`;
+  // THE CITATION IS PRINTED, and that is the point. Semantic relevance cannot be checked in code —
+  // measured twice, the model cited a real changed file and still wrote prose about code that was not
+  // in it, so filtering on "the citation resolves" passed a false attribution. Printing the files
+  // beside the claim makes a wrong one self-refuting to the reader instead of hidden from them.
+  const paras = d.carries
+    .filter((c) => c.key)
+    .map((c) => `${c.key} (${c.files.join(', ')}): ${c.note}`.trim());
+  if (d.other) paras.push(`Also: ${d.other}`);
+  return paras.length ? `${head}\n\n${paras.join('\n\n')}\n` : `${head}\n`;
 }
 
 /** Where git keeps the message it will prefill. */
@@ -270,22 +301,51 @@ export async function draftCommit(repo: string): Promise<DraftResult> {
 
   const m = /\{[\s\S]*\}/.exec(raw);
   if (!m) return { drafted: false, text: '', ctx, why: 'the model returned no JSON object' };
-  let parsed: Partial<CommitDraft>;
-  try { parsed = JSON.parse(m[0]) as Partial<CommitDraft>; }
+  let parsed: { type?: string; scope?: string; summary?: string; other?: string; carries?: unknown[] };
+  try { parsed = JSON.parse(m[0]) as typeof parsed; }
   catch { return { drafted: false, text: '', ctx, why: 'the model returned unparseable JSON' }; }
-  if (!parsed.subject?.trim()) return { drafted: false, text: '', ctx, why: 'the model drafted no subject' };
+  if (!parsed.summary?.trim()) return { drafted: false, text: '', ctx, why: 'the model drafted no summary' };
+
+  // TWO filters, and the second is the one that matters.
+  //
+  // Jira-confirmed is not enough: measured twice, the model read the scoring narrative out of the
+  // SESSION — which describes work from earlier commits — and claimed tickets whose files this diff
+  // never touched. Wording the instruction harder did not fix it. So a ticket must CITE a changed
+  // file, and a citation that is not in the changed set drops the ticket with it. The same
+  // anti-fabrication shape the hound uses: a claim that cannot point at something real is discarded
+  // before anyone reads it, rather than requested politely.
+  const confirmed = new Set(ctx.tickets.map((t) => t.key.toUpperCase()));
+  const changed = new Set(ctx.files);
+  const carries = (Array.isArray(parsed.carries) ? parsed.carries : [])
+    .map((c) => {
+      const o = (c ?? {}) as { key?: unknown; files?: unknown; note?: unknown };
+      return {
+        key: String(o.key ?? '').trim().toUpperCase(),
+        files: Array.isArray(o.files) ? (o.files as unknown[]).map(String) : [],
+        note: String(o.note ?? '').trim(),
+      };
+    })
+    .filter((c) => confirmed.has(c.key))
+    // Only the citations that are really in the diff survive, and a ticket with none left goes too.
+    .map((c) => ({ ...c, files: c.files.map((f) => String(f).trim()).filter((f) => changed.has(f)) }))
+    .filter((c) => c.files.length > 0);
+  const dropped = (Array.isArray(parsed.carries) ? parsed.carries.length : 0) - carries.length;
 
   const text = draftText({
     type: (parsed.type || 'chore').trim(),
     scope: (parsed.scope || '').trim(),
-    subject: parsed.subject.trim(),
-    body: (parsed.body || '').trim(),
+    carries,
+    summary: parsed.summary.trim().replace(/\.$/, ''),
+    other: (parsed.other || '').trim(),
   });
   const p = commitMsgPath(repo);
   if (p) {
     try { writeFileSync(p, text); }
     catch (e) { log('WARN', 'commit_draft_write_failed', { error: e instanceof Error ? e.message : String(e) }); }
   }
-  log('INFO', 'commit_drafted', { repo, tickets: ctx.tickets.map((t) => t.key).join(','), files: String(ctx.files.length) });
+  log('INFO', 'commit_drafted', {
+    repo, carried: carries.join(',') || '(none)', droppedUncited: String(dropped),
+    confirmed: ctx.tickets.map((t) => t.key).join(','), files: String(ctx.files.length),
+  });
   return { drafted: true, text, ctx, why: '' };
 }
