@@ -507,6 +507,26 @@ exposes `activeContextTokens()`, which both `tokens.ts` and `indulge/budget.ts` 
 unknown window as `12k/? tokens` rather than a percentage of an invented denominator: a meter that
 invents its scale is worse than no meter, because it gets consulted.
 
+#### What the prompt is MADE of — `prompt_coverage`
+
+`llm_usage` reports the prompt's exact size (`prompt_eval_count`) after the call, which answers "how
+big" and nothing about "of what". Every context question worth debugging is a composition question,
+and none of it was visible: one real session climbed to 21.4k tokens by round 5, fell to 13.8k, and
+stayed there for ten more rounds with **42,000 tokens of the window unused** — and emitted no log line
+at all, because nothing logged a subtraction.
+
+So `buildMessages` emits one `prompt_coverage` per round: `prefixEst`, `historyEst`, `volatileEst`,
+the message count, how many were masked, `dropped` — characters destroyed in the window by the
+masking, which writes its truncation back and is therefore permanent — and the headroom left. Joined
+to the `llm_usage` for the same round, the exact total sits beside the breakdown; `round` is on both
+for that reason.
+
+Token figures here are `chars ÷ 3` and labelled `est`, the same pessimistic arithmetic
+`trimToContext` spends its budget with. Measured against the exact count on this hardware they run
+~40% high (21,209 chars = 7,054 est vs 5,037 actual), which is why the estimate is never presented as
+the answer when an exact number exists. Headroom is blank when the window is unknown — the rule above
+applies here too.
+
 ### The `native` dialect — for APIs that carry the schema themselves
 
 `DIALECTS` held only qwen and gemma, gemma being the fallback, so **an OpenAI model resolved to the

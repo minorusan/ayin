@@ -717,6 +717,8 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
   // tool_responses → 1-line stub; assistant tool calls → tool name + param preview.
   const VERBATIM_TAIL = 4;
   const maskStart = Math.max(0, conversationWindow.length - VERBATIM_TAIL);
+  let maskedCount = 0;
+  let maskedCharsDropped = 0;
   for (let i = 0; i < conversationWindow.length; i++) {
     const msg = conversationWindow[i];
     if (i >= maskStart) {
@@ -731,14 +733,73 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
       const trimmed = cut > 100 ? msg.content.substring(0, cut) : msg.content.substring(0, 2000);
       // Written BACK into the window: compression is one-way. Recomputing it each round meant a
       // message sent verbatim last round arrived compressed this round, moving every token after it.
+      const was = msg.content.length;
       msg.content = trimmed + '\n</tool_response>';
+      maskedCount++;
+      maskedCharsDropped += was - msg.content.length;
       messages.push(msg);
     } else {
       messages.push(msg);
     }
   }
   if (volatileTurn) messages.push(volatileTurn);
+  logCoverage({
+    round,
+    system: systemContent,
+    history: messages.slice(1, volatileTurn ? messages.length - 1 : messages.length),
+    volatile: volatileTurn?.content ?? '',
+    maskedCount,
+    maskedCharsDropped,
+  });
   return trimToContext(messages);
+}
+
+/**
+ * WHAT THE PROMPT IS MADE OF, and how much of the window went unused.
+ *
+ * `llm_usage` reports the prompt's exact size AFTER the call, which answers "how big" and nothing
+ * about "of what". Every context question worth debugging is a composition question — whether the
+ * fixed prefix is crowding out history, whether the masking is destroying evidence mid-turn, whether
+ * the headroom that is left is large enough that a cap firing at all is a bug. None of that was
+ * visible: a session that dropped from 21.4k to 13.8k tokens across ten rounds, with 42,000 tokens
+ * spare, produced no log line at all, because nothing here logs a subtraction.
+ *
+ * `dropped` is the load-bearing number. It is chars destroyed IN THE WINDOW, permanently — the
+ * masking writes its truncation back — so a rising total is evidence the agent is being starved
+ * while the window is empty, and it is the one number no downstream event can reconstruct.
+ *
+ * TOKENS HERE ARE ESTIMATES (chars ÷ 3, pessimistic, the same arithmetic `trimToContext` spends the
+ * budget with) and are labelled `est`. Joining this to the `llm_usage` for the same round gives the
+ * exact total beside this breakdown, which is the whole reason `round` is on both.
+ */
+function logCoverage(c: {
+  round: number;
+  system: string;
+  history: Message[];
+  volatile: string;
+  maskedCount: number;
+  maskedCharsDropped: number;
+}): void {
+  const sys = approxTokens(c.system);
+  const hist = c.history.reduce((n, m) => n + approxTokens(m.content), 0);
+  const vol = approxTokens(c.volatile);
+  const ctx = activeContextTokens();
+  const used = sys + hist + vol;
+  log('INFO', 'prompt_coverage', {
+    round: String(c.round + 1),
+    estTokens: String(used),
+    prefixEst: String(sys),
+    historyEst: String(hist),
+    volatileEst: String(vol),
+    msgs: String(c.history.length),
+    masked: String(c.maskedCount),
+    dropped: String(c.maskedCharsDropped),
+    ctxTokens: String(ctx || 0),
+    // Unknown window → no headroom claim. A number invented here would be consulted and wrong,
+    // which is the failure the session meter already made once.
+    headroomEst: ctx ? String(ctx - RESPONSE_RESERVE_TOKENS - used) : '',
+    usedPct: ctx ? (100 * used / ctx).toFixed(1) : '',
+  });
 }
 
 /**
