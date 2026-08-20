@@ -310,8 +310,16 @@ const staticDraft = render.renderDiffPage(fabSet, {
 
 ok(/class="commit"/.test(withDraft), 'the page carries a commit-message panel');
 ok(/feat\(scope\): a subject/.test(withDraft), 'and renders the draft text');
-ok(/\.git\/COMMIT_EDITMSG/.test(withDraft), 'the panel names where the text came from — git, not a copy');
+ok(/\.git\/COMMIT_EDITMSG/.test(withDraft) && /\.git\/COMMIT_EDITMSG/.test(staticDraft),
+  'both panels name where the text came from — git, not a copy');
 ok(/No draft yet/.test(noDraft), 'an ABSENT draft is stated, never a blank panel');
+ok(/id="csubj"/.test(withDraft) && /id="cbody"/.test(withDraft),
+  'subject and description are SEPARATE labelled fields, not one blob');
+ok(/id="clen"/.test(withDraft) && /clen\.classList\.toggle\('over'/.test(withDraft),
+  'the subject carries a counter that flags the overflow');
+ok(/csubj\.classList\.toggle\('over'/.test(withDraft), 'and the field itself is painted, not just the counter');
+ok(/id="rephrase"/.test(withDraft) && !/id="rephrase"/.test(staticDraft),
+  'rephrase is served-only — it spends a model call');
 ok(/id="draft"/.test(withDraft) && !/id="draft"/.test(staticDraft),
   'Draft is served-only — it spends a model call and needs the route');
 
@@ -339,6 +347,77 @@ ok(dctx.tickets.length === 0 && /no ticket key/.test(dctx.jiraNote),
   'so it declines with a reason and never reaches the network', dctx.jiraNote);
 ok(dctx.files.length > 0, 'while still reporting the changed files it found', String(dctx.files.length));
 
+// ── 10b · the page's OWN JavaScript must parse ───────────────────────────────────
+//
+// tsc checks the module that BUILDS the page, never the string it emits. A template literal turns
+// `\n` into a real newline, so one under-escaped sequence puts a raw line break inside a JS string
+// literal and the whole script dies — filters, comments, Stage, the FAB, all of it — while the page
+// still renders and every other assertion here still passes. That shipped-shaped bug is one
+// `new Function` away from being caught.
+
+console.log('\npage script');
+
+for (const [label, opts] of [
+  ['served, with a draft', { interactive: true, rev: 'HEAD', comments: [], commitDraft: 'feat(a): s\n\nbody' }],
+  ['served, no draft', { interactive: true, rev: 'HEAD', comments: [], commitDraft: null }],
+  ['file://', { interactive: false, rev: 'HEAD', comments: [], commitDraft: 'feat(a): s' }],
+]) {
+  const html = render.renderDiffPage(fabSet, opts);
+  const m = html.match(/<script>([\s\S]*?)<\/script>/);
+  let parsed = false, err = '';
+  try { new Function(m ? m[1] : ''); parsed = true; }
+  catch (e) { err = e.message; }
+  ok(parsed, `the emitted page script parses — ${label}`, err);
+}
+
+// ── 11 · staged-only drafting, the HEAD stamp, and Commit ────────────────────────
+
+console.log('\nstaged-only + commit');
+
+const CM = mkdtempSync(join(tmpdir(), 'ayin-diffcm-'));
+const cg = (...a) => execFileSync('git', a, { cwd: CM, stdio: 'ignore' });
+cg('init', '-q', '-b', 'main');
+cg('config', 'user.email', 'c@example.invalid'); cg('config', 'user.name', 'c');
+writeFileSync(join(CM, 'a.ts'), 'a\n');
+cg('add', '-A'); cg('commit', '-qm', 'leftover message git keeps');
+writeFileSync(join(CM, 'a.ts'), 'a\nstaged\n');
+cg('add', 'a.ts');
+writeFileSync(join(CM, 'loose.ts'), 'never staged\n');
+
+const { readCommitDraft, commitStaged, commitMsgPath } = await import(`file://${join(ROOT, 'dist', 'commit-draft.js')}`);
+const cmCtx = await gatherDraftContext(CM);
+ok(cmCtx.files.length === 1 && cmCtx.files[0] === 'a.ts',
+  'only STAGED files are seen — a commit takes the index, not the working tree', cmCtx.files.join(','));
+ok(!cmCtx.files.includes('loose.ts'), 'an unstaged file is never described');
+
+// THE BUG THIS PINS: `git commit -m` leaves its message in COMMIT_EDITMSG, so "file is non-empty" is
+// not "a draft exists". Without the HEAD stamp the previous commit's message got committed again.
+ok(readCommitDraft(CM) === null,
+  "git's leftover COMMIT_EDITMSG is NOT a draft", JSON.stringify(readCommitDraft(CM)));
+ok(commitStaged(CM).ok === false, 'and Commit refuses rather than re-committing it');
+
+writeFileSync(commitMsgPath(CM), 'feat(a): add a line\n\nAlso: nothing.\n');
+writeFileSync(join(CM, '.git', 'ayin-commit-draft.head'),
+  `${execFileSync('git', ['rev-parse', 'HEAD'], { cwd: CM, encoding: 'utf-8' }).trim()}\n`);
+ok((readCommitDraft(CM) || '').startsWith('feat(a): add a line'),
+  'a draft stamped against the CURRENT head is visible');
+const done = commitStaged(CM);
+ok(done.ok && done.sha, 'Commit commits the staged changes', done.why);
+ok(readCommitDraft(CM) === null, 'and the draft goes stale the moment HEAD moves — no double commit');
+ok(commitStaged(CM).ok === false, 'so a second press refuses', commitStaged(CM).why);
+ok(execFileSync('git', ['status', '--porcelain'], { cwd: CM, encoding: 'utf-8' }).includes('loose.ts'),
+  'the unstaged file is still sitting there, untouched by the commit');
+
+const cmHtml = render.renderDiffPage(fabSet, { interactive: true, rev: 'HEAD', comments: [], commitDraft: 'feat: x' });
+const cmNone = render.renderDiffPage(fabSet, { interactive: true, rev: 'HEAD', comments: [], commitDraft: null });
+ok(/id="docommit"/.test(cmHtml) && /id="docommit"/.test(cmNone),
+  'Commit is offered whether or not a draft exists — the fields are editable, so the operator may type one');
+ok(/the subject is empty/.test(cmHtml),
+  'but an empty subject is refused in the client rather than committing a blank message');
+const cmStatic = render.renderDiffPage(fabSet, { interactive: false, rev: 'HEAD', comments: [], commitDraft: 'feat: x' });
+ok(!/id="docommit"/.test(cmStatic), 'a file:// page never offers Commit — committing is a git write');
+
+rmSync(CM, { recursive: true, force: true });
 rmSync(IX, { recursive: true, force: true });
 rmSync(REPO, { recursive: true, force: true });
 rmSync(CLEAN, { recursive: true, force: true });

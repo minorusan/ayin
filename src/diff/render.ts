@@ -236,18 +236,43 @@ function sidebarSections(files: FileDiff[]): string {
  */
 function commitPanel(o: Resolved): string {
   const draft = (o.commitDraft || '').trim();
-  const body = draft
-    ? `<pre class="cmsg">${esc(draft)}</pre>`
-    : '<div class="cnone">No draft yet — <code>.git/COMMIT_EDITMSG</code> is empty. '
-      + 'A draft is written when the watch pass finds ticket work in this tree, or when you press Draft.</div>';
-  const btn = o.interactive
-    ? '<button class="act" id="draft" title="Draft from the diff, this repo\'s Claude session, and its tickets">Draft</button>'
-    : '';
-  const copy = draft ? '<button class="act" id="cmsgcopy">copy</button>' : '';
-  return `<section class="commit">`
-    + `<header class="chead">Commit message<span class="sub">from <code>.git/COMMIT_EDITMSG</code></span>`
-    + `<span class="cacts">${copy}${btn}</span></header>`
-    + `${body}<div class="cwhy" id="cwhy"></div></section>`;
+  // Split at the FIRST blank line, git's own boundary: everything before it is the subject line,
+  // everything after is the description. Splitting on the first newline instead would swallow a
+  // wrapped subject into the body and silently change what gets committed.
+  const nl = draft.indexOf('\n');
+  const subject = nl === -1 ? draft : draft.slice(0, nl);
+  const body = nl === -1 ? '' : draft.slice(nl).replace(/^\n+/, '');
+
+  if (!o.interactive) {
+    // A file:// page has no route to commit or redraft through, so it stays a rendering of the file.
+    return `<section class="commit">`
+      + `<header class="chead">Commit message<span class="sub">from <code>.git/COMMIT_EDITMSG</code></span></header>`
+      + (draft
+        ? `<pre class="cmsg">${esc(draft)}</pre>`
+        : '<div class="cnone">No draft yet — <code>.git/COMMIT_EDITMSG</code> holds no message ayin wrote for this HEAD.</div>')
+      + `</section>`;
+  }
+
+  return `<section class="commit">
+  <header class="chead">Commit message<span class="sub">from <code>.git/COMMIT_EDITMSG</code> · edit either field, Commit takes what is in them</span>
+    <span class="cacts"><button class="act" id="cmsgcopy">copy</button>
+    <button class="act" id="draft" title="Redraft both fields from the staged diff, this repo's Claude session and its tickets">Draft</button>
+    <button class="act commit" id="docommit" title="Commit the staged changes with the text in these fields">Commit</button></span>
+  </header>
+  <div class="cfield">
+    <div class="clabel">Subject
+      <button class="act tiny" id="rephrase" title="Ask ayin to rephrase the subject against the staged diff, inside the limit">rephrase</button>
+      <span class="clen" id="clen"></span>
+    </div>
+    <input id="csubj" class="csubj" value="${esc(subject)}" spellcheck="false"
+      placeholder="type(scope): KEY-1,KEY-2 - one sentence">
+  </div>
+  <div class="cfield">
+    <div class="clabel">Description</div>
+    <textarea id="cbody" class="cbody" spellcheck="false" rows="7"
+      placeholder="One paragraph per ticket, then Also: for what belongs to no ticket.">${esc(body)}</textarea>
+  </div>
+  <div class="cwhy" id="cwhy">${draft ? '' : 'No draft yet — press <b>Draft</b> to build one from the staged diff, or just type your own.'}</div></section>`;
 }
 
 /**
@@ -407,11 +432,82 @@ function commentClient(o: Resolved): string {
     });
   };
 
+  // ── the commit fields ──────────────────────────────────────────────────────
+  // 50 is git's own subject convention. The counter and the field both go red past it rather than the
+  // input refusing more text: truncating someone mid-word is worse than showing them the overflow and
+  // letting them decide. Nothing here blocks a commit — the limit is advice made visible.
+  var SUBJ_MAX = 50;
+  var csubj = document.getElementById('csubj');
+  var cbody = document.getElementById('cbody');
+  var clen = document.getElementById('clen');
+  var cwhy = document.getElementById('cwhy');
+
+  function gauge(){
+    if (!csubj || !clen) return;
+    var n = csubj.value.length;
+    clen.textContent = n + '/' + SUBJ_MAX;
+    clen.classList.toggle('over', n > SUBJ_MAX);
+    csubj.classList.toggle('over', n > SUBJ_MAX);
+  }
+  if (csubj) { csubj.oninput = gauge; gauge(); }
+
+  // ── rephrase: the subject only ──────────────────────────────────────────────
+  // Scoped to the subject on purpose. The description is where the operator's own words end up, and a
+  // button that silently rewrote those while they were editing would be the worst kind of helpful.
+  var reph = document.getElementById('rephrase');
+  if (reph) reph.onclick = function(){
+    reph.classList.add('busy');
+    reph.textContent = 'rephrasing\u2026';
+    if (cwhy) cwhy.textContent = '';
+    post('/api/diff/rephrase', { subject: csubj ? csubj.value : '' }).then(function(r){
+      reph.classList.remove('busy');
+      reph.textContent = 'rephrase';
+      if (r.ok && r.j.subject) {
+        if (csubj) { csubj.value = r.j.subject; gauge(); }
+        if (cwhy && r.j.note) cwhy.innerHTML = esc(r.j.note);
+        return;
+      }
+      if (cwhy) cwhy.innerHTML = '<b>not rephrased</b> \u2014 ' + esc((r.j && (r.j.why || r.j.error)) || 'failed');
+    }).catch(function(err){
+      reph.classList.remove('busy'); reph.textContent = 'rephrase';
+      if (cwhy) cwhy.innerHTML = '<b>not rephrased</b> \u2014 ' + esc(String(err));
+    });
+  };
+
+  // ── commit ─────────────────────────────────────────────────────────────────
+  // WHAT IS IN THE FIELDS, not what is on disk. The operator may have rewritten either one, and
+  // committing the file instead of the form would silently discard their edit. It asks once, because a
+  // mis-click is recoverable but not free, and reports the sha plus the exact undo.
+  var dcommit = document.getElementById('docommit');
+  if (dcommit) dcommit.onclick = function(){
+    var subject = csubj ? csubj.value.trim() : '';
+    var bodyText = cbody ? cbody.value.trim() : '';
+    if (!subject) { if (cwhy) cwhy.innerHTML = '<b>not committed</b> \u2014 the subject is empty'; return; }
+    if (!window.confirm('Commit the staged changes with this message?')) return;
+    dcommit.classList.add('busy');
+    dcommit.textContent = 'committing\u2026';
+    post('/api/diff/commit', { subject: subject, body: bodyText }).then(function(r){
+      dcommit.classList.remove('busy');
+      dcommit.textContent = 'Commit';
+      if (r.ok && r.j.ok) {
+        if (cwhy) cwhy.innerHTML = '<b>committed</b> \u2014 ' + esc(r.j.why)
+          + ' \u00b7 undo with <code>git reset --soft HEAD~1</code>';
+        rememberViewport();
+        setTimeout(function(){ location.reload(); }, 1800);
+        return;
+      }
+      if (cwhy) cwhy.innerHTML = '<b>not committed</b> \u2014 ' + esc((r.j && (r.j.why || r.j.error)) || 'failed');
+    }).catch(function(err){
+      dcommit.classList.remove('busy'); dcommit.textContent = 'Commit';
+      if (cwhy) cwhy.innerHTML = '<b>not committed</b> \u2014 ' + esc(String(err));
+    });
+  };
+
   var ccopy = document.getElementById('cmsgcopy');
   if (ccopy) ccopy.onclick = function(){
-    var pre = document.querySelector('.cmsg');
-    if (!pre || !navigator.clipboard) return;
-    navigator.clipboard.writeText(pre.textContent || '').then(function(){
+    var full = (csubj ? csubj.value : '') + (cbody && cbody.value.trim() ? '\\n\\n' + cbody.value.trim() : '');
+    if (!navigator.clipboard) return;
+    navigator.clipboard.writeText(full + '\\n').then(function(){
       ccopy.textContent = 'copied';
       setTimeout(function(){ ccopy.textContent = 'copy'; }, 1200);
     }).catch(function(){ ccopy.textContent = 'copy failed'; });
@@ -691,6 +787,23 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
 .chead .cacts{margin-left:auto;display:flex;gap:6px}
 .cmsg{margin:0;padding:12px;font:12.5px/1.6 var(--mono);color:var(--ink);
   white-space:pre-wrap;word-break:break-word}
+/* Two FIELDS, labelled, so subject and description are never guessed at from layout alone. */
+.cfield{padding:10px 12px 0}
+.cfield:last-of-type{padding-bottom:12px}
+.clabel{display:flex;align-items:center;gap:8px;
+  font:600 10px/1 var(--ui);letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);
+  margin:0 0 6px}
+.act.tiny{padding:3px 7px;font-size:10px}
+/* The counter is the whole point of the limit: n/50, and it goes RED the moment it is exceeded so an
+   over-long subject is visible before the commit, not after someone rejects the message. */
+.clen{margin-left:auto;font:600 10.5px/1 var(--mono);color:var(--ink-3)}
+.clen.over{color:var(--priv)}
+.csubj,.cbody{width:100%;box-sizing:border-box;background:var(--bg);color:var(--ink);
+  border:1px solid var(--line);border-radius:8px;padding:9px 10px;
+  font:12.5px/1.55 var(--mono);resize:vertical}
+.csubj:focus,.cbody:focus{outline:none;border-color:var(--wire-hot)}
+/* Overflow is painted on the field too, not only in the counter — the field is where the eye is. */
+.csubj.over{border-color:var(--priv);color:var(--priv)}
 .cnone{padding:12px;font:11.5px/1.6 var(--ui);color:var(--ink-3)}
 .cnone code,.chead code{font:11px/1 var(--mono);color:var(--ink-2)}
 .cwhy{font:11px/1.5 var(--ui);color:var(--ink-2);padding:0 12px 10px}
@@ -712,6 +825,9 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
   border-radius:6px;padding:5px 8px;cursor:pointer;margin-right:8px}
 .ix:hover{color:var(--ink);border-color:var(--wire-hot)}
 .ix.busy{pointer-events:none;opacity:.55}
+.act.commit{color:var(--pub);border-color:var(--pub)}
+.act.commit:hover{background:var(--surface-3)}
+.act.commit.busy{pointer-events:none;opacity:.6}
 .act.stage{color:var(--ink);border-color:var(--wire-hot)}
 .act.stage:hover{background:var(--surface-3)}
 .act.stage.busy{pointer-events:none;opacity:.6}

@@ -19,7 +19,7 @@
  * open-source checkout never phones home to a registry nobody asked about.
  */
 
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -493,10 +493,51 @@ function pidAlive(pid: number): boolean {
  * on PATH (e.g. Windows, where the daemon runs as a Task Scheduler job instead) just gets a
  * fallback note instead of a crash.
  */
+/**
+ * The launchd label that OWNS this pid, when one does.
+ *
+ * `launchctl list` prints `PID<TAB>STATUS<TAB>LABEL`, so the pid is the exact join key — no guessing
+ * at a label name, and no false match on a hand-started daemon that launchd knows nothing about.
+ */
+function launchdLabelFor(pid: number): string | null {
+  if (process.platform !== 'darwin') return null;
+  try {
+    const out = execFileSync('launchctl', ['list'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+    for (const line of out.split('\n')) {
+      const [p, , label] = line.split('\t');
+      if (label && p && p.trim() === String(pid)) return label.trim();
+    }
+  } catch { /* launchctl absent or refused — treat as unmanaged */ }
+  return null;
+}
+
 async function restartWatchDaemon(newVersion: string): Promise<void> {
   const pid = watchDaemonPid();
   if (!pid) return;
   process.stdout.write(`Restarting the watch daemon (pid ${pid}) so it picks up ${newVersion} immediately…\n`);
+
+  // LAUNCHD OWNS IT? THEN LAUNCHD RESTARTS IT. Killing a launchd job and spawning our own replacement
+  // is a race we lose: launchd relaunches its job the instant the old one dies, both contend for the
+  // pidfile, and the survivor is whatever the plist points at. Measured — a plist still naming an
+  // OLD CHECKOUT beat the fresh spawn every time, so every `update` reported success while the daemon
+  // stayed 155 versions behind and its self-heal quietly reinstalled the previous hook into every
+  // watched repo. `kickstart -k` restarts the job in place, so the plist stays the single source of
+  // truth for what runs.
+  const label = launchdLabelFor(pid);
+  if (label) {
+    try {
+      execFileSync('launchctl', ['kickstart', '-k', `gui/${process.getuid?.() ?? ''}/${label}`],
+        { stdio: ['ignore', 'ignore', 'pipe'] });
+      process.stdout.write(`Watch daemon restarted by launchd (${label}).\n`);
+      return;
+    } catch (e) {
+      const detail = String((e as { stderr?: Buffer }).stderr ?? '').trim();
+      process.stdout.write(`launchd job ${label} would not restart${detail ? ` (${detail})` : ''} — `
+        + 'run `launchctl kickstart -k gui/$(id -u)/' + label + '` yourself.\n');
+      return; // do NOT fall through to a spawn: that is the race this branch exists to avoid
+    }
+  }
+
   try {
     process.kill(pid, 'SIGTERM');
   } catch {

@@ -1,0 +1,19 @@
+Rewrite this commit subject to fit {{LIMIT}} characters.
+
+CURRENT SUBJECT
+{{SUBJECT}}
+
+STAGED FILES
+{{FILES}}
+
+STAGED DIFF
+{{DIFF}}
+
+Keep the shape `type(scope): KEY-1,KEY-2 - summary`, and keep the type, the scope and every ticket key
+exactly as they are — only the summary may change. Shorten by cutting words, not by dropping meaning:
+say what the staged diff does. Imperative, no trailing period.
+
+If the keys alone leave no room, return the shortest honest summary anyway rather than dropping a key.
+
+Reply with one JSON object and nothing else:
+{"subject":"<the rewritten subject>"}

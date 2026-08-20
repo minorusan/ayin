@@ -1,8 +1,13 @@
 /**
  * commit-draft.ts — the commit message, drafted from three sources that already exist on this machine.
  *
+ * STAGED ONLY. Every git read here is `--cached`: `git commit` takes the index, so a message that
+ * describes unstaged edits describes a commit that will not happen. On a Unity tree the unstaged half
+ * is usually generated assets the operator deliberately left out, and naming them is worse than
+ * silence. Nothing staged is a decline, not an empty message.
+ *
  * THE EXPENSIVE HALF IS LAST. Everything that decides WHETHER to spend a model call is deterministic:
- * the changed files come from git, the ticket keys come from a regex over the branch name, the local
+ * the staged files come from git, the ticket keys come from a regex over the branch name, the local
  * Claude Code transcript and the diff, and each key is then CONFIRMED against Jira. Only if Jira
  * resolves at least one does a model get asked to write anything. So an unconfigured Jira, a branch
  * with no ticket in its name, or a session that never mentioned one all cost nothing at all.
@@ -44,6 +49,8 @@ const MAX_TURN_CHARS = 600;
 const MAX_TRANSCRIPTS = 6;
 /** Diff handed to the model. The subject comes from the shape of the change, not every line of it. */
 const MAX_DIFF_CHARS = 18_000;
+/** git's own subject convention, and what the page paints red past. */
+export const SUBJECT_LIMIT = 50;
 /** Ticket candidates carried to a Jira lookup. */
 const MAX_CANDIDATES = 12;
 /**
@@ -136,7 +143,7 @@ export function readSession(repo: string, branch: string): SessionRead {
 
 export interface DraftContext {
   branch: string;
-  /** Changed paths, staged and unstaged, as git reports them. */
+  /** STAGED paths only — the message describes what a commit would take, not what is lying around. */
   files: string[];
   session: SessionRead;
   /** Ticket-shaped strings found, before validation. */
@@ -172,17 +179,20 @@ function candidatesFrom(texts: string[]): string[] {
  */
 export async function gatherDraftContext(repo: string): Promise<DraftContext> {
   const branch = git(repo, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
-  const status = git(repo, ['-c', 'core.quotepath=false', 'status', '--porcelain=v1']);
-  const files = status.split('\n').filter((l) => l.length > 3).map((l) => l.slice(3));
+  // THE INDEX, NOT THE WORKING TREE. `git commit` takes what is staged, so a message describing
+  // unstaged edits describes a commit that will not happen — and on a Unity tree the unstaged half is
+  // usually generated assets the operator deliberately left out. `--cached` everywhere below.
+  const files = git(repo, ['diff', '--cached', '--name-only', '-M'])
+    .split('\n').map((l) => l.trim()).filter(Boolean);
   const session = readSession(repo, branch);
   const subjects = git(repo, ['log', '--format=%s', `-${RECENT_SUBJECTS}`]).split('\n').filter(Boolean);
-  const added = git(repo, ['diff', 'HEAD', '--no-color'])
+  const added = git(repo, ['diff', '--cached', '--no-color'])
     .split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
 
   const candidates = candidatesFrom([branch, ...session.turns, ...subjects, ...added]);
 
   if (candidates.length === 0) {
-    return { branch, files, session, candidates, tickets: [], jiraNote: 'no ticket key in the branch name, the session or the diff' };
+    return { branch, files, session, candidates, tickets: [], jiraNote: 'no ticket key in the branch name, the session or the staged diff' };
   }
   const lookup = await jiraTickets(candidates);
   if (!lookup.ok) return { branch, files, session, candidates, tickets: [], jiraNote: lookup.reason };
@@ -238,18 +248,122 @@ export function draftText(d: CommitDraft): string {
   return paras.length ? `${head}\n\n${paras.join('\n\n')}\n` : `${head}\n`;
 }
 
+/**
+ * Commit what is staged, with the message currently in COMMIT_EDITMSG.
+ *
+ * `--no-verify` is NOT passed: the repo's own hooks are the operator's, and skipping them from a
+ * button is not this feature's call to make. `--only` is not passed either — the index is exactly
+ * what the operator assembled, and re-deciding it here would defeat the per-file buttons.
+ *
+ * Refuses on an empty index rather than producing an empty commit, and refuses on an empty message
+ * rather than committing a blank subject that someone has to amend.
+ */
+export function commitStaged(repo: string, message?: string): { ok: boolean; why: string; sha: string } {
+  const staged = git(repo, ['diff', '--cached', '--name-only']).split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!staged.length) return { ok: false, why: 'nothing staged', sha: '' };
+  // THE CALLER'S TEXT WINS. The page's fields are editable, and committing the file when the operator
+  // has rewritten the form would silently discard what they typed. The stored draft is only the
+  // fallback for a caller with nothing to say.
+  const msg = (message ?? '').trim() || readCommitDraft(repo);
+  if (!msg) return { ok: false, why: 'no message given and no draft stored — draft one first', sha: '' };
+  try {
+    execFileSync('git', ['commit', '-F', '-'], {
+      cwd: repo, input: `${msg}\n`, encoding: 'utf-8', stdio: ['pipe', 'ignore', 'pipe'],
+    });
+  } catch (e) {
+    const err = e as { stderr?: Buffer | string };
+    const detail = String(err.stderr ?? (e instanceof Error ? e.message : e)).trim().split('\n').slice(-3).join(' ');
+    log('WARN', 'diff_commit_failed', { repo, error: detail });
+    return { ok: false, why: detail || 'git commit failed', sha: '' };
+  }
+  const sha = git(repo, ['rev-parse', '--short', 'HEAD']).trim();
+  log('INFO', 'diff_committed', { repo, sha, files: String(staged.length) });
+  return { ok: true, why: `${staged.length} file(s) committed as ${sha}`, sha };
+}
+
 /** Where git keeps the message it will prefill. */
 export function commitMsgPath(repo: string): string | null {
   const dir = git(repo, ['rev-parse', '--absolute-git-dir']).trim();
   return dir ? join(dir, 'COMMIT_EDITMSG') : null;
 }
 
-/** What `/diff` renders. Read from git, never from a copy this module keeps. */
+/**
+ * Rephrase the subject alone, against the staged diff, to fit the limit.
+ *
+ * Deliberately NOT a redraft: the description is where the operator's own words accumulate, and
+ * rewriting those under them while they edit is the worst kind of helpful. The type, scope and every
+ * ticket key are kept verbatim — the keys were Jira-confirmed when the draft was made, and
+ * re-deriving them here could quietly drop one.
+ */
+export async function rephraseSubject(repo: string, subject: string): Promise<{ subject: string; note: string }> {
+  const staged = git(repo, ['diff', '--cached', '--name-only', '-M'])
+    .split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!staged.length) return { subject: '', note: 'nothing staged' };
+  let diff = git(repo, ['diff', '--cached', '--no-color', '--no-ext-diff', '-M']);
+  if (diff.length > MAX_DIFF_CHARS) diff = `${diff.slice(0, MAX_DIFF_CHARS)}\n[…diff truncated…]`;
+
+  const content = draftPrompts.get('commitRephrase', {
+    LIMIT: String(SUBJECT_LIMIT),
+    SUBJECT: subject.trim() || '(none yet)',
+    FILES: staged.map((f) => `- ${f}`).join('\n'),
+    DIFF: diff || '(no textual diff)',
+  });
+  let raw = '';
+  try { raw = await llmChat([{ role: 'user', content }], { declareTools: false }); }
+  catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    log('WARN', 'commit_rephrase_failed', { error: msg });
+    return { subject: '', note: `model call failed: ${msg}` };
+  }
+  const m = /\{[\s\S]*\}/.exec(raw);
+  if (!m) return { subject: '', note: 'the model returned no JSON object' };
+  let out: { subject?: string };
+  try { out = JSON.parse(m[0]) as { subject?: string }; }
+  catch { return { subject: '', note: 'the model returned unparseable JSON' }; }
+  const next = (out.subject || '').trim().replace(/\.$/, '');
+  if (!next) return { subject: '', note: 'the model returned no subject' };
+  return {
+    subject: next,
+    note: next.length > SUBJECT_LIMIT
+      ? `still ${next.length} characters — ${SUBJECT_LIMIT} is hard to reach with this many ticket keys`
+      : `${next.length}/${SUBJECT_LIMIT}`,
+  };
+}
+
+/**
+ * Where ayin records WHICH HEAD its draft was written against.
+ *
+ * `.git/COMMIT_EDITMSG` is not ayin's file — git writes the message of every commit into it, including
+ * ones made with `-m`. So "the file is non-empty" says nothing about whether a draft exists, and
+ * treating it as one is a real bug that shipped for exactly one test: a fixture whose previous commit
+ * message was still sitting there got committed a second time, message and all.
+ *
+ * A HEAD stamp is the right invariant, not a hash of the text. Hashing would call an operator's own
+ * edit "not a draft" and throw their words away; HEAD moving means the message describes a commit that
+ * has ALREADY been made, which is the only case that must be suppressed.
+ */
+function draftStampPath(repo: string): string | null {
+  const dir = git(repo, ['rev-parse', '--absolute-git-dir']).trim();
+  return dir ? join(dir, 'ayin-commit-draft.head') : null;
+}
+
+function headSha(repo: string): string {
+  return git(repo, ['rev-parse', 'HEAD']).trim();
+}
+
+/**
+ * What `/diff` renders, and what Commit will use — read from git, never from a copy kept here.
+ *
+ * Null unless ayin wrote a draft against the CURRENT HEAD. Anything else in COMMIT_EDITMSG is git's
+ * leftover from a commit already made, and showing it as a draft invites committing it twice.
+ */
 export function readCommitDraft(repo: string): string | null {
   const p = commitMsgPath(repo);
-  if (!p || !existsSync(p)) return null;
+  const stamp = draftStampPath(repo);
+  if (!p || !existsSync(p) || !stamp || !existsSync(stamp)) return null;
   try {
-    // git leaves its own comment lines in here after a `git commit`; they are not a draft.
+    if (readFileSync(stamp, 'utf-8').trim() !== headSha(repo)) return null;  // HEAD moved: already committed
+    // git leaves its own comment lines in here; they are not part of a message.
     const body = readFileSync(p, 'utf-8').split('\n').filter((l) => !l.startsWith('#')).join('\n').trim();
     return body || null;
   } catch { return null; }
@@ -273,10 +387,10 @@ export interface DraftResult {
  */
 export async function draftCommit(repo: string): Promise<DraftResult> {
   const ctx = await gatherDraftContext(repo);
-  if (!ctx.files.length) return { drafted: false, text: '', ctx, why: 'working tree is clean' };
+  if (!ctx.files.length) return { drafted: false, text: '', ctx, why: 'nothing staged — a commit would take nothing' };
   if (!ctx.tickets.length) return { drafted: false, text: '', ctx, why: ctx.jiraNote };
 
-  let diff = git(repo, ['diff', 'HEAD', '--no-color', '--no-ext-diff']);
+  let diff = git(repo, ['diff', '--cached', '--no-color', '--no-ext-diff', '-M']);
   if (diff.length > MAX_DIFF_CHARS) diff = `${diff.slice(0, MAX_DIFF_CHARS)}\n[…diff truncated…]`;
   let session = ctx.session.turns.join('\n---\n');
   if (session.length > MAX_SESSION_CHARS) session = `[…earlier turns dropped…]\n${session.slice(-MAX_SESSION_CHARS)}`;
@@ -339,9 +453,13 @@ export async function draftCommit(repo: string): Promise<DraftResult> {
     other: (parsed.other || '').trim(),
   });
   const p = commitMsgPath(repo);
+  const stamp = draftStampPath(repo);
   if (p) {
-    try { writeFileSync(p, text); }
-    catch (e) { log('WARN', 'commit_draft_write_failed', { error: e instanceof Error ? e.message : String(e) }); }
+    try {
+      writeFileSync(p, text);
+      // Stamped with the HEAD it describes, so the next commit makes it stale automatically.
+      if (stamp) writeFileSync(stamp, `${headSha(repo)}\n`);
+    } catch (e) { log('WARN', 'commit_draft_write_failed', { error: e instanceof Error ? e.message : String(e) }); }
   }
   log('INFO', 'commit_drafted', {
     repo, carried: carries.join(',') || '(none)', droppedUncited: String(dropped),

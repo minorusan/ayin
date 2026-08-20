@@ -2072,10 +2072,41 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
   declines it answers with WHY plus the candidates it saw — an operator who pressed a button and got
   nothing needs the reason, not a shrug.
 
+- **The panel is two editable fields, and Commit takes what is in them.** Subject and description are
+  separated and labelled rather than inferred from a blob of text, split at the FIRST BLANK LINE — git's
+  own boundary, because splitting on the first newline would swallow a wrapped subject into the body.
+  The subject carries a `n/50` counter that turns the counter AND the field red past the limit; nothing
+  is truncated, because cutting someone off mid-word is worse than showing them the overflow. `rephrase`
+  asks the model to refit the SUBJECT ONLY against the staged diff — never the description, which is
+  where the operator's own words accumulate. `Commit` posts the field contents, not the file: they are
+  editable, and committing the file would silently discard an edit. It is offered only when a draft
+  exists, and only on a served page.
+
+  **Everything is `--cached`.** `git commit` takes the index, so a message describing unstaged edits
+  describes a commit that will not happen — and on a Unity tree the unstaged half is usually generated
+  assets deliberately left out. Nothing staged is a decline, not an empty message.
+
+  **A leftover message is not a draft**, and this was a real bug. `git commit -m` writes its message
+  into `COMMIT_EDITMSG`, so "the file is non-empty" says nothing — the previous commit's message got
+  committed a second time. Ayin now stamps `.git/ayin-commit-draft.head` with the HEAD its draft
+  describes; when HEAD moves the draft is stale and the panel says "no draft yet". A HEAD stamp rather
+  than a hash of the text, so an operator's own edit is never thrown away as "not a draft".
+
+  **`check:diff` compiles the page's own JavaScript.** `tsc` checks the module that BUILDS the page,
+  never the string it emits — and inside a template literal `\n` is an escape, so one under-escaped
+  sequence put a raw line break inside a JS string literal and killed the entire script: filters,
+  comments, Stage, the FAB, all of it, while the page still rendered and every other assertion passed.
+  A `new Function` on the emitted script catches that class outright.
+
 Gate: `npm run check:diff` — checks every count against `git diff --numstat`, escaping against a
 file containing `</script>`, and which of the two page modes carries the refresh FAB.
 
 ## `/sprint` — the board in a browser (`src/sprint/`)
+
+A **refresh FAB** sits bottom-right, deliberately the same shape and behaviour as `/diff`'s: the route
+re-collects the sprint per request, so refresh is `location.reload()`, and the button disarms on click
+because a Jira round-trip is not instant. The drawer is NOT reopened afterwards — a ticket's detail is
+a separate fetch, and reviving it would fire one nobody asked for.
 
 `/sprint` serves the operator's current Jira sprint as a simplified kanban page on the session's own
 loopback server: one column per status the SITE reports, one card per ticket, one ticket open at a time.

@@ -1,7 +1,8 @@
-Draft the commit message for this working tree.
+Draft the commit message for what is STAGED.
 
-THE DIFF IS THE ONLY EVIDENCE. The ticket list below is a menu of what MIGHT be here, not a
-description of what is. Describe only changes you can point at in these files.
+THE STAGED DIFF IS THE ONLY EVIDENCE. The ticket list below is a menu of what MIGHT be here, not a
+description of what is. Describe only changes you can point at in these files. Anything the operator
+left unstaged is not part of this commit and must not be mentioned at all.
 
 BRANCH
 {{BRANCH}}
@@ -12,14 +13,14 @@ TICKETS — confirmed to exist by a Jira lookup. Existing is not the same as bei
 WHAT THE OPERATOR SAID WHILE DOING THIS WORK, newest last:
 {{SESSION}}
 
-CHANGED FILES
+STAGED FILES
 {{FILES}}
 
-DIFF
+STAGED DIFF
 {{DIFF}}
 
 `carries` names tickets whose work is in the DIFF, and each one must CITE the changed files that
-carry it, copied exactly from CHANGED FILES above. A citation that is not in that list is dropped and
+carry it, copied exactly from STAGED FILES above. A citation that is not in that list is dropped and
 the ticket with it, so a ticket you cannot point at costs you the ticket. The session above often
 describes work from EARLIER commits — that work has already landed and is not in this diff. An empty
 list is the correct answer for a diff of assets, generated files or config. Use only keys from the
@@ -27,7 +28,7 @@ list.
 
   "carries": [{"key": "KEY-1", "files": ["exact/path/from/the/list.cs"], "note": "what that file changed"}]
 
-`summary` is ONE sentence covering what the diff does, imperative, under 90 characters, no ticket
+`summary` is ONE sentence covering what the staged diff does, imperative, under 90 characters, no ticket
 keys and no trailing period.
 
 Each entry in `carries` also carries `note`: one or two sentences on what ITS CITED FILES changed for
@@ -42,4 +43,4 @@ empty this is the whole description.
 Reply with one JSON object and nothing else:
 {"type":"feat|fix|refactor|chore|perf|test|docs","scope":"<sub-domain>","carries":[{"key":"KEY-1","files":["path"],"note":"..."}],"summary":"<one sentence>","other":"..."}
 
-NEVER name a ticket you cannot cite a changed file for.
+NEVER name a ticket you cannot cite a staged file for, and never describe an unstaged change.

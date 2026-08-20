@@ -28,7 +28,7 @@ import { collectDiff } from './collect.js';
 import { renderDiffPage } from './render.js';
 import { createComment, getComment, readComments } from './comments.js';
 import { autoStage, safeRepoPath, stageOne, unstageOne } from './stage.js';
-import { draftCommit, readCommitDraft } from '../commit-draft.js';
+import { commitStaged, draftCommit, readCommitDraft, rephraseSubject } from '../commit-draft.js';
 import { log } from '../log.js';
 
 /** How a comment reaches the agent. Wired by app.ts at boot; absent in any process without a TUI. */
@@ -215,6 +215,43 @@ export async function handleDiffRequest(req: IncomingMessage, res: ServerRespons
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log('WARN', 'diff_draft_failed', { error: msg });
+      json(res, 500, { error: msg });
+    }
+    return true;
+  }
+
+  // The one route here that creates history. Still inside the same envelope as the rest — loopback
+  // bind, this session's own repo — and reversible with `git reset --soft HEAD~1`, which the reply
+  // says out loud so the operator is not left guessing how to undo it.
+  if (path === '/api/diff/commit' && req.method === 'POST') {
+    try {
+      // The page's fields, not the file: they are editable and the operator's edit must win.
+      const raw = await readBody(req);
+      let b: Record<string, unknown> = {};
+      try { b = JSON.parse(raw) as Record<string, unknown>; } catch { /* empty body → stored draft */ }
+      const subject = typeof b.subject === 'string' ? b.subject.trim() : '';
+      const body = typeof b.body === 'string' ? b.body.trim() : '';
+      const message = subject ? (body ? `${subject}\n\n${body}\n` : `${subject}\n`) : '';
+      const r = commitStaged(cwd, message);
+      json(res, r.ok ? 200 : 400, { ok: r.ok, why: r.why, sha: r.sha });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('WARN', 'diff_commit_route_failed', { error: msg });
+      json(res, 500, { error: msg });
+    }
+    return true;
+  }
+
+  if (path === '/api/diff/rephrase' && req.method === 'POST') {
+    try {
+      const raw = await readBody(req);
+      let b: Record<string, unknown> = {};
+      try { b = JSON.parse(raw) as Record<string, unknown>; } catch { /* no body — rephrase from scratch */ }
+      const r = await rephraseSubject(cwd, typeof b.subject === 'string' ? b.subject : '');
+      json(res, r.subject ? 200 : 400, { subject: r.subject, note: r.note, why: r.note });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('WARN', 'diff_rephrase_failed', { error: msg });
       json(res, 500, { error: msg });
     }
     return true;

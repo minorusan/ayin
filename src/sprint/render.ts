@@ -97,6 +97,21 @@ body{display:flex;flex-direction:column;height:100vh;overflow:hidden;
 .empty{padding:18px;color:var(--ink-2);font-size:13px}
 
 /* ── the drawer: one ticket, opened over the board ── */
+/* ── refresh FAB ── */
+/* Same shape and behaviour as /diff's, deliberately: two pages served by the same session should not
+   disagree about what a refresh button looks like. The board is re-collected per request, so this is
+   a reload — and the drawer is deliberately NOT reopened, because a ticket's detail is a separate
+   fetch and reviving it would fire one the operator did not ask for. */
+.fab{position:fixed;right:22px;bottom:22px;width:44px;height:44px;z-index:60;
+  display:grid;place-items:center;cursor:pointer;border-radius:50%;
+  color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line);
+  box-shadow:0 4px 16px rgba(0,0,0,.28)}
+.fab:hover{color:var(--wire-hot);border-color:var(--wire-hot)}
+.fab svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;
+  stroke-linecap:round;stroke-linejoin:round}
+.fab.busy{pointer-events:none;color:var(--wire-hot)}
+.fab.busy svg{animation:fabspin .8s linear infinite;transform-origin:50% 50%}
+@keyframes fabspin{to{transform:rotate(360deg)}}
 .drawer{position:fixed;inset:0 0 0 auto;width:min(620px,100%);background:var(--surface);
   border-left:1px solid var(--line);display:none;flex-direction:column;box-shadow:-24px 0 60px #0006}
 .drawer.open{display:flex}
@@ -153,10 +168,23 @@ textarea:focus{outline:none;border-color:var(--wire-hot)}
   </div>
 </aside>
 
+<button class="fab" id="refresh" aria-label="Reload the board from Jira" title="Reload the board from Jira">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3.5V10h-6.5"/></svg>
+</button>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const cache = new Map();
 let openKey = null;
+
+// ── refresh ────────────────────────────────────────────────────────────────────
+// The route re-collects the sprint on every GET, so a reload IS the refresh — no cache to invalidate
+// and no URL to move. Disarmed on click: a Jira round-trip is not instant and a dead-looking button
+// gets pressed twice, which is a second sprint query for nothing.
+{
+  const fab = document.getElementById('refresh');
+  if (fab) fab.onclick = () => { fab.classList.add('busy'); location.reload(); };
+}
 
 const esc = (s) => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
