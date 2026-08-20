@@ -2155,6 +2155,23 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
   editable, and committing the file would silently discard an edit. It is offered only when a draft
   exists, and only on a served page.
 
+  **The index buttons are a green plus and a quiet minus**, not the words they replaced: a file header
+  carries three controls and they should read as one row of equal-weight actions. Opposite shapes AND
+  opposite colours, because a staged and an unstaged card sit next to each other in the same list — the
+  plus is the vibrant green because staging is what anyone actually reaches for, the minus is muted
+  because it undoes rather than invites. Both keep an `aria-label`, since the label is no longer the
+  button text.
+
+  **Commit opens a READ-ONLY preview** rather than firing on a `confirm()`. A confirm shows a sentence
+  and hides the thing being decided; the sheet shows the decision — exactly which files the index holds
+  with their counts, the subject as it will be written with its `n/50`, and the description. Nothing in
+  it is editable: the fields behind it are where text changes, and a second editable copy is a second
+  place for them to disagree about what is about to be committed. It is built from the PAGE, not a
+  route — the staged set is already rendered and the message is already in the fields, so asking the
+  server would introduce a version of the truth that can differ from what the operator is looking at.
+  Reasons a commit cannot happen are stated next to the button instead of discovered after pressing it.
+  Escape and the backdrop close it; the sheet does not.
+
   **Everything is `--cached`.** `git commit` takes the index, so a message describing unstaged edits
   describes a commit that will not happen — and on a Unity tree the unstaged half is usually generated
   assets deliberately left out. Nothing staged is a decline, not an empty message.

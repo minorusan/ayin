@@ -257,7 +257,8 @@ const ixHtml = render.renderDiffPage(ixSet, { interactive: true, rev: 'HEAD', co
 const ixStatic = render.renderDiffPage(ixSet, { interactive: false, rev: 'HEAD', comments: [] });
 ok(/data-staged="true"/.test(ixHtml) && /data-staged="false"/.test(ixHtml),
   'the sidebar renders both sections');
-ok(/class="ix" data-act="unstage"/.test(ixHtml) && /class="ix" data-act="stage"/.test(ixHtml),
+// The class carries the direction now (stg/unstg) because the button is an icon, not a word.
+ok(/class="ix unstg" data-act="unstage"/.test(ixHtml) && /class="ix stg" data-act="stage"/.test(ixHtml),
   'a staged card offers unstage and an unstaged card offers stage');
 ok(/id="autostage"/.test(ixHtml), 'the top panel carries the Stage button');
 ok(!/class="ix"/.test(ixStatic) && !/id="autostage"/.test(ixStatic),
@@ -582,6 +583,38 @@ ok(/var saved = loadExts\(\)/.test(memJs), 'and the saved set is read before the
 const litStart = memHtml.indexOf('<script>');
 ok(!memHtml.slice(litStart, memHtml.indexOf('</script>', litStart)).includes('`'),
   'no backtick survives into the emitted script — one would have ended the literal that built it');
+
+// ── 11c · icon index buttons, and the read-only commit preview ───────────────────
+
+console.log('\nindex icons + commit preview');
+
+const iconRows = render.renderDiffPage(ixSet, { interactive: true, rev: 'HEAD', comments: [], commitDraft: 'feat: s' });
+const iconStatic = render.renderDiffPage(ixSet, { interactive: false, rev: 'HEAD', comments: [], commitDraft: 'feat: s' });
+
+ok(/class="ix stg"/.test(iconRows), 'an unstaged file offers a PLUS');
+ok(/class="ix unstg"/.test(iconRows), 'a staged file offers a MINUS');
+ok(!/>stage<\/button>|>unstage<\/button>/.test(iconRows),
+  'the words are gone — three controls on a header should read as one row of equal-weight actions');
+ok(/\.ix\.stg\{color:var\(--pub\)/.test(iconRows),
+  'the plus is the vibrant green: staging is the action anyone actually reaches for');
+ok(/\.ix\.unstg\{color:var\(--ink-3\)/.test(iconRows), 'and the minus is quiet — it undoes, it does not invite');
+// A screen reader gets what the glyph no longer spells out.
+ok(/aria-label="Add to the index"/.test(iconRows) && /aria-label="Remove from the index"/.test(iconRows),
+  'both carry an aria-label, since the label is no longer the button text');
+
+ok(/id="cpv"/.test(iconRows) && !/id="cpv"/.test(iconStatic), 'the commit preview is served-only');
+ok(/dcommit\.onclick = openPreview/.test(iconRows),
+  'Commit OPENS the preview — it no longer fires on a confirm() that hides what is being decided');
+// READ-ONLY is the point of it: a second editable copy is a second place for the two to disagree.
+const sheet = iconRows.slice(iconRows.indexOf('id="cpv"'), iconRows.indexOf('id="cpv-go"'));
+ok(!/<textarea|<input/.test(sheet), 'nothing inside the sheet is editable');
+ok(/read-only/.test(iconRows), 'and it says so');
+ok(/id="cpv-files"/.test(iconRows) && /id="cpv-subj"/.test(iconRows) && /id="cpv-body"/.test(iconRows),
+  'it previews the staged set, the subject and the description');
+ok(/Cannot commit: /.test(iconRows),
+  'and it states why a commit cannot happen next to the button, rather than after pressing it');
+ok(/Escape[\s\S]{0,80}closePreview/.test(iconRows), 'Escape closes it — a dialog that traps you is worse than a button');
+ok(/e\.target === cpv/.test(iconRows), 'the backdrop closes it but the sheet does not');
 
 // ── 12 · discard: the only irreversible controls on the page ─────────────────────
 //

@@ -365,10 +365,24 @@ function commitPanel(o: Resolved): string {
  * One button, not two: a change is on exactly one side of the index, so the only move that means
  * anything is the one that crosses it. Offering both would make half of every card a no-op.
  */
+/**
+ * The index button: a green plus to stage, a muted minus to unstage.
+ *
+ * Icons rather than the words it replaced, so the three controls on a file header read as one row of
+ * equal-weight actions instead of a word beside two glyphs. Plus and minus are opposite shapes AND
+ * opposite colours — the plus is the vibrant green, the minus deliberately quiet — because a staged and
+ * an unstaged card sit next to each other in the same list and the difference has to be legible at a
+ * glance, not read.
+ */
 function stageBtn(f: FileDiff): string {
   const act = f.staged ? 'unstage' : 'stage';
-  return `<button class="ix" data-act="${act}" data-path="${esc(f.path)}"`
-    + ` title="${f.staged ? 'Remove from the index' : 'Add to the index'}">${act}</button>`;
+  const path = f.staged
+    ? '<path d="M6 12h12"/>'
+    : '<path d="M12 6v12M6 12h12"/>';
+  return `<button class="ix ${f.staged ? 'unstg' : 'stg'}" data-act="${act}" data-path="${esc(f.path)}"`
+    + ` aria-label="${f.staged ? 'Remove from the index' : 'Add to the index'}"`
+    + ` title="${f.staged ? 'Remove from the index' : 'Add to the index'}">`
+    + `<svg viewBox="0 0 24 24" aria-hidden="true">${path}</svg></button>`;
 }
 
 /**
@@ -393,6 +407,39 @@ function discardBtn(f: FileDiff): string {
  * reachable from a document. So the button is ABSENT there rather than present and dead, which is the
  * same call the page already makes about the comment affordance.
  */
+/**
+ * The commit preview — READ-ONLY, and that is the whole point of it.
+ *
+ * Commit used to fire on a browser confirm(), which shows a sentence and hides the thing being decided.
+ * This shows the decision instead: exactly which files the index holds, the subject as it will be
+ * written, and the description under it. Nothing here is editable — the fields behind it are where
+ * text is changed, and a second editable copy is a second place for them to disagree about what is
+ * about to be committed.
+ *
+ * Built from the page, not from a route: the staged set is already in the DOM and the message is already
+ * in the two fields, so asking the server what it thinks is staged would introduce a version of the
+ * truth that can differ from what the operator is looking at.
+ */
+function commitPreview(): string {
+  return `<div class="modal" id="cpv" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="cpv-h">
+    <header><h2 id="cpv-h">Commit preview</h2><span class="sub">read-only \u00b7 edit in the fields behind</span>
+      <button class="act" id="cpv-x">close</button></header>
+    <div class="sheet-b">
+      <div class="cpv-sec">Staged <i id="cpv-n"></i></div>
+      <ul class="cpv-files" id="cpv-files"></ul>
+      <div class="cpv-sec">Subject <i id="cpv-len"></i></div>
+      <pre class="cpv-subj" id="cpv-subj"></pre>
+      <div class="cpv-sec">Description</div>
+      <pre class="cpv-body" id="cpv-body"></pre>
+    </div>
+    <footer><span class="say" id="cpv-say"></span>
+      <button class="act" id="cpv-cancel">Cancel</button>
+      <button class="act commit" id="cpv-go">Commit</button></footer>
+  </div>
+</div>`;
+}
+
 /**
  * The discard FAB — served pages only, and the only irreversible control on this page.
  *
@@ -594,29 +641,83 @@ function commentClient(o: Resolved): string {
   // committing the file instead of the form would silently discard their edit. It asks once, because a
   // mis-click is recoverable but not free, and reports the sha plus the exact undo.
   var dcommit = document.getElementById('docommit');
-  if (dcommit) dcommit.onclick = function(){
+  var cpv = document.getElementById('cpv');
+
+  /** The staged set, read from the page: it is already rendered, so there is one truth to show. */
+  function stagedNow(){
+    return [].slice.call(document.querySelectorAll('.file[data-staged="true"]')).map(function(f){
+      var ct = f.querySelector('.ct');
+      return { path: f.dataset.path, counts: ct ? ct.textContent.trim() : '' };
+    });
+  }
+
+  function openPreview(){
     var subject = csubj ? csubj.value.trim() : '';
     var bodyText = cbody ? cbody.value.trim() : '';
-    if (!subject) { if (cwhy) cwhy.innerHTML = '<b>not committed</b> \u2014 the subject is empty'; return; }
-    if (!window.confirm('Commit the staged changes with this message?')) return;
-    dcommit.classList.add('busy');
-    dcommit.textContent = 'committing\u2026';
-    post('/api/diff/commit', { subject: subject, body: bodyText }).then(function(r){
-      dcommit.classList.remove('busy');
-      dcommit.textContent = 'Commit';
-      if (r.ok && r.j.ok) {
-        if (cwhy) cwhy.innerHTML = '<b>committed</b> \u2014 ' + esc(r.j.why)
-          + ' \u00b7 undo with <code>git reset --soft HEAD~1</code>';
-        rememberViewport();
-        setTimeout(function(){ location.reload(); }, 1800);
-        return;
-      }
-      if (cwhy) cwhy.innerHTML = '<b>not committed</b> \u2014 ' + esc((r.j && (r.j.why || r.j.error)) || 'failed');
-    }).catch(function(err){
-      dcommit.classList.remove('busy'); dcommit.textContent = 'Commit';
-      if (cwhy) cwhy.innerHTML = '<b>not committed</b> \u2014 ' + esc(String(err));
+    var files = stagedNow();
+
+    document.getElementById('cpv-n').textContent = String(files.length);
+    document.getElementById('cpv-files').innerHTML = files.length
+      ? files.map(function(f){
+          return '<li><span>' + esc(f.path) + '</span><span class="ct">' + esc(f.counts) + '</span></li>';
+        }).join('')
+      : '<li class="none">Nothing staged — a commit would take nothing.</li>';
+
+    var subjBox = document.getElementById('cpv-subj');
+    subjBox.textContent = subject || '(no subject)';
+    subjBox.classList.toggle('over', subject.length > SUBJ_MAX);
+    var lenBox = document.getElementById('cpv-len');
+    lenBox.textContent = subject.length + '/' + SUBJ_MAX;
+    lenBox.classList.toggle('over', subject.length > SUBJ_MAX);
+
+    document.getElementById('cpv-body').textContent = bodyText;
+
+    // The reasons a commit cannot happen are stated HERE, next to the button, rather than discovered
+    // after pressing it.
+    var stop = !files.length ? 'nothing staged' : (!subject ? 'the subject is empty' : '');
+    document.getElementById('cpv-say').textContent = stop ? 'Cannot commit: ' + stop : '';
+    document.getElementById('cpv-go').disabled = !!stop;
+
+    cpv.hidden = false;
+    document.getElementById('cpv-go').focus();
+  }
+
+  function closePreview(){ if (cpv) cpv.hidden = true; }
+
+  if (dcommit) dcommit.onclick = openPreview;
+  if (cpv) {
+    document.getElementById('cpv-x').onclick = closePreview;
+    document.getElementById('cpv-cancel').onclick = closePreview;
+    // Clicking the backdrop closes; clicking the sheet must not. Escape closes too — this is a dialog,
+    // and a dialog that traps you is worse than one more button.
+    cpv.onclick = function(e){ if (e.target === cpv) closePreview(); };
+    document.addEventListener('keydown', function(e){
+      if (e.key === 'Escape' && !cpv.hidden) { e.preventDefault(); closePreview(); }
     });
-  };
+
+    document.getElementById('cpv-go').onclick = function(){
+      var go = document.getElementById('cpv-go');
+      var subject = csubj ? csubj.value.trim() : '';
+      var bodyText = cbody ? cbody.value.trim() : '';
+      go.classList.add('busy');
+      go.textContent = 'committing…';
+      post('/api/diff/commit', { subject: subject, body: bodyText }).then(function(r){
+        go.classList.remove('busy');
+        go.textContent = 'Commit';
+        if (r.ok && r.j.ok) {
+          document.getElementById('cpv-say').textContent = r.j.why + ' · undo with git reset --soft HEAD~1';
+          rememberViewport();
+          setTimeout(function(){ location.reload(); }, 1600);
+          return;
+        }
+        document.getElementById('cpv-say').textContent = (r.j && (r.j.why || r.j.error)) || 'failed';
+      }).catch(function(err){
+        go.classList.remove('busy');
+        go.textContent = 'Commit';
+        document.getElementById('cpv-say').textContent = String(err);
+      });
+    };
+  }
 
   var ccopy = document.getElementById('cmsgcopy');
   if (ccopy) ccopy.onclick = function(){
@@ -1042,10 +1143,16 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
 .ix:hover{color:var(--ink);border-color:var(--wire-hot)}
 .ix.busy{pointer-events:none;opacity:.55}
 /* The per-file discard, red at rest like the page-wide one so the two read as the same authority. */
-.ix.dz{display:grid;place-items:center;padding:4px;color:var(--priv);
-  border-color:color-mix(in srgb, var(--priv) 40%, var(--line))}
-.ix.dz svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.7;
-  stroke-linecap:round;stroke-linejoin:round}
+.ix.dz,.ix.stg,.ix.unstg{display:grid;place-items:center;padding:4px}
+.ix.dz svg,.ix.stg svg,.ix.unstg svg{width:13px;height:13px;fill:none;stroke:currentColor;
+  stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+/* Vibrant, because staging is the action on this row anyone actually reaches for. */
+.ix.stg{color:var(--pub);border-color:color-mix(in srgb, var(--pub) 55%, var(--line))}
+.ix.stg:hover{border-color:var(--pub);background:color-mix(in srgb, var(--pub) 16%, var(--surface-3))}
+/* And the inverse is quiet: it undoes, it does not invite. */
+.ix.unstg{color:var(--ink-3)}
+.ix.unstg:hover{color:var(--ink);border-color:var(--wire-hot)}
+.ix.dz{color:var(--priv);border-color:color-mix(in srgb, var(--priv) 40%, var(--line))}
 .ix.dz:hover{border-color:var(--priv);background:color-mix(in srgb, var(--priv) 12%, var(--surface-3))}
 .act.commit{color:var(--pub);border-color:var(--pub)}
 .act.commit:hover{background:var(--surface-3)}
@@ -1059,6 +1166,41 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
   border-top:1px dashed var(--line);background:var(--surface-2)}
 .why b{color:var(--ink)}
 .why.skip b{color:var(--prot)}
+
+/* ── commit preview modal ── */
+.modal{position:fixed;inset:0;z-index:80;display:grid;place-items:center;
+  background:color-mix(in srgb, var(--bg) 72%, transparent)}
+.modal[hidden]{display:none}
+.sheet{width:min(760px,92vw);max-height:86vh;display:flex;flex-direction:column;
+  background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;
+  box-shadow:0 18px 60px rgba(0,0,0,.45)}
+.sheet>header{display:flex;align-items:center;gap:10px;padding:11px 14px;background:var(--surface-2);
+  border-bottom:1px solid var(--line)}
+.sheet>header h2{margin:0;font:600 13px/1 var(--ui);color:var(--ink)}
+.sheet>header .sub{font:11.5px/1 var(--ui);color:var(--ink-3)}
+.sheet>header .act{margin-left:auto}
+.sheet-b{overflow-y:auto;padding:12px 14px}
+.sheet>footer{display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--surface-2);
+  border-top:1px solid var(--line)}
+.sheet>footer .say{font:11.5px/1.4 var(--ui);color:var(--ink-2);margin-right:auto}
+.cpv-sec{display:flex;align-items:center;gap:7px;margin:0 0 6px;
+  font:600 10px/1 var(--ui);letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)}
+.cpv-sec:not(:first-child){margin-top:14px}
+.cpv-sec i{font-style:normal;font:600 10px/1 var(--ui);color:var(--ink-2);
+  background:var(--surface-3);border-radius:999px;padding:3px 6px}
+.cpv-sec i.over{color:var(--priv)}
+.cpv-files{margin:0;padding:0;list-style:none;border:1px solid var(--line);border-radius:9px;
+  overflow:hidden}
+.cpv-files li{display:flex;align-items:center;gap:9px;padding:6px 10px;
+  font:12px/1.4 var(--mono);color:var(--ink);border-bottom:1px solid var(--line-soft)}
+.cpv-files li:last-child{border-bottom:0}
+.cpv-files .ct{margin-left:auto;font:600 11px/1 var(--mono)}
+.cpv-files .none{color:var(--ink-3);font-style:italic;font-family:var(--ui)}
+.cpv-subj,.cpv-body{margin:0;padding:9px 11px;background:var(--bg);border:1px solid var(--line);
+  border-radius:9px;font:12.5px/1.6 var(--mono);color:var(--ink);white-space:pre-wrap;
+  word-break:break-word}
+.cpv-subj.over{border-color:var(--priv);color:var(--priv)}
+.cpv-body:empty::after{content:'(no description)';color:var(--ink-3);font-style:italic}
 
 /* ── refresh FAB (served pages only) ── */
 /* Fixed, bottom-right, above the sticky header's z-index:2. Every colour is a token, so the light
@@ -1203,7 +1345,7 @@ kbd{font:10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2
 ${iconSprite()}
 <aside id="side">${sidebarSections(set.files)}</aside>
 <main id="main">${commitPanel(o)}${omitted}${filesHtml || '<div class="empty">Working tree is clean.</div>'}</main>
-${o.interactive ? discardFab() + refreshFab() : ''}
+${o.interactive ? commitPreview() + discardFab() + refreshFab() : ''}
 <script>
 (function(){
   var DEF = ${JSON.stringify(DEFAULT_EXTENSIONS)};
