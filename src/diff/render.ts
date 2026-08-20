@@ -23,6 +23,7 @@
 
 import type { DiffLine, DiffSet, FileDiff } from './collect.js';
 import type { DiffComment } from './comments.js';
+import { renderWebMarkdown } from '../web-markdown.js';
 
 /**
  * Comments exist only on the SERVED page. A `file://` page has no session to send one to, so the
@@ -87,9 +88,13 @@ function threadHtml(list: DiffComment[]): string {
     const age = c.status === 'pending' || c.status === 'working'
       ? `<span class="age" data-since="${esc(since)}"></span>` : '';
     const badge = `${age}<span class="badge ${c.status}">${STATUS_LABEL[c.status] ?? esc(c.status)}</span>`;
+    // MARKDOWN, not escaped text. The agent replies in markdown — headings, bullets, fenced code,
+    // inline spans naming symbols — and `esc()` showed all of it raw: literal ### and ** and backticks
+    // in the one place on this page a human reads prose. renderWebMarkdown escapes first and formats
+    // second, so this is no less safe than the escape it replaces.
     const reply = c.status === 'done' && c.response
       ? `<div class="cmt reply"><div class="cmt-h"><span class="who">ayin</span></div>`
-        + `<div class="cmt-b">${esc(c.response)}</div></div>`
+        + `<div class="cmt-b md">${renderWebMarkdown(c.response)}</div></div>`
       : '';
     const failed = c.status === 'failed' && c.error
       ? `<div class="cmt reply err"><div class="cmt-b">${esc(c.error)}</div></div>`
@@ -1002,6 +1007,24 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
 .cwhy{font:11px/1.5 var(--ui);color:var(--ink-2);padding:0 12px 10px}
 .cwhy:empty{display:none}
 .cwhy b{color:var(--ink)}
+/* ── markdown inside a reply ── */
+/* Tuned for a card, not a document: margins collapse at the edges so the block does not float, and
+   headings are only slightly larger than body text because they sit inside a panel that already has
+   its own heading. */
+.md>*:first-child{margin-top:0}
+.md>*:last-child{margin-bottom:0}
+.md p{margin:0 0 8px}
+.md h3,.md h4{font:600 12.5px/1.4 var(--ui);color:var(--ink);margin:12px 0 6px}
+.md ul,.md ol{margin:0 0 8px;padding-left:20px}
+.md li{margin:2px 0}
+.md code{font:11.5px/1.5 var(--mono);background:var(--surface-3);border-radius:4px;padding:1px 4px}
+.md pre{margin:0 0 8px;padding:9px 11px;background:var(--bg);border:1px solid var(--line);
+  border-radius:8px;overflow-x:auto}
+.md pre code{background:none;padding:0;font:11.5px/1.55 var(--mono);color:var(--ink)}
+.md blockquote{margin:0 0 8px;padding:2px 0 2px 10px;border-left:2px solid var(--line);color:var(--ink-2)}
+.md a{color:var(--wire-hot)}
+.md hr{border:0;border-top:1px solid var(--line);margin:10px 0}
+.md strong{color:var(--ink)}
 
 /* ── the index: sidebar sections, per-file buttons, Stage ── */
 .sect{margin-bottom:10px}

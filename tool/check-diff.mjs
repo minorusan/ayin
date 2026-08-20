@@ -467,6 +467,57 @@ ok(/the subject is empty/.test(cmHtml),
 const cmStatic = render.renderDiffPage(fabSet, { interactive: false, rev: 'HEAD', comments: [], commitDraft: 'feat: x' });
 ok(!/id="docommit"/.test(cmStatic), 'a file:// page never offers Commit — committing is a git write');
 
+// ── 11a · agent replies render as markdown, and hostile prose stays inert ────────
+//
+// The reply widget is the one place on this page that shows PROSE A MODEL WROTE ABOUT A CODEBASE, so it
+// routinely contains angle brackets, ampersands and whole HTML fragments quoted out of source. It used
+// to be escaped and shown raw — literal ### and ** — and the fix must not trade that safety for
+// formatting. renderWebMarkdown escapes FIRST and formats second; these assertions pin both halves.
+
+console.log('\nmarkdown in replies');
+
+const { renderWebMarkdown } = await import(`file://${join(ROOT, 'dist', 'web-markdown.js')}`);
+const BT = String.fromCharCode(96);
+const NL = String.fromCharCode(10);
+
+ok(renderWebMarkdown('# One') === '<h3>One</h3>', 'a top heading renders at h3 — capped so it cannot out-shout the panel');
+ok(renderWebMarkdown('##### Five') === '<h4>Five</h4>', 'and deeper headings flatten to h4');
+ok(/<code>ScoringId<\/code>/.test(renderWebMarkdown(`a ${BT}ScoringId${BT} b`)), 'an inline code span renders');
+ok(/<ul>[\s\S]*<li>one<\/li>/.test(renderWebMarkdown('- one' + NL + '- two')), 'a bullet list renders');
+ok(/<pre><code>/.test(renderWebMarkdown(BT + BT + BT + NL + 'x' + NL + BT + BT + BT)), 'a fence renders');
+// A real '>' goes in; the renderer escapes it to &gt; and its own rule matches THAT. Passing a
+// pre-escaped marker here was the bug in this assertion, not in the renderer.
+ok(renderWebMarkdown('> quoted').includes('<blockquote>quoted</blockquote>'),
+  'a blockquote renders, matched after escaping turned its marker into an entity');
+
+// The safety half. Escaping runs first, so none of this can become markup.
+ok(!/<script>/.test(renderWebMarkdown('<script>alert(1)</script>')), 'a script tag cannot survive');
+ok(/&lt;div&gt;/.test(renderWebMarkdown(`${BT}<div>${BT} tag`)), 'HTML quoted inside a code span is shown, not run');
+ok(!/href="javascript/.test(renderWebMarkdown('[x](javascript:alert(1))')), 'a javascript: URL is not turned into a link');
+ok(/href="https:\/\//.test(renderWebMarkdown('[x](https://example.com)')), 'an http link is');
+
+// The placeholder that parks code spans must not be forgeable, and must not collide with prose. The
+// first version used a bare space-digit-space and DID collide; the angle form cannot, because esc()
+// has already turned every < in the text into &lt;.
+ok(renderWebMarkdown(`evil <0> with ${BT}R${BT}`).includes('&lt;0&gt;'),
+  'a forged placeholder is escaped, not substituted');
+ok((renderWebMarkdown(`evil <0> with ${BT}R${BT}`).match(/<code>R<\/code>/g) || []).length === 1,
+  'and the real span is substituted exactly once');
+ok(renderWebMarkdown(`a ${BT}Q${BT} b 0 c`).includes('b 0 c'), 'bare digits in prose are left alone');
+
+// And it is actually WIRED into the reply, not merely available.
+const mdSet = { ...ixSet, files: [ixSet.files[0]] };
+const mdHtml = render.renderDiffPage(mdSet, {
+  interactive: true, rev: 'HEAD', comments: [{
+    id: 'c1', cwd: '.', rev: 'HEAD', file: ixSet.files[0].path, side: 'new', lineNo: 1, lineText: 'x',
+    text: 'why?', status: 'done', response: '## Heading' + NL + NL + '- a bullet',
+    error: '', createdAt: '', startedAt: '', doneAt: '',
+  }], commitDraft: null,
+});
+ok(/<div class="cmt-b md">/.test(mdHtml), 'the reply body is marked as markdown');
+ok(/<h4>Heading<\/h4>/.test(mdHtml) && !/## Heading/.test(mdHtml), 'and the reply is rendered, not shown raw');
+ok(/\.md pre code\{/.test(mdHtml), 'the page carries styles for it');
+
 // ── 11b · the filter is remembered, and the helpers are RUN, not grepped ─────────
 //
 // Every "is the code present" check passed while this feature did nothing at all: `[].slice.call(on)`

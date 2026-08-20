@@ -2171,6 +2171,28 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
   comments, Stage, the FAB, all of it, while the page still rendered and every other assertion passed.
   A `new Function` on the emitted script catches that class outright.
 
+- **Agent replies render as markdown** (`src/web-markdown.ts`). The reply widget is the one place on
+  these pages showing prose a MODEL wrote about a codebase, and it was escaped and shown raw — literal
+  `###`, `**`, backticks. `markdown.ts` already converts markdown but to BLESSED TAGS for a terminal,
+  which in a browser is literal text; two renderers for one syntax is the cost of two very different
+  targets.
+
+  **Escape first, format second, always.** That prose routinely carries `<`, `>`, `&` and whole HTML
+  fragments quoted out of source. Formatting first would have its own tags escaped into text; escaping
+  after would corrupt them with a stray `&`. So the input is escaped once at the top and every rule
+  operates on already-safe text. One consequence worth knowing: the blockquote rule matches `&gt;`,
+  because by the time it runs the marker is already an entity — it is the only block marker escaping
+  touches, and it silently stopped matching until that was found.
+
+  Code spans are parked as `<n>` placeholders before emphasis runs, so asterisks inside a span stay
+  code. That form is safe rather than merely unlikely: `esc()` has already turned every `<` in the text
+  into `&lt;`, so a placeholder cannot be forged by the input. The first version used a bare
+  space-digit-space and **did** collide — a paragraph with one code span and the words "0 files" had the
+  digit in the prose replaced by the span.
+
+  No tables, no images, no HTML passthrough. Passthrough is the single feature that would turn a
+  model's prose into a way to inject markup into a page the operator trusts.
+
 Gate: `npm run check:diff` — checks every count against `git diff --numstat`, escaping against a
 file containing `</script>`, and which of the two page modes carries the refresh FAB.
 
