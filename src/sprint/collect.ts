@@ -12,6 +12,7 @@
  */
 
 import { currentSprintIssues, whoAmI, type JiraIssue } from '../tools/connectors/jira/client.js';
+import { readCredentials } from '../tools/connectors/jira/credentials.js';
 
 export interface SprintColumn {
   status: string;
@@ -22,6 +23,15 @@ export interface SprintColumn {
 
 export interface SprintBoard {
   me: string;
+  /**
+   * `https://<site>/browse` — where a ticket key becomes a link a colleague can open.
+   *
+   * Carried on the board rather than rebuilt in the renderer: the site comes from the CREDENTIAL, and a
+   * renderer that reads credentials is a renderer that cannot be handed a board collected elsewhere.
+   * EMPTY when Jira is unconfigured, and the page then shows no copy buttons at all — a button that
+   * copies `https://undefined/browse/KEY` is worse than no button.
+   */
+  browseBase: string;
   /** The sprint and board this came from, verbatim from the client — including the pin hint. */
   scope: string;
   generatedAt: string;
@@ -51,8 +61,12 @@ export function toColumns(issues: JiraIssue[]): SprintColumn[] {
 export async function collectSprint(): Promise<SprintBoard> {
   const me = await whoAmI();
   const { issues, scope } = await currentSprintIssues();
+  // `site` is a bare host by the time it reaches here (see credentials.ts), which is why this
+  // concatenates a scheme rather than trusting whatever was typed.
+  const cred = readCredentials();
   return {
     me: me.name,
+    browseBase: cred?.site ? `https://${cred.site}/browse` : '',
     scope,
     generatedAt: new Date().toISOString(),
     columns: toColumns(issues),

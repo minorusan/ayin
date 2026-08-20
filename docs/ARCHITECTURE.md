@@ -2103,6 +2103,23 @@ file containing `</script>`, and which of the two page modes carries the refresh
 
 ## `/sprint` — the board in a browser (`src/sprint/`)
 
+Every card carries a **copy-link button** next to its key, and so does the open drawer: it writes
+`https://<site>/browse/<KEY>` to the clipboard, which is the form a colleague can paste anywhere. The
+base comes from `SprintBoard.browseBase`, filled from the CREDENTIAL at collect time — a renderer that
+read credentials could not be handed a board collected elsewhere. **No configured site means no copy
+buttons at all**, because one that copies `https://undefined/browse/KEY` is worse than none.
+
+Two consequences worth stating. The card was a `<button>` and is now a **div with `role="button"`**:
+it has to contain a button, and a button inside a button is invalid HTML — the parser hoists the inner
+out of the outer and wrecks the layout silently rather than failing anywhere visible. The keyboard path
+a real button gave for free is now explicit (Enter and Space open a card). And the copy click calls
+`stopPropagation`, because the button sits inside the card's own click target: without it, copying a
+link would also open the drawer and fire a detail fetch nobody asked for.
+
+The button is **always visible, just quiet** (40% opacity, full on hover). Hover-reveal was the first
+attempt and it is the wrong trade on a board that is scanned rather than explored: a button nobody can
+see is a button nobody knows exists.
+
 A **refresh FAB** sits bottom-right, deliberately the same shape and behaviour as `/diff`'s: the route
 re-collects the sprint per request, so refresh is `location.reload()`, and the button disarms on click
 because a Jira round-trip is not instant. The drawer is NOT reopened afterwards — a ticket's detail is

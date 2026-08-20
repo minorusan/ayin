@@ -30,19 +30,35 @@ const CATEGORY_CLASS: Record<string, string> = {
   'To Do': 'todo', 'In Progress': 'wip', Done: 'done',
 };
 
-function cardHtml(key: string, title: string, type: string, priority: string, updated: string): string {
-  return `<button class="card" data-key="${esc(key)}">`
-    + `<span class="k">${esc(key)}</span>`
+/**
+ * A card is a DIV with a button role, not a `<button>`.
+ *
+ * It has to hold its own copy button, and a button nested inside a button is invalid HTML — the parser
+ * hoists the inner one out of the outer, which silently wrecks the card's layout rather than failing
+ * anywhere visible. `role`/`tabindex` plus the Enter/Space handler in the client keep it reachable from
+ * the keyboard, which is the only thing the element change would otherwise have cost.
+ *
+ * The copy button is omitted entirely when there is no site to link to — see `SprintBoard.browseBase`.
+ */
+function cardHtml(
+  key: string, title: string, type: string, priority: string, updated: string, browseBase: string,
+): string {
+  const copy = browseBase
+    ? `<button class="cp" data-url="${esc(`${browseBase}/${key}`)}" title="Copy the link to ${esc(key)}"`
+      + ` aria-label="Copy the link to ${esc(key)}">link</button>`
+    : '';
+  return `<div class="card" role="button" tabindex="0" data-key="${esc(key)}">`
+    + `<span class="krow"><span class="k">${esc(key)}</span>${copy}</span>`
     + `<span class="t">${esc(title)}</span>`
     + `<span class="meta">${esc(type)} · ${esc(priority)}${updated ? ` · ${esc(updated)}` : ''}</span>`
-    + `</button>`;
+    + `</div>`;
 }
 
 export function renderSprintPage(board: SprintBoard): string {
   const columns = board.columns.map((c) => `
     <section class="col ${CATEGORY_CLASS[c.category] ?? 'other'}">
       <header><span class="name">${esc(c.status)}</span><span class="n">${c.issues.length}</span></header>
-      <div class="cards">${c.issues.map((i) => cardHtml(i.key, i.title, i.issueType, i.priority, i.updated)).join('')}</div>
+      <div class="cards">${c.issues.map((i) => cardHtml(i.key, i.title, i.issueType, i.priority, i.updated, board.browseBase)).join('')}</div>
     </section>`).join('');
 
   const empty = board.total === 0
@@ -89,7 +105,9 @@ body{display:flex;flex-direction:column;height:100vh;overflow:hidden;
 .cards{padding:9px;display:flex;flex-direction:column;gap:8px;overflow-y:auto}
 .card{text-align:left;display:flex;flex-direction:column;gap:5px;padding:10px;cursor:pointer;
   background:var(--surface-2);border:1px solid var(--line);border-radius:10px;color:var(--ink);font:inherit}
+.card{text-align:left;width:100%;box-sizing:border-box}
 .card:hover{border-color:var(--wire-hot)}
+.card:focus-visible{outline:2px solid var(--wire-hot);outline-offset:1px}
 .card.on{border-color:var(--wire-hot);background:var(--surface-3)}
 .card .k{font:600 11px/1 var(--mono);color:var(--wire-hot)}
 .card .t{font-size:12.5px;line-height:1.35}
@@ -97,6 +115,19 @@ body{display:flex;flex-direction:column;height:100vh;overflow:hidden;
 .empty{padding:18px;color:var(--ink-2);font-size:13px}
 
 /* ── the drawer: one ticket, opened over the board ── */
+/* ── copy-link button, on every card and in the drawer ── */
+.krow{display:flex;align-items:center;gap:6px}
+.cp{font:600 9.5px/1 var(--ui);letter-spacing:.05em;text-transform:uppercase;
+  color:var(--ink-3);background:none;border:1px solid var(--line);border-radius:5px;
+  padding:2px 5px;cursor:pointer;opacity:.4;transition:opacity .12s,color .12s}
+/* ALWAYS VISIBLE, just quiet. Hover-reveal was the first attempt and it is the wrong trade here: a
+   button nobody can see is a button nobody knows exists, and this board is scanned rather than
+   explored. Low opacity keeps it out of the way of the key and title without hiding it. */
+.card:hover .cp,.cp:focus-visible{opacity:1}
+.cp:hover{color:var(--wire-hot);border-color:var(--wire-hot)}
+.cp.done{color:var(--done);border-color:var(--done);opacity:1}
+.drawer .cp{opacity:1}
+
 /* ── refresh FAB ── */
 /* Same shape and behaviour as /diff's, deliberately: two pages served by the same session should not
    disagree about what a refresh button looks like. The board is re-collected per request, so this is
@@ -155,7 +186,7 @@ textarea:focus{outline:none;border-color:var(--wire-hot)}
 <div class="board">${columns}${empty}</div>
 
 <aside class="drawer" id="drawer">
-  <header><span class="key" id="d-key"></span><h2 id="d-title"></h2><button class="x" id="d-close">close</button></header>
+  <header><span class="key" id="d-key"></span><button class="cp" id="d-copy" title="Copy the link to this ticket" aria-label="Copy the link to this ticket" hidden>link</button><h2 id="d-title"></h2><button class="x" id="d-close">close</button></header>
   <div class="body">
     <div class="st" id="d-st"></div>
     <div class="desc" id="d-desc"></div>
@@ -202,6 +233,16 @@ async function open(key) {
   document.querySelectorAll('.card').forEach((c) => c.classList.toggle('on', c.dataset.key === key));
   $('drawer').classList.add('open');
   $('d-key').textContent = key;
+  {
+    // Reuse the card's own URL rather than rebuilding one here: the base lives on the board, and a
+    // second place that concatenates it is a second place for it to be wrong.
+    const src = document.querySelector('.card[data-key="' + key + '"] .cp[data-url]');
+    const dc = $('d-copy');
+    if (dc) {
+      if (src) { dc.dataset.url = src.dataset.url; dc.hidden = false; }
+      else { dc.hidden = true; }
+    }
+  }
   $('d-compose').classList.remove('open');
   $('d-say').textContent = '';
   $('d-say').className = 'say';
@@ -230,7 +271,39 @@ function paint(t) {
   renderComments(t.comments || []);
 }
 
-document.querySelectorAll('.card').forEach((c) => c.addEventListener('click', () => open(c.dataset.key)));
+// ── copy a ticket link ─────────────────────────────────────────────────────────
+// stopPropagation on both events, because the button lives INSIDE the card's own click target: without
+// it, copying a link would also open the drawer and fire a detail fetch nobody asked for. The label
+// confirms in place rather than via a toast — the button is where the eye already is.
+function copyLink(btn, url) {
+  if (!navigator.clipboard) { btn.textContent = 'no clipboard'; return; }
+  navigator.clipboard.writeText(url).then(() => {
+    btn.textContent = 'copied';
+    btn.classList.add('done');
+    setTimeout(() => { btn.textContent = 'link'; btn.classList.remove('done'); }, 1200);
+  }).catch(() => { btn.textContent = 'failed'; setTimeout(() => { btn.textContent = 'link'; }, 1200); });
+}
+
+document.querySelectorAll('.cp[data-url]').forEach((b) => {
+  b.addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); copyLink(b, b.dataset.url); });
+  b.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); });
+});
+
+{
+  const dc = $('d-copy');
+  if (dc) dc.addEventListener('click', () => { if (dc.dataset.url) copyLink(dc, dc.dataset.url); });
+}
+
+// The card is a div with role=button (it has to hold the copy button), so Enter and Space are ours to
+// handle — a real <button> gave that for free.
+document.querySelectorAll('.card').forEach((c) => {
+  c.addEventListener('click', () => open(c.dataset.key));
+  c.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    open(c.dataset.key);
+  });
+});
 $('d-close').addEventListener('click', () => {
   $('drawer').classList.remove('open');
   openKey = null;

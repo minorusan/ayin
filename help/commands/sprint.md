@@ -6,6 +6,8 @@ The comments section has a `+`. It opens a box, and `post to Jira` posts what yo
 
 The board is served by the session you ran it from and re-read on every request, so a reload shows what changed. There is no offline copy: the cards fetch their own detail and the comment box writes to an external service, and a page with two dead buttons is worse than a page that says why it is not there.
 
+Every card has a **link** button beside its ticket key, and the open ticket has one too — it copies `https://<your-site>/browse/<KEY>` to the clipboard, ready to paste into Slack or a commit message. It only appears when a Jira credential is configured, since there is no site to build a link from otherwise. Clicking it does not open the ticket.
+
 ## Examples
 
     /sprint

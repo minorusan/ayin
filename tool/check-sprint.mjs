@@ -200,5 +200,43 @@ ok(r.code === 502 && /could not be read/.test(r.body), 'the PAGE carries the rea
   `${r.code} ${r.body.slice(0, 60)}`);
 ok(/jira-auth/.test(r.body), 'and names the fix');
 
+// ── the copy-link button, and the element change it forced ───────────────────────
+//
+// A card used to be a `<button>`. It now has to CONTAIN one, and a button inside a button is invalid
+// HTML — the parser hoists the inner out of the outer, which wrecks the card's layout silently rather
+// than failing anywhere a test would look. So the card is a div with role=button, and the keyboard
+// path a real button gave for free is now ours to provide.
+
+console.log('\ncopy-link');
+
+const tkt = (k, t) => ({ key: k, title: t, issueType: 'Task', priority: 'High', updated: '2026-01-01', status: 'Open', statusCategory: 'To Do' });
+const withSite = {
+  me: 'me', browseBase: 'https://example.atlassian.net/browse', scope: 'S', generatedAt: '2026-01-01T00:00:00Z',
+  total: 2, columns: [{ status: 'Open', category: 'To Do', issues: [tkt('AB-1', 'One'), tkt('AB-2', 'Two')] }],
+};
+const page = renderSprintPage(withSite);
+const noSite = renderSprintPage({ ...withSite, browseBase: '' });
+
+ok(!/<button class="card"/.test(page), 'a card is NOT a button — it has to contain one');
+ok(/<div class="card" role="button" tabindex="0"/.test(page), 'it is a div with the button role and tab stop');
+ok((page.match(/class="cp" data-url/g) || []).length === 2, 'one copy button per ticket');
+ok(/data-url="https:\/\/example\.atlassian\.net\/browse\/AB-1"/.test(page),
+  'the link is <site>/browse/<KEY>, built from the board not the renderer');
+ok(/id="d-copy"/.test(page), 'the drawer carries one too');
+ok(!/class="cp" data-url/.test(noSite),
+  'no configured site → NO copy buttons, rather than one copying https://undefined/browse/KEY');
+ok(/e\.stopPropagation\(\)/.test(page),
+  'the click is stopped from bubbling — copying must not also open the drawer and fetch detail');
+ok(/e\.key === 'Enter' \|\| e\.key === ' '/.test(page),
+  'Enter and Space still open a card, since it is no longer a real button');
+
+// The page's own script must parse: a template literal turns \n into a real newline, and one
+// under-escaped sequence kills every interaction while the page still renders.
+let sprintJsOk = false, sprintJsErr = '';
+try { new Function(page.match(/<script>([\s\S]*?)<\/script>/)[1]); sprintJsOk = true; }
+catch (e) { sprintJsErr = e.message; }
+ok(sprintJsOk, 'the emitted page script parses', sprintJsErr);
+ok(/id="refresh"/.test(page), 'and the refresh FAB is there');
+
 console.log(fails ? `\nsprint check: ${fails} FAILURE(S)\n` : '\nsprint check: ok\n');
 process.exit(fails ? 1 : 0);
