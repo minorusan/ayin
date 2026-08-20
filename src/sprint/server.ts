@@ -17,6 +17,13 @@ import { addComment, issueDetail } from '../tools/connectors/jira/client.js';
 import { collectSprint } from './collect.js';
 import { renderSprintPage } from './render.js';
 import { log } from '../log.js';
+import { appendTurn, chatPath, isTicketKey, parseTurns, readChat } from './chat.js';
+import { renderWebMarkdown } from '../web-markdown.js';
+import { prompts as promptService, packagePath } from '../prompts-service.js';
+
+/** The sprint namespace's prompts. Registering twice is idempotent and returns the same bundle. */
+const sprintPrompts = (): { get: (id: string, vars?: Record<string, string>) => string } =>
+  promptService.register('sprint', packagePath('prompts', 'sprint')).bundle;
 
 const KEY = /^[A-Z][A-Z0-9_]*-\d+$/;
 
@@ -89,6 +96,23 @@ async function postComment(req: IncomingMessage, res: ServerResponse): Promise<v
 }
 
 /** Returns true when the request was ours. Anything else falls through to the other routes. */
+/**
+ * How a ticket message reaches the agent. Wired by app.ts at boot; absent in any process with no TUI.
+ *
+ * One argument, not two: there is no comment id to track, because the agent replies by appending to the
+ * thread file rather than by reporting back through here.
+ */
+type ChatSubmit = (prompt: string) => void;
+let chatSubmit: ChatSubmit | null = null;
+
+export function wireSprintChat(fn: ChatSubmit): void {
+  chatSubmit = fn;
+}
+
+export function sprintChatWired(): boolean {
+  return chatSubmit !== null;
+}
+
 export async function handleSprintRequest(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
   const path = url.pathname;
@@ -115,6 +139,67 @@ export async function handleSprintRequest(req: IncomingMessage, res: ServerRespo
     if (!served.has(key)) { json(res, 403, { error: `${key} is not on the board this page served` }); return true; }
     try { json(res, 200, await issueDetail(key)); }
     catch (e) { json(res, 502, { error: e instanceof Error ? e.message : String(e) }); }
+    return true;
+  }
+
+  // ── the agent thread for one ticket ────────────────────────────────────────
+  // GET returns the raw markdown plus a version stamp, so the page can poll cheaply and re-render only
+  // when the file actually grew — which is how the agent's reply appears without any status machinery.
+  if (path.startsWith('/api/sprint/chat/') && req.method === 'GET') {
+    const key = decodeURIComponent(path.slice('/api/sprint/chat/'.length)).toUpperCase();
+    if (!isTicketKey(key)) { json(res, 400, { error: `not a ticket key: ${key}` }); return true; }
+    try {
+      const c = readChat(key);
+      // Rendered HERE, with the same hardened renderer the diff replies use: the agent writes markdown
+      // and a second renderer in the browser would be a second place for the escaping to be wrong.
+      json(res, 200, {
+        version: c.version,
+        turns: parseTurns(c.text).map((t) => ({ who: t.who, when: t.when, html: renderWebMarkdown(t.body) })),
+      });
+    }
+    catch (e) { json(res, 500, { error: e instanceof Error ? e.message : String(e) }); }
+    return true;
+  }
+
+  // POST appends what the operator said and hands the agent the PATH, the ticket and the question. The
+  // agent answers by appending to that same file with the tools it already has — its write IS the
+  // reply, so there is nothing here to mark done and nothing to poll for a payload.
+  if (path === '/api/sprint/chat' && req.method === 'POST') {
+    try {
+      if (!chatSubmit) {
+        json(res, 503, { error: 'no interactive session is wired to take this' });
+        return true;
+      }
+      const raw = await readBody(req);
+      let b: Record<string, unknown> = {};
+      try { b = JSON.parse(raw) as Record<string, unknown>; } catch { /* guarded below */ }
+      const key = String(b.key ?? '').toUpperCase();
+      const text = typeof b.text === 'string' ? b.text.trim() : '';
+      if (!isTicketKey(key)) { json(res, 400, { error: `not a ticket key: ${key}` }); return true; }
+      if (!text) { json(res, 400, { error: 'text: empty message' }); return true; }
+
+      appendTurn(key, 'you', text);
+
+      // The ticket is fetched fresh rather than taken from the page: the browser's copy is as old as
+      // the last render, and the agent is about to reason about status and description.
+      let issue: { key: string; title: string; status: string; description?: string } | null = null;
+      try { issue = await issueDetail(key); } catch { /* unreachable Jira must not lose the message */ }
+
+      const prompts = sprintPrompts();
+      chatSubmit(prompts.get('chatTurn', {
+        KEY: key,
+        PATH: chatPath(key),
+        STATUS: issue?.status ?? '(status unavailable)',
+        TITLE: issue?.title ?? '(title unavailable)',
+        DESCRIPTION: (issue?.description ?? '(description unavailable)').slice(0, 8000),
+        COMMENT: text,
+      }));
+      json(res, 200, { ok: true, path: chatPath(key) });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('WARN', 'sprint_chat_failed', { error: msg });
+      json(res, 500, { error: msg });
+    }
     return true;
   }
 

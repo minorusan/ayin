@@ -127,6 +127,28 @@ body{display:flex;flex-direction:column;height:100vh;overflow:hidden;
 .cp:hover{color:var(--wire-hot);border-color:var(--wire-hot)}
 .cp.done{color:var(--done);border-color:var(--done);opacity:1}
 .drawer .cp{opacity:1}
+/* ── the agent thread ── */
+.chat{margin:0 0 10px}
+.chat:empty::after{content:'No discussion yet.';color:var(--ink-3);font:11.5px/1.5 var(--ui);font-style:italic}
+.turn{border:1px solid var(--line);border-radius:10px;padding:8px 11px;margin:0 0 8px;background:var(--surface-2)}
+.turn.ayin{border-color:color-mix(in srgb, var(--wire-hot) 45%, var(--line))}
+.turn>.who{display:block;font:600 10px/1 var(--ui);letter-spacing:.09em;text-transform:uppercase;
+  color:var(--ink-3);margin:0 0 6px}
+.turn.ayin>.who{color:var(--wire-hot)}
+.post.ask{background:var(--wire-hot);border-color:var(--wire-hot)}
+h3 .hint{margin-left:auto;font:400 10.5px/1 var(--mono);color:var(--ink-3);text-transform:none;letter-spacing:0}
+/* markdown inside a turn */
+.turn .md>*:first-child{margin-top:0}
+.turn .md>*:last-child{margin-bottom:0}
+.turn .md p{margin:0 0 7px}
+.turn .md h3,.turn .md h4{font:600 12px/1.4 var(--ui);color:var(--ink);margin:10px 0 5px}
+.turn .md ul,.turn .md ol{margin:0 0 7px;padding-left:19px}
+.turn .md code{font:11px/1.5 var(--mono);background:var(--surface-3);border-radius:4px;padding:1px 4px}
+.turn .md pre{margin:0 0 7px;padding:8px 10px;background:var(--bg);border:1px solid var(--line);
+  border-radius:7px;overflow-x:auto}
+.turn .md pre code{background:none;padding:0}
+.turn .md blockquote{margin:0 0 7px;padding:2px 0 2px 9px;border-left:2px solid var(--line);color:var(--ink-2)}
+.turn .md a{color:var(--wire-hot)}
 
 /* ── refresh FAB ── */
 /* Same shape and behaviour as /diff's, deliberately: two pages served by the same session should not
@@ -196,6 +218,13 @@ textarea:focus{outline:none;border-color:var(--wire-hot)}
       <div class="row"><button class="post" id="d-post">post to Jira</button><span class="say" id="d-say"></span></div>
     </div>
     <div id="d-cmts"></div>
+
+    <h3>ask ayin<span class="hint" id="d-chat-path"></span></h3>
+    <div class="chat" id="d-chat"></div>
+    <div class="compose open">
+      <textarea id="d-ask" placeholder="Ask about this ticket and the codebase. ayin searches, then answers here."></textarea>
+      <div class="row"><button class="post ask" id="d-send">ask ayin</button><span class="say" id="d-asay"></span></div>
+    </div>
   </div>
 </aside>
 
@@ -207,6 +236,91 @@ textarea:focus{outline:none;border-color:var(--wire-hot)}
 const $ = (id) => document.getElementById(id);
 const cache = new Map();
 let openKey = null;
+
+// ── the agent thread ───────────────────────────────────────────────────────────
+// The file IS the thread, so this is a poll on a VERSION STAMP rather than a status machine: when the
+// file grows, the agent has answered and the turns are re-rendered. Polling stops the moment the drawer
+// closes or the stamp stops moving for long enough, because a page left open overnight must not keep
+// asking.
+let chatVer = null;
+let chatTimer = null;
+let chatIdle = 0;
+
+function paintChat(turns) {
+  const box = $('d-chat');
+  if (!box) return;
+  box.innerHTML = (turns || []).map((t) => {
+    const who = t.who || 'note';
+    return '<div class="turn ' + (t.who === 'ayin' ? 'ayin' : 'you') + '">'
+      + '<span class="who">' + who + (t.when ? ' · ' + t.when.slice(0, 19).replace('T', ' ') : '') + '</span>'
+      + '<div class="md">' + t.html + '</div></div>';
+  }).join('');
+}
+
+async function pollChat(key, force) {
+  if (openKey !== key) return;
+  try {
+    const r = await fetch('/api/sprint/chat/' + encodeURIComponent(key));
+    const j = await r.json();
+    if (!r.ok) return;
+    if (force || j.version !== chatVer) {
+      chatVer = j.version;
+      chatIdle = 0;
+      paintChat(j.turns);
+    } else {
+      chatIdle++;
+    }
+  } catch (e) { chatIdle++; }
+}
+
+function startChat(key) {
+  stopChat();
+  chatVer = null;
+  chatIdle = 0;
+  $('d-chat').innerHTML = '';
+  $('d-asay').textContent = '';
+  void pollChat(key, true);
+  // Every 2s while something might be coming, then it gives up: 90 idle polls is three minutes of a
+  // quiet file, which is longer than a search-and-answer turn takes and short enough not to poll a
+  // forgotten tab forever. Asking again restarts it.
+  chatTimer = setInterval(() => {
+    if (openKey !== key || chatIdle > 90) { stopChat(); return; }
+    void pollChat(key, false);
+  }, 2000);
+}
+
+function stopChat() {
+  if (chatTimer) { clearInterval(chatTimer); chatTimer = null; }
+}
+
+{
+  const send = $('d-send');
+  if (send) send.addEventListener('click', async () => {
+    const key = openKey;
+    const text = $('d-ask').value.trim();
+    if (!key || !text) return;
+    send.disabled = true;
+    $('d-asay').textContent = 'sending…';
+    try {
+      const r = await fetch('/api/sprint/chat', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, text }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      $('d-ask').value = '';
+      // The operator turn is already in the file; show it at once and let the poll bring the answer.
+      $('d-asay').textContent = 'ayin is looking…';
+      chatIdle = 0;
+      await pollChat(key, true);
+      startChat(key);
+    } catch (e) {
+      $('d-asay').textContent = String(e.message || e);
+    } finally {
+      send.disabled = false;
+    }
+  });
+}
 
 // ── refresh ────────────────────────────────────────────────────────────────────
 // The route re-collects the sprint on every GET, so a reload IS the refresh — no cache to invalidate
@@ -233,6 +347,7 @@ async function open(key) {
   document.querySelectorAll('.card').forEach((c) => c.classList.toggle('on', c.dataset.key === key));
   $('drawer').classList.add('open');
   $('d-key').textContent = key;
+  startChat(key);
   {
     // Reuse the card's own URL rather than rebuilding one here: the base lives on the board, and a
     // second place that concatenates it is a second place for it to be wrong.
@@ -305,6 +420,7 @@ document.querySelectorAll('.card').forEach((c) => {
   });
 });
 $('d-close').addEventListener('click', () => {
+  stopChat();   // a closed drawer must not keep polling a file nobody is looking at
   $('drawer').classList.remove('open');
   openKey = null;
   document.querySelectorAll('.card').forEach((c) => c.classList.remove('on'));

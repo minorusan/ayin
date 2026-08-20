@@ -38,6 +38,7 @@ import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation, rec
 import { findToolBySlash, slashTools, loadTools } from './tools.js';
 import { startPromptServer, serverUrl } from './prompt-server.js';
 import { wireDiffComments } from './diff/server.js';
+import { wireSprintChat } from './sprint/server.js';
 import { commentIdFromPrompt, getComment, markDone, markFailed, markWorking, reapAbandoned } from './diff/comments.js';
 import { llmProvider } from './llm/select.js';
 import { showIndulgePicker, handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
@@ -1583,6 +1584,10 @@ async function runInteractive(): Promise<void> {
    * The review page's route into the session. `handleInput` decides whether this starts a turn or joins
    * the running one; either way the comment shows up in the chat exactly as if it had been typed.
    */
+  // The sprint ticket thread. One line, because the agent answers by appending to the thread file
+  // rather than reporting back — so there is no id to track and nothing to mark done here.
+  wireSprintChat((prompt) => { void handleInput(prompt); });
+
   wireDiffComments((id, prompt) => {
     inFlightComments.add(id);
     // Idle: this call starts the turn, so the comment is being acted on now. Busy: it goes on the

@@ -2215,6 +2215,32 @@ The button is **always visible, just quiet** (40% opacity, full on hover). Hover
 attempt and it is the wrong trade on a board that is scanned rather than explored: a button nobody can
 see is a button nobody knows exists.
 
+**Ask ayin about a ticket** (`src/sprint/chat.ts`). One markdown file per ticket at
+`~/.ayin-cli/sprint/chat/<KEY>.md`, and **that file IS the thread**. Sending appends the operator's turn
+and hands the agent three things: the PATH, the ticket, and the question. The agent searches the
+codebase and appends its own answer to that same file with the tools it already has.
+
+**Its write is the reply**, which is what removes the machinery. This is deliberately NOT the diff
+comment store: that one tracks pending/working/done per comment and polls for a response payload,
+because a diff moves under the discussion. A ticket does not. So there is no status machine, no reply
+payload, and no way for the two to disagree about whether an answer exists — the page polls a
+`size-mtime` version stamp and re-renders when the file grew. Polling stops when the drawer closes, and
+gives up after three minutes of a quiet file so a forgotten tab does not poll forever.
+
+The thread lives **outside the repo**: a discussion about a ticket is not a change to the project, and
+writing it into the working tree would put it in the next diff, the next commit, and eventually
+someone's review. The key is validated before it becomes a filename — it arrives from a browser, and a
+path built from an unchecked string is the one bug here that would matter.
+
+Turns are split on a heading both writers produce (`## you · <ts>` / `## ayin · <ts>`) and rendered
+server-side with the same `renderWebMarkdown` the diff replies use, so there is no second renderer in
+the browser for the escaping to be wrong in. Prose with no heading is still shown as a turn: losing an
+answer because the agent formatted it wrong is the one failure this file cannot afford.
+
+It sits beside the existing Jira `+` rather than replacing it — two destinations for two different
+intents. Worth knowing that a read-only Jira credential makes the Jira half fail while this half works,
+since this one never touches the API.
+
 A **refresh FAB** sits bottom-right, deliberately the same shape and behaviour as `/diff`'s: the route
 re-collects the sprint per request, so refresh is `location.reload()`, and the button disarms on click
 because a Jira round-trip is not instant. The drawer is NOT reopened afterwards — a ticket's detail is

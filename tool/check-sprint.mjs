@@ -14,6 +14,7 @@
  *     Jira confirmed it.
  */
 
+import { rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -237,6 +238,78 @@ try { new Function(page.match(/<script>([\s\S]*?)<\/script>/)[1]); sprintJsOk = 
 catch (e) { sprintJsErr = e.message; }
 ok(sprintJsOk, 'the emitted page script parses', sprintJsErr);
 ok(/id="refresh"/.test(page), 'and the refresh FAB is there');
+
+// ── the agent thread: one markdown file per ticket ───────────────────────────────
+//
+// Deliberately NOT the diff comment store: no status machine, no poll for a payload. The agent answers
+// by APPENDING to the thread file with the tools it already has, so the file growing IS the reply. What
+// has to hold is the path guard, the turn split, and that the prompt actually carries the three things
+// the agent needs — the path, the ticket and the question.
+
+console.log('\nagent thread');
+
+const chat = await import(`file://${join(ROOT, 'dist', 'sprint', 'chat.js')}`);
+
+ok(chat.isTicketKey('AB-1') && chat.isTicketKey('PERF-13808'), 'a ticket key is accepted');
+ok(!chat.isTicketKey('ab-1') && !chat.isTicketKey('../../etc') && !chat.isTicketKey(''),
+  'lowercase, traversal and empty are not ticket keys');
+let threw = false;
+try { chat.chatPath('../../etc/passwd'); } catch { threw = true; }
+ok(threw, 'chatPath THROWS on anything that is not a key — this value comes from a browser');
+ok(chat.chatPath('AB-1').includes('.ayin-cli'),
+  'the thread lives outside the repo: a discussion is not a change to the project');
+
+// The split both writers must agree on, including the case where the agent forgets the heading.
+const NL2 = String.fromCharCode(10);
+const thread = [
+  '', '## you · 2026-01-01T00:00:00Z', '', 'why two ids?', '',
+  '## ayin · 2026-01-01T00:01:00Z', '', '## What I found', '', '- one prices', '',
+].join(NL2);
+const turns = chat.parseTurns(thread);
+ok(turns.length === 2 && turns[0].who === 'you' && turns[1].who === 'ayin',
+  'the thread splits into turns on the shared heading', turns.map((t) => t.who).join(','));
+ok(turns[1].body.startsWith('## What I found'),
+  "a heading INSIDE a turn is body, not a turn boundary — only 'you' and 'ayin' break it");
+const orphan = chat.parseTurns('the agent forgot the heading');
+ok(orphan.length === 1 && orphan[0].who === '',
+  'prose with no heading is still a turn — losing an answer to bad formatting is the one failure this cannot afford');
+
+// The routes, with the agent hook stubbed so nothing reaches a real session.
+const srv = await import(`file://${join(ROOT, 'dist', 'sprint', 'server.js')}`);
+let prompt = null;
+srv.wireSprintChat((p) => { prompt = p; });
+ok(srv.sprintChatWired(), 'the agent hook is one argument — there is no id to track');
+
+const call = (method, path, body) => new Promise((resolve) => {
+  const chunks = []; let status = 0; const L = {};
+  const rq = { url: path, method, headers: { host: '127.0.0.1:1' }, on(e, f) { L[e] = f; }, destroy() {} };
+  const rs = { writeHead(c) { status = c; }, end(b) { if (b) chunks.push(b); resolve({ status, body: chunks.join('') }); } };
+  void srv.handleSprintRequest(rq, rs);
+  if (body !== undefined) setImmediate(() => { L.data?.(Buffer.from(JSON.stringify(body))); L.end?.(); });
+});
+
+let cr = await call('GET', '/api/sprint/chat/..%2F..%2Fetc');
+ok(cr.status === 400, 'a traversal key is refused by the route too', String(cr.status));
+cr = await call('POST', '/api/sprint/chat', { key: 'AB-1', text: '' });
+ok(cr.status === 400, 'an empty message is refused rather than waking the agent for nothing');
+
+const KEY = 'ZZ-999';
+cr = await call('POST', '/api/sprint/chat', { key: KEY, text: 'where is the counter read?' });
+ok(cr.status === 200, 'a real message is accepted', cr.body.slice(0, 80));
+ok(prompt !== null, 'and it reaches the agent');
+ok(prompt.includes(chat.chatPath(KEY)), 'the prompt carries the THREAD PATH — that is how the reply gets written');
+ok(/where is the counter read/.test(prompt), 'and the question');
+ok(prompt.includes(KEY), 'and the ticket key');
+ok(/Append only/.test(prompt), 'and it is told to append, never rewrite what the operator said');
+
+// The operator turn is already on disk before the agent is asked, so the page shows it immediately.
+cr = await call('GET', `/api/sprint/chat/${KEY}`);
+const got = JSON.parse(cr.body);
+ok(got.turns.length >= 1 && got.turns[0].who === 'you', 'the message is already in the thread');
+ok(got.version && got.version !== '0-0', 'and a version stamp is returned so the page can poll cheaply');
+ok(/<p>/.test(got.turns[0].html), 'turns come back as rendered HTML, not raw markdown');
+
+rmSync(chat.chatPath(KEY), { force: true });
 
 console.log(fails ? `\nsprint check: ${fails} FAILURE(S)\n` : '\nsprint check: ok\n');
 process.exit(fails ? 1 : 0);

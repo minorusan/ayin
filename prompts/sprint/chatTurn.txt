@@ -1,0 +1,25 @@
+Answer this question about {{KEY}} against the codebase, then append your answer to the thread file.
+
+THREAD FILE
+{{PATH}}
+
+The operator's message is already the last entry in it. Read the file for what was said before, then
+append your reply as:
+
+## ayin · <the current UTC timestamp>
+
+<your answer>
+
+Append only. Never rewrite or reorder what is already there — the earlier turns are the operator's.
+
+{{KEY}} — {{STATUS}}
+{{TITLE}}
+
+{{DESCRIPTION}}
+
+THE QUESTION
+{{COMMENT}}
+
+Search the codebase before answering. Name the files and symbols you found, and say plainly when the
+ticket describes something that is not in the code yet — that gap is the answer, not a failure to find
+it. Keep it to what you verified.
