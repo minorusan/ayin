@@ -999,6 +999,29 @@ async function handleInput(text: string): Promise<void> {
         }
         return;
       }
+      case '/unity-test': {
+        // The same selection and report as `ayin unity test`, printed into the chat. Bare: what can be
+        // run, and which are PlayMode — because nobody remembers an assembly name on demand.
+        const csv = text.slice('/unity-test'.length).trim();
+        addMessage('user', text);
+        pushEntry(text);
+        busy = true;
+        setAgentStatus('unity test…');
+        try {
+          const { unityTestForChat } = await import('./unity/cli.js');
+          const report = await unityTestForChat(process.cwd(), csv);
+          addMessage('assistant', report);
+          // Recorded like a slash tool's turn: an operator who runs the tests and then asks "why did
+          // that one fail" means THOSE tests, and a loop that never saw them answers about nothing.
+          recordSlashTurn(text, report);
+        } catch (e) {
+          addMessage('system', `unity test failed: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+          busy = false;
+          setAgentStatus('');
+        }
+        return;
+      }
       case '/testrun': {
         // Domain-scoped C# test run. Selection is deterministic (corpus → files → assemblies); the
         // only interactive part is whether Unity may be quit. See src/testrun/.
@@ -1490,6 +1513,14 @@ async function main(): Promise<void> {
   if (process.argv[2] === 'testrun') {
     const { runTestrunCli } = await import('./testrun/index.js');
     process.exitCode = await runTestrunCli(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === 'unity') {
+    // One namespace for the Unity toolkit — prefab, animator, prefab_edit, test. No TUI, no model: every
+    // one of them is deterministic, and three top-level subcommands would put Unity vocabulary in front
+    // of everyone who never opens Unity. See src/unity/cli.ts.
+    const { runUnityCli } = await import('./unity/cli.js');
+    process.exitCode = await runUnityCli(process.argv.slice(3));
     return;
   }
   if (process.argv[2] === 'debug') {

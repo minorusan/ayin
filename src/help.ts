@@ -67,6 +67,10 @@ export const HELP: HelpEntry[] = [
     tip: '/diff opens your working tree as a real review page — filters, per-file triage, changed tokens marked.',
   },
   {
+    name: '/unity-test', kind: 'command', section: 'Code',
+    short: 'Run Unity tests for assemblies you name (comma-separated) · bare /unity-test lists them and which are PlayMode',
+  },
+  {
     name: '/prefab', kind: 'command', section: 'Code',
     short: 'A Unity .prefab, scene or .asset as a hierarchy — components, and every guid resolved to the asset it points at',
     tip: '/prefab <file> shows a Unity asset as a tree with its references named, not as 16,000 lines of YAML.',
@@ -204,6 +208,11 @@ export const HELP: HelpEntry[] = [
     short: 'Open a terminal window at the front Finder/Explorer directory, running ayin. For a hotkey — see docs/LAUNCH.md',
   },
   { name: 'ayin testrun', kind: 'cli', section: 'From your shell', short: 'ayin testrun "<domain>" · --list shows what would run without running it' },
+  {
+    name: 'ayin unity', kind: 'cli', section: 'From your shell',
+    short: 'The Unity toolkit: unity prefab <file> · unity animator <file> · unity prefab_edit … · unity test <Asm,Asm> · unity test --assemblies',
+    tip: 'ayin unity test --assemblies lists what can be run and which are PlayMode — then ayin unity test Asm1,Asm2.',
+  },
   { name: 'ayin explain', kind: 'cli', section: 'From your shell', short: 'ayin explain "<question>" — prints the narrative and exits' },
   { name: 'ayin watch', kind: 'cli', section: 'From your shell', short: 'Repo watcher daemon — reviews what lands, resumes itself after a reboot' },
   { name: 'ayin unwatch', kind: 'cli', section: 'From your shell', short: 'Stop watching this repo: remove the hooks it installed and deregister it (--all, --stop)' },

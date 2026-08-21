@@ -20,6 +20,9 @@ const NO_TUI_COMMANDS = new Set([
   'kill',       // `ayin kill dog` — throws the hound kill switch and prints what it touched
   'unwatch',    // removes hooks from a repo and prints what it touched — it was MISSING, so taking
                 // back a watcher opened a full-screen TUI for the duration of a few file writes
+  'unity',      // `ayin unity prefab|animator|prefab_edit|test` — prints and exits, like testrun. Absent
+                // from this list it printed its answer and THEN opened an alternate screen to tear it
+                // down again, which clears the terminal the answer was just written to.
 ]);
 
 export const HEADLESS = process.argv.some(a => a === '-p' || a === '--prompt' || a === '--non-interactive')

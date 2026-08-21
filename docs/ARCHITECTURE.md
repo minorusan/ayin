@@ -2553,6 +2553,38 @@ conversation away. Two optional fields on `ToolSlash` carry that: `overlay` (the
 the same tool gets JSON). Both are declared BY THE TOOL, because the alternative is a name check in the
 dispatcher, which is the shared list directory discovery exists to remove.
 
+## `ayin unity …` — the Unity toolkit from a shell (`src/unity/cli.ts`)
+
+    ayin unity prefab <file>              the hierarchy, its components, every guid resolved
+    ayin unity animator <file.controller> states, transitions, exit time, clip overlap
+    ayin unity prefab_edit <file> --property P (--value V | --asset NAME) [--object O] [--component C]
+    ayin unity test <Asm1,Asm2>           run those test assemblies · -v for the full report
+    ayin unity test --assemblies          what can be run, and which are PlayMode
+
+`ayin --help unity` is the verbose page; `/unity-test A,B` is the same run inside a session. Gate:
+`npm run check:unity`, hermetic — a small Unity project (asmdefs, a prefab, a controller) in a temp dir.
+
+**One namespace, not three subcommands.** These answer one operator's question in one sitting — what is
+this prefab wired to, change that wiring, did the tests still pass — and three top-level entries would put
+Unity vocabulary in front of everyone who never opens Unity.
+
+**Nothing new underneath.** `prefab`/`animator`/`prefab_edit` run the same modules the agent's tools do,
+and `test` executes through `runSelection` — the same path `/testrun` takes, so a run from the shell and a
+run from the TUI cannot disagree about what passed. The one thing this adds is **selection by assembly
+name**: `/testrun` picks assemblies from a corpus domain, which is right when you know the feature and not
+the assembly, and wrong when you know exactly which assembly you just touched. A name that does not match
+is REFUSED with the near-misses listed — resolving it to "close enough" would run the wrong tests and pass.
+
+**Curt by default**: `ok · 42 passed · 3 skipped · prebuilt DLLs`, or nothing but the failed tests and
+their first message line. `-v` prints `formatReport`. Exit 1 on any failure or any assembly that did not
+run — an assembly that could not run is never folded into a pass. `--assemblies` lists every test assembly
+with **PlayMode or EditMode** (from `includePlatforms`) and whether its DLL is current, stale or missing.
+
+Registering a subcommand means two lists besides the dispatch, and both were found the hard way here.
+`SUBCOMMANDS` in `index.ts`, or the flag validator rejects the namespace's own flags on sight
+(`ayin: unknown option --assemblies`). And `NO_TUI_COMMANDS` in `ui/headless.ts`, or it prints its answer
+and THEN opens an alternate screen to tear it down — clearing the terminal it just wrote to.
+
 ## An AnimatorController as a graph (`src/animator/`)
 
 `animator_inspect` reads a `.controller` and returns its states and transitions as JSON. Read-only — a
