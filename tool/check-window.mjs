@@ -112,6 +112,31 @@ if (!led.includes('Assets/Scripts/Fact.cs:12')) fail('the ledger dropped the out
 if (led.includes('more lines')) fail('the ledger kept a second line — it is a ledger, not a transcript');
 if (!/FAILED/.test(led)) fail('a failed call is not marked failed — the model cannot tell it may retry');
 
+/**
+ * THE LEDGER MUST SAY WHERE THE ANSWER IS, not only that a call happened.
+ *
+ * The window compresses old observations, so a result given twenty rounds ago is — from the model's side
+ * — indistinguishable from a call it never made. Every result is also a file in the session's cache, and
+ * naming it is what makes the ledger usable rather than merely informative: one line instead of 200 KB.
+ */
+resetCallLedger();
+const { saveArtifact, startArtifactSession, artifactSessionDir } = await import('../dist/artifacts.js');
+startArtifactSession(`check-window-${process.pid}`);
+saveArtifact('grep', 'pattern=Widget', 'x'.repeat(4096));
+noteRanCall('grep', 'pattern=Widget', true, 'Assets/Widget.cs:12: Widget;');
+const withFile = renderCallLedger();
+if (!/t\d+-grep\.txt/.test(withFile)) fail('the ledger does not name the file holding the full result');
+if (!/4\.0 KB/.test(withFile)) fail('the ledger does not say how big that result is — the reader cannot decide against reading it');
+if (!withFile.includes(artifactSessionDir())) fail('the cache folder is not stated anywhere in the ledger');
+if ((withFile.match(new RegExp(artifactSessionDir().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length !== 1) {
+  fail('the folder is repeated per line — it must be stated once, not sixty times');
+}
+noteRanCall('read_file', 'path=NeverRan.cs', false, 'ENOENT');
+if (/NeverRan\.cs\)[^\n]*\[.* KB/.test(renderCallLedger())) fail('a call with no cached result was given a file anyway');
+resetCallLedger();
+// A gate that leaves a session folder behind every run is a gate that fills the cache it is testing.
+(await import('node:fs')).rmSync(artifactSessionDir(), { recursive: true, force: true });
+
 // Bounded render: a long turn must not put its own bookkeeping in front of the model.
 resetCallLedger();
 for (let i = 0; i < 300; i++) noteRanCall('bash', `cmd=echo ${i}`, true, `line ${i}`);

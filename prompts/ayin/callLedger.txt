@@ -1,4 +1,4 @@
 Calls already made this turn. Each one has an answer — above, or compressed out of the history above.
 Repeating a call listed here returns what you already have; make a different call, or answer.
-
+{{CACHE}}
 {{CALLS}}

@@ -31,6 +31,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Artifact } from './artifacts.js';
 import { log } from './log.js';
+import { startArtifactSession } from './artifacts.js';
 
 function readVersion(): string {
   try {
@@ -109,11 +110,19 @@ export function getSessionId(): string | null {
 
 export function setSessionId(id: string): void {
   sessionId = id;
+  startArtifactSession(id);
 }
 
-/** Create a fresh local session id for this run. */
+/**
+ * Create a fresh local session id for this run.
+ *
+ * The tool-result cache is opened HERE rather than by each entry point: `-p`, the TUI, the watch daemon
+ * and every subcommand all come through this function, and a cache that only some of them open is a
+ * cache the agent cannot rely on being there.
+ */
 export async function initSession(): Promise<string> {
   sessionId = randomUUID();
+  startArtifactSession(sessionId);
   log('INFO', 'session_created_local', { sessionId, namespace: SESSION_NAMESPACE });
   return sessionId;
 }

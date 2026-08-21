@@ -1185,6 +1185,27 @@ not a regression. If it returns, it belongs back as an explicit opt-in, not bund
   — worth restating here since it is easy to mistake for "the prompt change didn't take" when it is
   actually "the edit never reached the model".
 
+## Tool results are files, and the ledger names them (`artifacts.ts`)
+
+Every tool result is written to `~/.ayin-cli/artifacts/<sessionId>/t<N>-<tool>.txt` as it is produced, and
+the call ledger in the volatile block names the file next to the call — `grep(pattern=Widget) → 3 hits
+[204 KB → t7-grep.txt]`, with the folder stated once above the list.
+
+**Why the file has to be NAMED and not merely written.** Results were already saved (that is what Ctrl+O
+browses), but nothing told the model they existed. The window compresses and evicts old observations —
+which is what keeps a long turn affordable — so a result the model was handed twenty rounds ago is, from
+its side, indistinguishable from a call it never made; measured as a 36-call turn re-grepping identifiers
+whose answers it had already been given. The ledger already said *what ran*. The only thing missing was
+*where the answer is*, and that is one line per call instead of 200 KB in the window.
+
+**One folder per session**, because a flat shared directory cannot be pruned safely — two sessions writing
+`grep-1755764812345.txt` into the same place have no way to tell whose is whose — and ids are short and
+sequential (`t7`, not a timestamp) because they are written into the prompt every round and `t7` is a name
+a model can hold and repeat back. The cache is opened inside `initSession`/`setSessionId` rather than by
+each entry point, so `-p`, the TUI and the watch daemon all have it. **Pruned on boot by session count**
+(20 kept, oldest folders first): tool output is the largest thing ayin writes, and whole folders go rather
+than some of each session's files, so a surviving session keeps everything it had.
+
 ## Tool guard (`tool-guard.ts`)
 
 The previous duplicate detector answered every repeat with the same warning and let the model try

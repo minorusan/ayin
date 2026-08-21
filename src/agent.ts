@@ -31,7 +31,7 @@ import { hasFinalMarker, stripFinalMarker } from './final-marker.js';
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
 import { checkPermission } from './permissions.js';
-import { saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
+import { artifactFor, artifactSessionDir, hasArtifacts, humanBytes, saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
 import { recordPrompt, recordRaw, recordTool, recordAnswer } from './session-record.js';
 // The FULL record (opt-in, unclipped) runs alongside the clipped operating record above — see
 // transcript.ts for why both exist. Every call here is a no-op unless /transcribe is on.
@@ -1130,7 +1130,7 @@ const LOOP_NUDGE_EVERY = 8;
  * it is rebuilt into the volatile block each round rather than living in the history at all, which is
  * the whole point: the cheapest thing in this file, and the only one that cannot be thrown away.
  */
-interface RanCall { tool: string; params: string; ok: boolean; gist: string }
+interface RanCall { tool: string; params: string; ok: boolean; gist: string; file: string; bytes: number }
 const callLedger: RanCall[] = [];
 
 /** Cleared at the start of every turn. Exported for `check:window`, which cannot run a turn. */
@@ -1148,9 +1148,15 @@ const LEDGER_GIST_CHARS = 100;
 
 export function noteRanCall(tool: string, params: string, ok: boolean, outcome: string): void {
   const gist = outcome.split('\n').map((l) => l.trim()).find((l) => l.length > 0) ?? '';
+  // The FULL result is on disk. Naming the file here is what turns the ledger from "this ran" into "this
+  // ran and here is the answer" — the difference between the model knowing a call happened and being
+  // able to use what it returned after the history carrying it was compressed away.
+  const cached = artifactFor(tool, params);
   callLedger.push({
     tool, params, ok,
     gist: gist.length > LEDGER_GIST_CHARS ? `${gist.slice(0, LEDGER_GIST_CHARS - 1)}\u2026` : gist,
+    file: cached ? `${cached.id}-${cached.tool}.txt` : '',
+    bytes: cached?.bytes ?? 0,
   });
 }
 
@@ -1161,10 +1167,21 @@ export function renderCallLedger(): string {
   const omitted = callLedger.length - shown.length;
   const lines = shown.map((c, i) => {
     const n = omitted + i + 1;
-    return `${n}. ${c.tool}(${c.params}) \u2192 ${c.ok ? '' : 'FAILED: '}${c.gist || (c.ok ? 'ok' : 'no detail')}`;
+    // The file, when there is one, goes at the END of the line: the outcome is what decides whether to
+    // read it at all, and a reader who has decided needs the name last, not first.
+    const where = c.file ? `  [${humanBytes(c.bytes)} → ${c.file}]` : '';
+    return `${n}. ${c.tool}(${c.params}) \u2192 ${c.ok ? '' : 'FAILED: '}${c.gist || (c.ok ? 'ok' : 'no detail')}${where}`;
   });
   const head = omitted > 0 ? [`[${omitted} earlier call(s) not listed]`, ...lines] : lines;
-  return getPrompt('callLedger', { CALLS: head.join('\n') });
+  return getPrompt('callLedger', {
+    CALLS: head.join('\n'),
+    // Stated ONCE, because the same 80-character path on sixty lines is sixty times the cost for the
+    // same fact. Empty when nothing has been cached, so the instruction never points at nothing.
+    CACHE: hasArtifacts()
+      ? `\nEvery result above is also a file in ${artifactSessionDir()} — read one with read_file`
+        + ` (offset and limit work) instead of running the call again.\n`
+      : '',
+  });
 }
 
 async function runAgentTurn(userInput: string): Promise<void> {
