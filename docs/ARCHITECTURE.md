@@ -2450,6 +2450,30 @@ conversation away. Two optional fields on `ToolSlash` carry that: `overlay` (the
 the same tool gets JSON). Both are declared BY THE TOOL, because the alternative is a name check in the
 dispatcher, which is the shared list directory discovery exists to remove.
 
+## An AnimatorController as a graph (`src/animator/`)
+
+`animator_inspect` reads a `.controller` and returns its states and transitions as JSON. Read-only — a
+controller edit is a graph edit across three documents and Unity's own ids, and nothing here writes. Gate:
+`npm run check:animator`, hermetic, with clip lengths chosen so every number can be checked by hand.
+
+It exists for two questions the file cannot answer as written. **Does this transition wait for the clip?**
+`m_HasExitTime: 0` means it fires the moment its conditions hold, cutting the clip mid-play — one digit,
+thirty lines from the state it belongs to, and the usual cause of "the animation is skipping". **Do the
+clips overlap?** A transition duration greater than zero is a cross-fade, both clips playing at once — and
+the duration is in NORMALIZED time unless `m_HasFixedDuration` is set, so `0.25` means a quarter of the
+source clip, whose length lives in the `.anim`. Both are reported in seconds with the arithmetic done, and
+conditions are spelled rather than enumerated (`m_ConditionMode: 1` on a trigger is "is set").
+
+`findings` is what only the assembled graph shows: a state nothing enters (it can never play), a state
+nothing leaves and no Any-State transition to rescue it, a transition with neither conditions nor exit time
+(it fires the frame the state is entered), a muted transition, a motion guid nothing defines, and a
+cross-fade that runs past the end of its own clip. That last one is suppressed for a zero-length clip: a
+single-frame pose has no timeline to run past, and reporting it turned an ordinary fade on a real controller
+into a finding.
+
+The parser, guid resolution and project-root walk are the prefab reader's — a `.controller` is the same
+dialect, and a second copy of that parser is a second place for Unity's wrapped flow maps to be wrong.
+
 ## `ayin_help` — the agent reads its own manual
 
 Everything the operator can type — `!cmd`, `/diff`, `/qa`, `/sprint`, `ayin indulge` — is a capability of
