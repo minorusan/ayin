@@ -35,6 +35,7 @@ import { generic } from './projects/generic.js';
 import type { Attempt, ExploreResult, Finding, ProjectExplorer } from './types.js';
 import { exploreCacheGet, exploreCacheKey, exploreCacheSet } from './cache.js';
 import { exploreCorpusBlock } from './corpus.js';
+import { exploreDesignBlock } from './design.js';
 
 /** Most specific first; `generic` always matches. */
 const EXPLORERS: ProjectExplorer[] = [unity, typescript, generic];
@@ -156,7 +157,9 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     // The corpus block is NOT cached with the body: it is recomputed here so an `indulge --embed` that
     // finished mid-session shows up on the next call instead of after a restart.
     const knownAgain = await exploreCorpusBlock(root, question);
-    return `You already searched these exact terms this session (${search.join(', ')}) and nothing has `
+    const designAgain = await exploreDesignBlock(root, question, search);
+    return `${designAgain ? `${designAgain}\n\n` : ''}`
+      + `You already searched these exact terms this session (${search.join(', ')}) and nothing has `
       + `changed since. This is that same result — asking again will not produce more. Search for `
       + `something different, or use what is here.\n\n${cached}${knownAgain ? `\n${knownAgain}` : ''}`;
   }
@@ -288,7 +291,17 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   // What the corpus already answered about this question, semantically, `functionality` only. Appended
   // AFTER the cache write: the deterministic body is what is worth caching, the corpus moves under it.
   const known = await exploreCorpusBlock(root, question);
-  return known ? `${formatted}\n${known}` : formatted;
+  const body = known ? `${formatted}\n${known}` : formatted;
+  /**
+   * THE DESIGN GOES FIRST, when there is one.
+   *
+   * Everything else here is evidence about what the code IS; a naamah design is the operator's statement
+   * of what it is FOR — and read after a list of file spans it is a footnote, read before it is the frame
+   * the spans are read in. Outside the cache write on purpose: the design changes on its own schedule,
+   * and a cached body must not pin a stale version of it.
+   */
+  const design = await exploreDesignBlock(root, question, search);
+  return design ? `${design}\n\n${body}` : body;
 }
 
 export { relative, sep };

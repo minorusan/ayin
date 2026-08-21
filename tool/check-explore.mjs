@@ -327,6 +327,74 @@ console.log('\nno model in the tool');
   ok(usesLlm.length === 0, 'no file in explore/ calls the model', usesLlm.join(', '));
 }
 
+/**
+ * THE DESIGN LEADS, when the project has one.
+ *
+ * Everything above is evidence about what the code IS. A naamah `.puml` says what it is FOR — the intent
+ * of each member, and which domains may reference which — and that is better evidence about intent than
+ * any amount of grep output. Read after a list of file spans it is a footnote; read before them it is the
+ * frame. What must hold: it goes FIRST, it is FILTERED to the question (a whole design dumped into every
+ * prompt is the distractor case `planGrounding` was measured on), the domains are always there, and a
+ * project with no design gets no block at all.
+ */
+console.log('\nthe naamah design, read first');
+{
+  const naama = await import(`file://${join(DIST, 'naama/index.js')}`);
+  const P = join(TMP, 'designed');
+  mkdirSync(join(P, 'Assets'), { recursive: true });
+  mkdirSync(join(P, 'ProjectSettings'), { recursive: true });
+  mkdirSync(join(P, 'docs'), { recursive: true });
+  writeFileSync(join(P, 'ProjectSettings', 'ProjectVersion.txt'), 'm_EditorVersion: 2022.3.0f1\n');
+  writeFileSync(join(P, 'Assets', 'WidgetController.cs'), 'public sealed class WidgetController { }\n');
+
+  const doc = naama.emptyDoc('Widget design');
+  for (const line of [
+    'domain ui refs=core',
+    'domain core refs=NONE sealed',
+    'type WidgetController : class @ ui — drives the milestone circles',
+    'member WidgetController.OnCounterChanged(CounterState c) — plays Filling ONCE per newly lit slot, never looped',
+    'type CounterState : struct @ core — how many milestones are lit',
+    'member CounterState.Value : int — never above Target',
+    'type AudioBus : class @ core',
+    'edge WidgetController -> CounterState : dependency',
+  ]) naama.applyLine(doc, line);
+  const designPath = join(P, 'docs', 'design.puml');
+  naama.saveDoc(designPath, doc);
+
+  const matched = await exploreExecute({ question: 'what does WidgetController do when the counter changes?', cwd: P });
+  ok(matched.startsWith('design ·'), 'the design block is the FIRST thing in the answer', matched.slice(0, 24));
+  ok(matched.indexOf('design ·') < matched.indexOf('explore ·'), 'ahead of the localization, not under it');
+  ok(/plays Filling ONCE per newly lit slot/.test(matched),
+    'a matched type carries its members WITH their intent — the half the code cannot state');
+  ok(/domain core — refs NONE · sealed/.test(matched),
+    'the domains and what they may reference are always included — that is the constraint broken blindly');
+  ok(!/class AudioBus/.test(matched),
+    'a type the question is not about is NOT described — a dumped design is the distractor case');
+  ok(matched.includes(designPath), 'and the file is named, so the rest can be read');
+
+  const unmatched = await exploreExecute({ question: 'where is the network retry policy configured?', cwd: P });
+  ok(/nothing in the design matches this question/.test(unmatched),
+    'when nothing matches, it says so rather than describing something irrelevant');
+  ok(/WidgetController@ui · AudioBus@core|AudioBus@core/.test(unmatched),
+    'and gives the type names as an INDEX, so a name can be asked for next');
+  ok(!/plays Filling ONCE/.test(unmatched), 'without any member bodies — an index is not the document');
+
+  const plain = join(TMP, 'undesigned');
+  mkdirSync(join(plain, 'Assets'), { recursive: true });
+  mkdirSync(join(plain, 'ProjectSettings'), { recursive: true });
+  writeFileSync(join(plain, 'ProjectSettings', 'ProjectVersion.txt'), 'm_EditorVersion: 2022.3.0f1\n');
+  writeFileSync(join(plain, 'Assets', 'WidgetController.cs'), 'public sealed class WidgetController { }\n');
+  const none = await exploreExecute({ question: 'what does WidgetController do?', cwd: plain });
+  ok(!none.includes('design ·'), 'a project with no design gets no block — silence, not a placeholder');
+
+  // A PlantUML file that is not a naamah design must not be read as one: it declares no domains and no
+  // types, so a sequence diagram someone committed is not mistaken for a contract.
+  writeFileSync(join(plain, 'flow.puml'), '@startuml\nAlice -> Bob: hello\n@enduml\n');
+  const notADesign = await exploreExecute({ question: 'what does WidgetController really do?', cwd: plain });
+  ok(!notADesign.includes('design ·'),
+    'an ordinary PlantUML diagram is not a design — no domains, no types, no block');
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(fails === 0 ? '\nexplore check: ok' : `\nexplore check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

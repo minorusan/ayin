@@ -760,6 +760,32 @@ Because it is sub-second and honest, it is meant to be called **repeatedly and n
 answer points at the next question rather than trying to be exhaustive once. **"NOTHING FOUND" is a
 real answer** and is reported as one, compactly, with the strategies that came back empty.
 
+### The naamah design, read FIRST (`explore/design.ts`)
+
+When the project has a naamah `.puml`, an explore result is led by it — above the findings, not under
+them. Everything else explore produces is evidence about what the code IS; the design is the operator's
+statement of what it is FOR: what each member MUST DO, and which domains may reference which. Read after
+a list of file spans that is a footnote; read before them it is the frame the spans are read in. (The
+loop bug in a real session was exactly this shape — the code said `Queue(IdleFilled, loop: true)` and
+only the design said "plays Filling ONCE per newly lit slot, never looped".)
+
+The document is found from `entangledTo()` first — a session that ran `/entangle` has already said which
+document governs, and guessing past that answers a question the operator settled — then by a bounded,
+shallow `find` for `*.puml` (depth 3, `Library`/`node_modules`/`Temp`/`.git` excluded). A candidate counts
+as a design only if it declares **domains and types**, so an ordinary PlantUML sequence diagram someone
+committed is never mistaken for a contract. Parsing goes through `naama`'s own `parsePuml` — a second
+parser for that format would enforce something subtly different from what the operator drew. Results are
+memoised per path by mtime.
+
+**Retrieved, never dumped.** The block is FILTERED to the types the question is about (4 at most, with
+their full members and intent — clipping that would throw away the only part worth having), because
+interpolating a whole catalogue is the case `planGrounding` was measured on: 10,196 characters of 28
+components for a project that used four, i.e. ~24 distractors in every prompt. When nothing matches, the
+block shrinks to an INDEX — the domains plus the type names — since "there is a design and here is its
+outline" is worth a few lines and the document is not. The **domains and their allowed references are
+always included**, matched or not: they are short, and a reference out of a sealed domain compiles and is
+still wrong.
+
 ### What the corpus already knows, appended (`explore/corpus.ts`)
 
 A localization tells the agent WHERE; its very next question is what that code DOES — which an overnight
