@@ -2311,15 +2311,29 @@ see is a button nobody knows exists.
 
 **Ask ayin about a ticket** (`src/sprint/chat.ts`). One markdown file per ticket at
 `~/.ayin-cli/sprint/chat/<KEY>.md`, and **that file IS the thread**. Sending appends the operator's turn
-and hands the agent three things: the PATH, the ticket, and the question. The agent searches the
-codebase and appends its own answer to that same file with the tools it already has.
+and hands the agent the ticket, the earlier turns AS TEXT (`threadBefore`, tail-clipped to 4000 chars)
+and the question. It searches the codebase and answers; **`app.ts` appends that closing message to the
+thread when the turn ends** (`settleTicketThreads`).
 
-**Its write is the reply**, which is what removes the machinery. This is deliberately NOT the diff
-comment store: that one tracks pending/working/done per comment and polls for a response payload,
-because a diff moves under the discussion. A ticket does not. So there is no status machine, no reply
-payload, and no way for the two to disagree about whether an answer exists — the page polls a
-`size-mtime` version stamp and re-renders when the file grew. Polling stops when the drawer closes, and
-gives up after three minutes of a quiet file so a forgotten tab does not poll forever.
+**BOTH TURNS ARE WRITTEN BY CODE**, and `chat.ts` is the only writer. The first design gave the agent
+the PATH and asked it to append — its write was the reply. It failed exactly where a model fails: it
+invented the timestamp, anchored a `str_replace` on the operator's turn and inserted its answer ABOVE
+the message that asked for it, then re-pasted an earlier answer alongside it. So the path is no longer
+in the prompt at all — a path the model never sees is a file it cannot corrupt — and `appendTurn` owns
+the heading, the clock and the position, stripping a `## ayin · …` heading off a reply that arrives
+wearing one.
+
+The key travels with the prompt (`ChatSubmit(key, prompt)`) and is held until the turn ends. The
+pending/absorbed split is the diff store's, for the same reason: a message sent while the agent works is
+folded into the running turn, and settling one that was NOT absorbed would answer it with a reply to
+somebody else's question — it stays in `queuedThreads` until `onQueuedMessagesDrained` says a turn took
+it. Several tickets in one turn each get the closing message with a line saying it covered all of them.
+A turn that dies appends the error, so the thread never ends on an unanswered question.
+
+Still deliberately NOT the diff comment store: no status machine and no reply payload, because a diff
+moves under the discussion and a ticket does not. The page polls a `size-mtime` version stamp and
+re-renders when the file grew. Polling stops when the drawer closes, and gives up after three minutes of
+a quiet file so a forgotten tab does not poll forever.
 
 While a turn is in flight the drawer shows a **progress row** (`src/agent-activity.ts`,
 `GET /api/agent/state`): what the agent is doing and how long it has been doing it —
@@ -2341,10 +2355,10 @@ writing it into the working tree would put it in the next diff, the next commit,
 someone's review. The key is validated before it becomes a filename — it arrives from a browser, and a
 path built from an unchecked string is the one bug here that would matter.
 
-Turns are split on a heading both writers produce (`## you · <ts>` / `## ayin · <ts>`) and rendered
+Turns are split on the heading `appendTurn` writes (`## you · <ts>` / `## ayin · <ts>`) and rendered
 server-side with the same `renderWebMarkdown` the diff replies use, so there is no second renderer in
-the browser for the escaping to be wrong in. Prose with no heading is still shown as a turn: losing an
-answer because the agent formatted it wrong is the one failure this file cannot afford.
+the browser for the escaping to be wrong in. Prose with no heading is still shown as a turn — the parse
+outlives the design that made it possible, and an answer that lost its heading must still be visible.
 
 It sits beside the existing Jira `+` rather than replacing it — two destinations for two different
 intents. Worth knowing that a read-only Jira credential makes the Jira half fail while this half works,

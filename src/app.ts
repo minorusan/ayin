@@ -39,6 +39,7 @@ import { findToolBySlash, slashTools, loadTools } from './tools.js';
 import { startPromptServer, serverUrl } from './prompt-server.js';
 import { wireDiffComments } from './diff/server.js';
 import { wireSprintChat } from './sprint/server.js';
+import { appendTurn as appendTicketTurn } from './sprint/chat.js';
 import { commentIdFromPrompt, getComment, markDone, markFailed, markWorking, reapAbandoned } from './diff/comments.js';
 import { llmProvider } from './llm/select.js';
 import { showIndulgePicker, handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
@@ -473,6 +474,44 @@ function settleCommentTurns(error: string | null): void {
     if (error) markFailed(process.cwd(), c.id, error);
     else markDone(process.cwd(), c.id, (reply || '(the turn produced no closing message — check the chat)') + shared);
     inFlightComments.delete(c.id);
+  }
+}
+
+/**
+ * Ticket threads this turn owes a reply to, and the queued messages not yet absorbed by one.
+ *
+ * THE CLOSING MESSAGE IS THE REPLY, and it is written from here rather than by the agent. The first
+ * design handed the model the thread path: it invented timestamps, rewrote the operator's turn to insert
+ * its own above it, and duplicated an earlier answer. Code owns the file now, so a reply is always one
+ * heading, one real clock and an append at the end.
+ *
+ * The pending/absorbed split is the diff store's, for the same reason: a message queued while the agent
+ * works is folded into the running turn, and settling one that has NOT been absorbed would answer it with
+ * a reply to somebody else's question. It stays queued and settles with the turn that takes it up.
+ */
+const inFlightThreads = new Set<string>();
+const queuedThreads = new Map<string, string>();
+
+function settleTicketThreads(error: string | null): void {
+  if (!inFlightThreads.size) return;
+  const reply = lastAssistantMessage();
+  const keys = [...inFlightThreads];
+  inFlightThreads.clear();
+
+  // Several tickets folded into one turn get one closing message. Said plainly under each, exactly as
+  // the diff threads do, rather than three identical answers each looking individually authoritative.
+  const shared = keys.length > 1
+    ? `\n\n(one turn answered ${keys.length} tickets together — this closing message covers all of them)`
+    : '';
+
+  for (const key of keys) {
+    const body = error
+      ? `the turn failed before answering: ${error}`
+      : (reply ? reply + shared : '(the turn produced no closing message — check the terminal)');
+    // A thread that cannot be written is a question the operator will wait on forever. Say so in the log
+    // and keep going: the other tickets in this turn still have answers owed to them.
+    try { appendTicketTurn(key, 'ayin', body); log('INFO', 'sprint_chat_replied', { key, chars: String(body.length) }); }
+    catch (e) { log('WARN', 'sprint_chat_reply_failed', { key, error: e instanceof Error ? e.message : String(e) }); }
   }
 }
 
@@ -1335,6 +1374,7 @@ async function handleInput(text: string): Promise<void> {
 
     await runAgent(text);
     settleCommentTurns(null);
+    settleTicketThreads(null);
   } catch (err) {
     setAgentStatus('');
     const msg = err instanceof Error ? err.message : String(err);
@@ -1342,6 +1382,7 @@ async function handleInput(text: string): Promise<void> {
     log('ERROR', 'agent_error', { error: msg });
     // The page must never be left spinning on a turn that died.
     settleCommentTurns(msg);
+    settleTicketThreads(msg);
   }
   // The block belongs to the TURN. Clearing it here is what keeps a lookup made for "how does the
   // reward service work" out of the next turn about something else entirely.
@@ -1584,9 +1625,13 @@ async function runInteractive(): Promise<void> {
    * The review page's route into the session. `handleInput` decides whether this starts a turn or joins
    * the running one; either way the comment shows up in the chat exactly as if it had been typed.
    */
-  // The sprint ticket thread. One line, because the agent answers by appending to the thread file
-  // rather than reporting back — so there is no id to track and nothing to mark done here.
-  wireSprintChat((prompt) => { void handleInput(prompt); });
+  // The sprint ticket thread. The key is held until the turn ends and the closing message is appended to
+  // it here — busy means the message goes on the queue, so it is held aside until a turn absorbs it.
+  wireSprintChat((key, prompt) => {
+    if (busy) queuedThreads.set(prompt, key);
+    else inFlightThreads.add(key);
+    void handleInput(prompt);
+  });
 
   wireDiffComments((id, prompt) => {
     inFlightComments.add(id);
@@ -1600,6 +1645,8 @@ async function runInteractive(): Promise<void> {
     for (const m of messages) {
       const id = commentIdFromPrompt(m);
       if (id) markWorking(process.cwd(), id);
+      const key = queuedThreads.get(m);
+      if (key !== undefined) { queuedThreads.delete(m); inFlightThreads.add(key); }
     }
   });
 

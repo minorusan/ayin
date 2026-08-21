@@ -241,10 +241,11 @@ ok(/id="refresh"/.test(page), 'and the refresh FAB is there');
 
 // ── the agent thread: one markdown file per ticket ───────────────────────────────
 //
-// Deliberately NOT the diff comment store: no status machine, no poll for a payload. The agent answers
-// by APPENDING to the thread file with the tools it already has, so the file growing IS the reply. What
-// has to hold is the path guard, the turn split, and that the prompt actually carries the three things
-// the agent needs — the path, the ticket and the question.
+// Deliberately NOT the diff comment store: no status machine, no poll for a payload. But BOTH turns are
+// written by CODE — handing the model the path made it invent timestamps and insert its answer above the
+// message that asked for it. What has to hold is the path guard, the turn split, that the prompt carries
+// the ticket, the earlier turns and the question WITHOUT the path, and that a reply arriving with its own
+// heading does not get a second one.
 
 console.log('\nagent thread');
 
@@ -277,8 +278,9 @@ ok(orphan.length === 1 && orphan[0].who === '',
 // The routes, with the agent hook stubbed so nothing reaches a real session.
 const srv = await import(`file://${join(ROOT, 'dist', 'sprint', 'server.js')}`);
 let prompt = null;
-srv.wireSprintChat((p) => { prompt = p; });
-ok(srv.sprintChatWired(), 'the agent hook is one argument — there is no id to track');
+let promptKey = null;
+srv.wireSprintChat((k, p) => { promptKey = k; prompt = p; });
+ok(srv.sprintChatWired(), 'the agent hook is wired');
 
 const call = (method, path, body) => new Promise((resolve) => {
   const chunks = []; let status = 0; const L = {};
@@ -297,10 +299,14 @@ const KEY = 'ZZ-999';
 cr = await call('POST', '/api/sprint/chat', { key: KEY, text: 'where is the counter read?' });
 ok(cr.status === 200, 'a real message is accepted', cr.body.slice(0, 80));
 ok(prompt !== null, 'and it reaches the agent');
-ok(prompt.includes(chat.chatPath(KEY)), 'the prompt carries the THREAD PATH — that is how the reply gets written');
-ok(/where is the counter read/.test(prompt), 'and the question');
+ok(promptKey === KEY, 'with the ticket key alongside it — that is what the reply is appended to', String(promptKey));
+ok(!prompt.includes(chat.chatPath(KEY)),
+  'the prompt does NOT carry the thread path — a path the model never sees is a file it cannot corrupt');
+ok(/where is the counter read/.test(prompt), 'it carries the question');
 ok(prompt.includes(KEY), 'and the ticket key');
-ok(/Append only/.test(prompt), 'and it is told to append, never rewrite what the operator said');
+ok(/closing message IS the reply/.test(prompt), 'and says the closing message is the reply');
+ok(/this is the first message about this ticket/.test(prompt),
+  'an empty thread says so rather than leaving the earlier-turns block blank');
 
 // The operator turn is already on disk before the agent is asked, so the page shows it immediately.
 cr = await call('GET', `/api/sprint/chat/${KEY}`);
@@ -308,6 +314,24 @@ const got = JSON.parse(cr.body);
 ok(got.turns.length >= 1 && got.turns[0].who === 'you', 'the message is already in the thread');
 ok(got.version && got.version !== '0-0', 'and a version stamp is returned so the page can poll cheaply');
 ok(/<p>/.test(got.turns[0].html), 'turns come back as rendered HTML, not raw markdown');
+
+// The reply write app.ts performs when the turn ends: the heading and the clock are the code's, and a
+// closing message that arrived wearing its own heading does not get nested under a second one.
+chat.appendTurn(KEY, 'ayin', `## ayin \u00b7 2020-01-01T00:00:00Z${NL2}the counter is read in Foo.cs:12`);
+const settled = chat.parseTurns(chat.readChat(KEY).text);
+ok(settled.length === 2 && settled[1].who === 'ayin', 'the reply is one turn, appended at the END',
+  settled.map((t) => t.who).join(','));
+ok(settled[1].body === 'the counter is read in Foo.cs:12',
+  'with the model\'s own heading stripped — code owns the heading', settled[1].body.slice(0, 40));
+ok(settled[1].when !== '2020-01-01T00:00:00Z' && !Number.isNaN(Date.parse(settled[1].when)),
+  'and a real timestamp rather than the one the model made up', settled[1].when);
+
+// The earlier turns reach the next turn as TEXT, and the message being answered is not in them twice.
+const earlier = chat.threadBefore(KEY);
+ok(earlier.includes('where is the counter read') && earlier.includes('Foo.cs:12'),
+  'threadBefore carries what was already said');
+ok(chat.threadBefore(KEY, 40).startsWith('(earlier turns elided)'),
+  'and clips the OLDEST end when the thread outgrows the budget');
 
 rmSync(chat.chatPath(KEY), { force: true });
 

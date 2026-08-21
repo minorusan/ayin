@@ -17,7 +17,7 @@ import { addComment, issueDetail } from '../tools/connectors/jira/client.js';
 import { collectSprint } from './collect.js';
 import { renderSprintPage } from './render.js';
 import { log } from '../log.js';
-import { appendTurn, chatPath, isTicketKey, parseTurns, readChat } from './chat.js';
+import { appendTurn, chatPath, isTicketKey, parseTurns, readChat, threadBefore } from './chat.js';
 import { renderWebMarkdown } from '../web-markdown.js';
 import { prompts as promptService, packagePath } from '../prompts-service.js';
 
@@ -99,10 +99,11 @@ async function postComment(req: IncomingMessage, res: ServerResponse): Promise<v
 /**
  * How a ticket message reaches the agent. Wired by app.ts at boot; absent in any process with no TUI.
  *
- * One argument, not two: there is no comment id to track, because the agent replies by appending to the
- * thread file rather than by reporting back through here.
+ * The KEY travels with the prompt because the reply is written HERE-side, not by the agent: app.ts holds
+ * the key until the turn ends and then appends the closing message to that ticket's thread. A prompt
+ * alone would leave nothing to append it to.
  */
-type ChatSubmit = (prompt: string) => void;
+type ChatSubmit = (key: string, prompt: string) => void;
 let chatSubmit: ChatSubmit | null = null;
 
 export function wireSprintChat(fn: ChatSubmit): void {
@@ -161,9 +162,9 @@ export async function handleSprintRequest(req: IncomingMessage, res: ServerRespo
     return true;
   }
 
-  // POST appends what the operator said and hands the agent the PATH, the ticket and the question. The
-  // agent answers by appending to that same file with the tools it already has — its write IS the
-  // reply, so there is nothing here to mark done and nothing to poll for a payload.
+  // POST appends what the operator said and hands the agent the ticket, the earlier turns AS TEXT and the
+  // question. It is never given the thread path: the reply is appended by app.ts when the turn ends, so
+  // the file has exactly one writer and a turn cannot land above the message that asked for it.
   if (path === '/api/sprint/chat' && req.method === 'POST') {
     try {
       if (!chatSubmit) {
@@ -178,6 +179,8 @@ export async function handleSprintRequest(req: IncomingMessage, res: ServerRespo
       if (!isTicketKey(key)) { json(res, 400, { error: `not a ticket key: ${key}` }); return true; }
       if (!text) { json(res, 400, { error: 'text: empty message' }); return true; }
 
+      // Read the thread BEFORE the operator's turn goes in — it is the question, and it travels in COMMENT.
+      const earlier = threadBefore(key);
       appendTurn(key, 'you', text);
 
       // The ticket is fetched fresh rather than taken from the page: the browser's copy is as old as
@@ -186,12 +189,12 @@ export async function handleSprintRequest(req: IncomingMessage, res: ServerRespo
       try { issue = await issueDetail(key); } catch { /* unreachable Jira must not lose the message */ }
 
       const prompts = sprintPrompts();
-      chatSubmit(prompts.get('chatTurn', {
+      chatSubmit(key, prompts.get('chatTurn', {
         KEY: key,
-        PATH: chatPath(key),
         STATUS: issue?.status ?? '(status unavailable)',
         TITLE: issue?.title ?? '(title unavailable)',
         DESCRIPTION: (issue?.description ?? '(description unavailable)').slice(0, 8000),
+        THREAD: earlier || '(nothing — this is the first message about this ticket)',
         COMMENT: text,
       }));
       json(res, 200, { ok: true, path: chatPath(key) });

@@ -1,21 +1,14 @@
-Answer this question about {{KEY}} against the codebase, then append your answer to the thread file.
-
-THREAD FILE
-{{PATH}}
-
-The operator's message is already the last entry in it. Read the file for what was said before, then
-append your reply as:
-
-## ayin · <the current UTC timestamp>
-
-<your answer>
-
-Append only. Never rewrite or reorder what is already there — the earlier turns are the operator's.
+Answer this question about {{KEY}} against the codebase. Your closing message IS the reply — ayin
+appends it to the ticket thread when the turn ends. NEVER write to a thread file yourself, and do not
+open the answer with a `## you` or `## ayin` heading.
 
 {{KEY}} — {{STATUS}}
 {{TITLE}}
 
 {{DESCRIPTION}}
+
+EARLIER IN THIS THREAD
+{{THREAD}}
 
 THE QUESTION
 {{COMMENT}}
