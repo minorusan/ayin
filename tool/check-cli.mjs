@@ -134,6 +134,38 @@ else failures.push(`--ful gave code ${typo.code}: ${typo.err.slice(0, 160)}`);
 if (/Known options on a bare launch/.test(typo.err)) ok('and the error lists what IS accepted');
 else failures.push('the rejection did not list the known options');
 
+/**
+ * A MISTYPED SUBCOMMAND MUST NOT LAUNCH A SESSION.
+ *
+ * A bare word that was not a subcommand used to be waved through — so `ayin unty prefab Assets/W.prefab`
+ * started the TUI and discarded the rest of the line. The operator watched a session boot with no idea
+ * what had happened to what they asked for. The help list already knows every command, which makes it the
+ * database of what was probably meant.
+ */
+const misSub = launch(['unty', 'prefab', 'Assets/Widget.prefab']);
+if (misSub.code !== 2) fail(`a mistyped subcommand exits 2 rather than launching (got ${misSub.code})`);
+else ok('a mistyped subcommand exits 2 instead of starting a session');
+if (!/unknown command "unty"/.test(misSub.err)) fail('the mistyped word is named back');
+else ok('the mistyped word is named back');
+if (!/Did you mean: ayin unity/.test(misSub.err)) fail('and the nearest real command is suggested from the help list');
+else ok('and the nearest real command is suggested from the help list');
+if (!/Commands: /.test(misSub.err)) fail('with the full list for when the guess is wrong');
+else ok('with the full list for when the guess is wrong');
+
+// A word with no near miss still refuses — it must not fall through to a session either.
+const nonsense = launch(['zzzzzz']);
+if (nonsense.code !== 2) fail(`an unrecognisable subcommand also refuses (got ${nonsense.code})`);
+else ok('an unrecognisable subcommand also refuses, without inventing a suggestion');
+
+// The suggester itself: exact match wins, and a typo resolves to one candidate rather than a list.
+const help = await import(`file://${join(REPO, 'dist/help.js')}`);
+if (help.suggestNames('unity', 'cli')[0] !== 'unity') fail('an exact name is returned as itself, not as a near miss');
+else ok('an exact name is returned as itself');
+if (!help.suggestNames('prefabb', 'command').includes('prefab')) fail('a one-letter slip on a slash command resolves');
+else ok('a one-letter slip on a slash command resolves');
+if (help.suggestNames('xyzzy', 'cli').length !== 0) fail('a word like nothing at all suggests nothing');
+else ok('a word like nothing at all suggests nothing');
+
 // A subcommand owns its own arguments — a whitelist applied to those would reject flags that are
 // valid one frame down, which is why the check returns early when argv[2] names a subcommand.
 const sub = launch(['indulge', '--status']);

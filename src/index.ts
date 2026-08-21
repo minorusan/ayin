@@ -12,6 +12,7 @@
  * and with no way to tell the operator anything except by writing to stdout.
  */
 
+import { namesOfKind, suggestNames } from './help.js';
 import { preflight } from './preflight.js';
 
 // HELP BEFORE ANYTHING ELSE, including the preflight gate: someone asking what the commands are must
@@ -65,6 +66,23 @@ function rejectUnknownFlags(): void {
   if (args.length === 0) return;
   if (SUBCOMMANDS.has(args[0])) return;                 // the subcommand owns its arguments
 
+  /**
+   * A MISTYPED SUBCOMMAND MUST NOT LAUNCH A SESSION.
+   *
+   * A bare word that is not a subcommand used to be waved through as "not our business", so
+   * `ayin unty prefab Assets/Widget.prefab` opened the TUI and threw the rest of the line away — the
+   * operator watched a session boot and had to work out what they had actually asked for. It is a typo,
+   * and the help list knows what was meant.
+   */
+  if (!args[0].startsWith('-')) {
+    const near = suggestNames(args[0], 'cli');
+    process.stderr.write(`ayin: unknown command "${args[0]}"\n`);
+    if (near.length) process.stderr.write(`Did you mean: ${near.map((n) => `ayin ${n}`).join(' · ')}?\n`);
+    process.stderr.write(`Commands: ${namesOfKind('cli').join(' ')}\n`);
+    process.stderr.write('A bare `ayin` starts a session; `ayin --help` lists everything.\n');
+    process.exit(2);
+  }
+
   /** Bare-launch flags, each one actually read somewhere in this codebase. */
   const KNOWN = new Set([
     '-p', '--prompt', '--non-interactive',              // headless; these take a value
@@ -80,7 +98,7 @@ function rejectUnknownFlags(): void {
       if (TAKES_VALUE.has(a)) i++;                      // its value is not a flag
       continue;
     }
-    if (!a.startsWith('-')) continue;                   // a bare word is not our business here
+    if (!a.startsWith('-')) continue;                   // a flag's value, already skipped above
     process.stderr.write(`ayin: unknown option ${a}\n`);
     process.stderr.write(`Known options on a bare launch: ${[...KNOWN].join(' ')}\n`);
     process.stderr.write('Subcommands take their own flags — try `ayin <subcommand> --help`.\n');

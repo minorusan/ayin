@@ -248,6 +248,69 @@ export function entriesInSection(section: string): HelpEntry[] {
 }
 
 /**
+ * Edit distance, for "did you mean". Its own copy on purpose.
+ *
+ * `tools/lib.ts` has one, and importing it here would drag the tool registry into a module that must load
+ * before anything is wired — the initialization-order bug `check:gates` exists to prevent. An algorithm
+ * duplicated is not a FACT duplicated: this one cannot drift from the other in a way anybody notices.
+ */
+function distance(a: string, b: string): number {
+  if (a === b) return 0;
+  const m = a.length;
+  const n = b.length;
+  if (!m || !n) return m || n;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    const curr = [i];
+    for (let j = 1; j <= n; j++) {
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = curr;
+  }
+  return prev[n];
+}
+
+/**
+ * The names closest to what was typed — the help list IS the database, so a command that exists is
+ * suggestible and one that does not cannot be.
+ *
+ * A mistyped command must never run something else, and it must never be silently ignored either: the CLI
+ * used to discard a bare word it did not recognise and launch the TUI, so `ayin unty prefab` opened a
+ * session and threw the rest away. Exact match first (a name typed correctly is not a suggestion), then a
+ * distance that scales with the word — one edit for a short name, three for a long one, because a
+ * suggestion list that includes everything is noise.
+ */
+export function suggestNames(typed: string, kind: HelpEntry['kind']): string[] {
+  const bare = (name: string): string => name.replace(/^ayin\s+/, '').replace(/^\//, '');
+  const wanted = bare(typed).toLowerCase();
+  if (!wanted) return [];
+  const pool = HELP.filter((e) => e.kind === kind).map((e) => bare(e.name)).filter((n) => n && !n.startsWith('-'));
+
+  const exact = pool.filter((n) => n.toLowerCase() === wanted);
+  if (exact.length) return exact;
+
+  const budget = Math.max(1, Math.min(3, Math.floor(wanted.length / 3)));
+  const scored = pool
+    .map((n) => ({ n, d: distance(n.toLowerCase(), wanted) }))
+    // A prefix is a near-miss however far the tail is: someone typing `pref` means `prefab`.
+    .filter((x) => x.d <= budget || x.n.toLowerCase().startsWith(wanted) || wanted.startsWith(x.n.toLowerCase()))
+    .sort((a, b) => a.d - b.d);
+  return [...new Set(scored.map((x) => x.n))].slice(0, 4);
+}
+
+/** Every command of a kind, for the "here is what exists" half of a refusal. */
+export function namesOfKind(kind: HelpEntry['kind']): string[] {
+  return HELP.filter((e) => e.kind === kind)
+    .map((e) => e.name.replace(/^ayin\s+/, '').replace(/^\//, ''))
+    .filter((n) => n && !n.startsWith('-'))
+    .sort();
+}
+
+/**
  * One tip, fixed for the life of this process.
  *
  * Not re-rolled per render: the goal line repaints on every screen update, and a tip that changed

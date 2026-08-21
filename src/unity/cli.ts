@@ -56,6 +56,21 @@ function parseArgs(argv: string[]): { flags: Record<string, string>; rest: strin
   return { flags, rest };
 }
 
+/** Small and local: the namespace's four subcommands are not in the help database as separate entries. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length || !b.length) return a.length || b.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i];
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = curr;
+  }
+  return prev[b.length];
+}
+
 const out = (s: string): void => { process.stdout.write(s.endsWith('\n') ? s : `${s}\n`); };
 const err = (s: string): void => { process.stderr.write(s.endsWith('\n') ? s : `${s}\n`); };
 
@@ -233,10 +248,15 @@ export async function runUnityCli(argv: string[]): Promise<number> {
     case 'prefab_edit': case 'prefab-edit': return prefabEditCmd(argv.slice(1));
     case 'animator': return animatorCmd(argv.slice(1));
     case 'test': return testCmd(argv.slice(1));
-    default:
-      err(`ayin unity: no subcommand "${sub}"`);
+    default: {
+      // Same rule as the top-level dispatch: a typo names itself and what was probably meant, rather
+      // than printing a usage block and leaving the reader to diff it against what they typed.
+      const known = ['prefab', 'prefab_edit', 'animator', 'test'];
+      const near = known.filter((k) => k.startsWith(sub) || sub.startsWith(k) || editDistance(k, sub) <= 2);
+      err(`ayin unity: no subcommand "${sub}"${near.length ? ` — did you mean ${near.join(' · ')}?` : ''}`);
       out(USAGE);
       return 1;
+    }
   }
 }
 
