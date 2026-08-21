@@ -67,6 +67,11 @@ export const HELP: HelpEntry[] = [
     tip: '/diff opens your working tree as a real review page — filters, per-file triage, changed tokens marked.',
   },
   {
+    name: '/prefab', kind: 'command', section: 'Code',
+    short: 'A Unity .prefab, scene or .asset as a hierarchy — components, and every guid resolved to the asset it points at',
+    tip: '/prefab <file> shows a Unity asset as a tree with its references named, not as 16,000 lines of YAML.',
+  },
+  {
     name: '/explain', kind: 'command', section: 'Code',
     short: 'Explain a feature or answer a question about this codebase, in prose, from the code it read',
     tip: '/explain <feature> walks the codebase and comes back with a narrative, not a file list.',

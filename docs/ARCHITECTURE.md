@@ -2396,6 +2396,60 @@ Gate: `npm run check:sprint` — hermetic (stubbed `fetch`, env credential): col
 is dropped, escaping of a title containing `</script>`, the `+` affordance, both refusals, and the ADF vs
 plain-string body per flavour.
 
+## Unity assets as a map, not as YAML (`src/prefab/`)
+
+`prefab_inspect` reads a `.prefab`, `.unity` scene or `.asset` and returns what the file DESCRIBES: the
+GameObject hierarchy, each object's components under their real class names, every property, and every
+asset reference resolved from its guid. `/prefab <path>` is the same reader with the tree rendering, shown
+in a scrollable overlay. `prefab_edit` changes one property of it. Gate: `npm run check:prefab`, hermetic —
+it builds a five-file Unity project in a temp directory, so a clone with no Unity project passes.
+
+**Why a reader at all.** A prefab names nothing it depends on. Every edge in it is a 32-hex guid whose only
+definition is a `.meta` file elsewhere in the project, and the hierarchy is not written down — it is implied
+by `m_Father`/`m_Children` fileIDs across documents in arbitrary order. So an agent that reads the text gets
+the numbers and not the wiring, which is the half a Unity bug usually lives in. A 16,000-line prefab becomes a tree in ~70 ms of parsing.
+
+**The parser (`yaml.ts`) exists to locate, not to model.** Every node carries its line span, because an edit
+must replace those bytes and leave the rest alone. Two shapes in Unity's dialect fail SILENTLY and both were
+bugs here first: a sequence's dashes sit at the PARENT key's indent (`m_Component:` then `- component:` in the
+same column), so a single-mode parser reads the next sibling key as another list item; and a long flow map
+WRAPS mid-value (`{fileID: 8074…, guid: b88e…,\n    type: 3}`), so a line-per-key reader gets a truncated
+reference — which then resolves to nothing and reads as "this prefab has no dependencies".
+
+**Resolution has no index, deliberately** (`refs.ts`). A cached guid→path map is faster on the second call
+and wrong the first time someone moves an asset in Unity with a session open — the corpus retrieval in this
+same repo is the cautionary case. Instead one grep resolves ALL of a prefab's guids at once
+(`grep -E 'g1|g2|…' --include=*.meta`), chunked so no scan can hit the probe runner's line cap and return a
+partial answer as if it were complete. A second batched scan answers "what IS it": a `.asset` is a
+ScriptableObject whose class lives in its own `m_Script` guid, which is what turns `guid: 3d9f…` into
+`SkeletonDataAsset named Hero_SkeletonData.asset at Assets/Art/Spine/`. Two scans, whatever the prefab size.
+
+Three details that were each a wrong answer before they were a rule. `PRUNE` excludes `Library/`, so package
+assets — TextMeshPro, uGUI — resolved to nothing: the leftovers get a second pass over
+`Library/PackageCache` and `Packages`, run with that directory as cwd, because the probe runner translates
+`grep` into `git grep` on a work tree and that translation drops path arguments. A TMP font serializes its
+atlas first and puts its own `m_Script` two megabytes in, so the class is looked for in a bounded 4 MB prefix
+rather than the first few kilobytes. And sub-assets share their file's guid — a font's material is a
+different fileID in the same `.asset` — so the fileID is decoded too, arithmetically when Unity used
+`classId * 100000` and by reading the target's document header when it used a hash.
+
+**The edit is byte-level** (`edit.ts`). Parse to locate, replace exactly the lines the value occupied: a
+prefab edited here differs by one line, which is also the proof nothing else moved. Re-serializing instead
+would drop every key the parser does not model and hand Unity's merge tool a conflict on a file nobody
+meaningfully changed. Assets are named, not hexed (`asset=OtherFont.asset`), and three things are REFUSED
+rather than guessed: an ambiguous asset name or object name, a property that is a map rather than a leaf, and
+a reference whose resolved CLASS does not match the field's current one — same extension is not the same
+type, and `asset=GameConfig.asset` into `m_FontAsset` is a field Unity reads as null. That last
+refusal names the way through (`value={fileID: …, guid: …, type: …}`) so a base-class field is not a dead end.
+`m_Pivot.x` is rewritten inside its flow map, since a vector is one value and the most-edited thing in any
+prefab. Properties only: nothing structural, no components or objects added or removed.
+
+**`/prefab` is a document, so it opens in an overlay** rather than as a chat message that scrolls the
+conversation away. Two optional fields on `ToolSlash` carry that: `overlay` (the answer is a page) and
+`defaults` (parameters pinned for the slash path only — the operator gets `format=tree`, the agent calling
+the same tool gets JSON). Both are declared BY THE TOOL, because the alternative is a name check in the
+dispatcher, which is the shared list directory discovery exists to remove.
+
 ## `ayin_help` — the agent reads its own manual
 
 Everything the operator can type — `!cmd`, `/diff`, `/qa`, `/sprint`, `ayin indulge` — is a capability of

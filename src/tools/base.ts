@@ -56,6 +56,23 @@ export interface ToolSlash {
    * see whether it worked.
    */
   secret?: boolean;
+  /**
+   * Parameters pinned for the SLASH path only.
+   *
+   * A slash command carries one argument, but the same tool can owe its two callers different answers:
+   * `prefab_inspect` hands the agent JSON to edit from and the operator a readable tree. Without this the
+   * choice would have to be a name check in the dispatcher — which is the shared list that directory
+   * discovery exists to remove.
+   */
+  defaults?: Record<string, string>;
+  /**
+   * The result is a DOCUMENT: show it in a scrollable overlay rather than as a chat message.
+   *
+   * A recursive prefab tree is hundreds of lines. In the chat it scrolls the conversation away and cannot
+   * be paged back through; in an overlay it is read, scrolled and closed, and the conversation is where it
+   * was. The tool declares this because the tool knows how big its answer is.
+   */
+  overlay?: boolean;
 }
 
 export interface Tool {

@@ -30,6 +30,7 @@
     "check:bang": "node tool/check-bang.mjs",
     "check:launch": "node tool/check-launch.mjs",
     "check:diff": "node tool/check-diff.mjs",
+    "check:prefab": "node tool/check-prefab.mjs",
     "check:help": "node tool/check-help.mjs",
     "check:testrun": "node tool/check-testrun.mjs",
     "prebuild": "node tool/check-glyphs.mjs && node tool/check-hygiene.mjs",

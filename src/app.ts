@@ -173,6 +173,42 @@ function closeSummaryOverlay(): void {
   screen.render();
 }
 
+// ── Document overlay: a slash tool whose answer is a page, not a message ──────
+//
+// `/prefab` prints a recursive tree that is hundreds of lines long. As a chat message it scrolls the
+// conversation out of reach and cannot be paged back through; here it is read, scrolled and closed, and
+// the conversation is exactly where it was. Same keys as the other two overlays — Esc closes, PgUp/PgDn
+// scroll — because a third set of keys for the third overlay is one more thing to remember.
+
+let docOverlay: blessed.Widgets.BoxElement | null = null;
+
+function showDocOverlay(title: string, body: string): void {
+  if (docOverlay) closeDocOverlay();
+  blurInput();
+  docOverlay = blessed.box({
+    parent: screen,
+    top: 1, left: 2, right: 2, bottom: 2,
+    border: { type: 'line' },
+    // tags OFF: this is tool output, and a `{` in a prefab's YAML must not be read as a style tag.
+    tags: false,
+    scrollable: true,
+    alwaysScroll: true,
+    padding: { left: 1, right: 1, top: 0, bottom: 1 },
+    style: { fg: 'white', bg: '#111', border: { fg: '#7B8CDE' } },
+    label: ` ${title} (Esc to close · PgUp/PgDn) `,
+  });
+  docOverlay.setContent(body);
+  screen.render();
+}
+
+function closeDocOverlay(): void {
+  if (!docOverlay) return;
+  docOverlay.destroy();
+  docOverlay = null;
+  focusInput();
+  screen.render();
+}
+
 // ── Artifacts viewer overlay ────────────────────────────────────────
 
 let artifactsOverlay: blessed.Widgets.BoxElement | null = null;
@@ -252,6 +288,7 @@ if (!HEADLESS) {
       // that had nothing else to do.
       if (artifactsOverlay) { closeArtifactsOverlay(); lastIdleEscapeAt = 0; return; }
       if (summaryOverlay) { closeSummaryOverlay(); lastIdleEscapeAt = 0; return; }
+      if (docOverlay) { closeDocOverlay(); lastIdleEscapeAt = 0; return; }
       // A `!` command owns the foreground while it runs, so it gets the interrupt first — otherwise
       // `!npm run build` would be uncancellable and the UI would sit there until the timeout.
       if (bangRunning()) { cancelBang(); lastIdleEscapeAt = 0; return; }
@@ -294,7 +331,7 @@ if (!HEADLESS) {
   // Overlays scroll by keyboard (mouse tracking is off so terminal selection stays native).
   // The chat box has its own PgUp/PgDn in the input handler; it is inert while an overlay is open.
   const overlayScroll = (dir: 1 | -1) => {
-    const box = artifactsOverlay ?? summaryOverlay;
+    const box = artifactsOverlay ?? summaryOverlay ?? docOverlay;
     if (!box) return;
     box.scroll(dir * Math.floor((box.height as number) / 2));
     screen.render();
@@ -1318,8 +1355,15 @@ async function handleInput(text: string): Promise<void> {
         setAgentStatus(`${tool.name}…`);
         try {
           addMessage('system', `${tool.name}…`);
-          const out = await tool.execute({ [tool.slash.param]: arg });
-          addMessage('assistant', out);
+          const out = await tool.execute({ ...(tool.slash.defaults ?? {}), [tool.slash.param]: arg });
+          if (tool.slash.overlay) {
+            // In the chat too, so the transcript still shows what was asked and how big the answer was —
+            // an overlay that closes must not take the only record of it with it.
+            addMessage('assistant', `${tool.name}: ${out.split('\n').length} lines — shown in the overlay, Esc to close.`);
+            showDocOverlay(`${tool.name} ${arg}`, out);
+          } else {
+            addMessage('assistant', out);
+          }
           // The turn is recorded so the agent can refer back to it: an operator who runs /jira and then
           // asks "which of those is blocked?" means the tickets they just read, and a loop that never
           // saw them answers about nothing. Never for a secret argument.
