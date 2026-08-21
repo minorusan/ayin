@@ -24,6 +24,8 @@
  * here pretends to persist.
  */
 
+import { statSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 import { getConfig } from './prompts.js';
 import { log } from './log.js';
 
@@ -59,9 +61,61 @@ export interface GuardDecision {
 interface CallState {
   count: number;
   lastAt: number;
+  /** What the call's target looked like when it last ran — see `witnessOf`. */
+  witness: string;
+  /** The mutation epoch at that moment, for calls whose target is not one file. */
+  epoch: number;
 }
 
 const calls = new Map<string, CallState>();
+
+/**
+ * WHY A REPEAT IS SOMETIMES THE RIGHT CALL.
+ *
+ * The escalation above is written for a model that is stuck, and it was blocking a model that was
+ * WORKING: read a file, fix it, read it again to check the fix — the third read is the same call with the
+ * same parameters, and it was refused with "the answer will not change by asking again". The answer had
+ * changed. That refusal cost real fixes, because the alternative offered ("use the result already in your
+ * context") is the STALE result.
+ *
+ * So a repeat is judged against the world, not only against the transcript, by two signals:
+ *
+ *   · the WITNESS — mtime and size of the file the call names. Exact, and it catches a change made by
+ *     anything at all: another tool, a build, the operator in their editor, git.
+ *   · the EPOCH — a counter bumped whenever ayin's own edit tools write a file. This is what covers the
+ *     calls whose target is not a single file (a grep over a directory, a find).
+ *
+ * `bash` deliberately does NOT bump the epoch. A build or a test run mutates plenty, but letting it lift
+ * the block would re-open the loop this guard exists to close — `npm test` five times in a row, each run
+ * excusing the next. A bash repeat still lifts when the FILE it names changed, which is the honest signal.
+ *
+ * A user DENIAL is never lifted by either. That was a decision about permission, not about freshness.
+ */
+let mutationEpoch = 0;
+
+/** Bumped by the agent loop after a tool that writes files succeeds. */
+export function guardNoteMutation(tool: string, paths: string[]): void {
+  mutationEpoch++;
+  log('INFO', 'guard_mutation_noted', { tool, epoch: String(mutationEpoch), paths: paths.slice(0, 3).join(',') });
+}
+
+/**
+ * What the call's target looks like right now: `mtime:size`, or `missing`, or '' when the call names no
+ * path at all. Two calls with the same witness are asking the same question of the same bytes.
+ */
+function witnessOf(params: Record<string, string>): string {
+  const raw = params.path ?? params.file ?? '';
+  if (!raw.trim()) return '';
+  const abs = isAbsolute(raw) ? raw : resolve(process.cwd(), raw);
+  try {
+    const st = statSync(abs);
+    // A directory's own mtime moves when entries are added or removed — weaker than a file's, and still
+    // the difference between "the folder I searched is the folder I searched" and a guess.
+    return st.isDirectory() ? `dir:${Math.floor(st.mtimeMs)}` : `${Math.floor(st.mtimeMs)}:${st.size}`;
+  } catch {
+    return 'missing';
+  }
+}
 const blocked = new Map<string, string>(); // key → why
 let denied = new Map<string, string>();    // key → what the user refused
 
@@ -78,6 +132,9 @@ export function guardBeginTurn(): void {
   calls.clear();
   blocked.clear();
   denied = new Map();
+  // The epoch is NOT reset: it counts writes, and a turn boundary does not un-write them. Resetting it
+  // would only matter if a stale CallState survived the turn, and none does.
+
 }
 
 /** Remember that the user refused this exact call — it must not be attempted again this turn. */
@@ -112,21 +169,51 @@ export function guardCheck(name: string, params: Record<string, string>): GuardD
     };
   }
 
+  const now = Date.now();
+  const witness = witnessOf(params);
+  const prior = calls.get(key);
+
+  /**
+   * THE WORLD MOVED, so this is a new question rather than a repeat.
+   *
+   * Checked BEFORE the block above on purpose: a block set three rounds ago was about a file that has
+   * since been edited, and keeping it would be the guard insisting on a stale answer. The counter resets
+   * too — the escalation should start over for the new state of the file, not resume mid-ladder.
+   */
+  if (prior) {
+    const fileChanged = witness !== '' && prior.witness !== '' && witness !== prior.witness;
+    const filesWritten = mutationEpoch > prior.epoch;
+    if (fileChanged || filesWritten) {
+      calls.set(key, { count: 1, lastAt: now, witness, epoch: mutationEpoch });
+      const wasBlocked = blocked.delete(key);
+      const why = fileChanged ? 'the file it reads has changed since' : 'files have been written since';
+      log('INFO', 'guard_repeat_allowed_stale', { tool: name, reason: why, unblocked: String(wasBlocked) });
+      return {
+        allow: true,
+        label: fileChanged ? 'allowed (target changed)' : 'allowed (files written since)',
+        note: `\n\n[This repeats an earlier call, and it ran because ${why} — the earlier result is stale. `
+          + `Nothing else about the repeat policy has changed: an identical call with nothing changed in between is still blocked.]`,
+      };
+    }
+  }
+
   const why = blocked.get(key);
   if (why) {
     return {
       allow: false,
       label: 'blocked (repeat)',
-      note: `BLOCKED. ${why} This exact call is disabled for the rest of this turn. Do not try it again — `
-        + `use what is already in your context, take a materially different approach, or answer with what you have.`,
+      note: `BLOCKED. ${why} This exact call is disabled for the rest of this turn — nothing it reads has changed since. `
+        + `Use what is already in your context, take a materially different approach, or answer with what you have. `
+        + `If you CHANGE the file first, reading it again is allowed.`,
     };
   }
 
-  const state = calls.get(key) ?? { count: 0, lastAt: 0 };
-  const now = Date.now();
+  const state = prior ?? { count: 0, lastAt: 0, witness, epoch: mutationEpoch };
   const sinceMs = state.lastAt ? now - state.lastAt : Infinity;
   state.count++;
   state.lastAt = now;
+  state.witness = witness;
+  state.epoch = mutationEpoch;
   calls.set(key, state);
 
   // First time — nothing to police.
@@ -167,9 +254,10 @@ export function guardCheck(name: string, params: Record<string, string>): GuardD
     return {
       allow: false,
       label: 'skipped (identical repeat)',
-      note: `You already ran ${name}(${preview(params)}) with these exact parameters in this turn and the result is `
-        + `already in your context. Use it. If it was not what you needed, change the parameters or the approach — `
-        + `an identical third call will be BLOCKED for the rest of the turn.`,
+      note: `You already ran ${name}(${preview(params)}) with these exact parameters in this turn, nothing it reads has `
+        + `changed since, and the result is already in your context. Use it. If it was not what you needed, change the `
+        + `parameters or the approach — an identical third call will be BLOCKED for the rest of the turn. Editing the `
+        + `file and reading it again is not a repeat, and is allowed.`,
     };
   }
 

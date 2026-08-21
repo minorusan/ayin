@@ -1210,6 +1210,25 @@ the same call with the same parameters, on purpose), and a blocked `bash` call i
 hatch — `sleep 5; <command>` is a *different* call and runs, which is what "wait for the server to come
 up" actually needs. State is per-turn: a new user turn is a new intention.
 
+**A repeat is judged against the world, not only against the transcript.** The escalation above is
+written for a model that is stuck, and it was also blocking a model that was working: read a file, fix
+it, read it again to check — the third read is identical, and it was refused with "the answer will not
+change by asking again". The answer had changed, and the alternative the refusal offered ("use the
+result already in your context") was the STALE result. So before the block is applied, two signals can
+lift it:
+
+- the **witness** — `mtime:size` of the file the call names. Exact, and it catches a change made by
+  anything: another tool, a build, git, the operator in their editor.
+- the **epoch** — a counter bumped when one of ayin's own write tools succeeds (`write_file`,
+  `str_replace`, `rename`, `prefab_edit`, `naama`), which covers calls whose target is not one file: a
+  grep over a directory, a find.
+
+Either one resets that call's ladder to the first attempt and **deletes a standing block**, so the
+next round's system prompt no longer names it. `bash` deliberately does not bump the epoch — a build
+mutates plenty, and letting it lift its own block re-opens the `npm test` five times in a row loop —
+but an EDIT does lift it, because re-running the build after a fix is a different question. A user
+**deny** is never lifted by either: that was a decision about permission, not about freshness.
+
 ## Presenter pass (`src/presenter/`)
 
 **Off by default for the session** — `/present` (bare) toggles it on for the rest of the session;

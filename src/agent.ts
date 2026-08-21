@@ -49,11 +49,20 @@ import { gateAdoption, nextBrief, implementedCount, stopAwaitingOperator } from 
 import { loadTools } from './tools.js';
 import { presenterPass, shouldRunPresenterThisTurn } from './presenter/index.js';
 import { clearActivity } from './activity.js';
-import { guardBeginTurn, guardCheck, guardDirective, guardNoteDenied } from './tool-guard.js';
+import { guardBeginTurn, guardCheck, guardDirective, guardNoteDenied, guardNoteMutation } from './tool-guard.js';
 import { planContextBlock, runPlan } from './plan/index.js';
 import { liveTool } from './live-mirror.js';
 import { exploreCacheNoteTool } from './tools/explore/cache.js';
 import { setLlmPurpose } from './timing.js';
+
+/**
+ * The tools whose success means the working tree is not what an earlier read said it was.
+ *
+ * `bash` is deliberately absent: a build or a test run changes plenty, but letting it bump the epoch
+ * would re-open the identical-command loop the guard closes — each run excusing the next. A bash repeat
+ * still runs when the FILE it names has changed, which is the honest half of the signal.
+ */
+const WRITE_TOOLS = new Set(['write_file', 'str_replace', 'rename', 'prefab_edit', 'naama']);
 
 let interrupted = false;
 let immediateCancel = false;
@@ -1886,6 +1895,17 @@ async function runAgentTurn(userInput: string): Promise<void> {
       }
 
       result = result!;
+      /**
+       * A WRITE MAKES EVERY EARLIER READ STALE, and the repeat guard has to know that.
+       *
+       * Without this, "read the file, fix it, read it again to check" is three calls of which the guard
+       * refuses the third — telling the model to use a result that describes the file as it was BEFORE
+       * the fix. The epoch is what lifts that block; the tools are named here rather than in the guard
+       * because this loop is the one place that knows a call actually succeeded.
+       */
+      if (WRITE_TOOLS.has(name) && !/^(Error|Refused)\b/.test(result)) {
+        guardNoteMutation(name, [params.path, params.file, params.to].filter((p): p is string => Boolean(p)));
+      }
       saveArtifact(name, paramPreview, result);
       recordTool(name, paramPreview, result);
       // FULL params (not the 60-char-per-value preview) and the FULL result — the operating record

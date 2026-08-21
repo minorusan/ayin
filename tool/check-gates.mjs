@@ -74,6 +74,60 @@ g.guardCheck('entangle', { op: 'status' });
 const statusThird = g.guardCheck('entangle', { op: 'status' });
 ok(statusFirst.allow && !statusThird.allow, 'other entangle ops are still guarded normally');
 
+/**
+ * A REPEAT IS NOT A LOOP WHEN THE WORLD MOVED.
+ *
+ * "read the file, fix it, read it again to check the fix" is three identical reads, and the guard used to
+ * refuse the third — telling the model to use a result that describes the file BEFORE the fix. So the
+ * repeat is judged against the file's mtime+size and against a counter of ayin's own writes, and a block
+ * set before either changed is lifted rather than kept.
+ */
+const freshFile = join(TMP, 'guard-fresh.ts');
+writeFileSync(freshFile, 'export const a = 1;\n');
+const fresh = { path: freshFile };
+g.guardCheck('read_file', fresh);
+g.guardCheck('read_file', fresh);
+const blockedRead = g.guardCheck('read_file', fresh);
+ok(blockedRead.allow === false, 'an unchanged file still blocks on the third identical read');
+writeFileSync(freshFile, 'export const a = 2;\nexport const b = 3;\n');   // mtime AND size move
+const afterEdit = g.guardCheck('read_file', fresh);
+ok(afterEdit.allow === true && /target changed/.test(afterEdit.label ?? ''),
+  'the SAME read runs again once the file has changed — and the standing block is lifted with it',
+  `${afterEdit.allow} ${afterEdit.label ?? ''}`);
+ok(!/guard-fresh/.test(g.guardDirective()), 'and it is no longer named as blocked in the system prompt');
+const againUnchanged = g.guardCheck('read_file', fresh);
+ok(againUnchanged.allow === false,
+  'the ladder restarts rather than resetting the policy: unchanged repeats are refused again');
+
+// A directory-scoped call has no single file to witness, so ayin's own writes are the signal.
+const dirCall = { pattern: 'ScoringId', path: TMP };
+g.guardCheck('grep', dirCall);
+g.guardCheck('grep', dirCall);
+ok(g.guardCheck('grep', dirCall).allow === false, 'a repeated grep with nothing written since is blocked');
+g.guardNoteMutation('str_replace', [join(TMP, 'other.ts')]);
+const afterWrite = g.guardCheck('grep', dirCall);
+ok(afterWrite.allow === true && /files written since/.test(afterWrite.label ?? ''),
+  'once a file has been written, the same search runs again — the earlier hits are stale',
+  afterWrite.label ?? '');
+
+// bash is the case that must NOT excuse itself: a build changes plenty, and letting it lift its own block
+// re-opens the `npm test` five times in a row loop. It is lifted by an EDIT, which is the honest signal.
+const build = { command: 'npm test' };
+g.guardCheck('bash', build);
+g.guardCheck('bash', build);
+ok(g.guardCheck('bash', build).allow === false, 'a repeated identical command is blocked');
+ok(g.guardCheck('bash', build).allow === false, 'and stays blocked no matter how long it ran for');
+g.guardNoteMutation('write_file', [join(TMP, 'fix.ts')]);
+ok(g.guardCheck('bash', build).allow === true, 're-running it AFTER an edit is a different question, and runs');
+
+// A denial was a decision about permission, not about freshness.
+g.guardNoteDenied('bash', { command: 'git push' });
+ok(g.guardCheck('bash', { command: 'git push' }).allow === false, 'a denied call is refused');
+g.guardNoteMutation('write_file', [join(TMP, 'fix2.ts')]);
+const deniedAgain = g.guardCheck('bash', { command: 'git push' });
+ok(deniedAgain.allow === false && /DENIED/.test(deniedAgain.note ?? ''),
+  'and a write does NOT lift a denial — that was permission, not staleness');
+
 const polls = Array.from({ length: 8 }, () => g.guardCheck('status', {}));
 ok(polls[0].allow && polls[4].allow, 'polling a backgrounded task keeps working (repeats are its job)');
 ok(/POLLING NOTICE/.test(polls[1].note ?? ''), 'a too-soon poll still runs but carries the rate-limit notice');
