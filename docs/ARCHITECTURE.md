@@ -1232,6 +1232,13 @@ each entry point, so `-p`, the TUI and the watch daemon all have it. **Pruned on
 (20 kept, oldest folders first): tool output is the largest thing ayin writes, and whole folders go rather
 than some of each session's files, so a surviving session keeps everything it had.
 
+**The map survives the turn boundary.** `resetCallLedger()` clears the turn's detail — a new question
+legitimately searches again — but it now folds each call's FILE into a session tail (12 entries, newest per
+call) rendered under the current turn's list. Dropping it at the boundary meant "read the controller I
+inspected two questions ago" had nowhere to point, and a 6-second inspect was re-run for a file already on
+disk. Only what is needed to fetch the result is carried: the call and its file, never the gist, which
+belonged to the turn that asked.
+
 ## Tool guard (`tool-guard.ts`)
 
 The previous duplicate detector answered every repeat with the same warning and let the model try
@@ -1240,15 +1247,32 @@ gets the identical warning, and the transcript fills with `[Loop detected: statu
 same params]` five times over while two background tasks sit there running. **The warning was advice,
 and advice is not a rule.**
 
-So refusals **escalate and persist**:
+**A READ IS NEVER REFUSED.** That ladder was written for a model that is stuck and it was also stopping a
+model that was working: the second identical read cost a whole round and came back with prose instead of
+bytes, and the third was dead for the turn — so "read it again to check the fix", "re-grep after the build"
+and "look at the file the ledger says I already read" all hit a wall whose suggested alternative ("use the
+result already in your context") was the stale result. A repeated read costs milliseconds; a refused one
+costs the fix. `REPEATABLE_READS` (`read_file`, `grep`, `find_files`, `list_dir`, `explore`,
+`corpus_search`, `docs_search`, `prefab_inspect`, `animator_inspect`, `jira_ticket`, `ayin_help`) therefore
+always run, with a note that counts the repeat and gets blunter at 6 and 9, and are never written into the
+blocked list at all. `jira`, `sentry` and `web_search` are deliberately excluded despite reading: the first
+two are agentic loops that can comment on a ticket, and all three cost money or quota per call.
 
-| Attempt | Non-pollable tool | Pollable tool (`status`) |
-|---|---|---|
-| 1st | runs | runs |
-| 2nd identical | skipped, told the result is already in context | runs + `[POLLING NOTICE]`, throttled under `pollMinIntervalMs` |
-| 3rd identical | **BLOCKED for the turn** | runs, still throttled |
-| past `pollMaxPerTurn` | — | **BLOCKED for the turn** |
-| after a user **deny** | **BLOCKED immediately, for the turn** | same |
+Everything with a side effect keeps the ladder:
+
+| Attempt | Read-only tool | Side-effecting tool | Pollable tool (`status`) |
+|---|---|---|---|
+| 1st | runs | runs | runs |
+| 2nd identical | runs + "identical call 2, here is where the cached result is" | skipped, told the result is already in context | runs + `[POLLING NOTICE]`, throttled under `pollMinIntervalMs` |
+| 3rd identical | runs + note | **BLOCKED for the turn** | runs, still throttled |
+| 9th identical | runs + "answer or change approach" | — | — |
+| past `pollMaxPerTurn` | — | — | **BLOCKED for the turn** |
+| after a user **deny** | **BLOCKED immediately, for the turn** | same | same |
+
+The note is worded to send the model to the FILE, not to the cache: told the cache held the result, the
+first live run of this policy read `t3-read_file.txt` — a snapshot of what that call returned — when what
+it wanted was the current state. The cache is for a result that scrolled out of context; the call is for
+what is true now.
 
 A block is written into the **system prompt** every round (`guardDirective()` → `<blocked-calls>`),
 where the model cannot scroll past it — that persistence is the actual fix. Two deliberate exemptions
@@ -1266,15 +1290,28 @@ lift it:
 
 - the **witness** — `mtime:size` of the file the call names. Exact, and it catches a change made by
   anything: another tool, a build, git, the operator in their editor.
-- the **epoch** — a counter bumped when one of ayin's own write tools succeeds (`write_file`,
-  `str_replace`, `rename`, `prefab_edit`, `naama`), which covers calls whose target is not one file: a
-  grep over a directory, a find.
+- the **epoch** — a counter bumped after **any** tool that is not `TREE_SAFE` succeeds, `bash` included,
+  because a shell command can write anything and pretending otherwise left a re-grep blocked after a
+  build. This covers the calls whose target is not one file: a grep over a directory, a find.
 
-Either one resets that call's ladder to the first attempt and **deletes a standing block**, so the
-next round's system prompt no longer names it. `bash` deliberately does not bump the epoch — a build
-mutates plenty, and letting it lift its own block re-opens the `npm test` five times in a row loop —
-but an EDIT does lift it, because re-running the build after a fix is a different question. A user
-**deny** is never lifted by either: that was a decision about permission, not about freshness.
+Either one resets that call's ladder to the first attempt and **deletes a standing block**, so the next
+round's system prompt no longer names it. Each bump is attributed to the CALL that caused it and lifts
+blocks only on *other* calls — without that, `npm test` would excuse its own repeat and the
+identical-command loop would reopen; with it, `npm test` after an edit runs and `npm test` twice in a row
+still does not. A user **deny** is never lifted by either: that was a decision about permission, not about
+freshness.
+
+`TREE_SAFE` lives in `tool-guard.ts` and is imported by `explore/cache.ts`, which had its own copy — and
+that copy was missing `prefab_inspect` and `animator_inspect`, so every Unity inspection wiped a cache it
+could not have invalidated. Two lists answering "what is read-only" diverge, and the divergence shows up
+as a stale cache pointing at line numbers that moved.
+
+**Two other mechanisms fire on repeats** and are easy to mistake for this one. `agent.ts` skips a call that
+appears **twice in a single model response** (they cannot return different answers) — and now says so in
+the window rather than dropping it silently, because a call that vanishes is indistinguishable next round
+from a tool that hung. And the per-tool **loop nudge** fires every 12th use of one tool in a turn (was 8: a
+wide search over a big tree legitimately runs eight times), stated as a count rather than as a verdict on
+the model's intent.
 
 ## Presenter pass (`src/presenter/`)
 

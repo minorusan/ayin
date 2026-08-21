@@ -9,7 +9,7 @@
  * So the gate asserts the property that keeps the cache alive: after a trim, there is HEADROOM — the
  * next rounds can append without evicting again.
  */
-import { trimToContext, compressOldest, noteRanCall, renderCallLedger, resetCallLedger } from '../dist/agent.js';
+import { trimToContext, compressOldest, noteRanCall, renderCallLedger, resetCallLedger, resetSessionLedger } from '../dist/agent.js';
 
 const fail = (m) => { console.error(`FAIL: ${m}`); process.exit(1); };
 const msg = (role, chars) => ({ role, content: 'x'.repeat(chars) });
@@ -133,7 +133,22 @@ if ((withFile.match(new RegExp(artifactSessionDir().replace(/[.*+?^${}()|[\]\\]/
 }
 noteRanCall('read_file', 'path=NeverRan.cs', false, 'ENOENT');
 if (/NeverRan\.cs\)[^\n]*\[.* KB/.test(renderCallLedger())) fail('a call with no cached result was given a file anyway');
+
+/**
+ * THE MAP MUST SURVIVE THE TURN BOUNDARY.
+ *
+ * The turn's detail is cleared — a new question searches again — but the files stay on disk for the whole
+ * session, and dropping the pointer to them meant "read the controller I inspected two questions ago" had
+ * nowhere to point. Only what is needed to fetch it is carried: the call and its file, never the gist.
+ */
 resetCallLedger();
+const nextTurn = renderCallLedger();
+if (!/From earlier turns this session/.test(nextTurn)) fail('the cache map did not survive the turn boundary');
+if (!/t\d+-grep\.txt/.test(nextTurn)) fail('the carried entry does not name its file');
+if (/Assets\/Widget\.cs:12/.test(nextTurn)) fail('the gist was carried too — that belonged to the turn that asked');
+if (!/nothing yet in this turn/.test(nextTurn)) fail('the empty current turn is not stated, so the list reads as this turn\'s work');
+resetSessionLedger();
+if (renderCallLedger() !== '') fail('a session with no calls at all still rendered a ledger');
 // A gate that leaves a session folder behind every run is a gate that fills the cache it is testing.
 (await import('node:fs')).rmSync(artifactSessionDir(), { recursive: true, force: true });
 

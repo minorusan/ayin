@@ -49,20 +49,12 @@ import { gateAdoption, nextBrief, implementedCount, stopAwaitingOperator } from 
 import { loadTools } from './tools.js';
 import { presenterPass, shouldRunPresenterThisTurn } from './presenter/index.js';
 import { clearActivity } from './activity.js';
-import { guardBeginTurn, guardCheck, guardDirective, guardNoteDenied, guardNoteMutation } from './tool-guard.js';
+import { callKey, guardBeginTurn, guardCheck, guardDirective, guardNoteDenied, guardNoteMutation, TREE_SAFE } from './tool-guard.js';
 import { planContextBlock, runPlan } from './plan/index.js';
 import { liveTool } from './live-mirror.js';
 import { exploreCacheNoteTool } from './tools/explore/cache.js';
 import { setLlmPurpose } from './timing.js';
 
-/**
- * The tools whose success means the working tree is not what an earlier read said it was.
- *
- * `bash` is deliberately absent: a build or a test run changes plenty, but letting it bump the epoch
- * would re-open the identical-command loop the guard closes — each run excusing the next. A bash repeat
- * still runs when the FILE it names has changed, which is the honest half of the signal.
- */
-const WRITE_TOOLS = new Set(['write_file', 'str_replace', 'rename', 'prefab_edit', 'naama']);
 
 let interrupted = false;
 let immediateCancel = false;
@@ -1112,8 +1104,15 @@ export async function runAgent(userInput: string): Promise<void> {
   }
 }
 
-/** How often the loop-breaker fires for one tool within a turn. */
-const LOOP_NUDGE_EVERY = 8;
+/**
+ * How often the loop-breaker fires for one tool within a turn.
+ *
+ * Twelve, not eight. A wide search over a big tree legitimately runs eight times — the measured failure
+ * was 30 `find_files` calls ending with no answer, which twelve still catches — and firing at eight put an
+ * interrupt in front of ordinary work. It is stated as a count now rather than as a reprimand: the number
+ * is the information, and "changing approach" was ayin asserting something about the model's intent.
+ */
+const LOOP_NUDGE_EVERY = 12;
 
 /**
  * WHAT HAS ALREADY BEEN RUN THIS TURN — in the prompt, every round, from the first call to the last.
@@ -1133,8 +1132,39 @@ const LOOP_NUDGE_EVERY = 8;
 interface RanCall { tool: string; params: string; ok: boolean; gist: string; file: string; bytes: number }
 const callLedger: RanCall[] = [];
 
-/** Cleared at the start of every turn. Exported for `check:window`, which cannot run a turn. */
-export function resetCallLedger(): void { callLedger.length = 0; }
+/**
+ * WHAT EARLIER TURNS FOUND, kept when the turn ledger is cleared.
+ *
+ * A turn boundary resets the detail — a new question legitimately searches again — but it must not erase
+ * the fact that the answers EXIST. The results are files on disk for the whole session; dropping the map
+ * to them at the boundary meant "read the controller I inspected two questions ago" had nowhere to point,
+ * and the model re-ran a 6-second inspect for a file it already had. Only what is needed to fetch it is
+ * kept: the call and its file, never the gist, which belongs to the turn that asked.
+ */
+interface EarlierCall { tool: string; params: string; file: string; bytes: number }
+const earlierCalls: EarlierCall[] = [];
+/** Enough to reach back over a few questions; short enough to stay a footnote in the prompt. */
+const EARLIER_LINES = 12;
+
+/** Cleared at the start of every turn — into the session tail. Exported for `check:window`. */
+export function resetCallLedger(): void {
+  for (const c of callLedger) {
+    if (!c.file) continue;
+    // Newest wins for a repeated call: the older file is still on disk, and naming both would spend two
+    // lines saying one thing.
+    const already = earlierCalls.findIndex((e) => e.tool === c.tool && e.params === c.params);
+    if (already !== -1) earlierCalls.splice(already, 1);
+    earlierCalls.push({ tool: c.tool, params: c.params, file: c.file, bytes: c.bytes });
+  }
+  if (earlierCalls.length > EARLIER_LINES) earlierCalls.splice(0, earlierCalls.length - EARLIER_LINES);
+  callLedger.length = 0;
+}
+
+/** For `check:window`: forget the session tail as well, so cases do not leak into each other. */
+export function resetSessionLedger(): void {
+  earlierCalls.length = 0;
+  callLedger.length = 0;
+}
 
 /**
  * Lines rendered. The full ledger is kept — only the RENDER is bounded, and by the tail, because "what
@@ -1162,7 +1192,7 @@ export function noteRanCall(tool: string, params: string, ok: boolean, outcome: 
 
 /** The ledger as prompt text, or '' when nothing has run yet. Exported for `check:window`. */
 export function renderCallLedger(): string {
-  if (callLedger.length === 0) return '';
+  if (callLedger.length === 0 && earlierCalls.length === 0) return '';
   const shown = callLedger.slice(-LEDGER_LINES);
   const omitted = callLedger.length - shown.length;
   const lines = shown.map((c, i) => {
@@ -1173,12 +1203,18 @@ export function renderCallLedger(): string {
     return `${n}. ${c.tool}(${c.params}) \u2192 ${c.ok ? '' : 'FAILED: '}${c.gist || (c.ok ? 'ok' : 'no detail')}${where}`;
   });
   const head = omitted > 0 ? [`[${omitted} earlier call(s) not listed]`, ...lines] : lines;
+  const earlier = earlierCalls.length
+    ? `\nFrom earlier turns this session — the answers are still on disk, read the file rather than re-running:\n`
+      + earlierCalls.map((c) => `  ${c.file}  ${c.tool}(${c.params})  ${humanBytes(c.bytes)}`).join('\n')
+      + '\n'
+    : '';
   return getPrompt('callLedger', {
-    CALLS: head.join('\n'),
+    CALLS: head.length ? head.join('\n') : '(nothing yet in this turn)',
+    EARLIER: earlier,
     // Stated ONCE, because the same 80-character path on sixty lines is sixty times the cost for the
     // same fact. Empty when nothing has been cached, so the instruction never points at nothing.
     CACHE: hasArtifacts()
-      ? `\nEvery result above is also a file in ${artifactSessionDir()} — read one with read_file`
+      ? `\nEvery result is also a file in ${artifactSessionDir()} — read one with read_file`
         + ` (offset and limit work) instead of running the call again.\n`
       : '',
   });
@@ -1626,6 +1662,9 @@ async function runAgentTurn(userInput: string): Promise<void> {
     // (Gemma4 regularly chains read → write → bash). Execute sequentially,
     // feed each result back as its own assistant/user turn pair.
     const seenInBatch = new Set<string>();
+    /** Same clipping the transcript uses — a preview, not the params. */
+    const paramPreviewOf = (p: Record<string, string>): string =>
+      Object.entries(p).map(([k, v]) => `${k}=${v.length > 60 ? `${v.substring(0, 57)}...` : v}`).join(', ');
     for (let tcIdx = 0; tcIdx < parsed.toolCalls.length; tcIdx++) {
       const { name, params } = parsed.toolCalls[tcIdx];
       const firstInBatch = tcIdx === 0;
@@ -1637,6 +1676,12 @@ async function runAgentTurn(userInput: string): Promise<void> {
       if (seenInBatch.has(batchKey)) {
         addMessage('system', `${name}: skipped (same call already in this response)`);
         log('INFO', 'intrabatch_duplicate_skip', { tool: name });
+        // SAY SO IN THE WINDOW, not only on screen. Dropping it silently means the model emitted a call
+        // and got nothing back for it — indistinguishable, next round, from a tool that hung. One line
+        // costs nothing and closes the pair.
+        pushToWindow('user', renderToolResult(
+          `${name}(${paramPreviewOf(params)}) appeared twice in that one response. It ran once; the result `
+          + `above is that run. Two identical calls in a single response cannot return different answers.`));
         continue;
       }
       seenInBatch.add(batchKey);
@@ -1832,10 +1877,10 @@ async function runAgentTurn(userInput: string): Promise<void> {
         const alt = name === 'find_files' || name === 'grep'
           ? 'explore (it derives identifiers and searches for you), or read a directory listing to see what is actually there'
           : 'a different tool, or state what you have and what is missing';
-        addMessage('system', `[${name} used ${used}× this turn — changing approach]`);
+        addMessage('system', `[${name} used ${used}× this turn]`);
         pushToWindow('user', renderToolResult(
-          `You have called ${name} ${used} times in this turn and it has not answered the question. `
-          + `It will not answer on the next call either. Change approach: try ${alt}. `
+          `${name} has run ${used} times in this turn. If it has answered the question, use that answer. `
+          + `If it has not, it is unlikely to on the next call: try ${alt}. `
           + `If the thing you are looking for may not exist under that name, say so and work from what you have.`));
         log('INFO', 'tool_loop_nudge', { tool: name, uses: String(used) });
       }
@@ -1920,8 +1965,11 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * the fix. The epoch is what lifts that block; the tools are named here rather than in the guard
        * because this loop is the one place that knows a call actually succeeded.
        */
-      if (WRITE_TOOLS.has(name) && !/^(Error|Refused)\b/.test(result)) {
-        guardNoteMutation(name, [params.path, params.file, params.to].filter((p): p is string => Boolean(p)));
+      if (!TREE_SAFE.has(name) && !/^(Error|Refused)\b/.test(result)) {
+        // Keyed by the CALL, not the tool: a bump lifts blocks on other calls and never on itself, which
+        // is what lets `npm test` after an edit run while `npm test` twice in a row still does not.
+        guardNoteMutation(name, [params.path, params.file, params.to].filter((p): p is string => Boolean(p)),
+          callKey(name, params));
       }
       saveArtifact(name, paramPreview, result);
       recordTool(name, paramPreview, result);

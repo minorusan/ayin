@@ -54,14 +54,35 @@ const close = (server) => new Promise((res) => server.close(res));
 console.log('\ntool guard');
 const g = await import(`file://${join(DIST, 'tool-guard.js')}`);
 g.guardBeginTurn();
+/**
+ * A READ IS NEVER REFUSED — the change that un-castrated the loop.
+ *
+ * The old ladder refused the second identical read and killed the third for the turn, so "read it again to
+ * check the fix" was answered with "use the result already in your context" — the result from before the
+ * fix. A repeat read costs milliseconds; a refused one costs the fix. So reads are annotated and counted,
+ * never blocked, and the note names the cache.
+ */
 const rf = { path: join(TMP, 'x.ts') };
-ok(g.guardCheck('read_file', rf).allow === true, 'first call runs');
+ok(g.guardCheck('read_file', rf).allow === true, 'first read runs');
 const second = g.guardCheck('read_file', rf);
-ok(second.allow === false && /identical repeat/.test(second.label ?? ''), 'second identical call is skipped, not run again');
-const third = g.guardCheck('read_file', rf);
-ok(third.allow === false && /blocked/.test(third.label ?? ''), 'third identical call is BLOCKED for the turn');
-ok(/BLOCKED/.test(g.guardCheck('read_file', rf).note ?? ''), 'the block persists after it is set');
-ok(/read_file/.test(g.guardDirective()), 'the block is stated in the system-prompt directive');
+ok(second.allow === true && /repeat 2/.test(second.label ?? ''), 'the second identical read RUNS, labelled as a repeat', second.label ?? '');
+ok(/CURRENT state/.test(second.note ?? '') && /cached file/.test(second.note ?? ''),
+  'its note says this call is how to get the current state, and where a scrolled-away result is cached',
+  (second.note ?? '').slice(0, 80));
+const reads = Array.from({ length: 10 }, () => g.guardCheck('read_file', rf));
+ok(reads.every((r) => r.allow), 'a tenth identical read still runs — nothing read-only is ever dead for the turn');
+ok(/Answer with what you have/.test(reads[9].note ?? ''), 'but by then the note says so plainly', (reads[9].note ?? '').slice(-60));
+ok(!/read_file/.test(g.guardDirective()), 'a read is never written into the blocked list');
+
+// A tool with side effects keeps the ladder: `bash` twice in a row is the loop this guard exists to close.
+const buildCmd = { command: 'npm run build' };
+ok(g.guardCheck('bash', buildCmd).allow === true, 'first bash runs');
+const bashSecond = g.guardCheck('bash', buildCmd);
+ok(bashSecond.allow === false && /identical repeat/.test(bashSecond.label ?? ''), 'the second identical command is skipped');
+const bashThird = g.guardCheck('bash', buildCmd);
+ok(bashThird.allow === false && /blocked/.test(bashThird.label ?? ''), 'the third is BLOCKED for the turn');
+ok(/BLOCKED/.test(g.guardCheck('bash', buildCmd).note ?? ''), 'the block persists after it is set');
+ok(/bash/.test(g.guardDirective()), 'and is stated in the system-prompt directive');
 
 // A DRIVER'S REPEAT IS ITS PURPOSE. `entangle op=next` returns a different type every time — the answer is
 // a function of what has landed. The repeat guard read it as a loop and blocked it, and the run died: the
@@ -84,46 +105,53 @@ ok(statusFirst.allow && !statusThird.allow, 'other entangle ops are still guarde
  */
 const freshFile = join(TMP, 'guard-fresh.ts');
 writeFileSync(freshFile, 'export const a = 1;\n');
-const fresh = { path: freshFile };
-g.guardCheck('read_file', fresh);
-g.guardCheck('read_file', fresh);
-const blockedRead = g.guardCheck('read_file', fresh);
-ok(blockedRead.allow === false, 'an unchanged file still blocks on the third identical read');
+const fresh = { path: freshFile, content: 'x' };
+g.guardCheck('write_file', fresh);
+g.guardCheck('write_file', fresh);
+const blockedWrite = g.guardCheck('write_file', fresh);
+ok(blockedWrite.allow === false, 'an unchanged file still blocks the third identical WRITE');
 writeFileSync(freshFile, 'export const a = 2;\nexport const b = 3;\n');   // mtime AND size move
-const afterEdit = g.guardCheck('read_file', fresh);
+const afterEdit = g.guardCheck('write_file', fresh);
 ok(afterEdit.allow === true && /target changed/.test(afterEdit.label ?? ''),
-  'the SAME read runs again once the file has changed — and the standing block is lifted with it',
+  'the same call runs again once the file has changed — and the standing block is lifted with it',
   `${afterEdit.allow} ${afterEdit.label ?? ''}`);
 ok(!/guard-fresh/.test(g.guardDirective()), 'and it is no longer named as blocked in the system prompt');
-const againUnchanged = g.guardCheck('read_file', fresh);
+const againUnchanged = g.guardCheck('write_file', fresh);
 ok(againUnchanged.allow === false,
   'the ladder restarts rather than resetting the policy: unchanged repeats are refused again');
 
-// A directory-scoped call has no single file to witness, so ayin's own writes are the signal.
-const dirCall = { pattern: 'ScoringId', path: TMP };
-g.guardCheck('grep', dirCall);
-g.guardCheck('grep', dirCall);
-ok(g.guardCheck('grep', dirCall).allow === false, 'a repeated grep with nothing written since is blocked');
-g.guardNoteMutation('str_replace', [join(TMP, 'other.ts')]);
-const afterWrite = g.guardCheck('grep', dirCall);
+// A directory-scoped call has no single file to witness, so any write is the signal. Shown on a tool that
+// HAS a ladder, since a grep no longer has one to lift.
+const dirCall = { path: TMP, content: 'y' };
+g.guardCheck('write_file', dirCall);
+g.guardCheck('write_file', dirCall);
+ok(g.guardCheck('write_file', dirCall).allow === false, 'a repeat with nothing written since is blocked');
+g.guardNoteMutation('str_replace', [join(TMP, 'other.ts')], 'str_replace|path=other.ts');
+const afterWrite = g.guardCheck('write_file', dirCall);
 ok(afterWrite.allow === true && /files written since/.test(afterWrite.label ?? ''),
-  'once a file has been written, the same search runs again — the earlier hits are stale',
+  'once another call has written, this one runs again — what it saw is stale',
   afterWrite.label ?? '');
 
-// bash is the case that must NOT excuse itself: a build changes plenty, and letting it lift its own block
-// re-opens the `npm test` five times in a row loop. It is lifted by an EDIT, which is the honest signal.
+/**
+ * bash MUST NOT EXCUSE ITSELF. It now bumps the epoch like any tool that could have written — a shell
+ * command can do anything — so the bump is attributed to the CALL, and a call is never lifted by its own.
+ * Otherwise `npm test` five times in a row would be five legitimate questions.
+ */
 const build = { command: 'npm test' };
+const buildKey = g.callKey('bash', build);
 g.guardCheck('bash', build);
+g.guardNoteMutation('bash', [], buildKey);          // as the loop does after every non-read tool
 g.guardCheck('bash', build);
-ok(g.guardCheck('bash', build).allow === false, 'a repeated identical command is blocked');
-ok(g.guardCheck('bash', build).allow === false, 'and stays blocked no matter how long it ran for');
-g.guardNoteMutation('write_file', [join(TMP, 'fix.ts')]);
+g.guardNoteMutation('bash', [], buildKey);
+ok(g.guardCheck('bash', build).allow === false, 'a repeated identical command is blocked, its own writes notwithstanding');
+ok(g.guardCheck('bash', build).allow === false, 'and stays blocked no matter how many times it ran');
+g.guardNoteMutation('write_file', [join(TMP, 'fix.ts')], 'write_file|path=fix.ts');
 ok(g.guardCheck('bash', build).allow === true, 're-running it AFTER an edit is a different question, and runs');
 
 // A denial was a decision about permission, not about freshness.
 g.guardNoteDenied('bash', { command: 'git push' });
 ok(g.guardCheck('bash', { command: 'git push' }).allow === false, 'a denied call is refused');
-g.guardNoteMutation('write_file', [join(TMP, 'fix2.ts')]);
+g.guardNoteMutation('write_file', [join(TMP, 'fix2.ts')], 'write_file|path=fix2.ts');
 const deniedAgain = g.guardCheck('bash', { command: 'git push' });
 ok(deniedAgain.allow === false && /DENIED/.test(deniedAgain.note ?? ''),
   'and a write does NOT lift a denial — that was permission, not staleness');

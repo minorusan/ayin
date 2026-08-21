@@ -7,6 +7,11 @@
  * fills with `[Loop detected: status called again with same params]` five times in a row while two
  * background tasks sit there running. The warning was advice, and advice is not a rule.
  *
+ * READS ARE NOT REFUSED. A repeat of a read-only tool always runs — it costs milliseconds, and refusing it
+ * cost real fixes: "read it again to check the change" was answered with "use the result already in your
+ * context", which was the result from before the change. Those calls get a note that counts the repeat and
+ * names the cached file, and never a block. Everything with a side effect keeps the ladder below.
+ *
  * SO REFUSALS ESCALATE, AND THEY PERSIST. A second identical call is not warned — it is BLOCKED for
  * the rest of the turn, and the block is written into the SYSTEM PROMPT every round
  * (`guardDirective()`), where the model cannot scroll past it. Same for a call the user denied: once
@@ -31,6 +36,46 @@ import { log } from './log.js';
 
 /** Tools whose whole job is to be called again — repeats are the feature, not the failure. */
 const POLLABLE = new Set(['status']);
+
+/**
+ * Tools that cannot change the working tree. INVERTED on purpose: anything absent from this list may
+ * have written something, including `bash`, which can do anything.
+ *
+ * Lives here rather than in `explore/cache.ts` because two lists of "what is read-only" diverge, and the
+ * divergence shows up as a stale cache pointing at line numbers that moved. The explore cache imports it.
+ */
+export const TREE_SAFE = new Set([
+  'read_file', 'grep', 'find_files', 'list_dir', 'explore', 'corpus_search', 'docs_search',
+  'prefab_inspect', 'animator_inspect', 'ayin_help', 'status', 'jira', 'jira_ticket', 'sentry',
+  'web_search', 'load_tools', 'test_connectors',
+]);
+
+/**
+ * Tools whose identical repeat is NEVER refused — only annotated.
+ *
+ * THE LADDER BELOW WAS CASTRATING WORKING RUNS. A second identical read cost a whole LLM round and came
+ * back with prose instead of bytes, and a third was dead for the turn — so "read it again to check the
+ * fix", "re-grep after the build", "look at the file the ledger says I already read" all hit a wall whose
+ * suggested alternative ("use the result already in your context") was the stale result. The cost of a
+ * repeated read is milliseconds; the cost of a refused one is a fix that does not happen. That asymmetry
+ * is the whole argument.
+ *
+ * So these run every time, with a note that gets progressively blunter, and nothing here is ever written
+ * into the blocked list. A genuine loop stays VISIBLE (the note counts it, and the loop nudge in agent.ts
+ * still fires) without any data being withheld.
+ *
+ * `jira`, `sentry` and `web_search` are deliberately NOT here even though they read: the first two are
+ * agentic loops that can comment on a ticket, and all three cost money or quota per call. Repeating those
+ * is not free, so they keep the ladder.
+ */
+const REPEATABLE_READS = new Set([
+  'read_file', 'grep', 'find_files', 'list_dir', 'explore', 'corpus_search', 'docs_search',
+  'prefab_inspect', 'animator_inspect', 'jira_ticket', 'ayin_help',
+]);
+
+/** Where the note changes tone. Blunter, never a refusal. */
+const READ_NOTE_FIRM = 6;
+const READ_NOTE_BLUNT = 9;
 
 /**
  * Calls whose REPEAT IS THE POINT, and which must never be rate-limited either.
@@ -93,9 +138,21 @@ const calls = new Map<string, CallState>();
  */
 let mutationEpoch = 0;
 
-/** Bumped by the agent loop after a tool that writes files succeeds. */
-export function guardNoteMutation(tool: string, paths: string[]): void {
+/** Who caused each bump, so a call cannot lift its own block. Bounded — a turn does not make 200 writes. */
+const bumps: Array<{ epoch: number; key: string }> = [];
+const BUMPS_KEPT = 200;
+
+/**
+ * Bumped by the agent loop after any tool that is not `TREE_SAFE` succeeds — `bash` included, because a
+ * shell command can write anything and pretending otherwise is what left a re-grep blocked after a build.
+ *
+ * `key` is the call that caused it. A bump only lifts blocks on OTHER calls: without that, `npm test`
+ * would excuse its own repeat and the identical-command loop this guard exists to close would reopen.
+ */
+export function guardNoteMutation(tool: string, paths: string[], key = ''): void {
   mutationEpoch++;
+  bumps.push({ epoch: mutationEpoch, key });
+  if (bumps.length > BUMPS_KEPT) bumps.splice(0, bumps.length - BUMPS_KEPT);
   log('INFO', 'guard_mutation_noted', { tool, epoch: String(mutationEpoch), paths: paths.slice(0, 3).join(',') });
 }
 
@@ -182,7 +239,7 @@ export function guardCheck(name: string, params: Record<string, string>): GuardD
    */
   if (prior) {
     const fileChanged = witness !== '' && prior.witness !== '' && witness !== prior.witness;
-    const filesWritten = mutationEpoch > prior.epoch;
+    const filesWritten = bumps.some((b) => b.epoch > prior.epoch && b.key !== key);
     if (fileChanged || filesWritten) {
       calls.set(key, { count: 1, lastAt: now, witness, epoch: mutationEpoch });
       const wasBlocked = blocked.delete(key);
@@ -218,6 +275,30 @@ export function guardCheck(name: string, params: Record<string, string>): GuardD
 
   // First time — nothing to police.
   if (state.count === 1) return { allow: true };
+
+  // ── a read repeats: annotated, never refused ────────────────────────
+  if (REPEATABLE_READS.has(name)) {
+    log('INFO', 'guard_read_repeat', { tool: name, count: String(state.count) });
+    /**
+     * The note must not send it to the CACHE instead of the file. Measured on the first live run of this
+     * policy: told the cache held the result, the model read `t3-read_file.txt` — a snapshot of what that
+     * call returned — when what it wanted was the file's current state. The cache is for a result that has
+     * scrolled out of context; the file is for what is true now, and the wording has to separate them.
+     */
+    const tail = state.count >= READ_NOTE_BLUNT
+      ? `Nothing it reads has changed. Answer with what you have, or take a genuinely different approach — `
+        + `a tenth identical call returns this same thing again.`
+      : state.count >= READ_NOTE_FIRM
+        ? `Nothing it reads has changed since the first one, so this is the same answer. If an earlier result `
+          + `scrolled out of your context, the call list above names its cached file.`
+        : `Its result is already in your context. This call is how you get the CURRENT state, which is the `
+          + `right move after an edit; for a result that scrolled away, the call list names its cached file.`;
+    return {
+      allow: true,
+      label: `repeat ${state.count}`,
+      note: `\n\n[This is identical call ${state.count} of ${name}(${preview(params)}) in this turn. ${tail}]`,
+    };
+  }
 
   // ── polling: allowed, rate-limited, capped ──────────────────────────
   if (POLLABLE.has(name)) {
