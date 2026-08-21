@@ -2553,6 +2553,45 @@ conversation away. Two optional fields on `ToolSlash` carry that: `overlay` (the
 the same tool gets JSON). Both are declared BY THE TOOL, because the alternative is a name check in the
 dispatcher, which is the shared list directory discovery exists to remove.
 
+## `chore` — what you added last week and nobody calls (`src/chore/`)
+
+`chore` (agent tool), `/chore [commits]` (also opens a page), `ayin chore [--commits N] [--all] [--html]`.
+Gate: `npm run check:chore`, hermetic — it builds a real repository with real commits in a temp directory,
+because every claim this makes is a claim about history.
+
+**Why the scope is recent commits.** A dead-code scan over a whole repository returns hundreds of items,
+most of them public API, test helpers or serialized fields, and nobody reads that list twice. The narrower
+question has an owner: *of the members added in the last N commits, which are used by nothing?* That set is
+small, fresh enough that the author still remembers why, and each item carries its introducing commit — so
+it is a decision, not an archaeology assignment.
+
+Three deterministic steps, no model. `git log -n N --name-only` gives the touched files; `git show
+--unified=0` per commit gives the ADDED lines, filtered by narrow per-language declaration patterns (a
+pattern that also matched calls would report every added call site as dead code, which teaches the reader
+to distrust the report); then every candidate is **re-checked against HEAD**. That last step is what makes
+it trustworthy: a member added in commit 7 and deleted in commit 9 is history, and is dropped with a count.
+
+**"Unused" is not "dead", and it says so.** The declaration is read from HEAD *with the lines above it*,
+because C# puts attributes on their own line — the first run against a real project reported four NUnit
+tests as dead code. Reflection-invoked members (`[Test]`, `[MenuItem]`, `[RuntimeInitializeOnLoadMethod]`,
+`[SerializeField]`, DI) are excluded and counted rather than listed; they have no callers by design.
+Everything surviving carries its caveats (`override`, `virtual`, `public`, `partial`, a test path) and a
+confidence: `likely` only when nothing at all excuses it. **Assets are searched too**, because a Unity
+field is named from a prefab and a method can be named from an animation clip — invisible to a search of
+C# alone.
+
+**One pass, not one per candidate.** `git grep -nowI -E 'a|b|c'` prints `file:line:match`, so a single walk
+attributes every hit to the name that produced it — the same trick the guid resolver uses. Measured on a
+real Unity project: 204s of per-candidate plain grep → 96s batched → **17s** once `git grep` replaced it,
+which also skips `Library/` for free because it is gitignored. The declaration is discounted by matching
+its LINE, not by subtracting one from its file — which was wrong the moment a member was used in the file
+that declares it.
+
+The page (`~/.ayin-cli/chore/chore-<repo>.html`) is written outside the repository, like every other
+artifact: a report about the tree is not a change to it. `--all` includes the used and the
+reflection-invoked, for auditing the scan itself. Exit status is 0 whether or not anything was found — this
+is a report, and a non-zero exit would break any pipeline that runs it routinely.
+
 ## `ayin unity …` — the Unity toolkit from a shell (`src/unity/cli.ts`)
 
     ayin unity prefab <file>              the hierarchy, its components, every guid resolved

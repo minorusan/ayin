@@ -1515,6 +1515,13 @@ async function main(): Promise<void> {
     process.exitCode = await runTestrunCli(process.argv.slice(3));
     return;
   }
+  if (process.argv[2] === 'chore') {
+    // Members added in recent commits that nothing uses. Deterministic — git plus grep, no model. Text by
+    // default; `--html` writes the page `/chore` opens. See src/chore/.
+    const { runChoreCli } = await import('./chore/cli.js');
+    process.exitCode = runChoreCli(process.argv.slice(3));
+    return;
+  }
   if (process.argv[2] === 'unity') {
     // One namespace for the Unity toolkit — prefab, animator, prefab_edit, test. No TUI, no model: every
     // one of them is deterministic, and three top-level subcommands would put Unity vocabulary in front

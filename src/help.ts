@@ -67,6 +67,11 @@ export const HELP: HelpEntry[] = [
     tip: '/diff opens your working tree as a real review page — filters, per-file triage, changed tokens marked.',
   },
   {
+    name: '/chore', kind: 'command', section: 'Code',
+    short: 'Members added in the last commits that nothing uses — with the commit that added each · also opens a page',
+    tip: '/chore finds code you added this week and nobody calls, naming the commit it came in on.',
+  },
+  {
     name: '/unity-test', kind: 'command', section: 'Code',
     short: 'Run Unity tests for assemblies you name (comma-separated) · bare /unity-test lists them and which are PlayMode',
   },
@@ -208,6 +213,10 @@ export const HELP: HelpEntry[] = [
     short: 'Open a terminal window at the front Finder/Explorer directory, running ayin. For a hotkey — see docs/LAUNCH.md',
   },
   { name: 'ayin testrun', kind: 'cli', section: 'From your shell', short: 'ayin testrun "<domain>" · --list shows what would run without running it' },
+  {
+    name: 'ayin chore', kind: 'cli', section: 'From your shell',
+    short: 'ayin chore [--commits N] [--all] [--html] — recently added members nothing uses, as text',
+  },
   {
     name: 'ayin unity', kind: 'cli', section: 'From your shell',
     short: 'The Unity toolkit: unity prefab <file> · unity animator <file> · unity prefab_edit … · unity test <Asm,Asm> · unity test --assemblies',
