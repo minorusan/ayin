@@ -336,6 +336,33 @@ export function replyTruncated(raw: string): boolean {
   try { return d.truncated?.(raw) === true; } catch { return false; }
 }
 
+/**
+ * Did the model WRITE a tool call that no dialect could parse, and then stop?
+ *
+ * The sibling of `replyTruncated`, and the same silent failure from the other direction. There the call
+ * was cut off; here it arrived complete in a shape ayin does not speak — observed live as
+ * `[str_replace(path=…, old_str=…, new_str=…)]`, which every dialect parses to zero calls. Zero calls is
+ * indistinguishable from a finished answer, so the loop printed the call at the operator as prose, said
+ * "Done.", and changed nothing. The file was reported edited and was not.
+ *
+ * `parseToolCalls` already offers the text to every other dialect, so by the time this runs the shape is
+ * one NO dialect accepts — the model invented it. The only move left is to say so and ask again.
+ *
+ * DELIBERATELY NARROW, because a false positive turns a correct answer into a wasted round: the match
+ * must be a known tool name at the start of a line, opening a paren, with a `name=` argument — the shape
+ * of an invocation, not of prose that mentions a tool. Fenced code blocks are stripped first, so an
+ * answer that legitimately SHOWS a call while explaining one is not mistaken for making it.
+ */
+export function unexecutedCallText(raw: string, toolNames: readonly string[]): string | null {
+  if (!raw) return null;
+  const prose = raw.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
+  for (const name of toolNames) {
+    const re = new RegExp(`(^|\\n)\\s*\\[?\\s*${name}\\s*\\(\\s*\\w+\\s*=`);
+    if (re.test(prose)) return name;
+  }
+  return null;
+}
+
 export function parseToolCalls(raw: string): ParseAllResult {
   const active = activeDialect();
   const result = active.parse(raw);

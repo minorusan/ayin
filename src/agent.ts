@@ -14,11 +14,12 @@
  */
 
 import { formatTurnTimings, resetTurnTimings, timed } from './timing.js';
+import { waiveReadOnce } from './tools/readGuard.js';
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { cancelActiveThinking } from './connection.js';
-import { llmChat, parseToolCalls, replyTruncated, renderToolCall, renderToolResult, activeModelId, activeContextTokens, charsPerToken, resetUsageBaseline, toolMode } from './llm/manager.js';
+import { llmChat, parseToolCalls, replyTruncated, unexecutedCallText, renderToolCall, renderToolResult, activeModelId, activeContextTokens, charsPerToken, resetUsageBaseline, toolMode } from './llm/manager.js';
 import { llmCall } from './llm.js';
 import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution, modelTools } from './tools.js';
@@ -1370,6 +1371,30 @@ async function runAgentTurn(userInput: string): Promise<void> {
       continue;
     }
     hasToolCalls = parsed.toolCalls.length > 0;
+
+    /**
+     * A CALL IN A SHAPE WE DO NOT SPEAK IS ALSO NOT AN ANSWER.
+     *
+     * The sibling of the truncation guard above. `parseToolCalls` has already offered the reply to every
+     * dialect, so a call-shaped line surviving to here is one the model invented — seen live as
+     * `[str_replace(path=…, old_str=…, new_str=…)]` after a refused edit. Zero parsed calls reads as a
+     * finished answer, so the loop printed it as prose, said "Done.", and edited nothing.
+     *
+     * Each re-ask costs a round, which is what bounds this: the round budget already terminates the turn.
+     */
+    if (!hasToolCalls) {
+      const invented = unexecutedCallText(parsed.text ?? response, getAllTools().map((t) => t.name));
+      if (invented) {
+        log('WARN', 'unparsed_tool_call_in_answer', { tool: invented, chars: String(response.length) });
+        addMessage('system', `[the model wrote a ${invented} call in a format ayin cannot parse — nothing ran; asking again]`);
+        pushToWindow('assistant', '[unparsed tool call]');
+        pushToWindow('user', renderToolResult(
+          `You wrote a ${invented} call in a format this runtime does not parse, so NOTHING RAN and the file `
+          + `is unchanged — do not assume the edit landed. Make the call again using the exact tool-call `
+          + `format described in your instructions, not a bracketed function-call line.`));
+        continue;
+      }
+    }
     // The RAW model text, before any parsing strips the tool-call markup — this is the thing you need
     // when the question is "why did it call that", and it is the first thing every other record drops.
     transcribeResponse(round, activeModelId(), response, parsed.toolCalls.length);
@@ -2127,9 +2152,25 @@ async function runAgentTurn(userInput: string): Promise<void> {
       if (finalCall && finalCall.name === 'write_file') {
         const tool = getTool('write_file');
         if (tool) {
-          await tool.execute(finalCall.params);
-          ctaDelivered = true;
-          log('INFO', 'cta_force_delivered', { target: ctaTarget });
+          /**
+           * The read-before-overwrite guard is WAIVED for this one write, and the result is CHECKED.
+           *
+           * Waived because this write is forced by the system, not chosen by the model: if the target
+           * already exists and was never read, a refusal here means the headless run ends having
+           * delivered nothing — worse than the overwrite the guard is protecting against.
+           *
+           * Checked because this branch used to set `ctaDelivered = true` on a call whose result it
+           * discarded, so any failure to write was reported in the log as a delivery. That was latent
+           * before (a full disk, a bad path) and the guard would have made it reachable on a normal run.
+           */
+          waiveReadOnce(String(finalCall.params.path ?? ctaTarget));
+          const wrote = await tool.execute(finalCall.params);
+          if (wrote.trimStart().startsWith('Error:')) {
+            log('WARN', 'cta_force_write_failed', { target: ctaTarget, error: wrote.split('\n')[0].slice(0, 200) });
+          } else {
+            ctaDelivered = true;
+            log('INFO', 'cta_force_delivered', { target: ctaTarget });
+          }
         }
       }
     } catch {}

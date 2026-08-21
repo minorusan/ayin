@@ -675,6 +675,25 @@ the faulty method and its caller, and the critic (armed at ≥ 2 facts) never ra
 A miss (`0 matches`, an error) is deliberately not evidence — otherwise the judge is lied to in the
 other direction.
 
+### A reply with no parsable call is not automatically an answer
+
+Zero parsed tool calls is indistinguishable from a finished answer, so the loop carries two guards
+against ending a turn on a call that never ran:
+
+- **Truncated** (`replyTruncated`) — the model opened a call and the generation hit a length ceiling.
+  Ask again, once per round, instructing it to make the call *smaller*.
+- **Invented format** (`unexecutedCallText`) — the call arrived complete in a shape no dialect speaks.
+  Observed live as `[str_replace(path=…, old_str=…, new_str=…)]` on the round after a refused edit: it
+  was printed at the operator as prose, the turn ended saying "Done.", and the file was never touched.
+  `parseToolCalls` already offers the text to every other dialect, so anything reaching this point is
+  the model's own invention rather than a dialect mismatch. Ask again, naming the tool and stating
+  plainly that nothing ran and the file is unchanged.
+
+Both re-asks consume a round, which is what bounds them — the round budget already ends the turn. The
+detector is deliberately narrow (a known tool name at the start of a line, opening a paren, with a
+`name=` argument; fenced and inline code stripped first), because a false positive turns a correct
+answer into a wasted round. `npm run check:readguard` pins the positive and the negative cases.
+
 ## sentinaile — a standing instruction, carried out on a schedule
 
     /sentinaile check the CI and tell me if anything broke, every 10 minutes
@@ -1847,6 +1866,41 @@ resolve to a real issue come back. Unconfigured is an honest gap in the evidence
   (regenerating a large file from memory risks dropping content). A miss is **diagnosed**, not merely
   reported: CRLF-vs-LF, whitespace-only difference (with the line the text starts on), or first-line
   match plus what the file actually says there. "old_str not found" is almost never a wrong location.
+
+### Read before you edit, read back after — enforced (`src/tools/readGuard.ts`)
+
+`str_replace` and `write_file` **refuse** to change an existing file the process has not read, and both
+**read the file back off the disk** before reporting success.
+
+The failure this closes is invisible from the outside. "old_str not found" is indistinguishable from a
+quoting mistake, so a model that has not actually read the file retries with looser context until
+something matches — and returns a clean, plausible diff for an edit in the wrong place. `edit-truth.ts`
+already diagnosed this ("repeated misses on ONE file mean the model is editing text it has not read");
+this enforces the diagnosis instead of only reporting it.
+
+**The check is on LINE RANGES, not paths.** `read_file` returns at most 800 lines, so "I read this file"
+can be true of a 1000-line file while the edit lands at line 950 in the part that never came back. A
+path-level guard passes that; this one refuses it and names the line. `str_replace` already locates its
+match before writing, so the line number costs nothing.
+
+| Case | Result |
+|---|---|
+| Edit an existing file never read | refused — names the file and the tool to use |
+| Edit at a line outside what was returned | refused — "you have seen lines 1-800 (the file has 1000)" |
+| Edit after the file changed on disk | refused as stale — size+mtime compared against the read |
+| `write_file` over a file read only in part | refused — this is the `N lines GONE` banner, enforced instead of printed after the fact |
+| **Create** a new file | allowed, no read required — there is nothing to have read |
+| A second edit to the same file | allowed — the read-back already re-armed the guard |
+| Any successful write | result carries `read back from disk: N B, byte-identical` |
+
+Both tools return the refusal as an `Error:` string rather than throwing, which is the contract
+`edit-truth.ts` reads to count an attempt as not-landed. The holes in the rule are as deliberate as the
+rule: a guard that fires on correct behaviour is one the next person deletes wholesale, taking the real
+check with it. The single exemption is `waiveReadOnce`, used only by the headless CTA force-write in
+`agent.ts`, where a refusal would mean the run delivers nothing at all — one path, consumed on use, and
+the read-back still applies.
+
+`npm run check:readguard` asserts every row above against the real tools in a temp directory.
 
 ### The base tools tell the truth about their own limits
 

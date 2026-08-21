@@ -6,6 +6,7 @@ import { addPendingImage, isImagePath, preprocessImage } from '../../image.js';
 import { corpusBlockFor, chunksForFile } from '../../indulge/inject.js';
 import { log } from '../../log.js';
 import { attributeFile } from '../../indulge/attribution.js';
+import { recordRead } from '../readGuard.js';
 
 export const tool: Tool = {
     name: 'read_file',
@@ -125,6 +126,10 @@ export const tool: Tool = {
           });
         }
       } catch { /* attribution never breaks the read it annotates */ }
+      // The read-before-edit guard is armed with the range ACTUALLY RETURNED, not the whole file: a
+      // capped read of a 5000-line file must not license an edit at line 4012 in the part that never
+      // came back. See `../readGuard.ts`.
+      recordRead(resolved, [off2 + 1, lastShown], lines.length);
       return `${attribution}${header}${numbered}${footer}${corpus}`;
     },
   };
