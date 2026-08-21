@@ -392,9 +392,9 @@ export function unityHasProjectOpen(repo: string): boolean {
 }
 
 /** True for a directory that is a Unity project at all. */
+/** Both markers: `Assets/` alone matches a plain `assets/` folder on a case-insensitive filesystem. */
 export function isUnityProject(repo: string): boolean {
-  return existsSync(join(repo, 'ProjectSettings', 'ProjectVersion.txt'))
-    || existsSync(join(repo, 'Assets'));
+  return existsSync(join(repo, 'Assets')) && existsSync(join(repo, 'ProjectSettings'));
 }
 
 /** The Editor version this project pins, for locating the matching install. */

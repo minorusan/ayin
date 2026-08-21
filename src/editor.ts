@@ -55,19 +55,30 @@ function run(cmd: string, args: string[], timeoutMs = 10_000): Promise<{ code: n
 }
 
 /**
- * Open `target` in VS Code (or Insiders/Codium) if the policy allows it AND a CLI is on PATH.
+ * Open one or more targets in VS Code (or Insiders/Codium) if the policy allows it AND a CLI is on PATH.
  * `force` bypasses the policy for a genuinely user-initiated open (a command whose whole purpose
  * is "show me this"); it still cannot open when headless.
+ *
+ * SEVERAL TARGETS GO IN ONE INVOCATION. `code a b c` opens three tabs in one window; three separate
+ * launches race each other for which window wins and can leave the operator with three of them.
  */
-export async function openInEditor(target: string, opts: { force?: boolean } = {}): Promise<boolean> {
+export async function openInEditor(
+  target: string | string[], opts: { force?: boolean } = {},
+): Promise<boolean> {
+  const targets = (Array.isArray(target) ? target : [target]).filter(Boolean);
+  if (!targets.length) return false;
   if (!opts.force && !openPolicy().allowed) return false;
   if (opts.force && HEADLESS) return false;
   for (const bin of ['code', 'code-insiders', 'codium']) {
     const probe = await run(bin, ['--version'], 8_000);
     if (probe.code === 0) {
-      const r = await run(bin, [target], 10_000);
+      // A big turn can touch dozens of files; a window with dozens of tabs is not a review.
+      const r = await run(bin, targets.slice(0, MAX_TABS), 15_000);
       return r.code === 0;
     }
   }
   return false;
 }
+
+/** Tabs worth opening at once. Past this it is a file list, not something anyone reads. */
+const MAX_TABS = 12;

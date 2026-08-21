@@ -1374,6 +1374,29 @@ strict `JSON.parse` would reject good answers for a cosmetic reason.
 - **Config:** `AYIN_PRESENTER=0` is a hard kill switch, independent of and beating the session toggle —
   Presenter is skipped outright and QA falls back to reviewing the raw reply.
 
+### What a presentation hands over (`presenter/handoff.ts`)
+
+A presented turn does not just describe the work — it **stages it and opens it**. `/present` means "show
+me the work", and the next thing an operator does with shown work is look at what changed and decide what
+goes in the commit.
+
+The policy is not new: it is `diff/stage.ts#autoStage`, the same one the watch daemon uses — C# staged line
+by line with **live debug output held back**, `.meta` following the asset it belongs to, a `.asset` only
+when it is a ScriptableObject of a script in this project, prefabs and animator files whole, nothing over
+the size cap. A second copy of those rules would drift from the daemon's and the two would then disagree
+about what a commit should contain. What was **held back is printed**: the operator is about to commit and
+the part left behind is still in their tree, so silence there would be ayin quietly deciding what belongs
+in a commit. Files staged are then opened in one editor invocation (`code a b c`, capped at 12 tabs —
+three launches race for which window wins), and only if `editor.ts` allows it: headless, the daemon and
+`AYIN_EDITOR_OPEN=never` open nothing, which is why that decision lives in the one file that knows how to
+hand a file to an editor.
+
+`isUnityRepo` was corrected in the same change and now requires **`Assets/` AND `ProjectSettings/`**.
+`Assets/` alone matched this very repository — macOS and Windows filesystems are case-insensitive, so
+`existsSync('Assets')` is true for a plain `assets/` folder, and a TypeScript project was being handed the
+Unity staging policy. `watch.ts` had already worked that out in a private copy; there is now one
+definition, which is the argument for there having been one all along.
+
 ## QA gate (`src/qa/`)
 
 The agent's own last message is the least trustworthy thing it produces: written by the same model that
@@ -2099,6 +2122,22 @@ the fragment as the whole and reasons confidently from it. So every bound is sta
     every time it runs. A per-project retrieval layer (embed once, recall across sessions) is a
     separate, much larger project; it does not block this fix, since an investigation that stops
     looping within itself is worth having regardless of what it can remember between calls.
+
+### A mistyped command never runs anything (`help.ts#suggestNames`)
+
+A bare word that was not a subcommand used to be waved through as "not our business", so `ayin unty prefab
+Assets/Widget.prefab` **started a session and discarded the rest of the line** — the operator watched the
+TUI boot with no idea what had become of what they asked for. Now the first argument must be a known
+subcommand or a flag: anything else exits 2, names itself, and suggests the nearest real command.
+
+The suggestions come from the help list, which makes it the database of what was probably meant as well as
+of what exists — a command that is not in it cannot be suggested, and one that is cannot be missed. Exact
+match first (a name typed correctly is not a suggestion), then an edit distance that scales with the word
+(one edit for a short name, three for a long one) plus a prefix rule, because `pref` means `prefab` however
+far the tail is. The same helper answers an unknown slash command in the TUI (`/prefabb` → "did you mean
+/prefab?") and the `unity` namespace's own subcommands. `help.ts` keeps its own small edit-distance
+function on purpose: `tools/lib.ts` has one, and importing it would drag the tool registry into a module
+that must load before anything is wired.
 
 ## Commands and tricks are ONE list (`help.ts`)
 

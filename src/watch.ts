@@ -33,6 +33,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { isUnityRepo } from './diff/stage.js';
 import { createHash } from 'node:crypto';
 import { llmChat, refreshActiveModel } from './llm/manager.js';
 import { connect, llmBaseUrl } from './connection.js';
@@ -547,9 +548,9 @@ function unityDiffToolPath(): string {
   return process.env.AYIN_UNITY_DIFF || join(homedir(), 'tools', 'unity_asset_diff.py');
 }
 
-function isUnityRepo(repo: string): boolean {
-  return existsSync(join(repo, 'Assets')) && existsSync(join(repo, 'ProjectSettings'));
-}
+// The one definition lives in diff/stage.ts — this file had the correct private copy while the shared one
+// was wrong, which is the argument for there being only one.
+
 
 async function unityAssetDiff(repo: string, commit: string): Promise<string | null> {
   if (!isUnityRepo(repo)) return null; // non-Unity repo → section absent entirely

@@ -44,6 +44,12 @@ const NO_MODEL_NEEDED = new Set([
   'diff',
   // `debug` copies files that already exist — it must work when nothing else does.
   'debug',
+  // `unity` reads and edits Unity assets and runs Unity's own test runner. Every part of it is a parser,
+  // a grep or a subprocess — there is nothing for a model to do, and demanding one would make the toolkit
+  // unusable on exactly the machine where the endpoint has gone away.
+  'unity',
+  // `chore` is git plus grep. Same reasoning.
+  'chore',
   // `testrun` drives NUnit/Unity; the model is only consulted through the corpus, which is on disk.
   'testrun',
   // `kill dog` throws a switch and deletes hook files. Same reasoning as `unwatch`, only sharper: the

@@ -91,9 +91,17 @@ export function safeRepoPath(repo: string, path: string): boolean {
     || gitQuiet(repo, ['diff', '--cached', '--name-only', '--', path]) !== '';
 }
 
+/**
+ * BOTH markers, never either.
+ *
+ * `Assets/` alone matched this very repository — macOS and Windows filesystems are case-insensitive, so
+ * `existsSync('Assets')` is true for a plain `assets/` folder, and a TypeScript project was handed the
+ * Unity staging policy. Unity creates `ProjectSettings/` for every project it has ever made, so requiring
+ * both costs nothing and removes the whole class of false positive. `watch.ts` had already worked this out
+ * privately; this is now the one copy, because a fact duplicated in two places drifts and this one did.
+ */
 export function isUnityRepo(repo: string): boolean {
-  return existsSync(join(repo, 'ProjectSettings', 'ProjectVersion.txt'))
-    || existsSync(join(repo, 'Assets'));
+  return existsSync(join(repo, 'Assets')) && existsSync(join(repo, 'ProjectSettings'));
 }
 
 // ── the two single-file writes the per-file buttons make ─────────────────────────

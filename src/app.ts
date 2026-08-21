@@ -62,7 +62,7 @@ let embedNextTurn = false;
 /** The FIRST prompt states the task; later ones are refinements. Only the first is automatic. */
 let promptsThisSession = 0;
 import { getGoal, setGoal, clearGoal, refreshGoal } from './goal.js';
-import { SECTIONS, entriesInSection } from './help.js';
+import { SECTIONS, entriesInSection, suggestNames } from './help.js';
 import { runArduinoDiagram, formatArduinoDiagramOutcome } from './tools/arduino-diagram.js';
 import { runExplain, formatExplainOutcome as formatExplainReportOutcome } from './explain/index.js';
 import { readFileSync } from 'node:fs';
@@ -1243,7 +1243,10 @@ async function handleInput(text: string): Promise<void> {
           return;
         }
         const enabled = togglePresenterSession();
-        addMessage('system', `Presenter pass ${enabled ? 'ON' : 'OFF'} for the rest of this session`);
+        addMessage('system', enabled
+          ? 'Presenter pass ON for the rest of this session — each finished turn is presented, staged per '
+            + "this project's policy, and opened in your editor"
+          : 'Presenter pass OFF for the rest of this session');
         return;
       }
       case '/presentthis': {
@@ -1351,7 +1354,13 @@ async function handleInput(text: string): Promise<void> {
         await loadTools();
         const tool = findToolBySlash(cmd);
         if (!tool || !tool.slash) {
-          addMessage('system', `Unknown command: ${cmd}`);
+          // A typo is not a question for the model, and "Unknown command" alone leaves the operator to
+          // guess which letter was wrong. The help list is the database of what exists, so it is also the
+          // database of what was probably meant.
+          const near = suggestNames(cmd, 'command');
+          addMessage('system', near.length
+            ? `Unknown command: ${cmd} — did you mean ${near.map((n) => `/${n}`).join(' · ')}?`
+            : `Unknown command: ${cmd}. /help lists every command.`);
           return;
         }
         const arg = text.slice(cmd.length).trim();

@@ -287,6 +287,38 @@ ok(why('ProjectSettings/EditorSettings.asset').staged === false,
 ok(res.outcomes.every((o) => typeof o.why === 'string' && o.why.length > 0),
   'every outcome carries a reason — a file that silently failed to stage is the complaint this answers');
 
+// ── what /present hands over: the SAME policy, plus the editor ──────────────────
+//
+// `/present` means "show me the work", and the last thing an operator does with shown work is stage it
+// and look at it. So a presented turn runs this policy and opens what it staged — and it must reuse
+// autoStage rather than re-deciding, or the presenter and the watch daemon would disagree about what
+// belongs in a commit. Headless here, so nothing may open: that gate lives in editor.ts, and this
+// asserts the handoff respects it rather than launching a window on a machine with no desk.
+const { stageAndOpenForPresentation, renderHandoff } = await import(`file://${join(ROOT, 'dist', 'presenter', 'handoff.js')}`);
+const handoff = await stageAndOpenForPresentation(IX);
+ok(handoff.policy === 'unity', 'the handoff uses the project policy, not one of its own', handoff.policy);
+// The autoStage call above already staged everything that qualifies, so the handoff finds only the
+// declined files left — which is the honest second-run behaviour and worth pinning: a policy that
+// re-reported already-staged files would read as work it had just done.
+ok(handoff.staged.length === 0 && handoff.skipped.length === 3,
+  'a second pass reports only what is still unstaged, and re-stages nothing',
+  `${handoff.staged.length} staged, ${handoff.skipped.length} skipped`);
+ok(handoff.skipped.every((sk) => sk.why.length > 0), 'each of them with the reason it was declined');
+ok(handoff.opened === false && /headless/.test(handoff.openWhy),
+  'nothing opens when there is no desk to put a window on', handoff.openWhy);
+const handoffText = renderHandoff(handoff);
+ok(/nothing new staged — of the 3 file\(s\) still unstaged, none qualify under the unity policy/.test(handoffText),
+  'and says so as a decision rather than as a failure', handoffText.split('\n')[0]);
+ok(/not staged: Assets\/ThirdParty\/Vendor\.asset/.test(handoffText),
+  'and what was LEFT — a file the tool decided against is a decision the operator must see');
+// A repository with no staging policy stages nothing and SAYS nothing. ROOT is this repo, which has a
+// lowercase `assets/` — it was classified as Unity until `isUnityRepo` was made to require
+// `ProjectSettings/` as well, because `existsSync('Assets')` is true for `assets/` on this filesystem.
+const noPolicy = await stageAndOpenForPresentation(ROOT);
+ok(noPolicy.policy === '' && renderHandoff(noPolicy) === '',
+  'a project with no staging policy stages nothing and says nothing — silence, not an empty heading',
+  `policy=${JSON.stringify(noPolicy.policy)}`);
+
 // ── the path guard on the write routes ──
 const { safeRepoPath } = await import(`file://${join(ROOT, 'dist', 'diff', 'stage.js')}`);
 ok(safeRepoPath(IX, 'Assets/Prefabs/Hero.prefab'), 'a real repo path is accepted');

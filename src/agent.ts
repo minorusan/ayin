@@ -48,6 +48,7 @@ import { regenerateTouchedDiagrams } from './arduino-diagram-regen.js';
 import { gateAdoption, nextBrief, implementedCount, stopAwaitingOperator } from './entangle/index.js';
 import { loadTools } from './tools.js';
 import { presenterPass, shouldRunPresenterThisTurn } from './presenter/index.js';
+import { renderHandoff, stageAndOpenForPresentation } from './presenter/handoff.js';
 import { clearActivity } from './activity.js';
 import { callKey, guardBeginTurn, guardCheck, guardDirective, guardNoteDenied, guardNoteMutation, TREE_SAFE } from './tool-guard.js';
 import { planContextBlock, runPlan } from './plan/index.js';
@@ -1594,6 +1595,19 @@ async function runAgentTurn(userInput: string): Promise<void> {
                 ].join('\n'));
               }
               textForQa = presenterOutcome.text;
+
+              /**
+               * A PRESENTATION HANDS THE WORK OVER, not just a description of it.
+               *
+               * "Show me the work" ends with the operator looking at what changed and deciding what goes
+               * in the commit — so the presented turn stages per this project's policy (the daemon's own
+               * `autoStage`, C# line by line with live debug output held back) and opens what it staged.
+               * What was held back is printed: the operator is about to commit, and the part left behind
+               * is still sitting in their tree.
+               */
+              const handoff = await stageAndOpenForPresentation(process.cwd());
+              const handoffText = renderHandoff(handoff);
+              if (handoffText) addMessage('system', handoffText);
             } else if (parsed.text) {
               // Presenter declined (literal/warning/error/question/not-a-presentation, or disabled) —
               // show the raw reply exactly as interactive mode always has.
