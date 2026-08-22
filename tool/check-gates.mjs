@@ -212,8 +212,13 @@ const readTool = toolsMod.getTool('read_file');
 const bigFile = join(sRoot, 'big.ts');
 writeFileSync(bigFile, Array.from({ length: 1200 }, (_, i) => `line ${i + 1}`).join('\n'));
 let r1 = await readTool.execute({ path: bigFile });
-ok(/more lines — continue with offset=/.test(r1), 'a read with no limit is capped and SAYS how to continue, instead of returning a file the window then cuts silently');
+ok(/unread: \d+-1200/.test(r1) && /slide there/.test(r1),
+  'a read with no limit is capped and SAYS what is still unread and how to continue, instead of returning a file the window then cuts silently');
 ok(!/line 1000\b/.test(r1), 'the cap actually applies');
+// The SECOND param-free read must not repeat the first window — that was a wasted round.
+let r1b = await readTool.execute({ path: bigFile });
+ok(/slid past what you already read/.test(r1b) && /line 1000\b/.test(r1b),
+  'a repeated param-free read SLIDES to the unread part instead of returning the same top slice', r1b.split('\n')[0]);
 let r2 = await readTool.execute({ path: bigFile, offset: '191' });
 ok(/^\(lines 191-/.test(r2) && /\n191\tline 191/.test(`\n${r2}`), 'offset is the LINE NUMBER — a grep hit pasted straight in lands on that line, not the one after', r2.split('\n')[1]);
 writeFileSync(join(sRoot, 'bin.dat'), Buffer.from([0x41, 0x00, 0x42, 0x00]));

@@ -110,6 +110,8 @@ interface CallState {
   witness: string;
   /** The mutation epoch at that moment, for calls whose target is not one file. */
   epoch: number;
+  /** The read epoch at that moment — see `guardNoteRead`. */
+  readEpoch: number;
 }
 
 const calls = new Map<string, CallState>();
@@ -173,6 +175,44 @@ function witnessOf(params: Record<string, string>): string {
     return 'missing';
   }
 }
+/**
+ * A READ IS ALSO THE WORLD MOVING — because what the agent has read now decides whether an edit runs.
+ *
+ * `readGuard` refuses an edit to a region that was never returned by a read, and the prescribed recovery
+ * is: read the right lines, then make THE SAME CALL again. To this guard that retry looked byte-identical
+ * to the refused attempt, with no witness change (the refusal wrote nothing) and no epoch bump (a read is
+ * TREE_SAFE) — so it was skipped as a repeat and then blocked, and the edit never landed. Observed on a
+ * live run: read → grep → str_replace refused → read the right window → `skipped (identical repeat)` →
+ * `blocked (3 identical calls)` → "Done", file unchanged.
+ *
+ * So a read of the file a call targets lifts that call's ladder, exactly as a write does. This cannot be
+ * used to loop: after the retry runs, another identical call with no further read in between is blocked
+ * again, and the "wrong old_str retried verbatim" loop — the case this guard was built for — has no read
+ * in between and is still caught.
+ */
+const readsAt = new Map<string, number>();
+let readEpoch = 0;
+
+/** The absolute form of the path a call names, matching `witnessOf` so the two agree on identity. */
+function absPath(raw: string): string {
+  if (!raw.trim()) return '';
+  return isAbsolute(raw) ? raw : resolve(process.cwd(), raw);
+}
+
+/** Called by the agent loop after a read-only tool that names a path succeeds. */
+export function guardNoteRead(paths: string[]): void {
+  const abs = paths.map(absPath).filter(Boolean);
+  if (!abs.length) return;
+  readEpoch++;
+  for (const p of abs) readsAt.set(p, readEpoch);
+  log('INFO', 'guard_read_noted', { epoch: String(readEpoch), paths: abs.slice(0, 3).join(',') });
+}
+
+/** Every path a call targets, for the read-lift check. Mirrors the mutation hook's list. */
+function targetsOf(params: Record<string, string>): string[] {
+  return [params.path, params.file, params.to].filter((p): p is string => Boolean(p)).map(absPath).filter(Boolean);
+}
+
 const blocked = new Map<string, string>(); // key → why
 let denied = new Map<string, string>();    // key → what the user refused
 
@@ -188,6 +228,7 @@ export function callKey(name: string, params: Record<string, string>): string {
 export function guardBeginTurn(): void {
   calls.clear();
   blocked.clear();
+  readsAt.clear();
   denied = new Map();
   // The epoch is NOT reset: it counts writes, and a turn boundary does not un-write them. Resetting it
   // would only matter if a stale CallState survived the turn, and none does.
@@ -240,14 +281,17 @@ export function guardCheck(name: string, params: Record<string, string>): GuardD
   if (prior) {
     const fileChanged = witness !== '' && prior.witness !== '' && witness !== prior.witness;
     const filesWritten = bumps.some((b) => b.epoch > prior.epoch && b.key !== key);
-    if (fileChanged || filesWritten) {
-      calls.set(key, { count: 1, lastAt: now, witness, epoch: mutationEpoch });
+    const readSince = targetsOf(params).some((p) => (readsAt.get(p) ?? 0) > prior.readEpoch);
+    if (fileChanged || filesWritten || readSince) {
+      calls.set(key, { count: 1, lastAt: now, witness, epoch: mutationEpoch, readEpoch });
       const wasBlocked = blocked.delete(key);
-      const why = fileChanged ? 'the file it reads has changed since' : 'files have been written since';
+      const why = fileChanged ? 'the file it reads has changed since'
+        : filesWritten ? 'files have been written since'
+        : 'you have READ the file since, which is what an edit needs and is why the earlier attempt was refused';
       log('INFO', 'guard_repeat_allowed_stale', { tool: name, reason: why, unblocked: String(wasBlocked) });
       return {
         allow: true,
-        label: fileChanged ? 'allowed (target changed)' : 'allowed (files written since)',
+        label: fileChanged ? 'allowed (target changed)' : filesWritten ? 'allowed (files written since)' : 'allowed (read since)',
         note: `\n\n[This repeats an earlier call, and it ran because ${why} — the earlier result is stale. `
           + `Nothing else about the repeat policy has changed: an identical call with nothing changed in between is still blocked.]`,
       };
@@ -265,12 +309,13 @@ export function guardCheck(name: string, params: Record<string, string>): GuardD
     };
   }
 
-  const state = prior ?? { count: 0, lastAt: 0, witness, epoch: mutationEpoch };
+  const state = prior ?? { count: 0, lastAt: 0, witness, epoch: mutationEpoch, readEpoch };
   const sinceMs = state.lastAt ? now - state.lastAt : Infinity;
   state.count++;
   state.lastAt = now;
   state.witness = witness;
   state.epoch = mutationEpoch;
+  state.readEpoch = readEpoch;
   calls.set(key, state);
 
   // First time — nothing to police.

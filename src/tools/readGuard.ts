@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from 'node:fs';
 import { resolveAgainstCwd } from './lib.js';
+import { type Span, describeSpans, mergeSpans, spanLines } from './readWindow.js';
 
 /**
  * READ BEFORE YOU EDIT, AND READ BACK AFTER — enforced by refusal, not asked for in a prompt.
@@ -46,9 +47,6 @@ import { resolveAgainstCwd } from './lib.js';
  * nothing finer to scope to and no need for a session id.
  */
 
-/** An inclusive, 1-based line span that was actually returned to the model. */
-type Span = [number, number];
-
 interface ReadMark {
   size: number;
   mtimeMs: number;
@@ -81,29 +79,14 @@ function stat(path: string): { size: number; mtimeMs: number; at: number } | nul
   }
 }
 
-/** Merge a new span into a sorted, non-overlapping list. Adjacent spans join: 1-800 + 801-900 = 1-900. */
-function merge(spans: Span[], add: Span): Span[] {
-  const all = [...spans, add].sort((a, b) => a[0] - b[0]);
-  const out: Span[] = [];
-  for (const s of all) {
-    const last = out[out.length - 1];
-    if (last && s[0] <= last[1] + 1) last[1] = Math.max(last[1], s[1]);
-    else out.push([s[0], s[1]]);
-  }
-  return out;
-}
+const merge = (spans: Span[], add: Span): Span[] => mergeSpans([...spans, add]);
 
 function covers(spans: Span[], from: number, to: number): boolean {
   return spans.some((s) => s[0] <= from && s[1] >= to);
 }
 
-function coveredCount(spans: Span[]): number {
-  return spans.reduce((n, s) => n + (s[1] - s[0] + 1), 0);
-}
-
-function describe(spans: Span[]): string {
-  return spans.map((s) => (s[0] === s[1] ? `${s[0]}` : `${s[0]}-${s[1]}`)).join(', ') || 'none';
-}
+const coveredCount = spanLines;
+const describe = describeSpans;
 
 /**
  * Record that a file was read.
@@ -182,7 +165,8 @@ export function requireRead(path: string, tool: string, where: Where = {}): stri
         + `only read lines ${describe(mark.spans)} of it (${coveredCount(mark.spans)} of ${mark.lines}).\n`
         + `Rewriting a file you have seen part of is how content silently disappears: whatever you did not `
         + `read is not in the replacement you are about to write.\n`
-        + `Either read the rest (read_file ${path} offset=${coveredCount(mark.spans) + 1}) or, better, use `
+        + `Either read the rest (read_file ${path} again — with no offset it SLIDES to the next part you `
+        + `have not read) or, better, use `
         + `str_replace to change only the lines you mean to change.`;
     }
     const from = where.atLine;
@@ -191,8 +175,9 @@ export function requireRead(path: string, tool: string, where: Where = {}): stri
       return `Error: ${tool} refused — the text you are replacing is at line${from === to ? ` ${from}` : `s ${from}-${to}`} `
         + `of ${path}, and you have not read that part: you have seen lines ${describe(mark.spans)} `
         + `(the file has ${mark.lines}).\n`
-        + `read_file ${path} offset=${Math.max(1, from - 20)} first — a match found in text you have not `
-        + `seen is a match you cannot know is the right one.`;
+        + `read_file ${path} around=${from} first — that returns a window CENTRED on that line, with `
+        + `the context on both sides. A match found in text you have not seen is a match you cannot know `
+        + `is the right one.`;
     }
   }
   return null;
@@ -248,6 +233,28 @@ let waived: string | null = null;
 
 export function waiveReadOnce(path: string): void {
   waived = key(path);
+}
+
+export interface Coverage {
+  /** Merged spans of lines already returned to the model. */
+  spans: Span[];
+  /** The file's line count as of that read. */
+  lines: number;
+}
+
+/**
+ * What has already been read of this file, or `null` if nothing has — or if the file has CHANGED since,
+ * which makes the recorded spans describe bytes that are gone. Returning stale coverage would slide a
+ * read past lines it never actually saw, which is the same lie as the guard passing a stale edit.
+ */
+export function coverage(path: string): Coverage | null {
+  const k = key(path);
+  const mark = reads.get(k);
+  if (!mark) return null;
+  const now = stat(k);
+  if (!now || now.size !== mark.size || now.mtimeMs !== mark.mtimeMs) return null;
+  if (mark.lines <= 0) return null;
+  return { spans: mergeSpans(mark.spans), lines: mark.lines };
 }
 
 /** For gates: how many paths are marked read. */

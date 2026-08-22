@@ -1332,6 +1332,23 @@ from a tool that hung. And the per-tool **loop nudge** fires every 12th use of o
 wide search over a big tree legitimately runs eight times), stated as a count rather than as a verdict on
 the model's intent.
 
+### A read lifts an edit's repeat ladder
+
+The repeat guard judges a repeat against the world: the **witness** (mtime+size of the file the call
+names) and the **epoch** (bumped when ayin's edit tools write). `readGuard` added a third input it did
+not know about — *what the agent has read* now decides whether an edit runs at all.
+
+That gap broke a live run. `readGuard` refuses an edit to lines never returned by a read and prescribes
+"read them, then make the same call again". The retry is byte-identical, the refusal wrote nothing so the
+witness is unchanged, and a read is `TREE_SAFE` so no epoch bump — so the retry was `skipped (identical
+repeat)`, then `blocked (3 identical calls)`, and the turn said "Done" with the file unchanged.
+
+So `guardNoteRead` records a read epoch per path, and a read of the file a call targets lifts that call's
+ladder exactly as a write does (`allowed (read since)`). This cannot be used to loop: after the retry
+runs, a further identical call with no new read in between is blocked again — and the case the guard was
+built for, a wrong `old_str` retried verbatim, has no read in between and is still caught. Asserted in
+`npm run check:readguard`.
+
 ## Presenter pass (`src/presenter/`)
 
 **Off by default for the session** — `/present` (bare) toggles it on for the rest of the session;
@@ -1901,6 +1918,45 @@ check with it. The single exemption is `waiveReadOnce`, used only by the headles
 the read-back still applies.
 
 `npm run check:readguard` asserts every row above against the real tools in a temp directory.
+
+### Read windows slide (`src/tools/readWindow.ts`)
+
+`read_file` caps at `READ_MAX_LINES` (800), and for a big file the first 800 lines are almost never the
+answer — they are imports. Four ways to pick a window, in priority order:
+
+| | Window |
+|---|---|
+| `tail=N` | the last N lines, verbatim |
+| `around=N` | a **focused** window centred on line N (default 100 lines, `limit=` widens it) — paste a `grep` hit straight in |
+| `offset=N` | starts exactly at line N |
+| *nothing* | the next part **not yet read**, sliding forward |
+
+**The slide is the important one.** A second param-free read used to return the same top-of-file slice,
+so it was a wasted round; it now moves to the first unread region (with `SLIDE_OVERLAP` lines of overlap
+so a construct straddling the boundary survives) and says `— slid past what you already read (1-800)`.
+Coverage comes from `readGuard`, which already records exactly which spans were returned, and is
+discarded when the file changed underneath — stale spans would slide past lines that were never seen.
+
+**The footer reports the complement**, not the tail: `(unread: 801-982 — 182 of 1004 lines …)`. The old
+"N more lines" was simply wrong after one slide, telling a model that had read 1-800 and 801-1000 of a
+2000-line file that 1000 lines remained, with no hint that 1-800 was behind it.
+
+It is `readWindow.ts`, not `window.ts`: in this repo "the window" already means the CONTEXT window
+(`trimToContext`, guarded by `tool/check-window.mjs` for KV-cache headroom). Two unrelated things with one
+name is how the wrong file gets edited — which is exactly what happened while building this.
+
+**Windows snap to a structural break** (`snapEnd`, `snapStart`) so a window does not end mid-function.
+Language-agnostic on purpose: a blank line separates constructs everywhere, a bracket alone at column 0
+closes one — no parser, no per-language table. The candidate is chosen by **distance**, with a blank line
+preferred over a bracket only at comparable range; ranking by quality alone shrank a window seven lines
+to reach a blank when a bracket sat one line ahead.
+
+`around` defaults small deliberately. Sized at the full cap, `around=1003` of a 1004-line file returned
+lines 205-1004 — correct arithmetic, 800 lines of context to show one constant, and on a live run the
+model immediately followed it with a narrower read.
+
+`npm run check:readwindow` pins the arithmetic at its edges (line 1, line `total`, a window wider than the
+file) plus the slide, the no-slide-when-changed case, and the focused default.
 
 ### The base tools tell the truth about their own limits
 

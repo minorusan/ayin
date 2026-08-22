@@ -93,7 +93,7 @@ console.log('\nstr_replace — a CAPPED read does not license an edit in the unr
   writeFileSync(big, lines.join('\n') + '\n', 'utf-8');
 
   const head = await readFile.execute({ path: big });
-  ok(/of 1001/.test(head) && /more lines/.test(head), 'the read is capped and says so', head.split('\n')[0]);
+  ok(/of 1001/.test(head) && /unread: \d+-1001/.test(head), 'the read is capped and names what is unread', head.split('\n')[0]);
 
   const r = await strReplace.execute({ path: big, old_str: 'const line950 = 950;', new_str: 'const line950 = 0;' });
   ok(r.startsWith('Error:') && /have not read that part/.test(r),
@@ -103,9 +103,10 @@ console.log('\nstr_replace — a CAPPED read does not license an edit in the unr
   const r2 = await strReplace.execute({ path: big, old_str: 'const line400 = 400;', new_str: 'const line400 = 0;' });
   ok(!r2.startsWith('Error:'), 'an edit at line 400, which WAS returned, is allowed', r2.split('\n')[0].slice(0, 50));
 
-  await readFile.execute({ path: big, offset: '801' });
+  ok(/around=950/.test(r), '...and the refusal suggests around=<line>, not a computed offset');
+  await readFile.execute({ path: big, around: '950' });
   const r3 = await strReplace.execute({ path: big, old_str: 'const line950 = 950;', new_str: 'const line950 = 0;' });
-  ok(!r3.startsWith('Error:'), 'reading the rest allows the line-950 edit', r3.split('\n')[0].slice(0, 50));
+  ok(!r3.startsWith('Error:'), 'reading around=950 then allows the line-950 edit', r3.split('\n')[0].slice(0, 50));
 }
 
 console.log('\nwrite_file — create is free, overwrite is not');
@@ -149,6 +150,34 @@ console.log('\nread-back — a write that does not land must not report success'
   ok(!b.ok && /MISMATCH/.test(b.note), 'content that differs fails the read-back', b.note.slice(0, 70));
   const c = readBackAfter(real, 'what is actually there');
   ok(c.ok && /byte-identical/.test(c.note), 'matching content passes', c.note);
+}
+
+console.log('\nthe repeat guard must not block the recovery the read guard prescribes');
+{
+  // THE INTERACTION THAT BROKE A LIVE RUN. readGuard refuses an edit to unread lines and says "read
+  // them, then make the same call again". That retry is byte-identical, and a read is TREE_SAFE so it
+  // bumps no mutation epoch — so the repeat guard skipped it, then blocked it, and the edit never
+  // landed while the turn reported "Done".
+  const { guardBeginTurn, guardCheck, guardNoteRead } = await import('../dist/tool-guard.js');
+  const f = join(DIR, 'interaction.ts');
+  writeFileSync(f, 'const a = 1;\n', 'utf-8');
+  guardBeginTurn();
+  const params = { path: f, old_str: 'const a = 1;', new_str: 'const a = 2;' };
+
+  const first = guardCheck('str_replace', params);
+  ok(first.allow, 'the first edit attempt is allowed (readGuard is what refuses it)');
+
+  const repeatNoRead = guardCheck('str_replace', params);
+  ok(!repeatNoRead.allow, 'an identical retry with NOTHING in between is still refused — the loop case stays closed',
+    repeatNoRead.label);
+
+  guardNoteRead([f]);
+  const afterRead = guardCheck('str_replace', params);
+  ok(afterRead.allow, 'but after READING the file, the identical retry RUNS', afterRead.label);
+  ok(/READ the file since/.test(afterRead.note ?? ''), '...and the note says why', (afterRead.note ?? '').slice(0, 64));
+
+  const againNoRead = guardCheck('str_replace', params);
+  ok(!againNoRead.allow, 'and a further identical call with no new read is refused again', againNoRead.label);
 }
 
 console.log('\nunexecutedCallText — a call in an invented format is not a finished answer');

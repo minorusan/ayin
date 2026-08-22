@@ -51,7 +51,7 @@ import { loadTools } from './tools.js';
 import { presenterPass, shouldRunPresenterThisTurn } from './presenter/index.js';
 import { renderHandoff, stageAndOpenForPresentation } from './presenter/handoff.js';
 import { clearActivity } from './activity.js';
-import { callKey, guardBeginTurn, guardCheck, guardDirective, guardNoteDenied, guardNoteMutation, TREE_SAFE } from './tool-guard.js';
+import { callKey, guardBeginTurn, guardCheck, guardDirective, guardNoteDenied, guardNoteMutation, guardNoteRead, TREE_SAFE } from './tool-guard.js';
 import { planContextBlock, runPlan } from './plan/index.js';
 import { liveTool } from './live-mirror.js';
 import { exploreCacheNoteTool } from './tools/explore/cache.js';
@@ -2009,6 +2009,17 @@ async function runAgentTurn(userInput: string): Promise<void> {
         // is what lets `npm test` after an edit run while `npm test` twice in a row still does not.
         guardNoteMutation(name, [params.path, params.file, params.to].filter((p): p is string => Boolean(p)),
           callKey(name, params));
+      }
+      /**
+       * A READ LIFTS AN EDIT'S REPEAT LADDER, and the guard has to be told here for the same reason the
+       * mutation bump is: this loop is the one place that knows the call actually succeeded.
+       *
+       * `readGuard` refuses an edit to lines that were never read and prescribes "read them, then make the
+       * same call again". That retry is byte-identical to the refused attempt, and a read is TREE_SAFE so
+       * it bumps no epoch — so the repeat guard skipped it and then blocked it, and the edit never landed.
+       */
+      if (TREE_SAFE.has(name) && !/^(Error|Refused)\b/.test(result)) {
+        guardNoteRead([params.path, params.file].filter((p): p is string => Boolean(p)));
       }
       saveArtifact(name, paramPreview, result);
       recordTool(name, paramPreview, result);

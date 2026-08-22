@@ -6,16 +6,18 @@ import { addPendingImage, isImagePath, preprocessImage } from '../../image.js';
 import { corpusBlockFor, chunksForFile } from '../../indulge/inject.js';
 import { log } from '../../log.js';
 import { attributeFile } from '../../indulge/attribution.js';
-import { recordRead } from '../readGuard.js';
+import { coverage, recordRead } from '../readGuard.js';
+import { AROUND_DEFAULT, centeredWindow, clampSpan, describeSpans, slideWindow, snapEnd, spanLines, unreadRanges } from '../readWindow.js';
 
 export const tool: Tool = {
     name: 'read_file',
-    description: 'Read a file and return its contents with line numbers. Use offset/limit for large files. For image files (png/jpg/jpeg/webp/gif/avif/tiff/bmp) the image is downscaled and attached to the next LLM call for vision processing instead of returning bytes.',
+    description: 'Read a file and return its contents with line numbers. For a large file: `around=<line>` centres the window on a line (paste a grep hit straight in), and calling it again with no offset SLIDES to the next part you have not read yet rather than repeating the top. Use offset/limit to pick a window by hand. For image files (png/jpg/jpeg/webp/gif/avif/tiff/bmp) the image is downscaled and attached to the next LLM call for vision processing instead of returning bytes.',
     parameters: [
       { name: 'path', type: 'string', description: 'Absolute file path', required: true },
       { name: 'offset', type: 'number', description: 'First line to show, 1-based — paste a grep line number straight in (text only)', required: false },
       { name: 'limit', type: 'number', description: 'Max lines to return (text only; capped per call, the reply says how to continue)', required: false },
       { name: 'tail', type: 'number', description: 'Return the LAST n lines instead — what a log is read for; no need to learn the length first', required: false },
+      { name: 'around', type: 'number', description: 'Centre a focused window on this line, with context on BOTH sides — paste a grep hit here rather than computing an offset. Widen it with limit=', required: false },
     ],
     async execute(params) {
       if (!params.path) return 'Error: path required';
@@ -74,13 +76,13 @@ export const tool: Tool = {
       // `offset` is the LINE NUMBER to start at, matching grep's output and the numbers printed below.
       // It used to be 0-based while the display was 1-based, so feeding a grep hit straight back read
       // from the line after it. 0 and 1 both mean "the top" so older callers still behave.
-      const rawOff = parseInt(params.offset || '1', 10);
-      const startLine = Number.isFinite(rawOff) ? Math.max(1, rawOff) : 1;
-      const off = startLine - 1;
+      const total = lines.length;
+      const rawOff = parseInt(params.offset || '0', 10);
+      const askedOffset = Number.isFinite(rawOff) && rawOff > 0 ? rawOff : 0;
       // A read with no limit used to return the WHOLE file, which the window then cut at 16 KB with no
       // notice — the model believing it had read a 5000-line file it had seen a fifth of.
       const askedLimit = parseInt(params.limit || '0', 10);
-      const lim = Number.isFinite(askedLimit) && askedLimit > 0 ? Math.min(askedLimit, READ_MAX_LINES) : READ_MAX_LINES;
+      const size = Number.isFinite(askedLimit) && askedLimit > 0 ? Math.min(askedLimit, READ_MAX_LINES) : READ_MAX_LINES;
       /**
        * `tail` — the LAST n lines, which is what a log is ever read for.
        *
@@ -91,21 +93,77 @@ export const tool: Tool = {
        */
       const askedTail = parseInt(params.tail || '0', 10);
       const tailN = Number.isFinite(askedTail) && askedTail > 0 ? Math.min(askedTail, READ_MAX_LINES) : 0;
-      const off2 = tailN > 0 ? Math.max(0, lines.length - tailN) : off;
-      const slice = tailN > 0 ? lines.slice(off2) : lines.slice(off, off + lim);
+      const rawAround = parseInt(params.around || '0', 10);
+      const askedAround = Number.isFinite(rawAround) && rawAround > 0 ? rawAround : 0;
+
+      /**
+       * WHICH WINDOW. Four ways in, in priority order — and the fourth is the one that matters.
+       *
+       *  `tail`     the end, verbatim.
+       *  `around`   centred on a line, context on BOTH sides. A grep hit pastes straight in; starting
+       *             *at* the hit (what `offset` does) throws away everything leading to it.
+       *  `offset`   a window chosen by hand.
+       *  nothing    the next part NOT YET READ. A second param-free read used to return the same
+       *             top-of-file slice — a whole round spent re-reading imports. It now slides, and says
+       *             so, which is also what makes the read-before-edit guard tractable: the model can
+       *             reach line 4012 of a 5000-line file by asking again, not by doing subtraction.
+       *
+       * A window that is not the tail is snapped to a structural break so it does not end mid-function;
+       * see `../window.ts` for why that is language-agnostic on purpose.
+       */
+      const seen = askedAround || askedOffset || tailN ? null : coverage(resolved);
+      let slidPast: string | null = null;
+      let span: [number, number];
+      if (tailN > 0) {
+        span = clampSpan([total - tailN + 1, total], total);
+      } else if (askedAround > 0) {
+        // A FOCUSED window by default. `around` is for looking at one thing; sizing it at the full cap
+        // returned 800 lines to show one constant, and the model followed it with a narrower read.
+        const centred = centeredWindow(askedAround, askedLimit > 0 ? size : AROUND_DEFAULT, total);
+        span = clampSpan([centred[0], snapEnd(lines, centred[0], centred[1], total)], total);
+      } else if (askedOffset > 0) {
+        span = clampSpan([askedOffset, snapEnd(lines, askedOffset, askedOffset + size - 1, total)], total);
+      } else {
+        const slid = seen && seen.lines === total ? slideWindow(lines, seen.spans, size, total) : null;
+        if (slid) {
+          span = slid;
+          slidPast = describeSpans(seen!.spans);
+        } else {
+          span = clampSpan([1, snapEnd(lines, 1, size, total)], total);
+        }
+      }
+
+      if (askedOffset > total) {
+        return `Error: offset ${askedOffset} is past the end of ${params.path} (${total} lines).`;
+      }
+      const off2 = span[0] - 1;
+      const slice = lines.slice(span[0] - 1, span[1]);
       if (!slice.length) {
-        return `Error: offset ${startLine} is past the end of ${params.path} (${lines.length} lines).`;
+        return `Error: offset ${askedOffset || 1} is past the end of ${params.path} (${total} lines).`;
       }
       const numbered = slice.map((l, i) => `${off2 + i + 1}\t${l}`).join('\n');
-      const lastShown = off2 + slice.length;
-      const more = lastShown < lines.length;
+      const lastShown = span[1];
       // The COUNTS, always. 19 shell `wc -l` calls existed only because a read never said how big the
       // file was unless it happened to truncate; now every reply carries it, so "is this file big?" is
       // never its own call.
-      const header = `(lines ${off2 + 1}-${lastShown} of ${lines.length}${raw.length >= 1024 ? `, ${(raw.length / 1024).toFixed(1)} KB` : `, ${raw.length} B`})\n`;
-      const footer = more
-        ? `\n(${lines.length - lastShown} more lines — continue with offset=${lastShown + 1}${askedLimit && askedLimit > READ_MAX_LINES ? `; limit is capped at ${READ_MAX_LINES} lines per call` : ''})`
-        : '';
+      const bytes = raw.length >= 1024 ? `, ${(raw.length / 1024).toFixed(1)} KB` : `, ${raw.length} B`;
+      const slidNote = slidPast ? ` — slid past what you already read (${slidPast})` : '';
+      const header = `(lines ${span[0]}-${lastShown} of ${total}${bytes}${slidNote})\n`;
+      /**
+       * WHAT IS STILL UNSEEN, as line ranges, every time the file is not fully read.
+       *
+       * "N more lines" only ever described the tail of the file, so after one slide it was wrong: a model
+       * that had read 1-800 and then 801-1000 of a 2000-line file was told "1000 more lines" with no way
+       * to know 1-800 was already behind it. The complement is the honest answer, and it is the number the
+       * next call needs.
+       */
+      const covered = [...(seen?.spans ?? []), span] as [number, number][];
+      const unread = unreadRanges(covered, total);
+      const capNote = askedLimit && askedLimit > READ_MAX_LINES ? `; limit is capped at ${READ_MAX_LINES} lines/call` : '';
+      const footer = unread.length
+        ? `\n(unread: ${describeSpans(unread)} — ${spanLines(unread)} of ${total} lines. Read again with no `
+          + `offset to slide there, or around=<line> to centre on one${capNote})`
+        : `\n(all ${total} lines of this file have now been read${capNote})`;
       // What the corpus already knows about THIS file. An exact path lookup, not a similarity
       // search, so it cannot surface a plausible-but-unrelated chunk. Never fatal: a corpus that
       // fails to load must not break the read that was actually asked for.
@@ -116,7 +174,7 @@ export const tool: Tool = {
       try {
         const rel = relative(process.cwd(), resolved).split(sep).join('/');
         if (rel && !rel.startsWith('..')) {
-          corpus = corpusBlockFor(process.cwd(), rel, { startLine: off + 1, endLine: lastShown }) ?? '';
+          corpus = corpusBlockFor(process.cwd(), rel, { startLine: span[0], endLine: lastShown }) ?? '';
           // WHAT this file is, stated where the mistake happens. Plus the corpus count — a flat int
           // the operator reads to decide whether this file deserves another indulge run. Shown even
           // when zero: silence and "not covered" must not look the same.
@@ -129,7 +187,7 @@ export const tool: Tool = {
       // The read-before-edit guard is armed with the range ACTUALLY RETURNED, not the whole file: a
       // capped read of a 5000-line file must not license an edit at line 4012 in the part that never
       // came back. See `../readGuard.ts`.
-      recordRead(resolved, [off2 + 1, lastShown], lines.length);
+      recordRead(resolved, [span[0], lastShown], total);
       return `${attribution}${header}${numbered}${footer}${corpus}`;
     },
   };
