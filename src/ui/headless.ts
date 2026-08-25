@@ -14,7 +14,8 @@ const NO_TUI_COMMANDS = new Set([
   'explain',    // headless `ayin explain "<question>"` — prints the narrative, exits
   'indulge',    // overnight corpus build — runs for hours under nohup; must never open a TUI
   'launch',     // opens a terminal window elsewhere and exits; taking this tty would be the wrong one
-  'diff',       // renders an HTML page and opens it; prints a path and exits
+  'diff',       // serves the review page and parks on it; prints a URL, never paints a screen
+  'sprint',     // serves the Jira board and parks on it, exactly like `diff`
   'debug',      // writes a bundle and prints its path
   'testrun',    // runs C# tests and prints a report
   'kill',       // `ayin kill dog` — throws the hound kill switch and prints what it touched

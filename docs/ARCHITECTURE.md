@@ -2303,6 +2303,21 @@ self-contained HTML page and opens it. Laid out in the order a diff is actually 
 (sidebar with per-file weight and status), **filter** (extension chips, `.cs .asset .ts .js .py` on
 and everything else one click away), **read** (unified hunks with the changed token marked).
 
+**`ayin diff` and `ayin sprint` serve their own page and park on it** (`src/serve-page.ts`). Neither
+needed a TUI for anything except the socket once a comment and a ticket question became their own
+headless runs — so the shell commands start the server, open the page, and hold it until Ctrl+C. A
+session already serving that tree is used instead of a second server: two servers on one repo publish
+two daemon records and split the comment store's readers across two ports. `ayin diff --static` keeps
+the old snapshot behaviour by name; the board has no static form and never will, because its cards
+fetch their own detail. `initLlmProvider()` runs before the first request, since Draft, rephrase and the
+`.cs` staging pass spend a model call **in this process** — the runs bring their own.
+
+A FOURTH list decides whether a subcommand exists, and it bit immediately: `SUBCOMMANDS` in
+`src/index.ts` is what the bare-launch flag validator lets through to the dispatch. `ayin sprint` was
+dispatched, exempted from the TUI, exempted from the model gate and documented — and still answered
+`unknown command "sprint"`, because the validator that runs first had never heard of it. `check:cli`
+asserts all four lists against the dispatch now.
+
 Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`](DIFF.md):
 
 - **The hidden-file count is always on screen.** Filters that default to off can make a large diff

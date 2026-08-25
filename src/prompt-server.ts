@@ -284,7 +284,14 @@ function crossOriginRefused(req: IncomingMessage): string | null {
   return allowed.includes(origin) ? null : `Origin ${origin} is not this session`;
 }
 
-export function startPromptServer(cwd = process.cwd()): void {
+/**
+ * Told when the socket is up, or when it could not be. The TUI ignores both — it starts the server and
+ * carries on — but a plain-shell `ayin diff` / `ayin sprint` has nothing else to do until there is a
+ * port to open, and must SAY SO rather than hang when twelve ports in a row are taken.
+ */
+export type ServerReady = (r: { port: number } | { error: string }) => void;
+
+export function startPromptServer(cwd = process.cwd(), onReady?: ServerReady): void {
   const server = createServer((req, res) => {
     // Every mutating route is behind this, including the prompt editor's own save — it rewrites the
     // agent's system prompt, which was reachable by any page in the browser until now.
@@ -319,7 +326,7 @@ export function startPromptServer(cwd = process.cwd()): void {
     });
   });
 
-  bind(server, cwd);
+  bind(server, cwd, BASE_PORT, PORT_TRIES, onReady);
 }
 
 function routePromptEditor(req: IncomingMessage, res: ServerResponse): void {
@@ -384,14 +391,25 @@ function routePromptEditor(req: IncomingMessage, res: ServerResponse): void {
  * The port is not fixed (see the header): EADDRINUSE walks up, because a second session with no server
  * is a second session whose review page cannot take comments.
  */
-function bind(server: import('node:http').Server, cwd: string, port = BASE_PORT, tries = PORT_TRIES): void {
+function bind(
+  server: import('node:http').Server,
+  cwd: string,
+  port = BASE_PORT,
+  tries = PORT_TRIES,
+  onReady?: ServerReady,
+): void {
   server.once('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE' && tries > 1) {
       log('INFO', 'server_port_taken', { port: String(port) });
-      bind(server, cwd, port + 1, tries - 1);
+      bind(server, cwd, port + 1, tries - 1, onReady);
       return;
     }
     log('WARN', 'prompt_server_error', { error: err.message, port: String(port) });
+    // A TUI survives this — it loses a page nobody asked for yet. A command whose whole job is to serve
+    // one page has to end, and with the reason: silence here was a process sitting there doing nothing.
+    onReady?.({ error: err.code === 'EADDRINUSE'
+      ? `every port from ${BASE_PORT} to ${port} is taken — ${PORT_TRIES} tries`
+      : err.message });
   });
 
   server.listen(port, '127.0.0.1', () => {
@@ -403,5 +421,6 @@ function bind(server: import('node:http').Server, cwd: string, port = BASE_PORT,
     process.on('exit', clean);
     process.on('SIGINT', clean);
     process.on('SIGTERM', clean);
+    onReady?.({ port });
   });
 }

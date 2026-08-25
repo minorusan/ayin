@@ -6,10 +6,16 @@
  * the machine where the model had gone away, which is exactly when someone wants it undone. Nothing
  * failed; it was simply wrong in a way only a person watching would notice.
  *
- * Three lists decide this, in three files, and they were kept in step by memory:
+ * FOUR lists decide this, in four files, and they were kept in step by memory:
  *   - the DISPATCH in app.ts (`process.argv[2] === 'x'`) — what exists
+ *   - SUBCOMMANDS in index.ts — what the flag validator lets THROUGH to that dispatch
  *   - NO_TUI_COMMANDS in ui/headless.ts — what may not take the terminal
  *   - NO_MODEL_NEEDED in preflight.ts — what may not be gated behind configuring a model
+ *
+ * The second one was missing from this gate and immediately proved why it belongs: `ayin sprint` was
+ * dispatched, exempted from the TUI, exempted from the model gate and documented — and still answered
+ * `unknown command "sprint"`, because the validator that runs FIRST had never heard of it. Every other
+ * list said the feature existed.
  *
  * A new subcommand lands in the first and is forgotten in the other two. This gate makes that a build
  * failure instead of a bug report, and it asks for an explicit decision rather than a default: a
@@ -20,6 +26,7 @@ import { join } from 'node:path';
 
 const REPO = new URL('..', import.meta.url).pathname;
 const app = readFileSync(join(REPO, 'src/app.ts'), 'utf-8');
+const index = readFileSync(join(REPO, 'src/index.ts'), 'utf-8');
 const headless = readFileSync(join(REPO, 'src/ui/headless.ts'), 'utf-8');
 const preflight = readFileSync(join(REPO, 'src/preflight.ts'), 'utf-8');
 
@@ -44,6 +51,8 @@ const listBetween = (src, marker) => {
   return src.slice(at, end);
 };
 
+const validated = listBetween(index, 'const SUBCOMMANDS = new Set(');
+if (!validated) fail('SUBCOMMANDS not found in index.ts — this gate cannot check what the flag validator lets through');
 const noTui = listBetween(headless, 'NO_TUI_COMMANDS = new Set(');
 const noModel = listBetween(preflight, 'NO_MODEL_NEEDED = new Set(');
 if (!noTui) fail('NO_TUI_COMMANDS not found in ui/headless.ts — this gate cannot check anything');
@@ -56,6 +65,11 @@ if (dispatched.length < 5) fail(`only ${dispatched.length} subcommand(s) found i
 else ok(`${dispatched.length} subcommands dispatched in app.ts`);
 
 for (const cmd of dispatched) {
+  // FIRST, because it runs first: a name the flag validator does not know never reaches the dispatch at
+  // all — it is answered as a typo, with a suggestion naming the command it just refused.
+  if (!validated?.includes(`'${cmd}'`)) {
+    fail(`\`ayin ${cmd}\` is dispatched in app.ts but missing from SUBCOMMANDS in index.ts — the flag validator will reject it as a typo before it runs`);
+  }
   const quiet = noTui?.includes(`'${cmd}'`);
   if (!quiet && !WANTS_TUI.has(cmd)) {
     fail(`\`ayin ${cmd}\` opens the full-screen TUI — add it to NO_TUI_COMMANDS, or to WANTS_TUI here if it really wants the terminal`);
@@ -116,6 +130,16 @@ if (/if \(HEADLESS \|\| skipPermissions \|\| READONLY\) \{[\s\S]{0,240}?return '
   failures.push('the dangerous-op guard no longer denies under skipPermissions');
 }
 
+/** Launch the real binary and return its stdout. */
+function launchOut(args) {
+  try {
+    return execFileSync(process.execPath, [join(REPO, 'dist/index.js'), ...args],
+      { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 25_000 });
+  } catch (e) {
+    return String(e.stdout ?? '');
+  }
+}
+
 /** Launch the real binary and report exit code + stderr. */
 function launch(args) {
   try {
@@ -165,6 +189,23 @@ if (!help.suggestNames('prefabb', 'command').includes('prefab')) fail('a one-let
 else ok('a one-letter slip on a slash command resolves');
 if (help.suggestNames('xyzzy', 'cli').length !== 0) fail('a word like nothing at all suggests nothing');
 else ok('a word like nothing at all suggests nothing');
+
+/**
+ * THE TWO PAGE SERVERS ANSWER FOR THEMSELVES.
+ *
+ * `ayin diff` and `ayin sprint` park on a socket, so this cannot run them for real without leaving a
+ * server behind — but `--help` proves the whole path a missing list entry breaks: the flag validator let
+ * the word through, the dispatch found it, and the command printed instead of a session booting. That is
+ * exactly the failure `ayin sprint` shipped with for one build.
+ */
+for (const [cmd, expect] of [['diff', /serve the working tree/], ['sprint', /serve your Jira sprint/]]) {
+  const r = launch([cmd, '--help']);
+  if (r.code !== 0) fail(`\`ayin ${cmd} --help\` exited ${r.code} instead of printing usage: ${r.err.slice(0, 160)}`);
+  else ok(`\`ayin ${cmd} --help\` reaches the command and exits 0`);
+  const out = launchOut([cmd, '--help']);
+  if (!expect.test(out)) fail(`\`ayin ${cmd} --help\` does not describe a SERVED page — that is what these commands now do`);
+  else ok(`and says it serves a page, which is what parking on a socket is for`);
+}
 
 // A subcommand owns its own arguments — a whitelist applied to those would reject flags that are
 // valid one frame down, which is why the check returns early when argv[2] names a subcommand.
