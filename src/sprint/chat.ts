@@ -1,13 +1,18 @@
 /**
  * sprint/chat.ts — one markdown file per ticket, and that file IS the thread.
  *
- * BOTH TURNS ARE WRITTEN BY CODE. The operator's on the way in, the agent's when its turn ends: this
- * module is the only writer of a thread file, so a turn is always one heading, one real timestamp, and
- * an append at the end. Handing the agent the PATH and asking it to append was the first design and it
- * failed exactly where a model fails — it invented the timestamp, anchored a `str_replace` on the
- * operator's turn and inserted its answer ABOVE the message that asked for it, twice. The agent never
- * learns the path now; earlier turns reach it as TEXT (`threadBefore`), and its closing message is the
- * reply.
+ * EVERY TURN IS WRITTEN BY CODE. The operator's on the way in, and the run's — each message it prints,
+ * then its closing one — from the run's own process: this module is the only writer of a thread file, so
+ * a turn is always one heading, one real timestamp, and an append at the end. Handing the agent the PATH
+ * and asking it to append was the first design and it failed exactly where a model fails — it invented
+ * the timestamp, anchored a `str_replace` on the operator's turn and inserted its answer ABOVE the
+ * message that asked for it, twice. The agent never learns the path now; earlier turns reach it as TEXT
+ * (`threadBefore`), and its closing message is the reply.
+ *
+ * THREE WHOS, not two. `note` is something the run said on the way to the answer — shown small and quiet
+ * — and `ayin` is the answer. A run cannot know which of its messages is the last one, so the mirror
+ * holds each back until the next arrives (see app.ts `runHeadless`): whatever is still held when the run
+ * ends IS the reply. That is what keeps the same sentence from landing twice under two different headings.
  *
  * Still deliberately NOT the diff comment store: no status machine and no reply payload, because a
  * ticket does not move under the discussion the way a diff does. The page polls a `size-mtime` stamp and
@@ -18,7 +23,7 @@
  * eventually someone's review.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -64,6 +69,9 @@ export function readChat(key: string): ChatRead {
 
 export interface ChatTurn { who: string; when: string; body: string }
 
+/** Who wrote a turn. `note` is progress, `ayin` is the answer. */
+export type ChatWho = 'you' | 'ayin' | 'note';
+
 /**
  * Split the thread into turns on the heading both writers produce.
  *
@@ -73,7 +81,7 @@ export interface ChatTurn { who: string; when: string; body: string }
  */
 export function parseTurns(text: string): ChatTurn[] {
   const turns: ChatTurn[] = [];
-  const re = /^##\s+(you|ayin)\s+·\s+(\S+)\s*$/gm;
+  const re = /^##\s+(you|ayin|note)\s+·\s+(\S+)\s*$/gm;
   let m: RegExpExecArray | null;
   let lastEnd = 0;
   let pending: { who: string; when: string } | null = null;
@@ -111,10 +119,29 @@ export function threadBefore(key: string, limit = 4000): string {
  * nested under a second one: the model is told not to write headings, and this is what makes the file
  * one shape even when it does anyway.
  */
-export function appendTurn(key: string, who: 'you' | 'ayin', text: string): void {
+export function appendTurn(key: string, who: ChatWho, text: string): void {
   const p = chatPath(key);
   mkdirSync(chatDir(), { recursive: true });
-  const body = text.replace(/^(?:\s*##\s+(?:you|ayin)\s+·\s+\S+[^\n]*\n)+/, '').trim();
+  const body = text.replace(/^(?:\s*##\s+(?:you|ayin|note)\s+·\s+\S+[^\n]*\n)+/, '').trim();
   if (!body) return;
   appendFileSync(p, `\n## ${who} · ${new Date().toISOString()}\n\n${body}\n`);
+}
+
+/**
+ * Every ticket thread, gone. What the red X on the board does.
+ *
+ * Only `*.md` in the chat directory — the run LOGS live beside it and are the only record of what a run
+ * did, so clearing the conversation must not take the evidence with it. Returns how many threads died,
+ * because a dialog that says "cleared" without a number cannot be checked.
+ */
+export function clearAllChats(): number {
+  const dir = chatDir();
+  if (!existsSync(dir)) return 0;
+  let n = 0;
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.md')) continue;
+    try { rmSync(join(dir, name), { force: true }); n++; }
+    catch { /* already gone, or not ours to delete */ }
+  }
+  return n;
 }

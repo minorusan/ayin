@@ -68,18 +68,6 @@ export function interruptAgent(): void {
   immediateCancel = cancelActiveThinking() || cancelActiveToolExecution() || immediateCancel;
 }
 
-/**
- * Told when queued messages are absorbed into the running turn. A diff-page comment that arrives
- * mid-turn is `pending` until this fires and `working` after — without it the page would show
- * "pending" for the entire turn that is already acting on it, which is a lie about the state of the
- * work, not just a cosmetic lag.
- */
-let onDrained: ((messages: string[]) => void) | null = null;
-
-export function onQueuedMessagesDrained(fn: (messages: string[]) => void): void {
-  onDrained = fn;
-}
-
 export function enqueueAgentMessage(message: string): void {
   queuedUserInputs.push(message);
   log('INFO', 'agent_message_queued', { length: String(message.length) });
@@ -934,14 +922,11 @@ function drainQueuedMessages(): number {
     pushMessage('user', message);
     taken.push(message);
   }
-  if (taken.length > 0) {
-    log('INFO', 'agent_messages_drained', { count: String(taken.length) });
-    // Never let a listener's failure break the turn that was doing real work.
-    if (onDrained) {
-      try { onDrained(taken); }
-      catch (e) { log('WARN', 'drain_listener_failed', { error: e instanceof Error ? e.message : String(e) }); }
-    }
-  }
+  // The listener this used to notify is gone with the mechanism that needed it: a review comment or a
+  // ticket question folded into a running turn had to flip from `pending` to `working` when the turn
+  // absorbed it, and neither is a turn in this session any more (diff/runner.ts, sprint/runner.ts). A
+  // typed message still drains exactly as before; nothing was left listening for the fact.
+  if (taken.length > 0) log('INFO', 'agent_messages_drained', { count: String(taken.length) });
   return taken.length;
 }
 

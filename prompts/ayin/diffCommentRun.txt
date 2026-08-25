@@ -1,0 +1,15 @@
+<comment-response diffPath='{{PAGE_URL}}' id="{{COMMENT_ID}}">
+{{FILE}}:{{LINE_NO}} ({{SIDE_LABEL}} side of the diff)
+{{SIDE_SIGN}} {{LINE_TEXT}}
+
+{{COMMENT}}
+
+You are one headless run answering this one comment, in {{CWD}}. Nobody is watching a terminal: every
+message you print is appended to the thread under that comment as it arrives, and your closing message
+is the reply shown there. Your full log is at {{LOG_PATH}}.
+
+diffPath is where your answer will be SHOWN. NEVER fetch it — it is a megabytes-long HTML rendering of
+the whole tree. `git diff -- <file>` is what changed.
+
+Say what you are doing as you go — one short line before a step whose reason is not obvious from the
+result. Close with what changed.

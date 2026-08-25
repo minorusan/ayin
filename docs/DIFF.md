@@ -70,15 +70,20 @@ which is the single largest source of fake volume in a review page.
 
 ---
 
-## 4 · Comment — the line, and the agent that owns the tree
+## 4 · Comment — the line, and a run of its own
 
-Hover any line on the served page for a `+`. It opens a git-style box; what you write is sent to the
-session that served the page and enters its chat **as an ordinary prompt** — same history, same `user`
-bubble, same queueing rules as typing it. There is one input path in `app.ts` and comments go down it,
-because a second entry point is a second copy of those decisions and the first thing to drift would be
-the one nobody sees until it breaks.
+Hover any line on the served page for a `+`. It opens a git-style box, and what you write **spawns its
+own headless ayin** in the repo the page was served from (`src/diff/runner.ts`). One comment, one run:
+its own process, its own context, its own log, its own reply.
 
-The agent receives it with a marker naming where it came from:
+It was a message into the serving session's chat until 2026-08-25, and the reason it is not any more is
+what folding did to the answers. A comment written while the agent worked was absorbed into that turn,
+so one closing message was shown under three unrelated questions — each looking like an individual
+answer — and a comment on line 40 waited for work on line 12 to finish. A review with no TUI attached
+could not be answered at all: the route refused with *"no interactive session is wired"*. A run per
+comment removes all three, and two comments written a second apart are answered in parallel.
+
+The run receives the marker naming where it came from (`prompts/ayin/diffCommentRun.txt`):
 
     <comment-response diffPath='http://127.0.0.1:7773/diff?rev=HEAD' id="c-8685e95b">
     Assets/…/SpeedsCore.cs:142 (current side of the diff)
@@ -86,34 +91,64 @@ The agent receives it with a marker naming where it came from:
 
     this truncates the float
 
-`prompts/ayin/system.txt` teaches the agent what that means: read the file and MAKE THE EDIT, fix the
-cause rather than the quoted line, and never build a diff page or open a browser — the harness does
-that half, deliberately, because leaving the reload to the model makes it probabilistic.
+    You are one headless run answering this one comment, in <cwd>. …
 
-**The thread on the page shows `pending` → `working` → `done`, with a clock.** A comment written while
-the agent is mid-turn is folded into that turn rather than starting a second one, so it stays
-`pending` until the turn absorbs it. Elapsed time ticks beside the state: "working…" alone looks the
-same after four minutes as after four seconds, and the operator cannot otherwise tell a long edit from
-a dead session. When the turn ends the page reloads **the same URL**, which re-collects from the new
-working tree, and the agent's closing message appears under the comment.
+`prompts/ayin/system.txt` teaches the agent what the marker means: read the file and MAKE THE EDIT, fix
+the cause rather than the quoted line, and never build a diff page or open a browser — the harness does
+that half, deliberately, because leaving the reload to the model makes it probabilistic. The prompt file
+adds only what is true of a RUN and not of a turn: that its messages are appended to the thread as they
+arrive, that its closing message is the reply, and where its log is.
+
+**Everything the run says lands in the thread while it works.** `onAssistantMessage` in `src/ui/index.ts`
+is the hook — the same funnel every message already goes through — and a run started with
+`AYIN_DIFF_COMMENT_ID` mirrors each one into the store as a `note` (`app.ts` `runHeadless`). The page
+shows notes small and quiet under the question, and the closing message big, as the reply. A five-minute
+edit that says nothing looks exactly like a dead one; this is the difference. Consecutive identical texts
+are dropped, because a streamed message is rewritten in place and each rewrite would otherwise land as a
+draft of one sentence.
+
+**The thread shows `pending` → `working` → `done`, with a clock.** It goes `working` the moment the POST
+returns, because by then a process is already answering it — its pid is in the store, which is how a
+later boot tells a run still editing from one whose process died. Elapsed time ticks beside the state:
+"working…" alone looks the same after four minutes as after four seconds. When the run finishes the page
+reloads **the same URL**, which re-collects from the new working tree.
+
+**The run settles its own thread.** `markDone` is called by the child, not by the session that spawned
+it, so closing the TUI mid-answer still leaves the answer on the page — an ordinary thing to do now
+rather than a crash. The parent's exit handler touches the record only when the child left it unsettled,
+and then says so naming the run's log (`~/.ayin-cli/diffs/comment-<id>.log`). A run has a 30-minute
+ceiling, after which it is killed and the thread says that.
+
+One trap worth keeping written down: the store is keyed by the **cwd string**, and `process.cwd()` in the
+child returns that path with every symlink resolved — a session serving `/var/folders/…` spawned a run
+reporting `/private/var/folders/…` and settled the thread in a second file nobody was reading. The cwd
+travels with the run in `AYIN_DIFF_COMMENT_CWD`; the child never asks for its own.
 
 **And the operator can ask for that reload directly.** A refresh FAB in the bottom-right corner does
-what the post-turn reload does — same URL, same re-collect — for the case the agent was never involved
-in: an edit made in an editor, a `git add`, a stash. It reuses the anchor rather than adding a second
-one: `rememberViewport()` stores the topmost on-screen file under the same key `restore()` reads, with
-no line number, so `restore()` fails to match a row and falls back to the file. That fallback is the
-correct behaviour here, not a compromise — after a refresh the line numbers are exactly what moved.
-The button disarms itself on click, because a re-collect on a large tree is not instant and a
-dead-looking button gets clicked twice, which is a second full collect for nothing. A `file://` page
-has no server to re-collect from, so it carries no FAB — absent rather than broken, the same call this
-page makes about comments.
+what the post-run reload does — same URL, same re-collect — for the case no run was involved in: an edit
+made in an editor, a `git add`, a stash. It reuses the anchor rather than adding a second one:
+`rememberViewport()` stores the topmost on-screen file under the same key `restore()` reads, with no line
+number, so `restore()` fails to match a row and falls back to the file. That fallback is the correct
+behaviour here, not a compromise — after a refresh the line numbers are exactly what moved. The button
+disarms itself on click, because a re-collect on a large tree is not instant and a dead-looking button
+gets clicked twice, which is a second full collect for nothing. A `file://` page has no server to
+re-collect from, so it carries no FAB — absent rather than broken, the same call this page makes about
+comments.
+
+**A red X FAB clears every thread in the repo**, above the discard FAB and a different glyph from the
+three bins on this page: those discard code, this one discards none. It confirms first, naming the count,
+and says out loud what it does not touch — the working tree. Back to full defaults: the store file is
+removed rather than emptied, since the whole point of an append-only log is that no writer holds the
+whole document.
 
 Threads are appended to `~/.ayin-cli/diffs/comments-<repo>.jsonl` — one record per creation, one per
-status change, current state is the fold. A comment is the operator's writing and the answer may take
+status change, one per thing the run said, current state is the fold. Notes are their own record kind
+rather than a patch carrying an array, because two processes write this file: the run appends notes while
+the session that spawned it appends status. A comment is the operator's writing and the answer may take
 minutes, so a browser refresh, a second session or a power cut must not lose it; an interrupted append
 costs the last line, never the thread. A thread still waiting when the page reloads keeps its clock and
-keeps polling. Comments left unanswered by a session that exited are failed **by name** at the next
-boot rather than polled forever.
+keeps polling. Comments whose run is **gone** are failed by name at the next boot; one whose pid is still
+alive is left alone.
 
 **Line numbers move**, and that is the point — the fix shifts every line below it. A comment is
 anchored to `{file, side, lineNo, lineText}` and re-attaches only when all four still agree. When they
@@ -123,23 +158,23 @@ the operator's words to code they never read.
 
 ### What it is not, yet
 
-One turn produces one closing message, so several comments folded into the same turn currently share
-it, labelled as shared. Routing a specific paragraph back to a specific thread is
-`docs/DIFF_COMMENTS_PLAN.md` §4 — the model wraps an answer in `<comment id="…">`, recognised
-generously and verified strictly — and it is not built.
+A run answers exactly one comment, so the closing message belongs to one thread and the shared-reply
+problem is gone with the folding that caused it. `docs/DIFF_COMMENTS_PLAN.md` §4 — `<comment id="…">`
+markers, recognised generously and verified strictly — is no longer needed for that and is not built.
 
 ### The endpoint is small on purpose
 
-    GET  /diff?rev=<rev>              the page, re-collected per request
-    POST /api/diff/comment            { rev, file, side, lineNo, lineText, text } → { id, status }
-    GET  /api/diff/comment/<id>       { status, response, error }
+    GET    /diff?rev=<rev>            the page, re-collected per request
+    POST   /api/diff/comment          { rev, file, side, lineNo, lineText, text } → { id, status, pid }
+    GET    /api/diff/comment/<id>     { status, response, error, notes }
+    DELETE /api/diff/comments         every thread in this repo → { ok, cleared }
 
 Same origin, so nothing about the port is baked into the HTML and there is no CORS to allow. The port
 walks up from 7773 when it is taken: one server per session, published to
 `~/.ayin-cli/daemon-<pid>.json`, so a page always talks to the session that owns its tree — and a
 comment reaching a different repo's agent is not a mistake worth routing around.
 
-**A POST here starts an agent turn, and the agent has a shell.** The bind is loopback-only, and every
+**A POST here spawns an agent with a shell.** The bind is loopback-only, and every
 mutating request is refused unless its `Origin` is this session and its `Host` is loopback: a page on
 the internet cannot read a reply from 127.0.0.1, but it does not need to when the POST itself is the
 effect.
@@ -189,9 +224,15 @@ modification, a deletion, a rename, a binary, a path with a space and untracked 
   extension set is exactly the five, and that the hidden count is present.
 
 `npm run check:comments` — the comment loop, over a real HTTP server against a real throwaway repo,
-with a stub agent standing in for the TUI. It asserts the parts that only exist at the boundary: the
-page's own javascript **parses** (nothing else here runs it), a foreign `Origin` is refused, a
-wrongly-typed field fails loud naming the field, the marker and id reach the agent and the id survives
-the round trip back out of the prompt text, the state moves `pending`→`working`→`done` as the page
-sees it, and — the one that matters most — after the stub edits the file, **the same URL renders the
-new code** with the thread and the reply still attached and the moved anchor shown as an orphan.
+model-free in two halves. It asserts the parts that only exist at the boundary: the page's own
+javascript **parses** (nothing else here runs it), a foreign `Origin` is refused, a wrongly-typed field
+fails loud naming the field, and the prompt a run receives carries the marker, the id, the line and no
+unsubstituted `{{VAR}}`.
+
+The **spawn** is exercised for real with the model pointed at a dead loopback port: what must hold there
+is not an answer but the absence of a hang — the thread goes `working` with a live pid, gets its own log,
+and settles as failed naming that log. The **answer** is exercised by doing exactly what the run's own
+process does on the way out (notes appended, the file edited, `markDone` with the closing message), and
+then — the one that matters most — **the same URL renders the new code**, with the thread, the notes and
+the reply still attached and the moved anchor shown as an orphan. Finally the red X is pressed: every
+thread gone, the store file gone, the working tree untouched.

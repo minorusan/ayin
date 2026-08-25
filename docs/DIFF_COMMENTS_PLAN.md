@@ -6,11 +6,12 @@ what shipped; this document is kept for the reasoning and for §4, which is stil
 - **§2 transport — deviated.** POST up, **polling** down (1.2s), not SSE. The plan allowed polling as the
   fallback and said not to build both; this took the fallback without trying SSE first. Reconsider if the
   poll shows up in a profile — the state a page waits on changes at most twice per comment.
-- **§4 reply routing — NOT BUILT.** The turn's closing message is attached to every comment that turn
-  absorbed, labelled as shared when there is more than one. `<comment id="…">` markers, generous
-  recognition, strict verification and the unrouted-reply area are all still to do. Ids are `c-<8 hex>`
-  rather than `c1`, `c2` — if the marker scheme is built, shorten them first: the plan's reason for short
-  ids was that a model must echo one without typos, and that reason returns the moment it has to.
+- **§4 reply routing — NOT BUILT, AND NO LONGER NEEDED (2026-08-25).** It existed to solve one problem:
+  a turn produces one closing message, so comments folded into the same turn shared it. Comments are not
+  folded into turns any more — each one spawns its own headless ayin (`src/diff/runner.ts`), so a closing
+  message belongs to exactly one thread by construction. `<comment id="…">` markers, generous
+  recognition, strict verification and the unrouted-reply area are all moot. Ids stay `c-<8 hex>`: no
+  model has to echo one.
 - **§5 versioned pages — deviated, and the plan's own goal is better served.** No `/page?v=<n>`: the route
   re-collects per request, so the URL is stable and the reload is `location.reload()`. The operator chose
   this shape explicitly ("let the daemon serve the page and we open the URL"), and it also removes the
@@ -23,6 +24,10 @@ what shipped; this document is kept for the reasoning and for §4, which is stil
 message to the *running* ayin session; the page shows pending → thinking → answered, and when the model has
 replied (and possibly edited the code) the page reloads showing the new diff and the reply anchored to that
 comment.
+
+> **The middle clause changed in 2026-08-25.** A comment is no longer a message to the running session: it
+> spawns its own headless run. Everything else in that sentence still holds, and `docs/DIFF.md` §4 is the
+> description of what runs today.
 
 ---
 

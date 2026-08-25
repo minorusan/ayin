@@ -132,9 +132,28 @@ body{display:flex;flex-direction:column;height:100vh;overflow:hidden;
 .chat:empty::after{content:'No discussion yet.';color:var(--ink-3);font:11.5px/1.5 var(--ui);font-style:italic}
 .turn{border:1px solid var(--line);border-radius:10px;padding:8px 11px;margin:0 0 8px;background:var(--surface-2)}
 .turn.ayin{border-color:color-mix(in srgb, var(--wire-hot) 45%, var(--line))}
-.turn>.who{display:block;font:600 10px/1 var(--ui);letter-spacing:.09em;text-transform:uppercase;
-  color:var(--ink-3);margin:0 0 6px}
+.turn>.who{display:flex;align-items:center;gap:8px;font:600 10px/1 var(--ui);letter-spacing:.09em;
+  text-transform:uppercase;color:var(--ink-3);margin:0 0 6px}
 .turn.ayin>.who{color:var(--wire-hot)}
+/* WHAT THE RUN SAID ON THE WAY, not what it concluded. Smaller, quieter, no border of its own and a
+   rail instead — five of these must read as one sequence of steps rather than five answers, and the
+   answer under them must be the loudest thing in the thread. */
+.turn.note{border:none;border-left:2px solid var(--line);border-radius:0;background:none;
+  margin:0 0 6px 12px;padding:2px 0 2px 11px;position:relative}
+.turn.note>.who{display:none}
+.turn.note .md{font:11.5px/1.55 var(--ui);color:var(--ink-3)}
+.turn.note::before{content:'';position:absolute;left:-4px;top:9px;width:5px;height:5px;border-radius:50%;
+  background:var(--line)}
+/* The answer: bigger than everything around it and FOLDABLE, because a long report otherwise buries
+   the question after it. A <details> keeps the keyboard, the screen reader and find-in-page working. */
+.turn.ayin .md{font-size:13.5px;line-height:1.62}
+details.turn>summary{cursor:pointer;list-style:none}
+details.turn>summary::-webkit-details-marker{display:none}
+details.turn>summary::marker{content:''}
+.turn .foldh{margin-left:auto;font:600 10px/1 var(--mono);color:var(--ink-3)}
+details.turn:not([open])>summary .foldh::after{content:' \\25B8'}
+details.turn[open]>summary .foldh::after{content:' \\25BE'}
+details.turn>summary:hover .foldh{color:var(--wire-hot)}
 .post.ask{background:var(--wire-hot);border-color:var(--wire-hot)}
 /* ── live progress ── */
 /* What it is DOING, not that it is doing something: a spinner and a four-minute wait look identical,
@@ -179,6 +198,13 @@ h3 .hint{margin-left:auto;font:400 10.5px/1 var(--mono);color:var(--ink-3);text-
 .fab.busy{pointer-events:none;color:var(--wire-hot)}
 .fab.busy svg{animation:fabspin .8s linear infinite;transform-origin:50% 50%}
 @keyframes fabspin{to{transform:rotate(360deg)}}
+/* The red X, a clear gap above the refresh FAB — the same arrangement /diff uses, for the same reason:
+   a mis-aimed click for refresh must land on empty space, not on the one control that deletes something.
+   It deletes CONVERSATION only: no Jira comment, no code, no run log. */
+.fab.wipe{bottom:78px;color:var(--priv);border-color:color-mix(in srgb, var(--priv) 45%, var(--line))}
+.fab.wipe:hover{color:var(--priv);border-color:var(--priv);
+  background:color-mix(in srgb, var(--priv) 12%, var(--surface-2))}
+.fab.wipe.busy{color:var(--priv)}
 /* The drawer fills the right edge, so the FAB sat ON TOP of its bottom-right corner. That was always
    true and never mattered until the progress row put the elapsed clock there. An open drawer covers
    the board anyway — refreshing behind it buys nothing — so the FAB steps aside rather than the row
@@ -223,6 +249,7 @@ textarea:focus{outline:none;border-color:var(--wire-hot)}
   <h1>sprint · ${esc(board.me)}</h1>
   <span class="sub">${esc(board.scope)}</span>
   <span class="n">${board.total} ticket(s) · ${esc(board.generatedAt.slice(0, 16).replace('T', ' '))}</span>
+  <span class="n say" id="topsay"></span>
 </div>
 <div class="board">${columns}${empty}</div>
 
@@ -248,6 +275,10 @@ textarea:focus{outline:none;border-color:var(--wire-hot)}
   </div>
 </aside>
 
+<button class="fab wipe" id="cclear" aria-label="Clear every ayin thread"
+  title="Clear every ayin thread on every ticket — back to full defaults">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+</button>
 <button class="fab" id="refresh" aria-label="Reload the board from Jira" title="Reload the board from Jira">
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3.5V10h-6.5"/></svg>
 </button>
@@ -265,14 +296,31 @@ let openKey = null;
 let chatVer = null;
 let chatTimer = null;
 let chatIdle = 0;
+/** The newest thing the run said, as plain text. Feeds the progress row. */
+let lastNote = '';
 
+// Three shapes, because a thread holds three different things: the question, the steps the run took, and
+// the answer. The answer is a <details open> — bigger than the rest and foldable with no javascript, so a
+// long report can be put away without losing it.
 function paintChat(turns) {
   const box = $('d-chat');
   if (!box) return;
+  lastNote = '';
   box.innerHTML = (turns || []).map((t) => {
-    const who = t.who || 'note';
-    return '<div class="turn ' + (t.who === 'ayin' ? 'ayin' : 'you') + '">'
-      + '<span class="who">' + who + (t.when ? ' · ' + t.when.slice(0, 19).replace('T', ' ') : '') + '</span>'
+    const when = t.when ? ' · ' + t.when.slice(0, 19).replace('T', ' ') : '';
+    if (t.who === 'ayin') {
+      return '<details class="turn ayin" open><summary class="who">ayin' + when
+        + '<span class="foldh">fold</span></summary>'
+        + '<div class="md">' + t.html + '</div></details>';
+    }
+    if (t.who === 'note') {
+      // Kept for the progress row: the newest thing the run said is a better "what is happening" than
+      // any spinner, and the row is where the elapsed clock lives.
+      lastNote = t.html.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim();
+      return '<div class="turn note"><span class="who">note' + when + '</span>'
+        + '<div class="md">' + t.html + '</div></div>';
+    }
+    return '<div class="turn you"><span class="who">' + (t.who || 'note') + when + '</span>'
       + '<div class="md">' + t.html + '</div></div>';
   }).join('');
 }
@@ -350,9 +398,13 @@ function stopChat() {
 }
 
 // ── live progress ──────────────────────────────────────────────────────────────
-// Two facts, both honest and both cheap: WHAT the agent is doing, straight from the state the TUI
-// indicator already shows, and HOW LONG this turn has been going. A bare spinner cannot tell four
-// seconds from four minutes, which is the whole reason this exists.
+// Two facts, both honest and both cheap: WHAT the run is doing — the newest thing it SAID, which the
+// chat poll already fetched — and HOW LONG it has been going. A bare spinner cannot tell four seconds
+// from four minutes, which is the whole reason this exists.
+//
+// It used to read /api/agent/state, the serving session's own indicator. That stopped being the truth
+// the moment a question became its OWN headless run: the session is idle while the run works, so the row
+// said "queued" for the entire answer. The run's notes are the state now, and they cost no request.
 let progTimer = null;
 let askedAt = 0;
 
@@ -369,31 +421,26 @@ function showProg(on) {
   if (!on) { $('d-what').textContent = ''; $('d-el').textContent = ''; box && box.classList.remove('stalled'); }
 }
 
-async function tickProg() {
+function tickProg() {
   const box = $('d-prog');
   if (!box || box.hidden) return;
   $('d-el').textContent = fmtEl(Date.now() - askedAt);
-  try {
-    const r = await fetch('/api/agent/state');
-    if (!r.ok) return;
-    const a = await r.json();
-    // Idle while we are still waiting means the turn is queued behind something else, or finished
-    // without writing — say which rather than showing a confident spinner either way.
-    if (a.state === 'idle') {
-      $('d-what').textContent = 'queued — the session is between turns';
-      box.classList.add('stalled');
-      return;
-    }
-    box.classList.remove('stalled');
-    $('d-what').textContent = a.label ? a.state + ' · ' + a.label : a.state;
-  } catch (e) { /* a dropped poll is not worth a message */ }
+  if (!lastNote) {
+    // Nothing said yet. Say THAT rather than showing a confident spinner — the run has to start, load
+    // its prompt and reach the model before it can have an opinion.
+    $('d-what').textContent = 'the run has started and not said anything yet';
+    box.classList.add('stalled');
+    return;
+  }
+  box.classList.remove('stalled');
+  $('d-what').textContent = lastNote.length > 160 ? lastNote.slice(0, 159) + '…' : lastNote;
 }
 
 function startProg() {
   stopProg();
   askedAt = Date.now();
   showProg(true);
-  void tickProg();
+  tickProg();
   progTimer = setInterval(tickProg, 1000);
 }
 
@@ -409,6 +456,45 @@ function stopProg() {
 {
   const fab = document.getElementById('refresh');
   if (fab) fab.onclick = () => { fab.classList.add('busy'); location.reload(); };
+}
+
+// ── clear every ayin thread ────────────────────────────────────────────────────
+// Irreversible, so it confirms — and the dialog states the blast radius in both directions, because the
+// two things this page can delete are very different: a Jira comment is public and permanent, and this
+// is a local conversation. Nothing here touches Jira, the code, or the run logs.
+function say(text) {
+  const el = $('topsay');
+  if (!el) return;
+  el.textContent = text;
+  // It reports an action, not a state — left on screen it would still be claiming something about a
+  // board that has since been reloaded and re-asked.
+  setTimeout(() => { if (el.textContent === text) el.textContent = ''; }, 6000);
+}
+
+{
+  const cx = document.getElementById('cclear');
+  if (cx) cx.onclick = async () => {
+    if (!window.confirm('Clear every ayin thread\\n\\nEvery question you asked ayin about every ticket, '
+      + 'and every answer, is deleted \\u2014 back to full defaults. Jira comments, your code and the run '
+      + 'logs are NOT touched.\\n\\nThis cannot be undone. Continue?')) return;
+    cx.classList.add('busy');
+    try {
+      const r = await fetch('/api/sprint/chat', { method: 'DELETE' });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      // The open drawer is showing a thread that no longer exists. Repaint it from the truth rather
+      // than reloading the board, which would cost a Jira query to show the same cards.
+      if (openKey) { chatVer = null; await pollChat(openKey, true); }
+      // IN THE HEADER, not in the drawer. This FAB is only clickable while the drawer is CLOSED (the
+      // drawer covers that corner and the FAB steps aside), so a message written into the drawer would
+      // be a message nobody ever reads.
+      say('cleared ' + j.cleared + ' thread(s)');
+    } catch (e) {
+      say('not cleared: ' + String(e.message || e));
+    } finally {
+      cx.classList.remove('busy');
+    }
+  };
 }
 
 const esc = (s) => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');

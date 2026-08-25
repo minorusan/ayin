@@ -21,7 +21,7 @@ import {
   screen, addMessage, setStatus, setAgentStatus, clearChat, noteCallCost,
   onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
   showAlert, setStickyAlert, clearStickyAlert, registerCommand, formatShellForChat, clearInput,
-  lastAssistantMessage,
+  lastAssistantMessage, onAssistantMessage,
 } from './ui.js';
 import { isTranscribing, startTranscript, stopTranscript, transcriptPath, transcriptSize, flush as flushTranscript } from './transcript.js';
 import { executeWipe, humanBytes, planWipe, wipeOverview, type WipeScope } from './wipe.js';
@@ -34,13 +34,12 @@ import { loadHistory, pushEntry, forgetEntry } from './history.js';
 import { forcePlanNextTurn, togglePlanSession } from './plan/index.js';
 import { toggleQaSession, forceQaNextTurn } from './qa/index.js';
 import { togglePresenterSession, forcePresenterNextTurn } from './presenter/index.js';
-import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation, recordSlashTurn, onQueuedMessagesDrained } from './agent.js';
+import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation, recordSlashTurn } from './agent.js';
 import { findToolBySlash, slashTools, loadTools } from './tools.js';
 import { startPromptServer, serverUrl } from './prompt-server.js';
-import { wireDiffComments } from './diff/server.js';
-import { wireSprintChat } from './sprint/server.js';
 import { appendTurn as appendTicketTurn } from './sprint/chat.js';
-import { commentIdFromPrompt, getComment, markDone, markFailed, markWorking, reapAbandoned } from './diff/comments.js';
+import { addNote, markDone, markFailed, reapAbandoned } from './diff/comments.js';
+import { runLogPath } from './diff/runner.js';
 import { llmProvider } from './llm/select.js';
 import { showIndulgePicker, handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
 import { showDialog } from './dialog.js';
@@ -467,90 +466,6 @@ function relativeWhen(iso: string): string {
   return `${Math.round(mins / (60 * 24))}d ago ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 let busy = false;
-
-/**
- * Comments whose answer the review page is still waiting for.
- *
- * A comment does not get a turn of its own. If the agent is idle it starts one; if the agent is mid-turn
- * the text is queued and FOLDED INTO that turn (see agent.ts drainQueuedMessages), which is the right
- * behaviour — the operator commenting on line 40 while the agent works on line 12 wants one coherent
- * pass, not two. So the page's status has to be derived from the turn, not from the comment:
- *
- *   pending  accepted, but nothing has taken it up yet
- *   working  a turn has absorbed it and is acting on it
- *   done     that turn finished; the reply is the agent's last message and the tree has changed
- *
- * Only `working` comments are settled when a turn ends. One still `pending` was never absorbed — it is
- * waiting for the next turn, and calling it done would answer the operator with a reply to someone
- * else's question.
- */
-const inFlightComments = new Set<string>();
-
-function settleCommentTurns(error: string | null): void {
-  if (!inFlightComments.size) return;
-  const reply = lastAssistantMessage();
-  const settling = [...inFlightComments]
-    .map((id) => getComment(process.cwd(), id))
-    .filter((c): c is NonNullable<typeof c> => c !== null && c.status === 'working');
-
-  /**
-   * SEVERAL COMMENTS, ONE CLOSING MESSAGE. Comments written while the agent works are folded into the
-   * same turn, so that turn ends with ONE final message for all of them. Copying it under each thread
-   * unchanged would read as an individual answer to each — three different questions, three identical
-   * replies, each looking authoritative.
-   *
-   * Said plainly instead. The real fix is docs/DIFF_COMMENTS_PLAN.md §4: ask the model to wrap the part
-   * of its reply that answers a given comment in <comment id="…">, recognise generously, verify strictly,
-   * and show an unroutable reply rather than guessing which thread it belongs to. Not built yet.
-   */
-  const shared = settling.length > 1
-    ? `\n\n(one turn answered ${settling.length} comments together — this closing message covers all of them)`
-    : '';
-
-  for (const c of settling) {
-    if (error) markFailed(process.cwd(), c.id, error);
-    else markDone(process.cwd(), c.id, (reply || '(the turn produced no closing message — check the chat)') + shared);
-    inFlightComments.delete(c.id);
-  }
-}
-
-/**
- * Ticket threads this turn owes a reply to, and the queued messages not yet absorbed by one.
- *
- * THE CLOSING MESSAGE IS THE REPLY, and it is written from here rather than by the agent. The first
- * design handed the model the thread path: it invented timestamps, rewrote the operator's turn to insert
- * its own above it, and duplicated an earlier answer. Code owns the file now, so a reply is always one
- * heading, one real clock and an append at the end.
- *
- * The pending/absorbed split is the diff store's, for the same reason: a message queued while the agent
- * works is folded into the running turn, and settling one that has NOT been absorbed would answer it with
- * a reply to somebody else's question. It stays queued and settles with the turn that takes it up.
- */
-const inFlightThreads = new Set<string>();
-const queuedThreads = new Map<string, string>();
-
-function settleTicketThreads(error: string | null): void {
-  if (!inFlightThreads.size) return;
-  const reply = lastAssistantMessage();
-  const keys = [...inFlightThreads];
-  inFlightThreads.clear();
-
-  // Several tickets folded into one turn get one closing message. Said plainly under each, exactly as
-  // the diff threads do, rather than three identical answers each looking individually authoritative.
-  const shared = keys.length > 1
-    ? `\n\n(one turn answered ${keys.length} tickets together — this closing message covers all of them)`
-    : '';
-
-  for (const key of keys) {
-    const body = error
-      ? `the turn failed before answering: ${error}`
-      : (reply ? reply + shared : '(the turn produced no closing message — check the terminal)');
-    // A thread that cannot be written is a question the operator will wait on forever. Say so in the log
-    // and keep going: the other tickets in this turn still have answers owed to them.
-    try { appendTicketTurn(key, 'ayin', body); log('INFO', 'sprint_chat_replied', { key, chars: String(body.length) }); }
-    catch (e) { log('WARN', 'sprint_chat_reply_failed', { key, error: e instanceof Error ? e.message : String(e) }); }
-  }
-}
 
 /**
  * ONE PATH FOR EVERY PROMPT. The review page's comments come through here too, which is what makes them
@@ -1449,16 +1364,11 @@ async function handleInput(text: string): Promise<void> {
     }
 
     await runAgent(text);
-    settleCommentTurns(null);
-    settleTicketThreads(null);
   } catch (err) {
     setAgentStatus('');
     const msg = err instanceof Error ? err.message : String(err);
     addMessage('system', `Agent error: ${msg}`);
     log('ERROR', 'agent_error', { error: msg });
-    // The page must never be left spinning on a turn that died.
-    settleCommentTurns(msg);
-    settleTicketThreads(msg);
   }
   // The block belongs to the TURN. Clearing it here is what keeps a lookup made for "how does the
   // reward service work" out of the next turn about something else entirely.
@@ -1664,11 +1574,74 @@ async function runHeadless(): Promise<void> {
 
   await refreshActiveModel();
 
+  // ── answering a review comment ────────────────────────────────────────────────
+  //
+  // A run spawned by diff/runner.ts carries the comment id it belongs to, and it SETTLES ITS OWN
+  // THREAD. That is deliberate: the session that spawned it may be closed before the answer lands, and
+  // an answer that only exists while its parent is alive is the failure this whole mechanism replaced.
+  //
+  // Every message goes into the thread as it is printed, not at the end — the operator watching the
+  // page sees the run think, and a long edit stops looking like a dead one. Consecutive identical texts
+  // are dropped because a streamed message is rewritten in place, and mirroring each rewrite would fill
+  // the thread with drafts of one sentence.
+  const commentId = process.env.AYIN_DIFF_COMMENT_ID ?? '';
+  // The cwd the SERVER recorded, never this process's own: the store is keyed by that string and
+  // `process.cwd()` has every symlink resolved out of it.
+  const commentCwd = process.env.AYIN_DIFF_COMMENT_CWD || process.cwd();
+  let lastFinal = '';
+  if (commentId) {
+    let lastMirrored = '';
+    onAssistantMessage((text, interim) => {
+      if (text === lastMirrored) return;
+      lastMirrored = text;
+      addNote(commentCwd, commentId, text);
+      if (!interim) lastFinal = text;
+    });
+  }
+
+  // ── answering a ticket question ──────────────────────────────────────────────
+  //
+  // The same mechanism, into a markdown thread instead of a JSONL store (sprint/runner.ts). It differs
+  // in one way that matters: a thread turn cannot be relabelled once appended, so a message is HELD
+  // until the next one arrives and only then written as a `note`. Whatever is still held when the run
+  // ends IS the reply, appended as `ayin`. Mirroring immediately and appending the reply at the end
+  // would put the same sentence in the thread twice under two different headings.
+  const ticketKey = process.env.AYIN_SPRINT_CHAT_KEY ?? '';
+  let heldTicketReply = '';
+  if (ticketKey) {
+    let lastMirrored = '';
+    onAssistantMessage((text, interim) => {
+      if (text === lastMirrored) return;
+      lastMirrored = text;
+      // An interim note is by definition not the reply, so it needs no holding.
+      if (interim) { appendTicketTurn(ticketKey, 'note', text); return; }
+      if (heldTicketReply) appendTicketTurn(ticketKey, 'note', heldTicketReply);
+      heldTicketReply = text;
+    });
+  }
+
   try {
     await runAgent(prompt);
   } catch (err) {
-    process.stderr.write(`ayin: agent error — ${err instanceof Error ? err.message : err}\n`);
+    const why = err instanceof Error ? err.message : String(err);
+    // The thread first, the terminal second: nobody is reading this stderr, and a page left spinning on
+    // a run that threw is the one outcome the status field exists to prevent.
+    if (commentId) markFailed(commentCwd, commentId, `the run failed — ${why}`);
+    if (ticketKey) appendTicketTurn(ticketKey, 'ayin', `The run failed before answering — ${why}`);
+    process.stderr.write(`ayin: agent error — ${why}\n`);
     process.exit(1);
+  }
+
+  if (commentId) {
+    const reply = lastAssistantMessage() || lastFinal;
+    if (reply) markDone(commentCwd, commentId, reply);
+    else markFailed(commentCwd, commentId, `the run finished without saying anything — its log is ${runLogPath(commentId)}`);
+  }
+
+  if (ticketKey) {
+    const reply = heldTicketReply || lastAssistantMessage();
+    appendTicketTurn(ticketKey, 'ayin', reply
+      || `The run finished without saying anything. Its log is ${process.env.AYIN_SPRINT_CHAT_LOG || '(unrecorded)'}`);
   }
 
   flushTranscript(); // belt and braces — the exit hook covers the rest
@@ -1718,33 +1691,17 @@ async function runInteractive(): Promise<void> {
    */
   // The sprint ticket thread. The key is held until the turn ends and the closing message is appended to
   // it here — busy means the message goes on the queue, so it is held aside until a turn absorbs it.
-  wireSprintChat((key, prompt) => {
-    if (busy) queuedThreads.set(prompt, key);
-    else inFlightThreads.add(key);
-    void handleInput(prompt);
-  });
+  // NEITHER A REVIEW COMMENT NOR A TICKET QUESTION IS A TURN HERE ANY MORE. It is answered by its own headless ayin, spawned by
+  // Each is answered by its own headless ayin, spawned by the route that took it (diff/runner.ts,
+  // sprint/runner.ts) — so this session neither queues one nor settles one, and a comment written while
+  // the operator is mid-conversation no longer waits for work it has nothing to do with. See
+  // docs/ARCHITECTURE.md "One comment, one run".
 
-  wireDiffComments((id, prompt) => {
-    inFlightComments.add(id);
-    // Idle: this call starts the turn, so the comment is being acted on now. Busy: it goes on the
-    // queue and flips to working when the turn absorbs it (onQueuedMessagesDrained, below).
-    if (!busy) markWorking(process.cwd(), id);
-    void handleInput(prompt);
-  });
-
-  onQueuedMessagesDrained((messages) => {
-    for (const m of messages) {
-      const id = commentIdFromPrompt(m);
-      if (id) markWorking(process.cwd(), id);
-      const key = queuedThreads.get(m);
-      if (key !== undefined) { queuedThreads.delete(m); inFlightThreads.add(key); }
-    }
-  });
-
-  // A session killed mid-turn leaves comments nothing will ever answer. Fail them by name at boot
-  // instead of letting a reopened page poll a turn that died with the last process.
+  // Runs whose process is gone leave comments nothing will ever answer. Fail those by name at boot
+  // instead of letting a reopened page poll a dead run — a run still ALIVE is left alone, which is why
+  // the store records its pid.
   const reaped = reapAbandoned(process.cwd());
-  if (reaped) addMessage('system', `${reaped} diff comment(s) from a previous session were never answered — re-send them from the page.`);
+  if (reaped) addMessage('system', `${reaped} diff comment(s) were left unanswered by a run that is gone — re-send them from the page.`);
 
   const url = serverUrl('/diff');
   if (url) addMessage('system', `review page: ${url}`);

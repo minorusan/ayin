@@ -14,7 +14,7 @@
  *     Jira confirmed it.
  */
 
-import { rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -275,12 +275,15 @@ const orphan = chat.parseTurns('the agent forgot the heading');
 ok(orphan.length === 1 && orphan[0].who === '',
   'prose with no heading is still a turn — losing an answer to bad formatting is the one failure this cannot afford');
 
-// The routes, with the agent hook stubbed so nothing reaches a real session.
+// The routes. A POST now SPAWNS A HEADLESS AYIN (sprint/runner.ts), so the model is pointed at a dead
+// loopback port first: the assertion that matters is not an answer but that the thread never ends on an
+// unanswered question. AYIN_MODEL_URL is the name connection.ts reads.
+process.env.AYIN_LLM_PROVIDER = 'direct';
+process.env.AYIN_MODEL_URL = 'http://127.0.0.1:1';
+process.env.AYIN_ACQUIRE_LLM = '0';
+
 const srv = await import(`file://${join(ROOT, 'dist', 'sprint', 'server.js')}`);
-let prompt = null;
-let promptKey = null;
-srv.wireSprintChat((k, p) => { promptKey = k; prompt = p; });
-ok(srv.sprintChatWired(), 'the agent hook is wired');
+const runner = await import(`file://${join(ROOT, 'dist', 'sprint', 'runner.js')}`);
 
 const call = (method, path, body) => new Promise((resolve) => {
   const chunks = []; let status = 0; const L = {};
@@ -296,17 +299,30 @@ cr = await call('POST', '/api/sprint/chat', { key: 'AB-1', text: '' });
 ok(cr.status === 400, 'an empty message is refused rather than waking the agent for nothing');
 
 const KEY = 'ZZ-999';
-cr = await call('POST', '/api/sprint/chat', { key: KEY, text: 'where is the counter read?' });
-ok(cr.status === 200, 'a real message is accepted', cr.body.slice(0, 80));
-ok(prompt !== null, 'and it reaches the agent');
-ok(promptKey === KEY, 'with the ticket key alongside it — that is what the reply is appended to', String(promptKey));
+
+// What a run is TOLD, checked without starting one.
+const prompt = runner.chatRunPrompt({
+  key: KEY, status: 'In Progress', title: 'the counter', description: 'a description',
+  thread: '', comment: 'where is the counter read?', logPath: runner.runLogPath(KEY, '2026-01-01T00:00:00.000Z'),
+});
 ok(!prompt.includes(chat.chatPath(KEY)),
   'the prompt does NOT carry the thread path — a path the model never sees is a file it cannot corrupt');
 ok(/where is the counter read/.test(prompt), 'it carries the question');
 ok(prompt.includes(KEY), 'and the ticket key');
-ok(/closing message IS the reply/.test(prompt), 'and says the closing message is the reply');
+ok(/closing\s+message IS the reply/.test(prompt), 'and says the closing message is the reply');
+ok(/every message you print is appended/.test(prompt),
+  'and that everything it says on the way lands in the thread — that is what the notes are');
+ok(prompt.includes(runner.runLogPath(KEY, '2026-01-01T00:00:00.000Z')),
+  'and names its own log, so a run that cannot say anything is still findable');
 ok(/this is the first message about this ticket/.test(prompt),
   'an empty thread says so rather than leaving the earlier-turns block blank');
+ok(!/\{\{[A-Z_]+\}\}/.test(prompt), 'every {{VAR}} was substituted — a literal placeholder is a silently degraded prompt');
+
+cr = await call('POST', '/api/sprint/chat', { key: KEY, text: 'where is the counter read?' });
+ok(cr.status === 200, 'a real message is accepted', cr.body.slice(0, 80));
+const posted = JSON.parse(cr.body);
+ok(Number.isInteger(posted.pid) && posted.pid > 0, `its own run answers it (pid ${posted.pid})`);
+ok(typeof posted.log === 'string' && existsSync(posted.log), 'with its own log file, which exists');
 
 // The operator turn is already on disk before the agent is asked, so the page shows it immediately.
 cr = await call('GET', `/api/sprint/chat/${KEY}`);
@@ -315,8 +331,26 @@ ok(got.turns.length >= 1 && got.turns[0].who === 'you', 'the message is already 
 ok(got.version && got.version !== '0-0', 'and a version stamp is returned so the page can poll cheaply');
 ok(/<p>/.test(got.turns[0].html), 'turns come back as rendered HTML, not raw markdown');
 
-// The reply write app.ts performs when the turn ends: the heading and the clock are the code's, and a
-// closing message that arrived wearing its own heading does not get nested under a second one.
+// The reply write the RUN's own process performs on the way out (app.ts `runHeadless`): the heading and
+// the clock are the code's, and a closing message that arrived wearing its own heading does not get
+// nested under a second one. Waited for first — the run started above is answering this very thread, and
+// a gate that raced it would assert against half a conversation.
+for (let i = 0; i < 300 && !chat.parseTurns(chat.readChat(KEY).text).some((t) => t.who === 'ayin'); i++) {
+  await new Promise((r) => setTimeout(r, 100));
+}
+{
+  const settledByRun = chat.parseTurns(chat.readChat(KEY).text);
+  ok(settledByRun.some((t) => t.who === 'ayin'),
+    'a run that cannot reach a model still ANSWERS — a thread must never end on an unanswered question',
+    settledByRun.map((t) => t.who).join(','));
+  ok(/log/i.test(settledByRun[settledByRun.length - 1].body),
+    'and says where to look instead of inventing an answer',
+    settledByRun[settledByRun.length - 1].body.slice(0, 90));
+  try { rmSync(posted.log, { force: true }); } catch { /* nothing to do */ }
+}
+rmSync(chat.chatPath(KEY), { force: true });
+
+chat.appendTurn(KEY, 'you', 'and again?');
 chat.appendTurn(KEY, 'ayin', `## ayin \u00b7 2020-01-01T00:00:00Z${NL2}the counter is read in Foo.cs:12`);
 const settled = chat.parseTurns(chat.readChat(KEY).text);
 ok(settled.length === 2 && settled[1].who === 'ayin', 'the reply is one turn, appended at the END',
@@ -328,10 +362,16 @@ ok(settled[1].when !== '2020-01-01T00:00:00Z' && !Number.isNaN(Date.parse(settle
 
 // The earlier turns reach the next turn as TEXT, and the message being answered is not in them twice.
 const earlier = chat.threadBefore(KEY);
-ok(earlier.includes('where is the counter read') && earlier.includes('Foo.cs:12'),
-  'threadBefore carries what was already said');
+ok(earlier.includes('and again?') && earlier.includes('Foo.cs:12'),
+  'threadBefore carries what was already said — both sides of it');
 ok(chat.threadBefore(KEY, 40).startsWith('(earlier turns elided)'),
   'and clips the OLDEST end when the thread outgrows the budget');
+
+// A note is a THIRD who — the middle of the story, which must not read as loud as the answer.
+chat.appendTurn(KEY, 'note', 'reading Foo.cs first');
+const withNote = chat.parseTurns(chat.readChat(KEY).text);
+ok(withNote[withNote.length - 1].who === 'note',
+  'a note is its own turn, parsed like the other two', withNote.map((t) => t.who).join(','));
 
 rmSync(chat.chatPath(KEY), { force: true });
 
@@ -370,14 +410,25 @@ ok(/id="d-prog"[^>]*hidden/.test(page),
   'the row ships HIDDEN — it appears when something was asked, not on every page load');
 ok(/id="d-what"/.test(page) && /id="d-el"/.test(page),
   'and carries both slots: what the agent is doing, and how long it has been doing it');
-ok(/fetch\('\/api\/agent\/state'\)/.test(page),
-  'it reads the session\'s own state over a relative route — nothing about the port is baked in');
+ok(!/api\/agent\/state'\)/.test(page),
+  'it no longer reads the SESSION\'s agent state — the answer is its own process now, and that row said "queued" for the whole run');
+ok(/lastNote/.test(page),
+  'it shows the newest thing the RUN said, which the chat poll already fetched — no second request');
 ok(/last\.who === 'ayin'\) stopProg\(\)/.test(page),
   'it STOPS when the answer lands — the same file-grew signal the thread already uses, not a second completion mechanism');
 ok(/function stopChat\(\)[\s\S]{0,200}stopProg\(\)/.test(page),
   'and when the drawer closes, so a closed ticket leaves no timer running');
-ok(/queued/.test(page) && /stalled/.test(page),
-  'idle while we are still waiting says QUEUED rather than pulsing confidently — the turn is behind something else');
+ok(/has started and not said anything yet/.test(page) && /stalled/.test(page),
+  'a run that has not spoken yet says so rather than pulsing confidently');
+ok(/id="cclear"/.test(page) && /Clear every ayin thread/.test(page),
+  'the red X that clears every thread is on the board, labelled for a screen reader');
+ok(/window\.confirm\('Clear every ayin thread/.test(page), 'and confirms before deleting');
+ok(/Jira comments, your code and the run/.test(page),
+  'saying what it does NOT touch — the other delete on this page is a public Jira comment');
+ok(/details class="turn ayin" open/.test(page),
+  'the answer is a foldable <details>, open — a long report must not bury the question after it');
+ok(/\.turn\.note \.md\{font:11\.5px/.test(page) && /\.turn\.ayin \.md\{font-size:13\.5px/.test(page),
+  'notes are smaller than the answer, in the stylesheet rather than by accident');
 ok(/\.drawer\.open ~ \.fab\{display:none\}/.test(page),
   'the refresh FAB steps aside for an open drawer — it sat on top of the elapsed clock');
 

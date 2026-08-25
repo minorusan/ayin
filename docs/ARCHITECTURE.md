@@ -2443,6 +2443,47 @@ Two things that are load-bearing rather than cosmetic, both argued in [`DIFF.md`
   reach `git`, so the affordance is absent rather than present and broken, the same call the page makes
   about comments.
 
+- **ONE COMMENT, ONE RUN** (`src/diff/runner.ts`). A line comment used to be handed to the session
+  serving the page — idle it started a turn, busy it was FOLDED into the running one. Folding is what
+  made the answers dishonest: one closing message was shown under three unrelated questions, each
+  looking individually authoritative, and a comment on line 40 waited for work on line 12. A review with
+  no TUI attached could not be answered at all. So `POST /api/diff/comment` now **spawns a headless
+  ayin** (`node dist/index.js -p <prompt>`) in the repo the page was served from, one per comment, and
+  two comments written a second apart are answered in parallel by two runs that never see each other's
+  prompt. The prompt is `prompts/ayin/diffCommentRun.txt`, opening with the same
+  `<comment-response …>` marker `prompts/ayin/system.txt` already teaches — the file adds only what is
+  true of a RUN: its messages reach the thread as they arrive, its closing message is the reply, and
+  where its log is.
+
+  **The run talks while it works.** `onAssistantMessage` (`src/ui/index.ts`) is the hook — the funnel
+  every message already went through — and a run carrying `AYIN_DIFF_COMMENT_ID` mirrors each message
+  into the store as a `note` (`app.ts` `runHeadless`). The page renders notes small and quiet under the
+  question and the closing message big as the reply, and the existing status poll carries them so there
+  is no second route to keep in step. A five-minute edit that says nothing is indistinguishable from a
+  dead one; this is the whole difference. Consecutive identical texts are dropped — a streamed message
+  is rewritten in place, and each rewrite would otherwise land as a draft of one sentence.
+
+  **The run settles its own thread.** `markDone` is called by the CHILD, not by the parent's exit
+  handler, so closing the session mid-answer still leaves the answer on the page — now an ordinary thing
+  to do rather than a crash. The parent touches the record only when the child left it unsettled, and
+  then names the run's log (`~/.ayin-cli/diffs/comment-<id>.log`). Notes are their own record kind rather
+  than a patch carrying an array, because two processes write that file at once and a patch would drop
+  whichever writer read it first. The store also keeps the run's **pid**, so `reapAbandoned` at boot can
+  fail the threads whose run is gone and leave alone the ones still editing — asked with `kill(pid, 0)`,
+  never trusted, since a pid recorded before a reboot names something else.
+
+  One trap worth keeping: the store is keyed by the **cwd string**, and `process.cwd()` in the child
+  returns it with every symlink resolved. A session serving `/var/folders/…` spawned a run reporting
+  `/private/var/folders/…` and settled the thread in a second file nobody was reading — the page waited
+  forever while the answer existed one directory-name away. The cwd travels in
+  `AYIN_DIFF_COMMENT_CWD`; the child never asks for its own. `check:comments` pins it.
+
+- **A red X FAB clears every thread in the repo** (`DELETE /api/diff/comments`). Same shape language as
+  the discard FAB, one clear gap above it, and a different glyph on purpose: the three bins on this page
+  discard CODE and this one discards none. It confirms first, names the count, and says out loud what it
+  does not touch — the working tree. The store FILE is removed rather than rewritten empty, because the
+  point of an append-only log is that no writer ever holds the whole document.
+
 - **The commit message is drafted from three sources and shown in the page** (`src/commit-draft.ts`).
   The expensive half is LAST: changed files come from git, ticket keys from one regex over the branch
   name, the local Claude Code transcript, the last few commit subjects and the diff's added lines — and
@@ -2564,8 +2605,35 @@ see is a button nobody knows exists.
 **Ask ayin about a ticket** (`src/sprint/chat.ts`). One markdown file per ticket at
 `~/.ayin-cli/sprint/chat/<KEY>.md`, and **that file IS the thread**. Sending appends the operator's turn
 and hands the agent the ticket, the earlier turns AS TEXT (`threadBefore`, tail-clipped to 4000 chars)
-and the question. It searches the codebase and answers; **`app.ts` appends that closing message to the
-thread when the turn ends** (`settleTicketThreads`).
+and the question. It searches the codebase and answers.
+
+**ONE MESSAGE, ONE RUN** (`src/sprint/runner.ts`) — the same change `/diff` made, for the same reasons.
+It used to be handed to the serving session and folded into whatever turn was running, which is worse
+here than on the diff page: two questions about two different tickets absorbed into one turn produced one
+closing message, appended verbatim to BOTH threads. Now every message spawns its own headless ayin in the
+repo the board was served from, and a board with no TUI behind it can be asked things at all.
+
+`chatRunPrompt` lives beside the spawn rather than in the route, so what a run is TOLD and how a run is
+STARTED change together — and a gate can check the prompt without starting a process.
+
+**THREE WHOS IN THE THREAD, not two.** `note` is something the run said on its way to the answer, `ayin`
+is the answer. A run cannot know which of its messages is its last, and a markdown turn cannot be
+relabelled once appended — so the mirror HOLDS each message until the next arrives and writes the held one
+as a `note`; whatever is still held when the run ends is appended as the reply. Mirroring immediately and
+appending the reply at the end would put the same sentence in the thread twice under two different
+headings. The page renders notes small and quiet on a rail, and the answer as a `<details open>` — bigger
+than everything around it and foldable with no javascript, because a long report otherwise buries the
+question after it.
+
+The progress row now reads **the newest thing the run SAID**, taken from the poll the thread already
+makes. It used to read `/api/agent/state` — the serving session's own indicator — and that stopped being
+the truth the moment a question became its own process: the session is idle while the run works, so the
+row said "queued" for the entire answer.
+
+**A red X FAB clears every ticket thread** (`DELETE /api/sprint/chat`), one clear gap above the refresh
+FAB as on the diff page. Only `*.md` in the chat directory: the run LOGS live beside the threads and are
+the only record of what a run did, so clearing the conversation must not take the evidence with it. The
+dialog names what it does not touch, because the other delete on this page is a **public Jira comment**.
 
 **BOTH TURNS ARE WRITTEN BY CODE**, and `chat.ts` is the only writer. The first design gave the agent
 the PATH and asked it to append — its write was the reply. It failed exactly where a model fails: it
@@ -2575,32 +2643,27 @@ in the prompt at all — a path the model never sees is a file it cannot corrupt
 the heading, the clock and the position, stripping a `## ayin · …` heading off a reply that arrives
 wearing one.
 
-The key travels with the prompt (`ChatSubmit(key, prompt)`) and is held until the turn ends. The
-pending/absorbed split is the diff store's, for the same reason: a message sent while the agent works is
-folded into the running turn, and settling one that was NOT absorbed would answer it with a reply to
-somebody else's question — it stays in `queuedThreads` until `onQueuedMessagesDrained` says a turn took
-it. Several tickets in one turn each get the closing message with a line saying it covered all of them.
-A turn that dies appends the error, so the thread never ends on an unanswered question.
+The key travels in `AYIN_SPRINT_CHAT_KEY` and the run appends through `chat.ts` from its own process, so
+there is no queue to keep and nothing to settle at the end of a turn. A run that dies appends the error
+naming its log, so the thread never ends on an unanswered question — the child speaks for a run that
+finished silently, the parent's exit handler only for one that died.
 
 Still deliberately NOT the diff comment store: no status machine and no reply payload, because a diff
 moves under the discussion and a ticket does not. The page polls a `size-mtime` version stamp and
 re-renders when the file grew. Polling stops when the drawer closes, and gives up after three minutes of
 a quiet file so a forgotten tab does not poll forever.
 
-While a turn is in flight the drawer shows a **progress row** (`src/agent-activity.ts`,
-`GET /api/agent/state`): what the agent is doing and how long it has been doing it —
-`tool · Running grep(ScoringId, Assets/Scripts) … 1m 24s`. The state is the one the TUI indicator
-already paints; `setAgentState` records it into a HOLDER (one current value, no history) before it
-paints, so a headless `-p` run reports too. `since` moves on a STATE change and holds across a label
-change, because a tool label updates several times inside one thinking phase and resetting the clock
-each time would make a long wait look like a series of short ones.
+`src/agent-activity.ts` and `GET /api/agent/state` still exist and still report what THIS session is
+doing — `setAgentState` records into a HOLDER (one current value, no history) before it paints, so a
+headless `-p` run reports too, and `since` moves on a STATE change while holding across a label change
+because a tool label updates several times inside one thinking phase. The sprint drawer no longer reads
+it; nothing else about it changed.
 
 The row stops on the signal the thread already has — the newest turn being `ayin` — and on the drawer
-closing. No second completion mechanism, so there is nothing for the two to disagree about. `idle`
-while the page is still waiting is reported as **queued**, not as a confident spinner: the turn is
-behind something else in the session, or it finished without writing, and both are worth saying. The
-refresh FAB is hidden while the drawer is open — it is fixed to the same corner the elapsed clock
-lands in.
+closing. No second completion mechanism, so there is nothing for the two to disagree about. A run that
+has not spoken yet is reported as such, not as a confident spinner: the run is still starting, loading its
+prompt and reaching the model, and saying that is worth more than a pulse. The refresh FAB is hidden while
+the drawer is open — it is fixed to the same corner the elapsed clock lands in.
 
 The thread lives **outside the repo**: a discussion about a ticket is not a change to the project, and
 writing it into the working tree would put it in the next diff, the next commit, and eventually

@@ -16,35 +16,26 @@
  * self-contained file that works with no network, with the comment affordance absent rather than
  * broken. See diff/index.ts.
  *
- * WHAT THIS ENDPOINT IS. A POST here becomes an agent turn, and the agent runs shell commands. That is
+ * WHAT THIS ENDPOINT IS. A POST here SPAWNS A HEADLESS AYIN that runs shell commands (diff/runner.ts —
+ * one run per comment, so two comments are two answers rather than one paragraph shown twice). That is
  * a larger authority than the prompt editor it shares a port with, which is itself larger than it
  * looks. Two things hold: the socket is bound to loopback only (prompt-server.ts owns the bind), and a
- * comment is refused unless its `cwd` is this session's own — the page is served by the session that
- * owns the repo, so a comment arriving for a different tree is not a mistake to route around.
+ * run is started only in the cwd of the session that served the page — the page is served by the
+ * session that owns the repo, so a comment arriving for a different tree is not a mistake to route
+ * around.
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { collectDiff } from './collect.js';
 import { renderDiffPage } from './render.js';
-import { createComment, getComment, readComments } from './comments.js';
+import { clearComments, createComment, getComment, readComments } from './comments.js';
+import { runCommentAgent } from './runner.js';
 import {
   autoStage, discardAll, discardByExt, discardOne, previewDiscard, previewDiscardExt,
   safeRepoPath, stageOne, unstageOne,
 } from './stage.js';
 import { commitStaged, draftCommit, readCommitDraft, rephraseSubject } from '../commit-draft.js';
 import { log } from '../log.js';
-
-/** How a comment reaches the agent. Wired by app.ts at boot; absent in any process without a TUI. */
-type Submit = (commentId: string, prompt: string) => void;
-let submit: Submit | null = null;
-
-export function wireDiffComments(fn: Submit): void {
-  submit = fn;
-}
-
-export function diffCommentsWired(): boolean {
-  return submit !== null;
-}
 
 /** A rev is operator input from a browser. execFileSync takes an argv array, so this is a sanity gate
  *  rather than a shell-injection one — but a rev that cannot be a rev should fail here, loudly, and
@@ -97,10 +88,6 @@ function servePage(res: ServerResponse, cwd: string, rev: string): void {
 }
 
 async function postComment(req: IncomingMessage, res: ServerResponse, cwd: string, url: URL): Promise<void> {
-  if (!submit) {
-    json(res, 503, { error: 'no interactive session is wired to take comments in this process' });
-    return;
-  }
   const raw = await readBody(req);
   let b: Record<string, unknown>;
   try { b = JSON.parse(raw) as Record<string, unknown>; }
@@ -121,11 +108,14 @@ async function postComment(req: IncomingMessage, res: ServerResponse, cwd: strin
   if (!validRev(rev)) { json(res, 400, { error: `rev: ${rev} cannot be a git rev` }); return; }
 
   const c = createComment({ cwd, rev, file, side, lineNo, lineText, text });
-  // The page URL the agent is told about is the one that will show its work — same route, same rev.
+  // The page URL the run is told about is the one that will show its work — same route, same rev.
   const pageUrl = `${url.origin}/diff?rev=${encodeURIComponent(rev)}`;
-  const { commentPrompt } = await import('./comments.js');
-  submit(c.id, commentPrompt(c, pageUrl));
-  json(res, 200, { id: c.id, status: c.status });
+  // ITS OWN RUN, started now. Nothing here waits for it: the answer takes minutes and this POST has to
+  // return in milliseconds, so the thread's status is how the page follows along. A run that could not
+  // start has already failed the comment by name, and `pid: 0` is what tells the page that happened.
+  const pid = runCommentAgent(c, pageUrl);
+  const settled = getComment(cwd, c.id);
+  json(res, 200, { id: c.id, status: settled?.status ?? c.status, pid, error: settled?.error ?? '' });
 }
 
 /**
@@ -337,11 +327,28 @@ export async function handleDiffRequest(req: IncomingMessage, res: ServerRespons
     return true;
   }
 
+  // EVERY THREAD IN THIS REPO, DELETED. Irreversible like the discard routes and confirmed the same
+  // way — but unlike them nothing here touches the working tree, so a mistaken click costs the review
+  // conversation and no code. The store file is removed rather than emptied (see comments.ts).
+  if (path === '/api/diff/comments' && req.method === 'DELETE') {
+    try {
+      const cleared = clearComments(cwd);
+      json(res, 200, { ok: true, cleared });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('WARN', 'diff_comments_clear_failed', { error: msg });
+      json(res, 500, { error: msg });
+    }
+    return true;
+  }
+
   if (path.startsWith('/api/diff/comment/') && req.method === 'GET') {
     const id = decodeURIComponent(path.slice('/api/diff/comment/'.length));
     const c = getComment(cwd, id);
     if (!c) { json(res, 404, { error: `no comment ${id}` }); return true; }
-    json(res, 200, { id: c.id, status: c.status, response: c.response, error: c.error });
+    // The NOTES ride along with the status. The run talks while it works and the page shows that as it
+    // arrives; a second route for it would poll the same file twice per second for the same answer.
+    json(res, 200, { id: c.id, status: c.status, response: c.response, error: c.error, notes: c.notes });
     return true;
   }
 

@@ -91,11 +91,34 @@ export function lastAssistantMessage(): string {
   return _lastAssistant;
 }
 
+/**
+ * Every assistant message as it is printed — the hook something outside the terminal listens on.
+ *
+ * A headless run answering a review comment (diff/runner.ts) has no terminal at all: its messages
+ * belong in the comment thread on the page, arriving while it works rather than as one paragraph at the
+ * end. So the funnel every message already goes through emits it, and the listener decides what a
+ * message is for. `interim` is passed through rather than filtered here — a mid-turn note and the
+ * closing reply are shown differently, and only the listener knows how.
+ */
+type AssistantListener = (text: string, interim: boolean) => void;
+let _onAssistant: AssistantListener | null = null;
+
+export function onAssistantMessage(fn: AssistantListener): void {
+  _onAssistant = fn;
+}
+
+function emitAssistant(text: string, interim: boolean): void {
+  if (!_onAssistant) return;
+  // A listener that throws must not take the message off the screen with it.
+  try { _onAssistant(text, interim); } catch { /* the mirror is never the reason a turn fails */ }
+}
+
 export function addMessage(role: MessageRole, content: string, opts?: { interim?: boolean }): void {
   // `_lastAssistant` is what something OUTSIDE the terminal shows as the reply (a diff-page comment
   // thread). A mid-turn note is not the reply, so it must not overwrite it — otherwise the page reports
   // "let me check the mapper first" as the answer to the comment it asked about.
   if (role === 'assistant' && !opts?.interim) _lastAssistant = content;
+  if (role === 'assistant') emitAssistant(content, opts?.interim === true);
   chat.add(role, content, opts?.interim === true);
 }
 
@@ -123,6 +146,7 @@ function tok(n: number): string {
 
 export function updateLastAssistant(content: string): void {
   _lastAssistant = content;
+  emitAssistant(content, false);
   chat.updateLastAssistant(content);
 }
 

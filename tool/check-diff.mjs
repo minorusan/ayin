@@ -547,7 +547,10 @@ const mdHtml = render.renderDiffPage(mdSet, {
     error: '', createdAt: '', startedAt: '', doneAt: '',
   }], commitDraft: null,
 });
-ok(/<div class="cmt-b md">/.test(mdHtml), 'the reply body is marked as markdown');
+ok(/<div class="cmt-b md big">/.test(mdHtml),
+  'the reply body is marked as markdown AND as the big one — it is the thing in the thread worth reading twice');
+ok(/<details class="cmt reply" open>/.test(mdHtml),
+  'and it is foldable, open: a long report must not bury the next file, and <details> costs no javascript');
 ok(/<h4>Heading<\/h4>/.test(mdHtml) && !/## Heading/.test(mdHtml), 'and the reply is rendered, not shown raw');
 ok(/\.md pre code\{/.test(mdHtml), 'the page carries styles for it');
 

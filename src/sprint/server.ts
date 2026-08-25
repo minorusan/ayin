@@ -6,8 +6,9 @@
  * board is a board that is wrong by the time it is read. So `/sprint` re-fetches on every request — a
  * reload is how you see what changed — and there is no static fallback: no session, no page, said plainly.
  *
- * A POST HERE WRITES TO AN EXTERNAL SERVICE, in the operator's name, and cannot be taken back. Three
- * things hold: the socket is loopback-only (prompt-server.ts owns the bind), every non-GET is behind the
+ * A POST HERE WRITES TO AN EXTERNAL SERVICE, in the operator's name, and cannot be taken back — and the
+ * chat route SPAWNS A HEADLESS AYIN with a shell (sprint/runner.ts, one run per message). Three things
+ * hold: the socket is loopback-only (prompt-server.ts owns the bind), every non-GET is behind the
  * cross-origin refusal that guards the prompt editor, and the comment is refused unless it names a ticket
  * ON THE BOARD THAT WAS SERVED — a page cannot be talked into commenting on an arbitrary key.
  */
@@ -17,14 +18,9 @@ import { addComment, issueDetail } from '../tools/connectors/jira/client.js';
 import { collectSprint } from './collect.js';
 import { renderSprintPage } from './render.js';
 import { log } from '../log.js';
-import { appendTurn, chatPath, isTicketKey, parseTurns, readChat, threadBefore } from './chat.js';
+import { appendTurn, chatPath, clearAllChats, isTicketKey, parseTurns, readChat, threadBefore } from './chat.js';
+import { chatRunPrompt, runLogPath, runSprintChatAgent } from './runner.js';
 import { renderWebMarkdown } from '../web-markdown.js';
-import { prompts as promptService, packagePath } from '../prompts-service.js';
-
-/** The sprint namespace's prompts. Registering twice is idempotent and returns the same bundle. */
-const sprintPrompts = (): { get: (id: string, vars?: Record<string, string>) => string } =>
-  promptService.register('sprint', packagePath('prompts', 'sprint')).bundle;
-
 const KEY = /^[A-Z][A-Z0-9_]*-\d+$/;
 
 /**
@@ -96,24 +92,6 @@ async function postComment(req: IncomingMessage, res: ServerResponse): Promise<v
 }
 
 /** Returns true when the request was ours. Anything else falls through to the other routes. */
-/**
- * How a ticket message reaches the agent. Wired by app.ts at boot; absent in any process with no TUI.
- *
- * The KEY travels with the prompt because the reply is written HERE-side, not by the agent: app.ts holds
- * the key until the turn ends and then appends the closing message to that ticket's thread. A prompt
- * alone would leave nothing to append it to.
- */
-type ChatSubmit = (key: string, prompt: string) => void;
-let chatSubmit: ChatSubmit | null = null;
-
-export function wireSprintChat(fn: ChatSubmit): void {
-  chatSubmit = fn;
-}
-
-export function sprintChatWired(): boolean {
-  return chatSubmit !== null;
-}
-
 export async function handleSprintRequest(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
   const path = url.pathname;
@@ -162,15 +140,28 @@ export async function handleSprintRequest(req: IncomingMessage, res: ServerRespo
     return true;
   }
 
-  // POST appends what the operator said and hands the agent the ticket, the earlier turns AS TEXT and the
-  // question. It is never given the thread path: the reply is appended by app.ts when the turn ends, so
-  // the file has exactly one writer and a turn cannot land above the message that asked for it.
+  // EVERY THREAD, DELETED. The red X on the board. Irreversible and confirmed on the page — but it
+  // touches nothing outside `~/.ayin-cli/sprint/chat/*.md`: no Jira comment, no code, and not the run
+  // logs, which are the only record of what a run actually did.
+  if (path === '/api/sprint/chat' && req.method === 'DELETE') {
+    try {
+      const cleared = clearAllChats();
+      log('INFO', 'sprint_chats_cleared', { threads: String(cleared) });
+      json(res, 200, { ok: true, cleared });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log('WARN', 'sprint_chats_clear_failed', { error: msg });
+      json(res, 500, { error: msg });
+    }
+    return true;
+  }
+
+  // POST appends what the operator said and SPAWNS A RUN with the ticket, the earlier turns AS TEXT and
+  // the question. The run is never given the thread path: it appends through `chat.ts` from its own
+  // process, so the file has exactly one writer and a turn cannot land above the message that asked for
+  // it.
   if (path === '/api/sprint/chat' && req.method === 'POST') {
     try {
-      if (!chatSubmit) {
-        json(res, 503, { error: 'no interactive session is wired to take this' });
-        return true;
-      }
       const raw = await readBody(req);
       let b: Record<string, unknown> = {};
       try { b = JSON.parse(raw) as Record<string, unknown>; } catch { /* guarded below */ }
@@ -188,16 +179,20 @@ export async function handleSprintRequest(req: IncomingMessage, res: ServerRespo
       let issue: { key: string; title: string; status: string; description?: string } | null = null;
       try { issue = await issueDetail(key); } catch { /* unreachable Jira must not lose the message */ }
 
-      const prompts = sprintPrompts();
-      chatSubmit(key, prompts.get('chatTurn', {
-        KEY: key,
-        STATUS: issue?.status ?? '(status unavailable)',
-        TITLE: issue?.title ?? '(title unavailable)',
-        DESCRIPTION: (issue?.description ?? '(description unavailable)').slice(0, 8000),
-        THREAD: earlier || '(nothing — this is the first message about this ticket)',
-        COMMENT: text,
-      }));
-      json(res, 200, { ok: true, path: chatPath(key) });
+      // The log path is in the PROMPT as well as in the reply of a run that dies, because a run that
+      // cannot say anything is otherwise unfindable.
+      const logPath = runLogPath(key);
+      const prompt = chatRunPrompt({
+        key,
+        status: issue?.status ?? '(status unavailable)',
+        title: issue?.title ?? '(title unavailable)',
+        description: issue?.description ?? '(description unavailable)',
+        thread: earlier,
+        comment: text,
+        logPath,
+      });
+      const run = runSprintChatAgent(key, process.cwd(), prompt, logPath);
+      json(res, 200, { ok: true, path: chatPath(key), pid: run.pid, log: run.logPath });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log('WARN', 'sprint_chat_failed', { error: msg });

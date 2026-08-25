@@ -13,6 +13,12 @@
  * by the session that owns the repo, and a comment reaching a DIFFERENT repo's agent would have it
  * edit files the reviewer never looked at.
  *
+ * THREE RECORD KINDS, not two. A comment is answered by its OWN headless ayin (diff/runner.ts), and
+ * that run talks while it works: every message it prints is appended here as a `note`. Notes are an
+ * append, never a patch, because a patch merges a whole array and two writers would each overwrite the
+ * other's notes — the run appends from its process while the session that spawned it appends from
+ * another.
+ *
  * ANCHORED BY TEXT, NOT ONLY BY NUMBER. The point of a comment is that the code changes in response to
  * it, and the fix moves every line below it. `lineNo` is where it was written; `lineText` is how the
  * re-rendered page finds it again. When neither matches, the thread is shown against the file with its
@@ -20,13 +26,19 @@
  * to the wrong line is worse than one attached to none.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { log } from '../log.js';
 
 export type CommentStatus = 'pending' | 'working' | 'done' | 'failed';
+
+/** One thing the run said on its way to the answer. */
+export interface CommentNote {
+  at: string;
+  text: string;
+}
 
 export interface DiffComment {
   id: string;
@@ -43,6 +55,10 @@ export interface DiffComment {
   /** The agent's reply, once the turn that consumed this comment finished. */
   response: string;
   error: string;
+  /** Everything the run said before the reply, oldest first. Rendered small, under the question. */
+  notes: CommentNote[];
+  /** The headless run answering this. Checked with `kill(pid, 0)` — never trusted as a liveness claim. */
+  pid: number;
   createdAt: string;
   startedAt: string;
   doneAt: string;
@@ -55,9 +71,17 @@ function storePath(cwd: string): string {
   return join(DIFF_DIR, `comments-${key}.jsonl`);
 }
 
+/**
+ * A comment AS FOUND ON DISK. Notes and pid arrived after the first stores were written, so a record
+ * from before them has neither field — the fold is the one place that can say so, and typing it here is
+ * what stops every reader from having to.
+ */
+type StoredComment = Omit<DiffComment, 'notes' | 'pid'> & Partial<Pick<DiffComment, 'notes' | 'pid'>>;
+
 type Record_ =
-  | { t: 'new'; c: DiffComment }
-  | { t: 'patch'; id: string; p: Partial<DiffComment> };
+  | { t: 'new'; c: StoredComment }
+  | { t: 'patch'; id: string; p: Partial<DiffComment> }
+  | { t: 'note'; id: string; n: CommentNote };
 
 function append(cwd: string, rec: Record_): void {
   mkdirSync(DIFF_DIR, { recursive: true });
@@ -74,8 +98,11 @@ export function readComments(cwd: string): DiffComment[] {
     if (!line.trim()) continue;
     let rec: Record_;
     try { rec = JSON.parse(line) as Record_; } catch { broken++; continue; }
-    if (rec.t === 'new') byId.set(rec.c.id, rec.c);
-    else {
+    if (rec.t === 'new') byId.set(rec.c.id, { ...rec.c, notes: rec.c.notes ?? [], pid: rec.c.pid ?? 0 });
+    else if (rec.t === 'note') {
+      const cur = byId.get(rec.id);
+      if (cur) byId.set(rec.id, { ...cur, notes: [...cur.notes, rec.n] });
+    } else {
       const cur = byId.get(rec.id);
       if (cur) byId.set(rec.id, { ...cur, ...rec.p });
     }
@@ -107,6 +134,7 @@ export function createComment(n: NewComment): DiffComment {
     cwd: n.cwd, rev: n.rev, file: n.file, side: n.side, lineNo: n.lineNo,
     lineText: n.lineText, text: n.text,
     status: 'pending', response: '', error: '',
+    notes: [], pid: 0,
     createdAt: now, startedAt: '', doneAt: '',
   };
   append(c.cwd, { t: 'new', c });
@@ -128,41 +156,62 @@ export function markDone(cwd: string, id: string, response: string): void {
   log('INFO', 'diff_comment_done', { id, replyChars: String(response.length) });
 }
 
+/**
+ * One thing the run said while it worked, straight into the thread.
+ *
+ * Appended by the RUN's own process (diff/runner.ts spawns it with `AYIN_DIFF_COMMENT_ID` set), which is
+ * why it is a record kind rather than a patch: the session that spawned it is appending status patches
+ * to the same file at the same time, and a patch carrying the whole array would drop whichever writer
+ * read it first.
+ */
+export function addNote(cwd: string, id: string, text: string): void {
+  const t = text.trim();
+  if (!t) return;
+  append(cwd, { t: 'note', id, n: { at: new Date().toISOString(), text: t } });
+}
+
 export function markFailed(cwd: string, id: string, error: string): void {
   patchComment(cwd, id, { status: 'failed', error, doneAt: new Date().toISOString() });
   log('WARN', 'diff_comment_failed', { id, error });
 }
 
 /**
- * Comments still owed an answer. Called at boot: a session killed mid-turn leaves `working` records
- * that nothing will ever finish, and a page polling one of them would spin forever. They are failed
- * loudly instead, naming the reason, so the operator can re-send rather than wait on a dead turn.
+ * Every thread, gone. What the red X on the page does.
+ *
+ * The FILE is removed, not rewritten empty: this store is append-only precisely so that no writer ever
+ * has to hold the whole document, and truncating it in place would be the one read-modify-write in the
+ * module. A run still talking to a deleted store simply recreates it with its own notes, which is the
+ * honest outcome — a comment whose thread was cleared mid-answer has no thread to come back to.
  */
-export function reapAbandoned(cwd: string): number {
-  let n = 0;
-  for (const c of readComments(cwd)) {
-    if (c.status === 'pending' || c.status === 'working') {
-      markFailed(cwd, c.id, 'the session that took this comment exited before the turn finished — re-send it');
-      n++;
-    }
-  }
+export function clearComments(cwd: string): number {
+  const n = readComments(cwd).length;
+  try { rmSync(storePath(cwd), { force: true }); }
+  catch (e) { throw new Error(`could not clear the comment store — ${e instanceof Error ? e.message : String(e)}`); }
+  log('INFO', 'diff_comments_cleared', { cwd, threads: String(n) });
   return n;
 }
 
 /**
- * The id inside a marker, or null for an ordinary prompt. This is how a comment that was folded into an
- * already-running turn is recognised on its way through the queue — the prompt text is the only thing
- * that crosses that boundary.
+ * Comments still owed an answer, whose run is GONE. Called at boot: a page polling a comment nothing
+ * will ever finish spins forever, so those are failed loudly by name instead.
+ *
+ * The pid check is what keeps that from being a lie now that the answer is a separate process. A run
+ * started by a session that has since exited is still working — killing its thread because its parent
+ * died would fail an edit that is about to land. `kill(pid, 0)` is asked rather than the pid being
+ * trusted: a pid recorded before a reboot names something else entirely, or nothing.
  */
-export function commentIdFromPrompt(text: string): string | null {
-  const m = /^<comment-response\s+diffPath='[^']*'\s+id="(c-[0-9a-f]+)">/.exec(text);
-  return m ? m[1] : null;
+export function reapAbandoned(cwd: string): number {
+  let n = 0;
+  for (const c of readComments(cwd)) {
+    if (c.status !== 'pending' && c.status !== 'working') continue;
+    if (c.pid && alive(c.pid)) continue;
+    markFailed(cwd, c.id, 'the run answering this comment is gone — re-send it');
+    n++;
+  }
+  return n;
 }
 
-/** The prompt the agent actually receives. The marker is the contract with `prompts/ayin/system.txt`. */
-export function commentPrompt(c: DiffComment, pageUrl: string): string {
-  return `<comment-response diffPath='${pageUrl}' id="${c.id}">\n`
-    + `${c.file}:${c.lineNo} (${c.side === 'old' ? 'removed' : 'current'} side of the diff)\n`
-    + `${c.side === 'old' ? '-' : '+'} ${c.lineText}\n\n`
-    + `${c.text}`;
+/** Does this pid exist? Signal 0 tests, it does not deliver. */
+function alive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }

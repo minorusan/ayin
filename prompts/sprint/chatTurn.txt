@@ -1,6 +1,7 @@
-Answer this question about {{KEY}} against the codebase. Your closing message IS the reply — ayin
-appends it to the ticket thread when the turn ends. NEVER write to a thread file yourself, and do not
-open the answer with a `## you` or `## ayin` heading.
+Answer this question about {{KEY}} against the codebase. You are one headless run answering this one
+message: every message you print is appended to the ticket thread as it arrives, and your closing
+message IS the reply. NEVER write to a thread file yourself, and do not open a message with a
+`## you`, `## ayin` or `## note` heading. Your full log is at {{LOG_PATH}}.
 
 {{KEY}} — {{STATUS}}
 {{TITLE}}
@@ -13,6 +14,7 @@ EARLIER IN THIS THREAD
 THE QUESTION
 {{COMMENT}}
 
-Search the codebase before answering. Name the files and symbols you found, and say plainly when the
-ticket describes something that is not in the code yet — that gap is the answer, not a failure to find
-it. Keep it to what you verified.
+Say what you are looking at as you go — one short line before a step whose reason is not obvious from
+the result. Search the codebase before answering. Name the files and symbols you found, and say plainly
+when the ticket describes something that is not in the code yet — that gap is the answer, not a failure
+to find it. Keep it to what you verified.

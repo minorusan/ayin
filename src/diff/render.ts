@@ -92,16 +92,41 @@ function threadHtml(list: DiffComment[]): string {
     // inline spans naming symbols — and `esc()` showed all of it raw: literal ### and ** and backticks
     // in the one place on this page a human reads prose. renderWebMarkdown escapes first and formats
     // second, so this is no less safe than the escape it replaces.
+    // THE REPLY IS A <details>, open. Foldable with no javascript at all — keyboard, screen readers and
+    // the browser's own find-in-page all keep working, which is not true of a div and a click handler.
+    // It is the one thing in the thread worth reading twice, so it is set BIGGER than both the question
+    // above it and the notes between; folding is what keeps a long report from burying the next file.
     const reply = c.status === 'done' && c.response
-      ? `<div class="cmt reply"><div class="cmt-h"><span class="who">ayin</span></div>`
-        + `<div class="cmt-b md">${renderWebMarkdown(c.response)}</div></div>`
+      ? `<details class="cmt reply" open><summary class="cmt-h"><span class="who">ayin</span>`
+        + `<span class="foldh">fold</span></summary>`
+        + `<div class="cmt-b md big">${renderWebMarkdown(c.response)}</div></details>`
       : '';
+    // WHAT THE RUN SAID ON THE WAY, small, above the reply. The answer is a separate headless ayin now
+    // (diff/runner.ts) and it talks while it works — a five-minute edit that says nothing looks exactly
+    // like a dead one, which is the whole reason these are shown at all.
+    //
+    // PLAIN TEXT, not markdown, unlike the reply. These arrive live over the poll as JSON and are
+    // appended by the client as `textContent`; rendering the same line as markdown after a reload would
+    // change its appearance under the reader for no gain — a progress line is one sentence.
+    //
+    // The closing message is mirrored here too (the hook sees every message and cannot know which is
+    // last), so the one equal to the reply is dropped rather than shown twice.
+    // `?? []` because this renderer is also handed comments built by a caller that predates notes (the
+    // gate, and any static page rendered from an older store) — a thread that throws takes the whole
+    // page with it.
+    // TRIMMED on both sides. `addNote` trims what it stores and `markDone` does not, so a closing message
+    // ending in a newline compared unequal to its own note and the same paragraph rendered twice.
+    const answered = (c.response ?? '').trim();
+    const notes = (c.notes ?? []).filter((n) => n.text.trim() !== answered);
+    const noteHtml = `<div class="rnotes" data-for="${esc(c.id)}" data-n="${notes.length}"${notes.length ? '' : ' hidden'}>`
+      + notes.map((n) => `<div class="rnote">${esc(n.text)}</div>`).join('')
+      + `</div>`;
     const failed = c.status === 'failed' && c.error
       ? `<div class="cmt reply err"><div class="cmt-b">${esc(c.error)}</div></div>`
       : '';
     return `<div class="cmt" data-cid="${esc(c.id)}" data-status="${esc(c.status)}">`
       + `<div class="cmt-h"><span class="who">you</span>${badge}</div>`
-      + `<div class="cmt-b">${esc(c.text)}</div></div>${reply}${failed}`;
+      + `<div class="cmt-b">${esc(c.text)}</div></div>${noteHtml}${reply}${failed}`;
   }).join('');
   return `<div class="thread">${items}</div>`;
 }
@@ -456,6 +481,22 @@ function discardFab(): string {
     + '</svg></button>';
 }
 
+/**
+ * The clear-comments FAB — served pages only, and the second irreversible control here.
+ *
+ * A red X rather than a third trashcan: the bins on this page all discard CODE, and this one deletes
+ * none — it throws away the review conversation and leaves every file exactly as it is. Same shape
+ * language, different glyph, so the two blast radii cannot be mistaken for each other by someone
+ * reaching for a corner of the screen.
+ */
+function clearCommentsFab(): string {
+  return '<button class="fab danger wipe" id="cclear"'
+    + ' aria-label="Clear every review comment" title="Clear every review comment and reply — back to full defaults">'
+    + '<svg viewBox="0 0 24 24" aria-hidden="true">'
+    + '<path d="M6 6l12 12M18 6L6 18"/>'
+    + '</svg></button>';
+}
+
 function refreshFab(): string {
   return '<button class="fab" id="refresh" aria-label="Rebuild against the current working tree"'
     + ' title="Rebuild against the current working tree">'
@@ -793,6 +834,33 @@ function commentClient(o: Resolved): string {
     });
   };
 
+  // ── clear every review comment ─────────────────────────────────────────────
+  // Irreversible, and confirmed for that reason — but it deletes no code, so the dialog says what it
+  // does destroy (the conversation) and what it does not (the tree), and it names the count. A clean
+  // store is refused rather than dressed up as a dialog that does nothing, exactly like discard.
+  var cx = document.getElementById('cclear');
+  if (cx) cx.onclick = function(){
+    var n = document.querySelectorAll('.cmt[data-cid]').length;
+    if (!n) {
+      if (cwhy) cwhy.innerHTML = '<b>nothing to clear</b> \u2014 this review has no comments';
+      return;
+    }
+    if (!window.confirm('Clear ' + n + ' review comment thread(s)\\n\\n'
+      + 'Every comment, every reply and every note ayin wrote in this repo is deleted \u2014 back to full '
+      + 'defaults. Your files are NOT touched.\\n\\nThis cannot be undone. Continue?')) return;
+    cx.classList.add('busy');
+    fetch('/api/diff/comments', { method: 'DELETE' })
+      .then(function(r){ return r.json().then(function(j){ return { ok: r.ok, j: j }; }); })
+      .then(function(r){
+        cx.classList.remove('busy');
+        if (r.ok && r.j.ok) { rememberViewport(); location.reload(); return; }
+        if (cwhy) cwhy.innerHTML = '<b>not cleared</b> \u2014 ' + esc((r.j && r.j.error) || 'failed');
+      }).catch(function(err){
+        cx.classList.remove('busy');
+        if (cwhy) cwhy.innerHTML = '<b>not cleared</b> \u2014 ' + esc(String(err));
+      });
+  };
+
   [].slice.call(document.querySelectorAll('.ix.dz')).forEach(function(btn){
     btn.onclick = function(e){
       e.preventDefault(); e.stopPropagation();          // the header is also the fold toggle
@@ -828,8 +896,34 @@ function commentClient(o: Resolved): string {
   function badgeOf(cmt){ return cmt.querySelector('.badge'); }
 
   /**
+   * Everything the run has said since the last poll, appended in place.
+   *
+   * The count already rendered lives on the container (data-n), so this survives a reload — the page
+   * comes back with N notes in the DOM and asks only for what came after them. textContent, never
+   * innerHTML: this is a model's prose about source code and it routinely carries angle brackets.
+   */
+  function showNotes(cmt, notes){
+    if (!notes) return;
+    var box = cmt.parentNode.querySelector('.rnotes[data-for="' + cmt.dataset.cid + '"]');
+    if (!box) return;
+    var have = parseInt(box.dataset.n || '0', 10) || 0;
+    if (notes.length <= have) return;
+    for (var i = have; i < notes.length; i++) {
+      var d = document.createElement('div');
+      d.className = 'rnote';
+      d.textContent = notes[i].text;
+      box.appendChild(d);
+    }
+    box.dataset.n = String(notes.length);
+    box.hidden = false;
+  }
+
+  /**
    * pending → working → done. The page owns none of these transitions: it asks, and reloads when the
    * answer is 'done', because by then the file on disk is not the file this page was rendered from.
+   *
+   * The same poll carries the run's notes, because it is already asking the same file twice a second
+   * and a second route for them would be a second thing to keep in step.
    */
   function poll(cmt){
     var id = cmt.dataset.cid;
@@ -839,6 +933,7 @@ function commentClient(o: Resolved): string {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
       }).then(function(j){
+        showNotes(cmt, j.notes);
         if (j.status === cmt.dataset.status) return;
         cmt.dataset.status = j.status;
         var b = badgeOf(cmt);
@@ -896,6 +991,15 @@ function commentClient(o: Resolved): string {
       + '<span class="badge pending">' + LABEL.pending + '</span></div><div class="cmt-b"></div>';
     cmt.querySelector('.cmt-b').textContent = text;
     t.appendChild(cmt);
+    // The box the run's notes land in. Created empty and hidden with the thread, because the first note
+    // arrives seconds after the comment does and a container built on first use is a container the poll
+    // has to know how to build.
+    var box = document.createElement('div');
+    box.className = 'rnotes';
+    box.dataset.for = id;
+    box.dataset.n = '0';
+    box.hidden = true;
+    t.appendChild(box);
     row.parentNode.insertBefore(t, row.nextSibling);
     poll(cmt);
   }
@@ -1219,6 +1323,9 @@ body{display:grid;grid-template-columns:322px 1fr;grid-template-rows:auto 1fr;he
    on the one control that cannot be undone. Red at rest, not only on hover — this one announces
    itself before it is touched. */
 .fab.danger{bottom:78px;color:var(--priv);border-color:color-mix(in srgb, var(--priv) 45%, var(--line))}
+/* One more clear gap up, for the same reason the discard FAB has one: three controls in a column and
+   only the top two are irreversible. */
+.fab.wipe{bottom:134px}
 .fab.danger:hover{color:var(--priv);border-color:var(--priv);background:color-mix(in srgb, var(--priv) 12%, var(--surface-2))}
 .fab.danger.busy{color:var(--priv)}
 .fab.busy svg{animation:fabspin .8s linear infinite;transform-origin:50% 50%}
@@ -1294,7 +1401,29 @@ mark{background:var(--add-mark);color:inherit;border-radius:3px;padding:1px 0}
   border-bottom:1px solid var(--line-soft);font-size:11.5px;color:var(--ink-3)}
 .cmt-h .who{font-weight:650;color:var(--ink-2)}
 .cmt-b{padding:9px 11px;font-size:12.5px;line-height:1.55;color:var(--ink);white-space:pre-wrap;word-break:break-word}
+/* What the run said while it worked: deliberately smaller and quieter than the reply below it. These are
+   the middle of the story, and a thread where progress reads as loud as the answer makes the answer
+   impossible to find. The rail on the left is what makes a run of them read as one sequence rather than
+   five unrelated remarks. */
+.rnotes{margin:0 0 7px 14px;padding-left:11px;border-left:2px solid var(--line)}
+.rnote{font:11.5px/1.55 var(--ui);color:var(--ink-3);padding:4px 0;white-space:pre-wrap;word-break:break-word;
+  position:relative}
+.rnote+.rnote{border-top:1px solid var(--line-soft)}
+.rnote::before{content:'';position:absolute;left:-16px;top:11px;width:5px;height:5px;border-radius:50%;
+  background:var(--line)}
+.rnote:last-child::before{background:var(--wire-hot)}
+/* The answer. Bigger than everything around it, and foldable — a long report must not bury the next
+   file, and a <details> gets that with no javascript to keep in step. */
 .cmt.reply{border-color:var(--wire-hot)}
+details.cmt.reply>summary{cursor:pointer;list-style:none}
+details.cmt.reply>summary::-webkit-details-marker{display:none}
+details.cmt.reply>summary::marker{content:''}
+.foldh{margin-left:auto;font:600 10px/1 var(--mono);color:var(--ink-3);letter-spacing:.06em;
+  text-transform:uppercase}
+details.cmt.reply:not([open])>summary .foldh::after{content:' \\25B8'}
+details.cmt.reply[open]>summary .foldh::after{content:' \\25BE'}
+details.cmt.reply>summary:hover .foldh{color:var(--wire-hot)}
+.cmt-b.big{font-size:13.5px;line-height:1.62;padding:11px 13px}
 .cmt.reply .cmt-h .who{color:var(--wire-hot)}
 .cmt.reply.err{border-color:var(--priv)}
 .cmt.reply.err .cmt-b{color:var(--priv)}
@@ -1345,7 +1474,7 @@ kbd{font:10.5px/1 var(--mono);border:1px solid var(--line);border-bottom-width:2
 ${iconSprite()}
 <aside id="side">${sidebarSections(set.files)}</aside>
 <main id="main">${commitPanel(o)}${omitted}${filesHtml || '<div class="empty">Working tree is clean.</div>'}</main>
-${o.interactive ? commitPreview() + discardFab() + refreshFab() : ''}
+${o.interactive ? commitPreview() + clearCommentsFab() + discardFab() + refreshFab() : ''}
 <script>
 (function(){
   var DEF = ${JSON.stringify(DEFAULT_EXTENSIONS)};
