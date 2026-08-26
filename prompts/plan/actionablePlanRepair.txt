@@ -1,0 +1,12 @@
+A deterministic validator REJECTED the plan below. Fix exactly what it names; change nothing else.
+
+THE REJECTED PLAN:
+{{PLAN}}
+
+VALIDATOR ERRORS — every one must be gone:
+{{ERRORS}}
+
+REQUIRED DELIVERABLES — each one must be named, by exact path, in the files of the step that produces it:
+{{DELIVERABLES}}
+
+Answer with the corrected JSON object in the same shape and nothing else.

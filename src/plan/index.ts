@@ -61,6 +61,9 @@
  *
  * `AYIN_PLAN=0` is an absolute operator kill switch — it beats the session toggle AND `/planthis`.
  * `planMinChars: 0` (from `prompts.json`) disables just the size door once the session toggle is on.
+ *
+ * `AYIN_PLAN_GRAPH=1` swaps step 8's prose document for the ACTIONABLE plan in `plan.ts` — typed steps
+ * a deterministic validator has already checked. Everything above it is unchanged; see that file.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -77,8 +80,9 @@ import { pushActivity, setActivityDetail } from '../activity.js';
 import { addMessage, setAgentStatus } from '../ui.js';
 import { detectProject, describeProject } from '../executors/detect.js';
 import { planExecutorFor } from '../executors/registry.js';
-import type { Deliverable, ProjectContext } from '../executors/types.js';
+import type { ProjectContext } from '../executors/types.js';
 import { ensureToolRuntime } from '../tool-wiring.js';
+import { buildActionablePlan, isActionablePlanEnabled, renderDeliverableList } from './plan.js';
 
 // This module imports tool implementations directly, so it must not depend on the registry having
 // been loaded by someone else first. Idempotent.
@@ -162,17 +166,6 @@ let forced = false;
 
 export function forcePlanNextTurn(): void {
   forced = true;
-}
-
-/**
- * The deliverable list as prompt text. One renderer, used by BOTH the plan document and the
- * grounding-only block — they were separate, and the grounding path simply had no deliverables,
- * which is how a scaffolded README stayed an empty stub and a required diagram went unwritten.
- */
-function renderDeliverableList(deliverables: Deliverable[]): string {
-  return deliverables
-    .map((d) => `- ${d.label} — \`${d.patterns[0]}\`${d.required ? ' (REQUIRED)' : ' (optional)'}: ${d.why}`)
-    .join('\n');
 }
 
 /** `ayin-plan-20260728-143012.md` — sortable, unique enough for a session, readable in a listing. */
@@ -400,7 +393,23 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
 
     setActivityDetail('writing the plan');
     const prompts = recentPrompts(12);
-    const body = await llmChat([{
+
+    // THE ACTIONABLE PLAN — `AYIN_PLAN_GRAPH=1`. A LangGraph draft → validate → repair cycle producing
+    // typed steps a program has already checked (see plan/plan.ts), instead of nine sections of prose in
+    // which a step with no verification is indistinguishable from a step with one. Null when nothing
+    // usable came back, and then the prose document below runs exactly as it always has.
+    const actionable = isActionablePlanEnabled()
+      ? await buildActionablePlan({
+        request: userInput, goal, features: t.features,
+        apiResearch, findings, grounding, ctx, executor,
+      })
+      : null;
+    if (actionable) {
+      addMessage('system', `Plan mode: ${actionable.steps.length} actionable step(s) in ${actionable.attempts} model call(s)`
+        + `${actionable.unresolved.length ? `, ${actionable.unresolved.length} problem(s) the validator still rejects` : ', validated'}.`);
+    }
+
+    const body = actionable ? actionable.markdown : await llmChat([{
       role: 'user',
       content: getPrompt('planDocument', {
         REQUEST: userInput.slice(0, 8000),

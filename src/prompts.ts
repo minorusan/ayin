@@ -37,6 +37,9 @@ const DEFAULT_CONFIG: Record<string, number> = {
   planMinChars: 2000,
   planExploreCalls: 2,
   planApiSearches: 3,
+  // How many times the actionable plan (plan/plan.ts) may be sent back to the model after its
+  // validator rejects it. 0 ships the first draft with its faults named instead of repairing it.
+  planRepairPasses: 1,
   // Model picker (model-picker.ts) — hides small/utility models from the `/model` popup so it lists
   // only real choices. 0 disables the filter (shows everything installed).
   modelPickerMinSizeGiB: 15,

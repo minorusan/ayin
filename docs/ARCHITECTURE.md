@@ -1145,6 +1145,70 @@ specific components are known.
 The document is on disk **before** implementation starts, so a machine that dies mid-feature leaves the
 thinking behind rather than only half the work.
 
+### The actionable plan (`plan/plan.ts`) — a LangGraph draft -> validate -> repair cycle
+
+`AYIN_PLAN_GRAPH=1` replaces the prose document with an **actionable plan**: typed, ordered steps a
+program has already checked. Off by default, because the prose document is what every existing install
+and the Arduino benchmark measure today, and the shape of a plan is not a thing to change under an
+operator without asking. Nothing else about plan mode moves — the same triage, the same mandatory API
+research, the same exploration and grounding feed it, and it is written to the same
+`ayin-plan-<timestamp>.md`.
+
+**Why a shape.** Prose is where a plan hides its holes: a step with no verification reads exactly like a
+step with one, and a required deliverable that no step produces is invisible until QA spends a fix pass
+creating it. The research on plan-then-execute agents names the same two failures — a static plan nobody
+can check, and *step drift*, where the executor reads a step and does something adjacent to it. So a step
+is `{id, title, files, action, verify, dependsOn}`, and a **deterministic validator** — no model, so
+there is nothing to argue with — rejects:
+
+- ids that are not unique and positive, and dependencies that point forward or at themselves, so a plan
+  **cannot contain a cycle**
+- a step with no title, no action, or a `verify` too short to name a command and what it must show
+- a plan where no step names a file at all
+- a **required deliverable that no step produces**, matched by exact path against the executor's
+  patterns (`patternMatchesPath` in `executors/deliverables.ts`, the same single-star, one-segment
+  semantics as `resolvePattern`, run against a string because the files do not exist yet)
+
+That last rule is the one that pays. The deliverable list already existed and was already checked on
+disk by QA — at the end, after the work. Checking it against the *plan* moves the finding to before a
+single file is written, where fixing it costs one model call. Measured, on a deliberately broken draft:
+`Blink.ino` (an Arduino sketch outside a folder of its own name cannot compile), a forward dependency,
+`verify: "ok"`, and no README or wiring diagram anywhere — six errors, one repair call, 4.6s, a
+three-step plan with every required deliverable named by exact path.
+
+**Why LangGraph and not a `for` loop.** The straight line is not the interesting part; the CYCLE is —
+`draft -> validate -> repair -> validate`, bounded by `planRepairPasses` (default 1). LangGraph gives
+that a declarable topology, a state snapshot per super-step, and one place where the bound lives.
+`actionablePlanGraph()` is separate from running it so the topology can be printed, which is where this
+diagram comes from and why it cannot drift from the code:
+
+```
+__start__ --> gather        gather: deterministic, no model — survey, observability, deliverables
+gather    --> draft         draft:  one llmChat, plan/actionablePlan.txt, JSON out
+draft     --> validate      validate: the deterministic rules above
+validate  -.-> repair       repair: one llmChat, plan/actionablePlanRepair.txt, errors + rejected plan
+validate  -.-> render       render: markdown for the document and the turn's <plan> block
+repair    --> validate
+render    --> __end__
+```
+
+**The state is plain JSON on purpose.** `ProjectContext` and the executor are closed over by the nodes,
+never put in a channel, so every checkpointed value is serializable. The checkpointer is `MemorySaver` —
+in-process, so it survives a repair pass and **not** a power cut; swapping it for a durable saver needs
+nothing from this file but the constructor argument. Note also that LangGraph replays a node whole on
+resume, so a durable saver makes `draft` and `repair` re-issue their model call rather than continue
+mid-node; the idempotency is the caller's problem, not the library's.
+
+Failure returns `null` and `runPlan` falls through to the prose document — the same contract as the rest
+of plan mode: a planner that cannot plan must never block the request. `renderDeliverableList` moved here
+from `plan/index.ts` (which cannot be imported back without a cycle) so the prose document, the
+grounding-only block and the actionable plan share one renderer rather than three that drift.
+
+`@langchain/langgraph` is used as **orchestration only** — the nodes call ayin's own `llmChat`, and no
+LangChain model class, prompt template or tool abstraction is imported. Model-agnosticism and "prompts
+live in files" both survive: `plan/actionablePlan.txt` and `plan/actionablePlanRepair.txt` are editable
+like every other prompt.
+
 ## `/explain` (`src/explain/`)
 
 Broader than `explore`: `explore` finds and reads code; `/explain <feature>` additionally pulls in the
@@ -1626,10 +1690,12 @@ an artifact of it. The port probe skips the port derived from `llmBaseUrl()`, so
 model gateway.
 
 **Config** (`prompts.json` → `config`): `qaMaxPasses`, `qaMinAnswerChars`, `pollMinIntervalMs`,
-`pollMaxPerTurn`, `planMinChars`, `planExploreCalls`. **Prompts** (editable `.txt` files, see the
+`pollMaxPerTurn`, `planMinChars`, `planExploreCalls`, `planRepairPasses`. **Prompts** (editable `.txt`
+files, see the
 Prompts section): `ayin/qaCriteria`, `ayin/qaReview`, `ayin/planTriage`, `ayin/planDocument`, the six
 `qa/baseline*` criteria, and `plan/*`. **Env:** `AYIN_QA=0|1`, `AYIN_PLAN=0|1` (`0` kills, `1` forces
-the session toggle on — the only way to exercise either gate headlessly), `AYIN_PLAN_DIR`,
+the session toggle on — the only way to exercise either gate headlessly),
+`AYIN_PLAN_GRAPH=1` (the actionable plan instead of the prose document), `AYIN_PLAN_DIR`,
 `AYIN_QA_PORT`, `AYIN_QA_PORT_DENY`, `AYIN_ARDUINO_CLI`, `AYIN_ARDUINO_FQBN`.
 
 ### Every message carries its token cost — the server's count, never an estimate
