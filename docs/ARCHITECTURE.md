@@ -1147,10 +1147,12 @@ thinking behind rather than only half the work.
 
 ### The actionable plan (`plan/plan.ts`) — a LangGraph draft -> validate -> repair cycle
 
-`AYIN_PLAN_GRAPH=1` replaces the prose document with an **actionable plan**: typed, ordered steps a
-program has already checked. Off by default, because the prose document is what every existing install
-and the Arduino benchmark measure today, and the shape of a plan is not a thing to change under an
-operator without asking. Nothing else about plan mode moves — the same triage, the same mandatory API
+Plan mode produces an **actionable plan**: typed, ordered steps a program has already checked.
+`AYIN_PLAN_GRAPH=0` goes back to the prose document, kept because an operator who wants nine sections of
+narrative should not have to fork to get them. It shipped off by default for one release — the prose
+document was what every existing install and the Arduino benchmark measured, and the shape of a plan is
+not a thing to change under an operator without asking; asked and answered. Nothing else about plan mode
+moves — the same triage, the same mandatory API
 research, the same exploration and grounding feed it, and it is written to the same
 `ayin-plan-<timestamp>.md`.
 
@@ -1695,7 +1697,7 @@ files, see the
 Prompts section): `ayin/qaCriteria`, `ayin/qaReview`, `ayin/planTriage`, `ayin/planDocument`, the six
 `qa/baseline*` criteria, and `plan/*`. **Env:** `AYIN_QA=0|1`, `AYIN_PLAN=0|1` (`0` kills, `1` forces
 the session toggle on — the only way to exercise either gate headlessly),
-`AYIN_PLAN_GRAPH=1` (the actionable plan instead of the prose document), `AYIN_PLAN_DIR`,
+`AYIN_PLAN_GRAPH=0` (the prose document instead of the default actionable plan), `AYIN_PLAN_DIR`,
 `AYIN_QA_PORT`, `AYIN_QA_PORT_DENY`, `AYIN_ARDUINO_CLI`, `AYIN_ARDUINO_FQBN`.
 
 ### Every message carries its token cost — the server's count, never an estimate
