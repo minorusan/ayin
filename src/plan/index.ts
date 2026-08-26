@@ -62,8 +62,9 @@
  * `AYIN_PLAN=0` is an absolute operator kill switch — it beats the session toggle AND `/planthis`.
  * `planMinChars: 0` (from `prompts.json`) disables just the size door once the session toggle is on.
  *
- * `AYIN_PLAN_GRAPH=1` swaps step 8's prose document for the ACTIONABLE plan in `plan.ts` — typed steps
- * a deterministic validator has already checked. Everything above it is unchanged; see that file.
+ * THE DOCUMENT ITSELF is now the ACTIONABLE plan in `plan.ts` — typed steps a deterministic validator
+ * has already checked, not the nine prose sections above. `AYIN_PLAN_GRAPH=0` swaps them back. Every
+ * gathering step (0-7, 9) is unchanged either way; only what the gathered context is written INTO moves.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -394,10 +395,10 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     setActivityDetail('writing the plan');
     const prompts = recentPrompts(12);
 
-    // THE ACTIONABLE PLAN — `AYIN_PLAN_GRAPH=1`. A LangGraph draft → validate → repair cycle producing
-    // typed steps a program has already checked (see plan/plan.ts), instead of nine sections of prose in
-    // which a step with no verification is indistinguishable from a step with one. Null when nothing
-    // usable came back, and then the prose document below runs exactly as it always has.
+    // THE ACTIONABLE PLAN — the default, `AYIN_PLAN_GRAPH=0` opts out. A LangGraph draft → validate →
+    // repair cycle producing typed steps a program has already checked (see plan/plan.ts), instead of
+    // nine sections of prose in which a step with no verification is indistinguishable from a step with
+    // one. Null when nothing usable came back, and then the prose document below runs as it always has.
     const actionable = isActionablePlanEnabled()
       ? await buildActionablePlan({
         request: userInput, goal, features: t.features,

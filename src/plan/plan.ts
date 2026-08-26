@@ -32,9 +32,10 @@
  * it survives a repair pass and NOT a power cut. Swapping it for a durable saver is the next step and
  * needs nothing from this file but the constructor argument.
  *
- * OFF BY DEFAULT. `AYIN_PLAN_GRAPH=1` selects this path; without it plan mode writes the prose document
- * exactly as before. Failure returns null and the caller falls back — the same contract as the rest of
- * plan mode: a planner that cannot plan must never block the request.
+ * ON BY DEFAULT. This is what plan mode produces now; `AYIN_PLAN_GRAPH=0` goes back to the prose
+ * document, which is kept because an operator who wants nine sections of narrative should not have to
+ * fork to get them. Failure returns null and the caller falls back to that document anyway — the same
+ * contract as the rest of plan mode: a planner that cannot plan must never block the request.
  */
 
 import { Annotation, END, MemorySaver, START, StateGraph } from '@langchain/langgraph';
@@ -86,12 +87,15 @@ export interface ActionablePlanInput {
 }
 
 /**
- * `AYIN_PLAN_GRAPH=1` — the third door, and the only way into this file. Off by default because the
- * prose document is what every existing install and the Arduino benchmark currently measure, and a plan
- * shape is not a thing to change under an operator without asking.
+ * ON unless the operator says otherwise — `AYIN_PLAN_GRAPH=0` is the way back to the prose document.
+ *
+ * It shipped off by default for one release, because the prose document was what every existing install
+ * and the Arduino benchmark measured, and the shape of a plan is not a thing to change under an operator
+ * without asking. Asked, and answered: a plan a program can reject is the better default, and the `=0`
+ * escape hatch is the same shape as `AYIN_PLAN=0` and `AYIN_QA=0` — one env var, one meaning.
  */
 export function isActionablePlanEnabled(): boolean {
-  return process.env.AYIN_PLAN_GRAPH === '1';
+  return process.env.AYIN_PLAN_GRAPH !== '0';
 }
 
 /**
