@@ -889,7 +889,7 @@ console.log('\ntools are discovered, and a private set needs no fork');
     // that outlives the session, and `recordSlashTurn` puts it in the conversation window — which is
     // re-sent to whatever serves the model on every later round. A token pasted into /jira-auth would go
     // to both. Asserted on the DISPATCHER, not just the flag, because the flag alone protects nothing.
-    const credentialTools = ['jira_auth', 'openai_auth', 'sentry_auth'];
+    const credentialTools = ['jira_auth', 'openai_auth', 'sentry_auth', 'slack_auth'];
     ok(credentialTools.every((n) => slashed.find((t) => t.name === n)?.slash.secret === true),
       'every credential command declares its argument secret', credentialTools.join(', '));
     const { maskSecret } = await import(`file://${join(DIST, 'tools', 'credentials', 'envfile.js')}`);
@@ -2296,7 +2296,7 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
     // A tool whose ARGUMENT is a credential must never be offered to the model. Its catalogue entry
     // otherwise sits in the prompt every turn teaching the model that a place to put tokens exists,
     // and a tool the model can call is a tool it can be talked into calling.
-    for (const name of ['jira_auth', 'sentry_auth', 'openai_auth']) {
+    for (const name of ['jira_auth', 'sentry_auth', 'slack_auth', 'openai_auth']) {
       const src = readFileSync(join(DIST, '..', 'src', 'tools', 'defs', `${name}.ts`), 'utf-8');
       ok(/secret: true/.test(src) ? /slashOnly: true/.test(src) : true,
         `${name} takes a secret, so it is operator-only`);

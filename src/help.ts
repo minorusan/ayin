@@ -187,6 +187,8 @@ export const HELP: HelpEntry[] = [
   },
   { name: '/sentry-auth', kind: 'command', section: 'Connectors', short: 'Store a Sentry token + org slug' },
   { name: '/sentry', kind: 'command', section: 'Connectors', short: 'Ask Sentry directly' },
+  { name: '/slack-auth', kind: 'command', section: 'Connectors', short: 'Store a Slack user token (xoxp-); a bot token is refused' },
+  { name: '/slack', kind: 'command', section: 'Connectors', short: 'Search and read your Slack directly' },
   { name: '/openai', kind: 'command', section: 'Connectors', short: 'Store and verify an OpenAI key · switching to it is /model openai — two decisions, two commands' },
 
   // ── keys ───────────────────────────────────────────────────────────────────────

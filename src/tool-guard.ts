@@ -47,7 +47,7 @@ const POLLABLE = new Set(['status']);
 export const TREE_SAFE = new Set([
   'read_file', 'grep', 'find_files', 'list_dir', 'explore', 'corpus_search', 'docs_search',
   'prefab_inspect', 'animator_inspect', 'ayin_help', 'status', 'jira', 'jira_ticket', 'sentry',
-  'web_search', 'load_tools', 'test_connectors',
+  'slack', 'web_search', 'load_tools', 'test_connectors',
 ]);
 
 /**
@@ -64,9 +64,9 @@ export const TREE_SAFE = new Set([
  * into the blocked list. A genuine loop stays VISIBLE (the note counts it, and the loop nudge in agent.ts
  * still fires) without any data being withheld.
  *
- * `jira`, `sentry` and `web_search` are deliberately NOT here even though they read: the first two are
- * agentic loops that can comment on a ticket, and all three cost money or quota per call. Repeating those
- * is not free, so they keep the ladder.
+ * `jira`, `sentry`, `slack` and `web_search` are deliberately NOT here even though they read: the first
+ * three are agentic loops (jira can comment on a ticket), and all four cost money or quota per call.
+ * Repeating those is not free, so they keep the ladder.
  */
 const REPEATABLE_READS = new Set([
   'read_file', 'grep', 'find_files', 'list_dir', 'explore', 'corpus_search', 'docs_search',

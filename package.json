@@ -64,6 +64,7 @@
     "unity:compile": "node tool/unity-compile.mjs",
     "check:io": "node tool/check-io-tools.mjs",
     "check:jira": "node tool/check-jira.mjs",
+    "check:slack": "node tool/check-slack.mjs",
     "check:sprint": "node tool/check-sprint.mjs",
     "check:jira-indulge": "node tool/check-indulge-jira.mjs",
     "check:explore-corpus": "node tool/check-explore-corpus.mjs",

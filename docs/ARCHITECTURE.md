@@ -1859,12 +1859,46 @@ frequency. Same loop shape as `jira`; three things are specific to it:
   plus every request header; `in_app` frames are kept ahead of library noise, and every omission is
   stated in the output rather than silently truncated.
 
-### Both connector loops end in a forced answer
+**`slack`** — the operator's own Slack, read-only on a **user token**, over `search` / `read` /
+`thread` / `channels` / `user` / `call` instead of jira/sentry's single `open`:
+
+- **A user token (`xoxp-`) is required, and refused twice if it is not one.** A bot token (`xoxb-`)
+  gets `not_allowed_token_type` from `search.messages` and only sees channels it was invited into, so
+  it cannot answer the question this connector exists for. `/slack-auth` refuses it by prefix, before
+  any network call; the client refuses it again at query time, in case one was set directly.
+- **Six verbs, not one generic `slack_call({method, params})`.** The generic version works — Slack's
+  surface is small enough to compose — but it pays for an API reference in the prompt on every
+  question and makes the model learn Slack's vocabulary before it can ask anything. `search` needs no
+  schema; `read <channel>` needs no explanation of what a "conversation" is. `call` still exists as
+  the allowlisted escape hatch for a read method none of the five wrap (`reactions.get`, `team.info`).
+- **`search` first, always.** It is the only verb that finds a topic without already knowing a
+  channel. A hit carries a channel id and a `ts`; `read` (with `latest=<that ts>`) reads what
+  surrounded it, `thread` (with the PARENT `ts`) reads the replies under it.
+- **Slack answers HTTP 200 with `{ok:false, error}` for nearly every failure, a revoked token
+  included.** Checking only the HTTP status reports a dead token as "no results" — indistinguishable
+  from a true negative, the worst failure shape for a search tool. `missing_scope` names the scope and
+  says the app must be reinstalled (a token never gains a scope on its own); `invalid_auth` /
+  `token_revoked` / `account_inactive` say the token is dead; HTTP 429 reports the retry-after value.
+- **Wire format is decoded before anything sees it.** `<@U…>` mentions (resolved from BOTH message
+  authors and every id mentioned inside the text — authors alone leaves a ping reading as a raw id),
+  `<!here>`/`<!channel>`/`<!subteam^…>`, `<#C…|name>` (ids can be `C`, `G` or `D`, not only `C`),
+  `<url|label>`, and HTML entities.
+- **`conversations.history` (newest-first) and `conversations.replies` (oldest-first) are both sorted
+  ascending by numeric `ts`**, never `.reverse()`d — that fixes one endpoint and presents the other
+  backwards. `ts` is the message id and travels verbatim beside its readable time.
+- **A cursor or a next-page hint is on the FIRST line of a rendered block, never the last.** A block
+  gets truncated for the prompt when it runs long, and truncation eats the end first — a trailing
+  cursor is exactly what it would eat, ending pagination at page one silently.
+- Gate: `npm run check:slack` — the allowlist, the failure mapping, the wire decoding, the ordering,
+  and the cursor-in-header rule, all offline against a stubbed `fetch`.
+
+### The connector loops end in a forced answer
 
 Bounded evidence, then a mandatory answer — enforced by the loop, not requested in the prompt:
 
-- The last round, a **repeated** `open` (the tool-guard rule: a second identical call is a stall, not
-  thoroughness), or **two** issues opened → the gathering phase ends.
+- The last round, a **repeated** command (the tool-guard rule: a second identical call is a stall, not
+  thoroughness), or the connector's own action budget spent (**two** issues opened for jira/sentry,
+  **five** verb calls for slack) → the gathering phase ends.
 - The answer-only round uses a **different prompt containing no protocol at all**. Telling the model
   `open` was unavailable did not stop it: the word was in the operator's own question ("open the top
   issue and tell me…") and it was **mirroring, not choosing** — measured as three rounds of `open` with

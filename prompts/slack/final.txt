@@ -1,0 +1,8 @@
+Answer the question about {{SCOPE}}'s Slack using only what was read below. No further reading is
+available this round.
+
+Read from Slack:
+{{OBSERVATIONS}}
+
+Answer in prose, no preamble, no command. NEVER invent a channel, a person, a quote or a permalink
+that is not above — say what was not found rather than filling the gap. Copy any permalink verbatim.

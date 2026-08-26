@@ -188,6 +188,7 @@ Those live in `~/.ayin-cli/prompts.json`, outside any repo, and are read fresh o
 | a SearXNG instance | web search prefers it; DuckDuckGo is the keyless default |
 | a Jira token | `/jira` — your current sprint, asked in plain words |
 | a Sentry token | `/sentry` — what is failing in production, asked in plain words |
+| a Slack user token | `/slack` — search and read your own Slack, asked in plain words |
 
 ### The shortest way to a working ayin
 
@@ -265,16 +266,20 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 | `arduino_diagram` | A wiring diagram grounded in the real sketch and the component catalogue | plantuml |
 | `jira` | Ask about your current sprint in plain words — a connector with its own agentic loop; a ticket key in the question is read directly | a Jira token |
 | `jira_ticket` | One ticket by key, in one request — no model, no loop, any sprint | a Jira token |
+| `sentry` | Ask what is breaking in production, in plain words — unresolved issues, ranked by frequency, with a stacktrace on request | a Sentry token |
+| `slack` | Search and read your own Slack in plain words — every channel and DM you can see, a thread's replies, a person's name | a Slack user token |
 | `ayin_help` | ayin's own help — every command, flag and key, the same bytes `ayin --help` prints | — |
 | `jira_auth` | Store that token from a pasted blob; verified before it is saved | — |
+| `sentry_auth` | Same, for Sentry — token plus organization slug | — |
+| `slack_auth` | Same, for Slack — a bot token is refused, before it is even checked against the API | — |
 
-**Twelve of the eighteen need nothing but Node and a POSIX shell** — including `naama` and `entangle`,
-which is the pair worth reading about below. Two want `plantuml`; the Jira and Sentry tools are inert
-until you run `/jira-auth` / `/sentry-auth`.
+**Fifteen of the twenty-two need nothing but Node and a POSIX shell** — including `naama` and
+`entangle`, which is the pair worth reading about below. Three want `plantuml`; the Jira, Sentry and
+Slack tools are inert until you run `/jira-auth` / `/sentry-auth` / `/slack-auth`.
 
 Several own a **slash command**, which runs the tool directly instead of asking the model to pick it:
-`/jira`, `/sentry`, and the three credential commands `/openai`, `/jira-auth`, `/sentry-auth`. Any tool
-can declare one.
+`/jira`, `/sentry`, `/slack`, and the credential commands `/openai`, `/jira-auth`, `/sentry-auth`,
+`/slack-auth`. Any tool can declare one.
 
 Nothing here needs a server ayin does not talk to directly. Tools that consumed a *private backend* were
 removed rather than shipped inert — they cost prompt tokens on every turn and implied ayin needs a service
@@ -298,6 +303,22 @@ authenticated as and when the token expires; within a week of that date, every a
 `/jira` is scoped to **your tickets in the open sprint** — enforced by the query, so it cannot wander —
 and answers in plain words, reading a ticket's comments only when your question needs them. Env vars
 (`JIRA_SITE`, `JIRA_TOKEN`, `JIRA_EMAIL`) override the file, for CI.
+
+### Slack, in two commands
+
+```
+/slack-auth <paste your Slack User OAuth Token>
+/slack what has anyone said about the outage last week?
+```
+
+`/slack-auth` wants the **User OAuth Token** (`xoxp-…`) from your Slack app's OAuth & Permissions page,
+**verifies it against Slack before saving it**, and writes `~/.ayin-cli/slack.env` (chmod 0600). A
+**bot token** (`xoxb-…`) is refused outright — before any network call — because it cannot search and
+only sees channels the bot was invited into, which is not what this connector is for.
+
+`/slack` reads **everything your own account can see** — every public and private channel you're in,
+your DMs — starting with a search, then reading around a hit or opening its thread as the question
+needs. Env vars (`SLACK_USER_TOKEN`, and `SLACK_TEAM_ID` on Enterprise Grid) override the file, for CI.
 
 **The registry is a directory, not a list.** A tool is a file in `src/tools/defs/`, so adding one touches
 nothing that already exists — and `AYIN_TOOL_DIRS=/path/to/your/tools` loads your own without forking
