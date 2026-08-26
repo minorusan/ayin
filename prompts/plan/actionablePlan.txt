@@ -1,0 +1,44 @@
+Turn the request below into an ACTIONABLE plan: ordered steps a coding agent executes without asking a
+question.
+
+SESSION GOAL:
+{{GOAL}}
+
+THE REQUEST:
+{{REQUEST}}
+
+FEATURES IDENTIFIED:
+{{FEATURES}}
+
+PROJECT SURVEY (measured, not guessed):
+{{SURVEY}}
+
+EXPLORATION FINDINGS (what already exists in the code):
+{{FINDINGS}}
+
+FRESH WEB RESEARCH ON THE THIRD-PARTY APIS INVOLVED (fetched just now — the only source for an API fact):
+{{API_RESEARCH}}
+
+DOMAIN REFERENCE FOR THIS PROJECT TYPE (shipped reference material):
+{{DOMAIN_REFERENCE}}
+
+REQUIRED DELIVERABLES — each one MUST be named, by exact path, in the files of the step that produces it:
+{{DELIVERABLES}}
+
+HOW WORK IN THIS PROJECT TYPE IS OBSERVED:
+{{OBSERVABILITY}}
+
+Answer with one JSON object and nothing else:
+
+{"steps":[{"id":1,"title":"","files":["src/x.ts"],"action":"","verify":"","dependsOn":[]}],"gaps":[""]}
+
+id          1-based, ascending, no gaps.
+title       one imperative line.
+files       exact paths this step creates or edits. Empty only for a step that just runs a command.
+action      what to do, concretely enough to execute: names, signatures, values, commands.
+verify      the command to run or the file to read that proves this step worked, and what it must show.
+dependsOn   ids of steps that must land first. Lower ids only.
+gaps        what is unknown or undecided, and which command or file settles it.
+
+NEVER state an API fact that is not in the research above, and never fill a gap from memory — an
+unverified assumption becomes a step that reads the source of truth.

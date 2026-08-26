@@ -47,6 +47,20 @@ export function resolvePattern(root: string, pattern: string, limit = 20): strin
   return current.sort().slice(0, limit);
 }
 
+/**
+ * Does a path a plan CLAIMS it will write match a deliverable pattern? Same single-star, one-segment
+ * semantics as `resolvePattern`, against a string instead of the filesystem — because a plan is
+ * validated before any of its files exist. Segment counts must match, so `*\/*.ino` rejects a bare
+ * `Sketch.ino`: an Arduino sketch outside a folder of its own name cannot compile, and that is exactly
+ * the class of mistake a deliverable pattern encodes.
+ */
+export function patternMatchesPath(path: string, pattern: string): boolean {
+  const parts = path.trim().replace(/^\.\//, '').split('/').filter(Boolean);
+  const segments = pattern.split('/').filter(Boolean);
+  if (parts.length !== segments.length || segments.length === 0) return false;
+  return segments.every((seg, i) => segmentRe(seg).test(parts[i]));
+}
+
 export interface DeliverableStatus {
   deliverable: Deliverable;
   matches: string[];

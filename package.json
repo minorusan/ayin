@@ -1,6 +1,6 @@
 {
   "name": "ayin",
-  "version": "1.0.384",
+  "version": "1.0.385",
   "license": "MIT",
   "description": "A small, model-agnostic terminal coding agent — an agentic loop in your shell against a self-hosted LLM (Ollama or any OpenAI-compatible endpoint).",
   "type": "module",
@@ -71,6 +71,8 @@
     "check:dart": "node tool/check-dart.mjs"
   },
   "dependencies": {
+    "@langchain/core": "^1.2.9",
+    "@langchain/langgraph": "^1.4.12",
     "blessed": "^0.1.81",
     "openai": "^7.4.0",
     "sharp": "^0.33.5",
