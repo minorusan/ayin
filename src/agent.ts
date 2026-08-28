@@ -1769,6 +1769,40 @@ async function runAgentTurn(userInput: string): Promise<void> {
         continue;
       }
 
+      /**
+       * SERVED FROM THE ARTIFACT — the guard proved the answer cannot have moved.
+       *
+       * `serveCached` is set only when the call's witness (`mtime:size`) is unchanged, no mutation has
+       * been noted since, and nothing has read the target since. So this returns exactly what running
+       * the tool would return, for nothing, and the round proceeds as though it had run.
+       *
+       * IT STILL LOOKS LIKE A CALL from every side that matters: the ledger records it, the transcript
+       * shows it with its label, the chat shows a tool card. A saving the operator cannot see is
+       * indistinguishable from a tool that silently did not run.
+       *
+       * Falls through to a real execution when there is no artifact — an early session, a pruned
+       * folder, a result that was never saved. The cache is an optimisation and must never be the only
+       * way to get an answer.
+       */
+      if (guard.serveCached) {
+        const held = artifactFor(name, paramPreviewOf(params));
+        if (held) {
+          const body = readArtifact(held);
+          if (body && body !== '(artifact file not found)') {
+            const served = `${body}${guard.note ?? ''}`;
+            log('INFO', 'tool_served_from_cache', { tool: name, id: held.id, bytes: String(held.bytes) });
+            setAgentStatus('');
+            addMessage('tool', formatToolResultForChat(name, served, 0));
+            noteRanCall(name, paramPreviewOf(params), true, body);
+            pushToWindow('assistant', textPrefix ? `${textPrefix}\n[${name}: ${guard.label}]` : `[${name}: ${guard.label}]`);
+            pushToWindow('user', renderToolResult(served));
+            toolsRunThisTurn++;
+            continue;
+          }
+        }
+        log('INFO', 'tool_cache_miss_running', { tool: name });
+      }
+
       if (name === 'explore') {
         exploreCallCount++;
         log('INFO', 'explore_call_count', { count: String(exploreCallCount) });

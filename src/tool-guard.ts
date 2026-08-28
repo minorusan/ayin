@@ -101,6 +101,18 @@ export interface GuardDecision {
   note?: string;
   /** Short label for the transcript, e.g. "blocked (3rd identical call)". */
   label?: string;
+  /**
+   * SERVE THE EARLIER RESULT INSTEAD OF RUNNING THIS.
+   *
+   * Set only where the guard has already PROVEN the answer cannot have changed: the call's witness
+   * (`mtime:size`) is identical, no mutation epoch has been bumped since, and the target has not been
+   * read since. Those are the same three conditions the staleness branch above tests for — this is
+   * simply what to do when all three say "nothing moved".
+   *
+   * Until now that case re-ran the tool and appended "nothing it reads has changed since the first
+   * one, so this is the same answer". Which is true, and is a sentence that costs a 200 KB grep.
+   */
+  serveCached?: boolean;
 }
 
 interface CallState {
@@ -324,6 +336,34 @@ export function guardCheck(name: string, params: Record<string, string>): GuardD
   // ── a read repeats: annotated, never refused ────────────────────────
   if (REPEATABLE_READS.has(name)) {
     log('INFO', 'guard_read_repeat', { tool: name, count: String(state.count) });
+
+    /**
+     * IF NOTHING MOVED, THE ANSWER IS ALREADY ON DISK — hand it over rather than earning it again.
+     *
+     * Reaching here means every staleness test above came back false: the witness is unchanged, no
+     * mutation has been noted since, and nothing has read the target since. The guard has therefore
+     * already proven this call returns what the last one returned. Re-running it buys nothing and
+     * costs whatever the tool costs — a re-grep of a large tree, a second `explore`, a web search.
+     *
+     * AND IT RESOLVES THE CACHE-VERSUS-FILE PROBLEM the note below was written around. The note has to
+     * warn the model off the cached snapshot because a snapshot can be stale and the file is what is
+     * true NOW. Here they are the same thing, provably, so there is nothing to choose between: the
+     * agent gets the answer, and it is current.
+     *
+     * Only for `TREE_SAFE` reads. A `POLLABLE` repeat is asking whether the world changed, which is
+     * the one question a cache must never answer.
+     */
+    if (TREE_SAFE.has(name)) {
+      return {
+        allow: true,
+        serveCached: true,
+        label: `repeat ${state.count} — served from cache`,
+        note: `\n\n[Identical call ${state.count} of ${name}(${preview(params)}) in this turn. Nothing it reads `
+          + `has changed since the last one — witness unchanged, no writes since — so this IS that result, `
+          + `returned without running the tool again. If you need the state AFTER an edit, edit first: a `
+          + `write makes the next call run for real.]`,
+      };
+    }
     /**
      * The note must not send it to the CACHE instead of the file. Measured on the first live run of this
      * policy: told the cache held the result, the model read `t3-read_file.txt` — a snapshot of what that
