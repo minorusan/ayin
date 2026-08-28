@@ -1,0 +1,7 @@
+You said you were about to do something and then ended your turn, so nothing happened and the operator
+is still waiting.
+
+IF YOU ALREADY HAVE THE ANSWER: give it now, plainly, with no preamble about what you are about to do.
+
+IF THE WORK STILL NEEDS DOING: do it in THIS reply — make the tool call. Do not describe it, do not
+announce it again, and do not ask permission for something you can simply do.

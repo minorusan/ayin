@@ -1,0 +1,16 @@
+A coding agent was asked to do something. It has just replied, and it called no tools.
+
+THE REQUEST:
+{{REQUEST}}
+
+ITS REPLY:
+{{REPLY}}
+
+Is that reply a COMPLETE answer to the request — is that it?
+
+Answer "no" ONLY if the reply announces work it has not done, promises something next, or obviously
+stops short of what was asked.
+Answer "yes" if it answers the request, refuses it, asks the operator a real question, or says plainly
+that it could not do it.
+
+Reply with exactly one word: yes or no.

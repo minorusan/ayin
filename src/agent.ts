@@ -30,6 +30,7 @@ import { theme } from './ui/theme.js';
 import { log } from './log.js';
 import { hasFinalMarker, stripFinalMarker } from './final-marker.js';
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
+import { stoppedShort } from './announced.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
 import { checkPermission } from './permissions.js';
 import { artifactFor, artifactSessionDir, hasArtifacts, humanBytes, saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
@@ -1263,6 +1264,8 @@ async function runAgentTurn(userInput: string): Promise<void> {
   let continueNudges = 0;
   let deferralNudges = 0;
   let unwrittenClaimNudges = 0;
+  /** "I'll rewrite that now." — announced, never acted. One nudge; see src/announced.ts. */
+  let announcedNudges = 0;
   // Did this turn actually DO anything? A turn that ran a tool has produced something the operator
   // did not have; its closing "you should also check X" is a caveat, not a dodge.
   let toolsRunThisTurn = 0;
@@ -1448,6 +1451,43 @@ async function runAgentTurn(userInput: string): Promise<void> {
         pushToWindow('assistant', response);
         pushMessage('assistant', response);
         pushToWindow('user', DEFERRAL_NUDGE);
+        continue;
+      }
+
+      /**
+       * A final answer that PROMISES the work and ends the turn. The third in this family, between the
+       * deferral above (hands the work back) and the unwritten claim below (says it is already done).
+       *
+       * The continue-nudge cannot catch it: that fires on a MISSING `$` marker, and a promise arrives
+       * WITH one — `$Сейчас перепишу файл.` is a well-formed final answer by every mechanical test. The
+       * marker says "I am done" and the sentence says "I am about to", and only the prose knows.
+       *
+       * ONE nudge, and the tools stay attached — the missing thing is a CALL, so a tool-less recovery
+       * cannot supply it. See src/announced.ts.
+       */
+      /**
+       * A final answer that PROMISES the work and ends the turn. The third in this family, between the
+       * deferral above (hands the work back) and the unwritten claim below (says it is already done).
+       *
+       * The continue-nudge cannot catch it: that fires on a MISSING `$` marker, and a promise arrives
+       * WITH one — `$Сейчас перепишу файл.` is a well-formed final answer by every mechanical test.
+       * The marker says "I am done" and the sentence says "I am about to"; only the prose knows.
+       *
+       * `stoppedShort` is a phrase list first and, when that is inconclusive, ONE yes/no to the model —
+       * the ways a model can stop early are not enumerable, so the judgement is asked for rather than
+       * enumerated. It fails safe: anything but a clear "no" means finished. See src/announced.ts.
+       *
+       * ONE nudge, and the tools stay attached — the missing thing is a CALL, so the tool-less recovery
+       * that fixes an empty answer cannot supply it.
+       */
+      if (announcedNudges < 1 && await stoppedShort(parsed.text ?? response, touchedAnythingThisTurn(), userInput)) {
+        announcedNudges++;
+        recordRaw(round, 'announced an action and ended the turn', response);
+        log('INFO', 'announced_nudge', { round: String(round) });
+        addMessage('system', 'said it was about to act, and did not — asking for the call');
+        pushToWindow('assistant', response);
+        pushMessage('assistant', response);
+        pushToWindow('user', getPrompt('announcedNudge'));
         continue;
       }
 
