@@ -439,7 +439,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
         DELIVERABLES: renderDeliverableList(deliverables),
         OBSERVABILITY: executor.observability(ctx),
       }),
-    }]);
+    }], { declareTools: false });
 
     const dir = process.env.AYIN_PLAN_DIR || process.cwd();
     mkdirSync(dir, { recursive: true });

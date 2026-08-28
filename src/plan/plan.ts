@@ -318,7 +318,7 @@ export function actionablePlanGraph(input: ActionablePlanInput) {
         DELIVERABLES: s.deliverables,
         OBSERVABILITY: s.observability,
       }),
-    }]);
+    }], { declareTools: false });
     const parsed = parsePlan(raw);
     if (!parsed) {
       log('WARN', 'plan_steps_unparsed', { chars: String(raw.length) });
@@ -347,7 +347,7 @@ export function actionablePlanGraph(input: ActionablePlanInput) {
         ERRORS: s.errors.map((e) => `- ${e}`).join('\n'),
         DELIVERABLES: s.deliverables,
       }),
-    }]);
+    }], { declareTools: false });
     const parsed = parsePlan(raw);
     // A repair that cannot be read leaves the previous steps standing: the validator's complaints are
     // then reported honestly with the plan rather than replaced by an empty one.

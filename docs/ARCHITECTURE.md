@@ -630,6 +630,37 @@ the decision was read from two places:
 `check:gates` now pins both halves: the expression must read `toolMode()`, and `provider.tools` must
 not appear near it.
 
+### "Does this call have tools" and "did the schemas go to the runtime" are different questions
+
+`llmChatInner` keeps them in separate variables, and the third failure of that decision was conflating
+them:
+
+| | Who answers | Meaning |
+|---|---|---|
+| `offersTools` | the **caller** — `opts.declareTools !== false` | this call has tools. The agent loop does; a sub-loop asking for JSON says `false` |
+| `declared` | the **transport** — `toolMode() === 'native' && offersTools` | the schemas were handed to the runtime. In prompt mode always false, because the catalogue rides in the system prompt instead |
+
+The guard that catches *"a tool-trained model answers with a tool call even when it has none"* read
+`declared`. So against **any text-contract endpoint — the default, and how most installs run** — it
+fired on every round of the agent loop: the model emitted a perfectly good `<function=read_file>`, the
+dialect parsed it, ayin discarded it and replied *"this request declared no tools and there is nothing
+to call"*. The model then apologised for having no task, and the turn ended with zero tool calls and a
+confident summary of work it had not done.
+
+Measured on `gemma4:26b` over the resource provider — three valid calls in three rounds, all destroyed,
+including the fused-tag form (`<parameter=path</parameter>`) the parser handles on purpose:
+
+```
+tool_call_without_tools · model gemma4:26b · dialect gemma     ×3
+Tool calls: 0 (explore: 0)
+```
+
+Nothing was wrong with the model, the dialect, or the parser — the guard only fires *after* a
+successful parse, so every discarded call was one ayin had already understood. The guard now reads
+`offersTools` and nothing else, and `llmCall` (one user message, no system prompt, therefore no
+catalogue and no schemas) passes `declareTools: false` by construction so its five callers cannot
+forget.
+
 **The fix belongs here and nowhere else.** The first attempt put a `<function=…>` recovery inside
 `explore.ts`, which would have left every other consumer — the agent loop, indulge, plan, QA — to
 discover the same failure separately. One dialect serves all of them; that is what the abstraction is

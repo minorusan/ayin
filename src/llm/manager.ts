@@ -663,7 +663,21 @@ async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}, p
   // omitted the tool catalogue because the mode said native, while this line still declared schemas to
   // a model whose format cannot carry them — so the model emitted canonical XML that its own server
   // could not parse, and the whole turn came back as unparsed text with zero tool calls.
-  const declared = toolMode() === 'native' && opts.declareTools !== false;
+  //
+  // TWO DIFFERENT QUESTIONS, and conflating them cost every prompt-mode install its tool calls.
+  //
+  //   offersTools — does this CALL have tools at all? Only the caller knows. The agent loop does; a
+  //                 sub-loop asking for JSON does not, and says so with `declareTools: false`.
+  //   declared    — were the schemas handed to the RUNTIME? That is a transport question, and in
+  //                 prompt mode the answer is always no because the catalogue rides in the system
+  //                 prompt instead.
+  //
+  // The guard below used `declared`, so against any text-contract endpoint it fired on EVERY round of
+  // the agent loop: the model emitted a perfectly good `<function=read_file>`, ayin parsed it, threw
+  // it away, and told the model it had no tools. Measured on gemma4:26b — three valid calls in three
+  // rounds, all discarded, and the turn ended with "I cannot answer because no task was provided".
+  const offersTools = opts.declareTools !== false;
+  const declared = toolMode() === 'native' && offersTools;
   const tools = declared
     ? await (async () => {
         // Reached from any generate path, not only a turn, so it insists on discovery rather than
@@ -690,8 +704,9 @@ async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}, p
 
     // A TOOL-TRAINED MODEL ANSWERS WITH A TOOL CALL EVEN WHEN IT HAS NONE.
     //
-    // `declareTools: false` stops ayin from HANDING it tools; it cannot stop the model from reaching
-    // for one. qwen3-coder emits `<function=grep><parameter=…>` for "find the files that…" because
+    // `declareTools: false` stops ayin from OFFERING it tools; it cannot stop the model from reaching
+    // for one. It fires on that flag and nothing else — a call that does offer tools, however they are
+    // transported, must keep the call the model made. qwen3-coder emits `<function=grep><parameter=…>` for "find the files that…" because
     // that is what it was trained to do, and the sub-loop that asked — explore, indulge, the QA
     // audit — wanted JSON and gets something that parses to nothing. The iteration is then thrown
     // away, which on a metered model is an iteration the operator paid for.
@@ -704,7 +719,7 @@ async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}, p
     // ONE retry, then whatever comes back is returned. A guard that can loop is worse than the
     // behaviour it corrects, and a model that insists twice is telling you something the loop should
     // surface rather than hide.
-    if (!declared && activeDialect().parse(reply).toolCalls.length > 0) {
+    if (!offersTools && activeDialect().parse(reply).toolCalls.length > 0) {
       log('INFO', 'tool_call_without_tools', { model: cachedModelId, dialect: activeDialect().id });
       // The raw text, on disk. This is the reply that settles "did the model emit that, or did ayin
       // mangle it" — and it was previously kept nowhere unless /transcribe had been switched on
@@ -741,6 +756,12 @@ async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}, p
     throw err;
   }
 }
+/**
+ * One question, one answer. NEVER offers tools — there is no system prompt here, so there is no
+ * catalogue and no schemas, and a call that cannot run is a wasted round whichever way it arrives.
+ * Every caller (goal derivation, the summary, plan triage, the agent's own sub-question) wants prose
+ * or JSON back, so the flag belongs here rather than repeated at each of them.
+ */
 export async function llmCall(prompt: string): Promise<string> {
-  return llmChat([{ role: 'user', content: prompt }]);
+  return llmChat([{ role: 'user', content: prompt }], { declareTools: false });
 }

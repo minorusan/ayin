@@ -2298,8 +2298,8 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
 // the iteration is discarded. On a metered model that is an iteration the operator paid for.
 {
   const mgrSrc = readFileSync(join(REPO, 'src/llm/manager.ts'), 'utf-8');
-  ok(/if \(!declared && activeDialect\(\)\.parse\(reply\)\.toolCalls\.length > 0\)/.test(mgrSrc),
-    'a reply that IS a tool call, when none were declared, is detected through the dialect');
+  ok(/if \(!offersTools && activeDialect\(\)\.parse\(reply\)\.toolCalls\.length > 0\)/.test(mgrSrc),
+    'a reply that IS a tool call, when the CALLER offered none, is detected through the dialect');
   ok(/declared no tools and there is nothing to call/.test(mgrSrc),
     'and the retry tells the model why, rather than repeating the original instruction louder');
   ok(/say what and why instead/.test(mgrSrc),
@@ -2309,7 +2309,7 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
   // Bounded slice from the guard itself — anchoring the end on a symbol name finds the IMPORT.
   // Sliced to the END OF THE GUARD, not a fixed character count: a comment added inside it pushed the
   // last assertion out of a 1400-char window and failed a gate about code that had not changed.
-  const guardAt = mgrSrc.indexOf('if (!declared && activeDialect()');
+  const guardAt = mgrSrc.indexOf('if (!offersTools && activeDialect()');
   const guardEnd = mgrSrc.indexOf('emitLlmCall(', guardAt);
   const guard = mgrSrc.slice(guardAt, guardEnd > guardAt ? guardEnd : guardAt + 1400);
   ok(!/while|for \(/.test(guard), 'ONE retry — a guard that can loop is worse than the behaviour it corrects');
@@ -2455,9 +2455,25 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
       'and it is reset when the provider OR the model changes — a different tokenizer is a different number');
   }
 
-  // The agent loop must be untouched: there, a tool call is the point.
-  ok(/const declared = toolMode\(\) === 'native' && opts\.declareTools !== false;/.test(mgrSrc),
-    'the guard is gated on `declared`, so the agent loop — which is genuinely calling tools — never sees it');
+  // THE AGENT LOOP MUST BE UNTOUCHED: there, a tool call is the point. This gate asserted that and was
+  // WRONG, because it asserted the wrong variable. `declared` also means "schemas went to the runtime",
+  // which in prompt mode is never true — so against every text-contract endpoint the guard fired on
+  // every round of the loop, parsed the model's `<function=read_file>`, discarded it, and replied "you
+  // have no tools". Measured on gemma4:26b: three valid calls in three rounds, all destroyed.
+  //
+  // Two variables now, because they are two questions. `offersTools` is the CALLER's answer to "does
+  // this call have tools", and it is the only thing the guard may consult; `declared` is transport.
+  ok(/const offersTools = opts\.declareTools !== false;/.test(mgrSrc),
+    'whether a call HAS tools is the caller\'s answer, independent of how they are transported');
+  ok(/const declared = toolMode\(\) === 'native' && offersTools;/.test(mgrSrc),
+    'and declaring schemas to the runtime is the transport question, derived from it');
+  {
+    const guardLine = mgrSrc.slice(mgrSrc.indexOf('if (!offersTools && activeDialect()'), mgrSrc.indexOf('if (!offersTools && activeDialect()') + 90);
+    ok(!/toolMode|declared\b/.test(guardLine),
+      'the guard reads NEITHER toolMode nor declared — prompt mode is how most installs run, and there the loop calls tools');
+  }
+  ok(/llmChat\(\[\{ role: 'user', content: prompt \}\], \{ declareTools: false \}\)/.test(mgrSrc),
+    'llmCall offers no tools by construction — one user message, no system prompt, so no catalogue and no schemas');
 
   // ONE SOURCE OF TRUTH for who declares tools.
   //
