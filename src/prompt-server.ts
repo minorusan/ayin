@@ -4,6 +4,14 @@
  *   /                  the prompt editor — reads/writes the prompt files, live on the next LLM call
  *   /diff, /api/diff/  the review page and its line comments (see diff/server.ts)
  *
+ * IT LISTENS ON THE LAN. The page is read from a phone as often as from this machine, and a page you
+ * cannot reach is a page you do not use — so the bind is `0.0.0.0` and the served URL is printed twice,
+ * loopback and network. That is an ACCEPTED EXPOSURE, not an oversight: everything behind this port is
+ * reachable by anything on the same network, including `POST /api/prompts` (which rewrites the agent's
+ * own system prompt) and the comment routes (which start headless runs with an unsandboxed `bash`).
+ * Serve it on a network you trust. The Host allowlist below is still enforced — it is what stops a
+ * hostile DNS name from resolving to this box and POSTing through the browser of someone on it.
+ *
  * ONE PORT PER SESSION, NOT ONE PER MACHINE. 7773 was a constant, so the second ayin on the box lost
  * the bind, logged a warning, and ran with no server at all — and once the review page became a client
  * of this server, that stopped being cosmetic: a page served by one session while another session owns
@@ -16,7 +24,7 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 import { log } from './log.js';
 import { resetPromptsToDefaults, getPromptsDir as promptsDir } from './prompts.js';
@@ -37,6 +45,58 @@ export function serverPort(): number {
 
 export function serverUrl(path = ''): string {
   return chosenPort ? `http://127.0.0.1:${chosenPort}${path}` : '';
+}
+
+/**
+ * THE ADDRESS A PHONE CAN REACH — one of them, chosen, not all of them listed.
+ *
+ * A laptop has several: Wi-Fi, ethernet, a VPN's `utun`, docker's bridge, and `networkInterfaces()`
+ * returns them in an order that is the OS's business rather than a preference. Printing all of them
+ * makes the operator guess; printing the first one hands them a VPN address that nothing on the sofa
+ * can route. So the RFC1918 ranges are preferred in the order a home or office network actually uses
+ * them, and anything else is the last resort.
+ *
+ * Returns null when there is no non-loopback IPv4 at all — a machine with the network off. The caller
+ * prints only the loopback line then, rather than a URL that resolves to nothing.
+ */
+export function lanAddress(): string | null {
+  const rank = (a: string): number => {
+    if (a.startsWith('192.168.')) return 0;
+    if (a.startsWith('10.')) return 1;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(a)) return 2;
+    if (a.startsWith('169.254.')) return 4;   // link-local: an interface with no DHCP answer
+    return 3;
+  };
+  const found: string[] = [];
+  for (const addrs of Object.values(networkInterfaces())) {
+    for (const a of addrs ?? []) {
+      // `family` is the string 'IPv4' on Node 18+ and the number 4 on older builds — accept both rather
+      // than silently finding nothing on one of them.
+      if ((a.family === 'IPv4' || (a.family as unknown as number) === 4) && !a.internal) found.push(a.address);
+    }
+  }
+  if (!found.length) return null;
+  return found.sort((x, y) => rank(x) - rank(y) || x.localeCompare(y))[0];
+}
+
+/** The same page over the network, for a phone. Empty when nothing is bound or there is no LAN address. */
+export function serverLanUrl(path = ''): string {
+  const ip = lanAddress();
+  return chosenPort && ip ? `http://${ip}:${chosenPort}${path}` : '';
+}
+
+/**
+ * Every literal host this server answers as. IP ADDRESSES AND `localhost`, never an arbitrary name —
+ * see crossOriginRefused: this list is the DNS-rebinding defence, and a wildcard here removes it.
+ */
+function servedHosts(): string[] {
+  const hosts = ['127.0.0.1', 'localhost', '[::1]', '::1'];
+  for (const addrs of Object.values(networkInterfaces())) {
+    for (const a of addrs ?? []) {
+      if ((a.family === 'IPv4' || (a.family as unknown as number) === 4) && !a.internal) hosts.push(a.address);
+    }
+  }
+  return hosts;
 }
 
 // ── who is listening, and for which tree ──────────────────────────────────────
@@ -267,20 +327,26 @@ const HTML = `<!DOCTYPE html>
 </html>`;
 
 /**
- * A page on the internet can make your browser POST to loopback; it cannot read the reply, but it does
+ * A page on the internet can make your browser POST to this port; it cannot read the reply, but it does
  * not need to when the POST itself is the effect — and here the effect is an agent turn with a shell.
- * So a request that carries an Origin must carry OURS, and the Host must be loopback (a name that
- * resolves to 127.0.0.1 is how DNS rebinding gets past an address check). A request with no Origin at
- * all is a local tool — curl, a script — and is allowed: that is the operator, not a web page.
+ * So a request that carries an Origin must carry OURS, and the Host must be an ADDRESS THIS BOX HOLDS:
+ * a name that resolves to it is how DNS rebinding gets past an address check, and the LAN bind did not
+ * make that attack cheaper, it made it worth checking for on more than one address. A request with no
+ * Origin at all is a tool — curl, a script — and is allowed: that is an operator, not a web page.
+ *
+ * The phone is why the allowlist is computed rather than constant. It asks for this box by its LAN
+ * address and its POSTs carry that as their Origin, so a loopback-only list refused every comment
+ * written on one.
  */
 function crossOriginRefused(req: IncomingMessage): string | null {
+  const hosts = servedHosts();
   const host = (req.headers.host ?? '').split(':')[0];
-  if (host && host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]' && host !== '::1') {
-    return `Host ${host} is not loopback`;
+  if (host && !hosts.includes(host)) {
+    return `Host ${host} is not an address of this machine`;
   }
   const origin = req.headers.origin;
   if (!origin) return null;
-  const allowed = [`http://127.0.0.1:${chosenPort}`, `http://localhost:${chosenPort}`, `http://[::1]:${chosenPort}`];
+  const allowed = hosts.map((h) => `http://${h}:${chosenPort}`);
   return allowed.includes(origin) ? null : `Origin ${origin} is not this session`;
 }
 
@@ -379,14 +445,16 @@ function routePromptEditor(req: IncomingMessage, res: ServerResponse): void {
 }
 
 /**
- * LOOPBACK ONLY. This was a wildcard bind, and the combination was remote code execution enabled by
- * default on every interactive launch: no auth, no Origin check, and `POST /api/prompts` writes the
- * agent's OWN system prompt. Anyone on the network could rewrite `prompts/ayin/system.txt`, and `bash`
- * has no sandbox while headless auto-approves shell commands.
+ * THE LAN, DELIBERATELY. This was `127.0.0.1`, and that was the right default for a prompt editor
+ * nobody read off a phone. The review page is: a diff is read on a sofa, a sprint board is read on a
+ * commute, and a page reachable only from the machine that serves it is a page opened on the machine
+ * that has the editor open anyway.
  *
- * A prompt editor is a single-operator convenience; a comment endpoint that starts agent turns is more
- * than that. Both stay on 127.0.0.1, and reaching either from another machine wants a token and an
- * explicit opt-in, never a wildcard.
+ * WHAT THIS COSTS, stated plainly rather than discovered later: there is no auth on this port. Anything
+ * on the same network can `POST /api/prompts` — which rewrites the agent's own system prompt — and can
+ * write a review comment, which spawns a headless ayin whose `bash` has no sandbox. The Origin and Host
+ * checks above stop a WEB PAGE from driving it through your browser; they stop nothing that can talk to
+ * the port directly. This is a trusted-network feature. On an untrusted one, do not run it.
  *
  * The port is not fixed (see the header): EADDRINUSE walks up, because a second session with no server
  * is a second session whose review page cannot take comments.
@@ -412,10 +480,10 @@ function bind(
       : err.message });
   });
 
-  server.listen(port, '127.0.0.1', () => {
+  server.listen(port, '0.0.0.0', () => {
     chosenPort = port;
     publish({ pid: process.pid, port, cwd, startedAt: new Date().toISOString() });
-    log('INFO', 'prompt_server_started', { port: String(port), cwd });
+    log('INFO', 'prompt_server_started', { port: String(port), cwd, lan: lanAddress() ?? 'none' });
     // The record is a claim that this port is live. It must not outlive the process that made it.
     const clean = () => unpublish(process.pid);
     process.on('exit', clean);

@@ -1,5 +1,7 @@
 Opens your current Jira sprint as a board in the browser — one column per status, one card per ticket.
 
+The board is served on your local network as well as on this machine, so the `on this network:` address printed at startup opens it on a **phone or tablet on the same Wi-Fi** — same board, same comment box. There is no password on it, and asking ayin about a ticket starts a run with an unsandboxed shell, so use it on a network you trust.
+
 Click a card and the ticket opens beside the board: status, type, priority, who filed it, the full description, and every comment. That detail is fetched when you click, not up front — a sprint of twenty tickets would otherwise cost twenty requests and a minute of waiting for the nineteen you did not open.
 
 The comments section has a `+`. It opens a box, and `post to Jira` posts what you typed to that ticket **as you** — the same credential `/jira-auth` stored. The comment appears in the list only after Jira confirmed it, so what you see on the page is what is on the ticket.

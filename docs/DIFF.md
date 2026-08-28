@@ -180,10 +180,18 @@ walks up from 7773 when it is taken: one server per session, published to
 `~/.ayin-cli/daemon-<pid>.json`, so a page always talks to the session that owns its tree — and a
 comment reaching a different repo's agent is not a mistake worth routing around.
 
-**A POST here spawns an agent with a shell.** The bind is loopback-only, and every
-mutating request is refused unless its `Origin` is this session and its `Host` is loopback: a page on
-the internet cannot read a reply from 127.0.0.1, but it does not need to when the POST itself is the
-effect.
+**A POST here spawns an agent with a shell, and the bind is the LAN.** `0.0.0.0`, deliberately: the URL
+is printed as a `local` line and a `network` line, and the network one is what a phone on the same Wi-Fi
+opens. So every mutating request is refused unless its `Origin` is this session and its `Host` is an
+address this machine actually holds — a page on the internet cannot read a reply from this port, but it
+does not need to when the POST itself is the effect, and a hostile DNS name resolving here is how that
+gets past an address check. Both allowlists are computed from the machine's own addresses rather than
+fixed, because the phone's `Origin` is the LAN one; a loopback-only list rendered the page and 403'd
+every comment written on it.
+
+Those checks stop a **web page**. They stop nothing that can reach the port directly, and there is no
+auth here: on this network, `POST /api/prompts` rewrites the agent's system prompt and a comment starts
+a run whose `bash` is unsandboxed. Serve it on a network you trust.
 
 ---
 

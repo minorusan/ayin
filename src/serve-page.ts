@@ -10,6 +10,10 @@
  * either page needs a chat any more: it needs a SERVER. So these commands start one, open the page, and
  * stay up — which is the whole of what a TUI was contributing.
  *
+ * IT IS SERVED ON THE NETWORK, so the URL is printed twice — loopback for this machine, and the LAN
+ * address for the phone that is going to read the diff. Both are the same page on the same port; see
+ * prompt-server.ts for what that exposure buys and costs.
+ *
  * IT PARKS, and that is the interface. A command that serves a page and exits serves nothing; the
  * process holding the socket IS the feature, so it says so on stdout and waits for Ctrl+C. The one case
  * that still exits immediately is the good one: a session already serving this tree, whose page is the
@@ -19,7 +23,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { initLlmProvider } from './llm/select.js';
-import { findSessionServer, serverPort, startPromptServer } from './prompt-server.js';
+import { findSessionServer, serverLanUrl, serverPort, startPromptServer } from './prompt-server.js';
 import { openExternal } from './open-external.js';
 import { log } from './log.js';
 
@@ -61,9 +65,17 @@ export function repoRoot(cwd = process.cwd()): string {
 
 export interface ServedPage {
   url: string;
+  /** The same page over the network — for a phone. Null when the machine has no non-loopback IPv4. */
+  lanUrl: string | null;
   opened: boolean;
   /** True when this process is the one holding the socket, and therefore must not exit. */
   own: boolean;
+}
+
+/** Where a page on `port` is, both ways round. One place, so the two URLs can never disagree. */
+function urls(port: number, route: string): { url: string; lanUrl: string | null } {
+  const lan = serverLanUrl(route);
+  return { url: `http://127.0.0.1:${port}${route}`, lanUrl: lan || null };
 }
 
 /**
@@ -74,11 +86,18 @@ export interface ServedPage {
  * (`/private/tmp/x`), and treating those as different sessions would start a second server on the tree
  * one is already serving.
  */
-export function existingServer(cwd: string, route: string): string | null {
-  if (serverPort() && cwd === process.cwd()) return `http://127.0.0.1:${serverPort()}${route}`;
+export function existingServer(cwd: string, route: string): ServedUrls | null {
+  if (serverPort() && cwd === process.cwd()) return urls(serverPort(), route);
   const other = findSessionServer(cwd) ?? (cwd === process.cwd() ? null : findSessionServer(process.cwd()));
-  return other ? `http://127.0.0.1:${other.port}${route}` : null;
+  return other ? urls(other.port, route) : null;
 }
+
+/**
+ * The network URL is computed from THIS process, not read from the other session's record — the record
+ * carries a port, and the address belongs to the machine both are on. A session that started before the
+ * laptop moved to a different Wi-Fi therefore hands out the address it has NOW rather than a stale one.
+ */
+export type ServedUrls = { url: string; lanUrl: string | null };
 
 /**
  * Serve `route` for `cwd` until the operator stops it, or hand back a URL an existing session already
@@ -90,7 +109,9 @@ export function existingServer(cwd: string, route: string): string | null {
 export async function servePage(cwd: string, route: string, open: boolean): Promise<ServedPage> {
   const existing = existingServer(cwd, route);
   if (existing) {
-    return { url: existing, opened: open ? openExternal(existing) : false, own: false };
+    // Opened on LOOPBACK even though the network URL is what gets printed for the phone: the browser
+    // being opened is on this machine, and 127.0.0.1 is the address that cannot go stale mid-session.
+    return { ...existing, opened: open ? openExternal(existing.url) : false, own: false };
   }
 
   // WHICH PROVIDER, before the first request. The buttons on these pages that spend a model call —
@@ -105,9 +126,9 @@ export async function servePage(cwd: string, route: string, open: boolean): Prom
     });
   });
 
-  const url = `http://127.0.0.1:${port}${route}`;
-  log('INFO', 'serve_page_cli', { route, port: String(port), cwd });
-  return { url, opened: open ? openExternal(url) : false, own: true };
+  const { url, lanUrl } = urls(port, route);
+  log('INFO', 'serve_page_cli', { route, port: String(port), cwd, lan: lanUrl ?? 'none' });
+  return { url, lanUrl, opened: open ? openExternal(url) : false, own: true };
 }
 
 /**

@@ -2,6 +2,13 @@ Serve the working tree as a reviewable page and open it.
 
 `ayin diff [<rev>]` collects staged, unstaged and untracked changes against HEAD (or against `<rev>` when given, e.g. `main` to review a whole branch), **serves** them as a review page, and stays up until you press Ctrl+C. If an ayin session is already running on this repo it hands you that session's page instead of starting a second server, and exits.
 
+**It is served on your local network, not just on this machine.** The command prints two URLs — a `local`
+one on `127.0.0.1` and a `network` one on this machine's LAN address. The network one is the address to
+open on a phone or a tablet on the same Wi-Fi; it is the same page on the same port, comment boxes and
+all. There is no password on it: anything on that network can write a review comment, and a comment
+starts a headless ayin with an unsandboxed shell. Serve it on a network you trust, and remember Ctrl+C
+takes it down. A machine with no network address prints the local line alone.
+
 The page is live either way: hover any line for a comment box, and what you write starts its own headless ayin on that repo — one comment, one run, so two comments are answered in parallel and neither waits for whatever the session is doing. Everything the run says shows up under your comment as it works, small and quiet; when it has made the change the page reloads itself against the new working tree and the reply lands last, larger, folding away if it is long. It is rendered as markdown — headings, bullets, inline symbols and fenced code all read as they were written rather than as raw asterisks. A refresh button sits in the bottom-right corner: it rebuilds the page against whatever the working tree holds right now — useful after editing outside the page — and lands you back on the file you were reading rather than at the top. Above it sits a red trashcan that discards uncommitted code, and above that a red X that clears every review comment in the repo; both ask first, and neither does the other's job.
 
 `--static` skips the server: the page is written to `~/.ayin-cli/diffs/diff-<timestamp>.html` and opened as a `file://` URL — self-contained, no port, works on a machine with no network, and says on screen that comments are off, because nothing is listening to send one to. A static file has no server to rebuild from, so it carries no refresh button and no index buttons either — staging is a git write. Every served page leaves one of these behind as well, since a served page dies with the process holding it, and they are pruned after 24 hours each time the command runs. Extension filters start collapsed to `.cs .asset .ts .js .py`; everything else is one click away, and the count of files hidden by the default filters is always shown on screen. Your selection is remembered in a cookie, so the next page opens with the chips you left on — `defaults` puts the shipped set back.
@@ -25,7 +32,7 @@ Reach for this to review a change before committing it, or to hand a colleague a
 ## Options
 
     <rev>       compare against this instead of HEAD, e.g. `ayin diff main`
-    --no-open   serve and print the URL, open no browser (over ssh)
+    --no-open   serve and print both URLs, open no browser (over ssh)
     --static    write the self-contained snapshot, print its path, exit — never serves
     --help, -h  print usage and exit
 

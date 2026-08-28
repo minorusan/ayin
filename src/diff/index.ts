@@ -50,6 +50,8 @@ function prune(): void {
 export interface DiffResult {
   /** The URL when a session served it, the file path when it was written to disk. */
   path: string;
+  /** The same page on the LAN, for a phone. Null for a static file, and when there is no LAN address. */
+  lanPath?: string | null;
   /** True when the page came off a live session — the only page whose lines can be commented on. */
   served: boolean;
   files: number;
@@ -93,8 +95,8 @@ export function buildDiffPage(repo: string, against = 'HEAD'): DiffResult {
 export function buildAndOpen(repo: string, against = 'HEAD'): DiffResult {
   // ONE definition of "who is serving this tree", shared with `ayin diff` and `ayin sprint` — two copies
   // of a port lookup is two places for a stale daemon record to be trusted differently.
-  const url = existingServer(repo, `/diff?rev=${encodeURIComponent(against)}`);
-  if (url) {
+  const served = existingServer(repo, `/diff?rev=${encodeURIComponent(against)}`);
+  if (served) {
     // The counts are collected here as well as by the route. Two git passes for one `/diff` is cheap,
     // and the alternative is a summary line that cannot say how big the change is.
     const set = collectDiff(repo, against);
@@ -103,13 +105,14 @@ export function buildAndOpen(repo: string, against = 'HEAD'): DiffResult {
     // It carries no comment client — it is an artifact, not a second client fighting over the same store.
     writeStaticPage(set);
     return {
-      path: url,
+      path: served.url,
+      lanPath: served.lanUrl,
       served: true,
       files: set.files.length,
       additions: set.files.reduce((n, f) => n + f.additions, 0),
       deletions: set.files.reduce((n, f) => n + f.deletions, 0),
       hiddenByDefault: set.files.filter((f) => !DEFAULT_EXTENSIONS.includes(f.ext)).length,
-      opened: openExternal(url),
+      opened: openExternal(served.url),
     };
   }
   const r = buildDiffPage(repo, against);
@@ -122,7 +125,9 @@ export function summarise(r: DiffResult): string {
   if (r.files === 0) return 'Working tree is clean — nothing to diff.';
   return `${r.files} file(s) · +${r.additions} −${r.deletions}`
     + (r.hiddenByDefault ? ` · ${r.hiddenByDefault} hidden by the default filters (chips at the top show them)` : '')
-    + `\n${r.path}`
+    // TWO ADDRESSES, LABELLED, or the bare path when there is only one. A phone cannot reach 127.0.0.1
+    // and an operator holding one should not have to work out which of their interfaces to type.
+    + (r.lanPath ? `\n  local    ${r.path}\n  network  ${r.lanPath}` : `\n${r.path}`)
     // Whether a line can be commented on is the difference between the two pages, so it is stated
     // rather than left for the operator to discover by hovering and finding nothing.
     + (r.served
@@ -133,7 +138,7 @@ export function summarise(r: DiffResult): string {
 const USAGE = `ayin diff [<rev>] — serve the working tree as a reviewable page and open it.
 
   <rev>       compare against this instead of HEAD (e.g. \`ayin diff main\`)
-  --no-open   serve and print the URL, open no browser (ssh)
+  --no-open   serve and print both URLs, open no browser (ssh)
   --static    write a self-contained snapshot to ~/.ayin-cli/diffs, print the path, exit
   --help
 
@@ -190,7 +195,7 @@ export async function runDiffCli(argv: string[]): Promise<number> {
     const { servePage, parkUntilInterrupted } = await import('../serve-page.js');
     const page = await servePage(root, `/diff?rev=${encodeURIComponent(rev)}`, open);
     process.stdout.write(`${summarise({
-      path: page.url, served: true,
+      path: page.url, lanPath: page.lanUrl, served: true,
       files: set.files.length,
       additions: set.files.reduce((n, f) => n + f.additions, 0),
       deletions: set.files.reduce((n, f) => n + f.deletions, 0),

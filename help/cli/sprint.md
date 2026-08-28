@@ -2,7 +2,7 @@ Serves your current Jira sprint as a board in the browser and stays up until you
 
     ayin sprint
 
-It prints the URL, opens it, and holds the port. Ctrl+C stops serving. If an ayin session is already running in this directory it uses that session's board instead of starting a second server, and exits.
+It prints two URLs — a `local` one on `127.0.0.1` and a `network` one on this machine's LAN address — opens the local one, and holds the port. The network one is the address to open on a phone or a tablet on the same Wi-Fi; it is the same board on the same port, and the comment box works from there. There is no password on it, and a ticket question starts a headless ayin with an unsandboxed shell, so serve it on a network you trust. Ctrl+C stops serving. If an ayin session is already running in this directory it uses that session's board instead of starting a second server, and exits.
 
 The board is live, not a snapshot: one column per status, one card per ticket, re-read from Jira on every request, so a reload shows what changed. Click a card and the ticket opens beside the board — status, type, priority, who filed it, the description, and every comment, fetched when you click rather than up front. The `+` under the comments posts to Jira **as you**, using the credential `/jira-auth` stored, and the comment appears only after Jira confirmed it.
 
@@ -14,5 +14,5 @@ There is no offline form of this page and there will not be: the cards fetch, th
 
 ## Options
 
-    --no-open   serve and print the URL, open no browser (over ssh)
+    --no-open   serve and print both URLs, open no browser (over ssh)
     --help

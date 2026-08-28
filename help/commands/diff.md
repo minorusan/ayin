@@ -1,6 +1,8 @@
 Renders your working tree — staged, unstaged, and untracked changes — as an HTML review page and opens it in your browser.
 
-Your session serves the page and opens its URL, which is what makes it a review rather than a printout: hover a line, write a comment, send it. The comment starts its **own headless ayin** on that repo — one comment, one run — which makes the change and replies under your line, and the page reloads itself showing the new tree. Two comments written a minute apart are answered in parallel, and neither waits for whatever you are doing in the terminal.
+Your session serves the page and opens its URL, which is what makes it a review rather than a printout. It also prints the address to open on a **phone or tablet on the same Wi-Fi** — the `on this network:` line at startup — because the page is served on your local network, not only on this machine. It is the same page with the same comment boxes, and there is no password on it: anything on that network can start a run with an unsandboxed shell, so use it on a network you trust.
+
+Then:  hover a line, write a comment, send it. The comment starts its **own headless ayin** on that repo — one comment, one run — which makes the change and replies under your line, and the page reloads itself showing the new tree. Two comments written a minute apart are answered in parallel, and neither waits for whatever you are doing in the terminal.
 
 Everything the run says arrives in the thread while it works, small and quiet under your comment; the reply lands last, larger, and **folds** if it is long. Comments still waiting on an answer keep their status and their clock through a reload, and a run that dies says so naming its log (`~/.ayin-cli/diffs/comment-<id>.log`).
 

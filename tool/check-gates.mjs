@@ -775,34 +775,42 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
     'nothing is checked when not entangled — the design loop stays free');
 }
 
-// THE PROMPT EDITOR IS LOOPBACK-ONLY. Found in the pre-publication audit, and not a leak but a
-// vulnerability: a wildcard bind, auto-started on every interactive launch, no auth and no Origin check,
-// with `POST /api/prompts` writing the agent's OWN system prompt. Anyone on the network could rewrite
-// prompts/ayin/system.txt, and `bash` has no sandbox while headless auto-approves shell commands — remote
-// code execution, on by default. The docs already said `localhost:7773`, which is what a reader assumes.
-console.log('\nthe prompt editor does not listen to the network');
+// THE BIND IS THE LAN NOW, AND THE BROWSER DEFENCE IS WHAT MUST NOT GO WITH IT.
+//
+// This block used to assert `127.0.0.1`, from the pre-publication audit that found a wildcard bind with
+// no auth and no Origin check while `POST /api/prompts` writes the agent's OWN system prompt — remote
+// code execution on by default. The bind is `0.0.0.0` again, on purpose: the review page and the sprint
+// board are read from a phone, and an operator was told what that costs before it was done.
+//
+// So the assertion INVERTS but does not disappear. What made the old bind a vulnerability was never the
+// address on its own — it was the address plus no Origin check plus an unvalidated prompt id. Those two
+// are the load-bearing half and they are what is asserted here, hard, because they are the difference
+// between "a page on my Wi-Fi" and "any website my browser visits can rewrite the agent's prompt".
+console.log('\nthe LAN bind keeps its browser defences');
 {
   const ps = readFileSync(join(DIST, '..', 'src', 'prompt-server.ts'), 'utf-8');
   // EVERY listen, not one spelling of it. The port stopped being a constant — a second session must get
-  // its own or its review page cannot take comments — so asserting the literal `PORT` would now pass a
-  // file that had grown a wildcard bind somewhere else in it.
+  // its own or its review page cannot take comments — so asserting a literal would pass a file that had
+  // grown a second, different bind somewhere else in it.
   const listens = [...ps.matchAll(/\.listen\(([^)]*)\)/g)].map((m) => m[1]);
-  ok(listens.length > 0 && listens.every((args) => /,\s*'127\.0\.0\.1'/.test(args)), 'bound to loopback');
-  // CODE lines only: the comment above the fix describes the old bind, and a gate tripping on its own
-  // explanation has happened three times today.
-  const psCode = ps.split('\n').filter((l) => {
-    const t = l.trim();
-    return t && !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*');
-  }).join('\n');
-  ok(!/0\.0\.0\.0/.test(psCode), 'no wildcard bind in the code');
+  ok(listens.length > 0 && listens.every((args) => /,\s*'0\.0\.0\.0'/.test(args)),
+    'bound on the LAN — a page a phone cannot reach is a page nobody reads');
   ok(/\^\[A-Za-z0-9_-\]\+\$/.test(ps), 'a prompt id is validated — an unsanitized id let `../` escape');
   // A COMMENT ON A DIFF LINE STARTS AN AGENT TURN, and the agent has a shell. A page on the internet
-  // cannot read a loopback reply, but it does not need to when the POST itself is the effect — so a
-  // request carrying a foreign Origin, or a Host that is not loopback (how DNS rebinding walks past an
-  // address check), is refused before any route sees it.
+  // cannot read a reply from this port, but it does not need to when the POST itself is the effect — so
+  // a request carrying a foreign Origin, or a Host that is a NAME rather than an address of this machine
+  // (how DNS rebinding walks past an address check), is refused before any route sees it.
   ok(/function crossOriginRefused/.test(ps), 'a foreign Origin is refused, not merely unread');
   ok(/req\.method !== 'GET' && req\.method !== 'HEAD'[\s\S]{0,500}crossOriginRefused\(req\)/.test(ps),
     "and on every mutating request, including the prompt editor's own save");
+  // THE HOST CHECK IS THE REBINDING DEFENCE and it is the one a LAN bind makes easy to lose: the phone
+  // asks for this box by its LAN address, so the fix that stops 403-ing the phone is one edit away from
+  // accepting any Host at all. Assert that the allowlist is BUILT FROM THIS MACHINE'S INTERFACES.
+  ok(/function servedHosts\(\)[\s\S]{0,600}networkInterfaces\(\)/.test(ps),
+    "the Host allowlist is this machine's real addresses, not a wildcard");
+  ok(/!hosts\.includes\(host\)/.test(ps), 'and an unlisted Host is refused, so a DNS name resolving here still fails');
+  // The behaviour of all of it is exercised against a real launch in check:cli — printed URL, page
+  // served over it, the phone's Origin accepted, a foreign Origin and a name-shaped Host refused.
 }
 
 // NAAMAH IS A SUBMODULE, AND RENDERING IS OPTIONAL.

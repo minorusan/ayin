@@ -22,7 +22,8 @@
  * command that genuinely wants the TUI or genuinely needs a model says so HERE, by name.
  */
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
+import { connect } from 'node:net';
 import { join } from 'node:path';
 
 const REPO = new URL('..', import.meta.url).pathname;
@@ -261,6 +262,70 @@ for (const [cmd, expect] of [['diff', /serve the working tree/], ['sprint', /ser
     const page = await fetch(url).then((r) => r.text()).catch((e) => `FETCH FAILED ${e}`);
     if (!page.includes('nested/a.ts')) fail('the served page does not carry the changed file');
     else ok('the page it serves is real — the changed file is on it');
+  }
+
+  /**
+   * AND IT IS REACHABLE FROM A PHONE, which is the whole reason the bind is not loopback.
+   *
+   * Three separate things can silently undo this and each of them looks fine from the machine that
+   * serves it: the bind going back to 127.0.0.1, the network URL not being PRINTED (an address nobody
+   * is told is an address nobody uses), and the Origin guard refusing the phone's own Origin — which
+   * would leave a page that renders and a comment box that 403s, the worst of the three to diagnose.
+   *
+   * Skipped when the machine has no non-loopback IPv4 — a CI container legitimately has none, and a
+   * gate that fails there is a gate that gets deleted.
+   */
+  const lanIps = Object.values(networkInterfaces()).flat()
+    .filter((a) => a && (a.family === 'IPv4' || a.family === 4) && !a.internal)
+    .map((a) => a.address);
+  if (!lanIps.length) {
+    ok('no non-loopback IPv4 on this machine — the network-URL checks do not apply here');
+  } else {
+    const lan = (out.match(/http:\/\/[\d.]+:(\d+)\/diff[^\s]*/g) ?? []).find((u) => !u.includes('127.0.0.1'));
+    if (!lan) {
+      fail(`no network URL was printed, so the page cannot be opened from a phone — this machine has ${lanIps.join(', ')}: ${out.slice(0, 300)}`);
+    } else if (!lanIps.includes(new URL(lan).hostname)) {
+      fail(`the network URL names ${new URL(lan).hostname}, which is not an address of this machine`);
+    } else {
+      ok('a network URL is printed, and it names a real address of this machine');
+
+      const page = await fetch(lan).then((r) => r.text()).catch((e) => `FETCH FAILED ${e}`);
+      if (!page.includes('nested/a.ts')) fail(`the page is not served over its network address: ${page.slice(0, 120)}`);
+      else ok('and the page is really served over it — the bind is not loopback-only');
+
+      // The phone's own Origin. A comment box that 403s is the failure this catches.
+      const base = new URL(lan).origin;
+      const r = await fetch(`${base}/api/prompts`, {
+        method: 'POST', headers: { origin: base, 'content-type': 'application/json' }, body: '{}',
+      }).then((x) => x.status).catch(() => 0);
+      if (r === 403) fail('a POST carrying the phone\'s own Origin is refused — the page would render and every comment on it would fail');
+      else ok('and a POST from that origin is accepted, so comments written on a phone reach the agent');
+
+      // The guard is still a guard. Both halves, because they refuse for different reasons.
+      const evil = await fetch(`${base}/api/prompts`, {
+        method: 'POST', headers: { origin: 'http://evil.example', 'content-type': 'application/json' }, body: '{}',
+      }).then((x) => x.status).catch(() => 0);
+      if (evil !== 403) fail(`a POST from an unrelated web page was NOT refused (${evil}) — that is remote code execution through the operator's browser`);
+      else ok('a POST from an unrelated origin is still refused');
+
+      // A RAW SOCKET, not fetch: `Host` is a forbidden header there, so undici drops it silently and the
+      // assertion passes against a request that never carried the thing being tested. The first version
+      // of this check did exactly that and reported 404.
+      const rebound = await new Promise((resolve) => {
+        const sock = connect(Number(new URL(lan).port), new URL(lan).hostname, () => {
+          sock.write('POST /api/prompts HTTP/1.1\r\n'
+            + `Host: attacker.example:${new URL(lan).port}\r\n`
+            + 'Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}');
+        });
+        let buf = '';
+        sock.on('data', (b) => { buf += b; });
+        sock.on('end', () => resolve(Number((buf.match(/^HTTP\/1\.1 (\d+)/) ?? [])[1] ?? 0)));
+        sock.on('error', () => resolve(0));
+        sock.setTimeout(5000, () => { sock.destroy(); resolve(0); });
+      });
+      if (rebound !== 403) fail(`a POST whose Host is a NAME was not refused (${rebound}) — DNS rebinding gets past an address check that way`);
+      else ok('and a request whose Host is a name rather than an address is refused');
+    }
   }
 
   child.kill('SIGINT');
