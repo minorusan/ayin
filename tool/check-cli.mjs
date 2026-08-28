@@ -21,7 +21,9 @@
  * failure instead of a bug report, and it asks for an explicit decision rather than a default: a
  * command that genuinely wants the TUI or genuinely needs a model says so HERE, by name.
  */
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { networkInterfaces, tmpdir } from 'node:os';
+import { connect } from 'node:net';
 import { join } from 'node:path';
 
 const REPO = new URL('..', import.meta.url).pathname;
@@ -103,7 +105,7 @@ if (!failures.length) ok('no exemption points at a subcommand that has been remo
 // asserted statically, which is exactly the regression worth catching (a call site quietly deleted),
 // and the REJECTION is asserted by launching the real binary, where an exit code is the whole answer.
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 
 const fullMode = readFileSync(join(REPO, 'src/full-mode.ts'), 'utf-8');
 if (/argv\.includes\('--full'\)/.test(fullMode)) ok('--full is defined in exactly one place');
@@ -205,6 +207,137 @@ for (const [cmd, expect] of [['diff', /serve the working tree/], ['sprint', /ser
   const out = launchOut([cmd, '--help']);
   if (!expect.test(out)) fail(`\`ayin ${cmd} --help\` does not describe a SERVED page — that is what these commands now do`);
   else ok(`and says it serves a page, which is what parking on a socket is for`);
+}
+
+/**
+ * CTRL+C MUST ACTUALLY STOP IT, and the repo it serves must be the repo, not the directory.
+ *
+ * Both of these shipped broken for one afternoon. `parkUntilInterrupted` printed "stopped" and resolved
+ * a promise — but a listening socket keeps the event loop alive, so the process kept serving and held
+ * the port. Two of them accumulated on 7773 and 7774, and the next `ayin diff` bound 7775 while the
+ * first port anyone would try answered for a different repository. And launched from a subdirectory,
+ * every write on the page (stage, discard, a comment's run) resolved one level too deep.
+ *
+ * A real launch, a real SIGINT, and a real subdirectory. The static assertions could not see either.
+ */
+{
+  // realpath, because `git rev-parse --show-toplevel` resolves symlinks and macOS hands out
+  // /var/folders/… for a temp dir that is really /private/var/folders/… — the same difference the
+  // comment store's cwd key ran into.
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'ayin-cli-serve-')));
+  const g = (...a) => execFileSync('git', a, { cwd: repo, stdio: 'ignore' });
+  g('init', '-q', '.');
+  g('config', 'user.email', 'gate@example.invalid');
+  g('config', 'user.name', 'gate');
+  mkdirSync(join(repo, 'nested'), { recursive: true });
+  writeFileSync(join(repo, 'nested/a.ts'), 'export const a = 1;\n');
+  g('add', '-A'); g('commit', '-qm', 'base');
+  writeFileSync(join(repo, 'nested/a.ts'), 'export const a = 2;\n');
+
+  // Launched from the SUBDIRECTORY on purpose.
+  const child = spawn(process.execPath, [join(REPO, 'dist/index.js'), 'diff', '--no-open'],
+    { cwd: join(repo, 'nested'), stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  child.stdout.on('data', (b) => { out += b; });
+
+  const until = async (test, ms) => {
+    for (let i = 0; i < ms / 100; i++) {
+      if (test()) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return false;
+  };
+
+  const up = await until(() => /Ctrl\+C to stop/.test(out), 20_000);
+  if (!up) fail(`\`ayin diff\` never reported that it was serving: ${out.slice(0, 200)}`);
+  else ok('`ayin diff` from a subdirectory serves and says so');
+
+  if (!out.includes(`serving ${repo} `)) {
+    fail(`it serves the DIRECTORY rather than the repo — every write on the page would aim one level too deep: ${out.slice(0, 300)}`);
+  } else ok('and names the REPO ROOT as the tree it serves, not the subdirectory it was launched from');
+
+  const url = (out.match(/http:\/\/127\.0\.0\.1:(\d+)\/diff/) ?? [])[0];
+  if (!url) fail('no URL was printed — the page cannot be opened');
+  else {
+    const page = await fetch(url).then((r) => r.text()).catch((e) => `FETCH FAILED ${e}`);
+    if (!page.includes('nested/a.ts')) fail('the served page does not carry the changed file');
+    else ok('the page it serves is real — the changed file is on it');
+  }
+
+  /**
+   * AND IT IS REACHABLE FROM A PHONE, which is the whole reason the bind is not loopback.
+   *
+   * Three separate things can silently undo this and each of them looks fine from the machine that
+   * serves it: the bind going back to 127.0.0.1, the network URL not being PRINTED (an address nobody
+   * is told is an address nobody uses), and the Origin guard refusing the phone's own Origin — which
+   * would leave a page that renders and a comment box that 403s, the worst of the three to diagnose.
+   *
+   * Skipped when the machine has no non-loopback IPv4 — a CI container legitimately has none, and a
+   * gate that fails there is a gate that gets deleted.
+   */
+  const lanIps = Object.values(networkInterfaces()).flat()
+    .filter((a) => a && (a.family === 'IPv4' || a.family === 4) && !a.internal)
+    .map((a) => a.address);
+  if (!lanIps.length) {
+    ok('no non-loopback IPv4 on this machine — the network-URL checks do not apply here');
+  } else {
+    const lan = (out.match(/http:\/\/[\d.]+:(\d+)\/diff[^\s]*/g) ?? []).find((u) => !u.includes('127.0.0.1'));
+    if (!lan) {
+      fail(`no network URL was printed, so the page cannot be opened from a phone — this machine has ${lanIps.join(', ')}: ${out.slice(0, 300)}`);
+    } else if (!lanIps.includes(new URL(lan).hostname)) {
+      fail(`the network URL names ${new URL(lan).hostname}, which is not an address of this machine`);
+    } else {
+      ok('a network URL is printed, and it names a real address of this machine');
+
+      const page = await fetch(lan).then((r) => r.text()).catch((e) => `FETCH FAILED ${e}`);
+      if (!page.includes('nested/a.ts')) fail(`the page is not served over its network address: ${page.slice(0, 120)}`);
+      else ok('and the page is really served over it — the bind is not loopback-only');
+
+      // The phone's own Origin. A comment box that 403s is the failure this catches.
+      const base = new URL(lan).origin;
+      const r = await fetch(`${base}/api/prompts`, {
+        method: 'POST', headers: { origin: base, 'content-type': 'application/json' }, body: '{}',
+      }).then((x) => x.status).catch(() => 0);
+      if (r === 403) fail('a POST carrying the phone\'s own Origin is refused — the page would render and every comment on it would fail');
+      else ok('and a POST from that origin is accepted, so comments written on a phone reach the agent');
+
+      // The guard is still a guard. Both halves, because they refuse for different reasons.
+      const evil = await fetch(`${base}/api/prompts`, {
+        method: 'POST', headers: { origin: 'http://evil.example', 'content-type': 'application/json' }, body: '{}',
+      }).then((x) => x.status).catch(() => 0);
+      if (evil !== 403) fail(`a POST from an unrelated web page was NOT refused (${evil}) — that is remote code execution through the operator's browser`);
+      else ok('a POST from an unrelated origin is still refused');
+
+      // A RAW SOCKET, not fetch: `Host` is a forbidden header there, so undici drops it silently and the
+      // assertion passes against a request that never carried the thing being tested. The first version
+      // of this check did exactly that and reported 404.
+      const rebound = await new Promise((resolve) => {
+        const sock = connect(Number(new URL(lan).port), new URL(lan).hostname, () => {
+          sock.write('POST /api/prompts HTTP/1.1\r\n'
+            + `Host: attacker.example:${new URL(lan).port}\r\n`
+            + 'Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}');
+        });
+        let buf = '';
+        sock.on('data', (b) => { buf += b; });
+        sock.on('end', () => resolve(Number((buf.match(/^HTTP\/1\.1 (\d+)/) ?? [])[1] ?? 0)));
+        sock.on('error', () => resolve(0));
+        sock.setTimeout(5000, () => { sock.destroy(); resolve(0); });
+      });
+      if (rebound !== 403) fail(`a POST whose Host is a NAME was not refused (${rebound}) — DNS rebinding gets past an address check that way`);
+      else ok('and a request whose Host is a name rather than an address is refused');
+    }
+  }
+
+  child.kill('SIGINT');
+  const dead = await until(() => child.exitCode !== null || child.signalCode !== null, 10_000);
+  if (!dead) {
+    child.kill('SIGKILL');
+    fail('SIGINT did NOT stop it — the process kept the port, which is how a stale server ends up answering for the wrong repo');
+  } else ok('SIGINT stops it: the process exits and the port is released');
+  if (!/no longer served/.test(out)) fail('and it says the page is gone rather than dying silently');
+  else ok('and says the page is gone');
+
+  rmSync(repo, { recursive: true, force: true });
 }
 
 // A subcommand owns its own arguments — a whitelist applied to those would reject flags that are

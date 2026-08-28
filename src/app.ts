@@ -36,7 +36,7 @@ import { toggleQaSession, forceQaNextTurn } from './qa/index.js';
 import { togglePresenterSession, forcePresenterNextTurn } from './presenter/index.js';
 import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation, recordSlashTurn } from './agent.js';
 import { findToolBySlash, slashTools, loadTools } from './tools.js';
-import { startPromptServer, serverUrl } from './prompt-server.js';
+import { startPromptServer, serverLanUrl, serverUrl } from './prompt-server.js';
 import { appendTurn as appendTicketTurn } from './sprint/chat.js';
 import { addNote, markDone, markFailed, reapAbandoned } from './diff/comments.js';
 import { runLogPath } from './diff/runner.js';
@@ -1714,6 +1714,11 @@ async function runInteractive(): Promise<void> {
 
   const url = serverUrl('/diff');
   if (url) addMessage('system', `review page: ${url}`);
+  // AND THE ADDRESS A PHONE CAN REACH. The port is bound on the LAN (prompt-server.ts), so the review
+  // page and the sprint board are readable from a handset on the same Wi-Fi — but only if the operator
+  // is told the address, which nothing else in a TUI is going to tell them.
+  const lan = serverLanUrl('/diff');
+  if (lan) addMessage('system', `  on this network: ${lan}   (phone, tablet — /sprint too)`);
 
   // Release a booked model (/model qwen) if we're killed — /quit already does this; a hard kill
   // otherwise leaves the grant to TTL-expire on the backend.

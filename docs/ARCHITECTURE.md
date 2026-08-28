@@ -2414,6 +2414,29 @@ the old snapshot behaviour by name; the board has no static form and never will,
 fetch their own detail. `initLlmProvider()` runs before the first request, since Draft, rephrase and the
 `.cs` staging pass spend a model call **in this process** — the runs bring their own.
 
+**The page is served on the LAN, and its URL is printed twice.** The bind is `0.0.0.0`, and every place
+that prints a served page prints a `local` line (`127.0.0.1`) and a `network` line — the machine's own
+LAN address, which is the one a phone on the same Wi-Fi can reach. This is `/diff`'s own version of the
+failure the QA probes already test for in other people's dev servers: a page bound to loopback looks
+perfect on the machine that built it and does not exist from the handset in your hand, and a diff is
+read on a sofa at least as often as at the desk that produced it. The address is chosen, not listed —
+RFC1918 ranges are preferred in the order a real network uses them, so a VPN's `utun` or docker's bridge
+does not get handed to the operator as *the* address; a machine with no non-loopback IPv4 prints the
+local line alone. It is computed per print rather than stored in the daemon record, so a laptop that
+changed Wi-Fi mid-session hands out the address it has now.
+
+**What that exposure costs is stated, not discovered.** There is no auth on this port. Anything on the
+same network can `POST /api/prompts` — which rewrites the agent's own system prompt — and can write a
+review comment, which spawns a headless ayin whose `bash` has no sandbox. The `Origin` and `Host` checks
+survive the change and are what they always were: a defence against a *web page* driving this port
+through the operator's browser, not against something that can talk to the port directly. Both lists are
+now **computed from this machine's addresses** rather than constant, because the phone asks for the box
+by its LAN address and its POSTs carry that as their `Origin` — a loopback-only allowlist rendered the
+page fine and 403'd every comment written on it. `Host` is still matched against literal addresses only,
+so a hostile DNS name resolving here is still refused. It is a trusted-network feature; `check:cli`
+asserts all four halves against a real launch — the network URL is printed, the page is really served
+over it, that origin's POSTs are accepted, and an unrelated origin and a name-shaped `Host` are not.
+
 A FOURTH list decides whether a subcommand exists, and it bit immediately: `SUBCOMMANDS` in
 `src/index.ts` is what the bare-launch flag validator lets through to the dispatch. `ayin sprint` was
 dispatched, exempted from the TUI, exempted from the model gate and documented — and still answered
@@ -2802,7 +2825,8 @@ because a Jira round-trip is not instant. The drawer is NOT reopened afterwards 
 a separate fetch, and reviving it would fire one nobody asked for.
 
 `/sprint` serves the operator's current Jira sprint as a simplified kanban page on the session's own
-loopback server: one column per status the SITE reports, one card per ticket, one ticket open at a time.
+server — loopback and LAN, like every other page it serves: one column per status the SITE reports, one
+card per ticket, one ticket open at a time.
 
 - **Columns are the workflow's, not a list in the code.** Statuses are invented per project ("Ready For
   QA", "Ready For Merge"), so the columns are whatever the sprint returned, ordered by Jira's own

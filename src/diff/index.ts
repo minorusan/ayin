@@ -26,7 +26,7 @@ import { join } from 'node:path';
 import { collectDiff, type DiffSet } from './collect.js';
 import { DEFAULT_EXTENSIONS, renderDiffPage } from './render.js';
 import { openExternal } from '../open-external.js';
-import { existingServer } from '../serve-page.js';
+import { existingServer, repoRoot } from '../serve-page.js';
 
 const DIFF_DIR = join(homedir(), '.ayin-cli', 'diffs');
 const PAGE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -50,6 +50,8 @@ function prune(): void {
 export interface DiffResult {
   /** The URL when a session served it, the file path when it was written to disk. */
   path: string;
+  /** The same page on the LAN, for a phone. Null for a static file, and when there is no LAN address. */
+  lanPath?: string | null;
   /** True when the page came off a live session — the only page whose lines can be commented on. */
   served: boolean;
   files: number;
@@ -93,8 +95,8 @@ export function buildDiffPage(repo: string, against = 'HEAD'): DiffResult {
 export function buildAndOpen(repo: string, against = 'HEAD'): DiffResult {
   // ONE definition of "who is serving this tree", shared with `ayin diff` and `ayin sprint` — two copies
   // of a port lookup is two places for a stale daemon record to be trusted differently.
-  const url = existingServer(repo, `/diff?rev=${encodeURIComponent(against)}`);
-  if (url) {
+  const served = existingServer(repo, `/diff?rev=${encodeURIComponent(against)}`);
+  if (served) {
     // The counts are collected here as well as by the route. Two git passes for one `/diff` is cheap,
     // and the alternative is a summary line that cannot say how big the change is.
     const set = collectDiff(repo, against);
@@ -103,13 +105,14 @@ export function buildAndOpen(repo: string, against = 'HEAD'): DiffResult {
     // It carries no comment client — it is an artifact, not a second client fighting over the same store.
     writeStaticPage(set);
     return {
-      path: url,
+      path: served.url,
+      lanPath: served.lanUrl,
       served: true,
       files: set.files.length,
       additions: set.files.reduce((n, f) => n + f.additions, 0),
       deletions: set.files.reduce((n, f) => n + f.deletions, 0),
       hiddenByDefault: set.files.filter((f) => !DEFAULT_EXTENSIONS.includes(f.ext)).length,
-      opened: openExternal(url),
+      opened: openExternal(served.url),
     };
   }
   const r = buildDiffPage(repo, against);
@@ -122,7 +125,9 @@ export function summarise(r: DiffResult): string {
   if (r.files === 0) return 'Working tree is clean — nothing to diff.';
   return `${r.files} file(s) · +${r.additions} −${r.deletions}`
     + (r.hiddenByDefault ? ` · ${r.hiddenByDefault} hidden by the default filters (chips at the top show them)` : '')
-    + `\n${r.path}`
+    // TWO ADDRESSES, LABELLED, or the bare path when there is only one. A phone cannot reach 127.0.0.1
+    // and an operator holding one should not have to work out which of their interfaces to type.
+    + (r.lanPath ? `\n  local    ${r.path}\n  network  ${r.lanPath}` : `\n${r.path}`)
     // Whether a line can be commented on is the difference between the two pages, so it is stated
     // rather than left for the operator to discover by hovering and finding nothing.
     + (r.served
@@ -133,7 +138,7 @@ export function summarise(r: DiffResult): string {
 const USAGE = `ayin diff [<rev>] — serve the working tree as a reviewable page and open it.
 
   <rev>       compare against this instead of HEAD (e.g. \`ayin diff main\`)
-  --no-open   serve and print the URL, open no browser (ssh)
+  --no-open   serve and print both URLs, open no browser (ssh)
   --static    write a self-contained snapshot to ~/.ayin-cli/diffs, print the path, exit
   --help
 
@@ -162,10 +167,14 @@ export async function runDiffCli(argv: string[]): Promise<number> {
   }
   const rev = argv.find((a) => !a.startsWith('-')) ?? 'HEAD';
   const open = !argv.includes('--no-open');
+  // THE REPO, not the directory. Launched from `src/diff/`, git already collected the whole tree — but
+  // the page's paths are root-relative and every write on it (stage, discard, a comment's run) resolved
+  // against the cwd, one level too deep. See serve-page.ts.
+  const root = repoRoot();
 
   if (argv.includes('--static')) {
     try {
-      const r = buildDiffPage(process.cwd(), rev);
+      const r = buildDiffPage(root, rev);
       r.opened = open ? openExternal(r.path) : false;
       process.stdout.write(`${summarise(r)}\n`);
       return 0;
@@ -179,14 +188,14 @@ export async function runDiffCli(argv: string[]): Promise<number> {
     // COLLECTED FIRST, deliberately. A clean tree or a bad rev must fail here, before a socket is bound
     // and a browser is opened onto a page that says nothing — and the summary is the only thing that can
     // tell the operator how big the change is.
-    const set = collectDiff(process.cwd(), rev);
+    const set = collectDiff(root, rev);
     // The snapshot is still written, exactly as the TUI path does: a served page dies with this process,
     // and a review worth having is one that can still be read tomorrow.
     writeStaticPage(set);
     const { servePage, parkUntilInterrupted } = await import('../serve-page.js');
-    const page = await servePage(process.cwd(), `/diff?rev=${encodeURIComponent(rev)}`, open);
+    const page = await servePage(root, `/diff?rev=${encodeURIComponent(rev)}`, open);
     process.stdout.write(`${summarise({
-      path: page.url, served: true,
+      path: page.url, lanPath: page.lanUrl, served: true,
       files: set.files.length,
       additions: set.files.reduce((n, f) => n + f.additions, 0),
       deletions: set.files.reduce((n, f) => n + f.deletions, 0),
@@ -194,10 +203,12 @@ export async function runDiffCli(argv: string[]): Promise<number> {
       opened: page.opened,
     })}\n`);
     if (!page.own) {
-      process.stdout.write('an ayin session is already serving this repo — using its page\n');
+      process.stdout.write(`an ayin session is already serving ${root} — using its page\n`);
       return 0;
     }
-    process.stdout.write('serving · Ctrl+C to stop\n');
+    // NAMING THE TREE, because two of these can be up at once on adjacent ports and the URL does not say
+    // which repo it is. One afternoon of demos left 7773 answering for a repo nobody was looking at.
+    process.stdout.write(`serving ${root} · Ctrl+C to stop\n`);
     await parkUntilInterrupted('ayin diff');
     return 0;
   } catch (err) {

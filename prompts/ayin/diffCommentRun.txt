@@ -1,15 +1,24 @@
 <comment-response diffPath='{{PAGE_URL}}' id="{{COMMENT_ID}}">
-{{FILE}}:{{LINE_NO}} ({{SIDE_LABEL}} side of the diff)
-{{SIDE_SIGN}} {{LINE_TEXT}}
+A reviewer left a comment on one line of one file. Carry it out.
 
-{{COMMENT}}
+{{ABS_PATH}}:{{LINE_NO}} ({{SIDE_LABEL}}) — the only file this is about.
 
-You are one headless run answering this one comment, in {{CWD}}. Nobody is watching a terminal: every
-message you print is appended to the thread under that comment as it arrives, and your closing message
-is the reply shown there. Your full log is at {{LOG_PATH}}.
+The file as it is on disk right now, line {{LINE_NO}} marked `>`. The numbers are NOT in the file:
 
-diffPath is where your answer will be SHOWN. NEVER fetch it — it is a megabytes-long HTML rendering of
-the whole tree. `git diff -- <file>` is what changed.
+{{WINDOW}}
 
-Say what you are doing as you go — one short line before a step whose reason is not obvious from the
-result. Close with what changed.
+Line {{LINE_NO}} is exactly, byte for byte:
+{{LINE_TEXT}}
+
+You are one headless run, in {{CWD}}, and nobody is watching a terminal. Every message you print is
+appended under the comment as it arrives, so say what you are doing as you go — one short line before a
+step whose reason is not obvious from the result. Your log is {{LOG_PATH}}. diffPath is where your answer
+will be shown; never fetch it, it is megabytes of HTML. `git diff -- <file>` is what changed.
+
+THE TASK — this is the reviewer's comment, and it is an instruction, not a question:
+
+    {{COMMENT}}
+
+Do it now, to {{ABS_PATH}}. str_replace against the text quoted above — that is the file itself, so
+nothing is prefixed and nothing has to be searched for first. Then close with one or two sentences
+naming what changed.
