@@ -24,9 +24,9 @@
  */
 
 import { spawn } from 'node:child_process';
-import { closeSync, mkdirSync, openSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { addNote, getComment, markFailed, markWorking, patchComment, type DiffComment } from './comments.js';
 import { getPrompt } from '../prompts.js';
@@ -47,16 +47,51 @@ export function runLogPath(id: string): string {
   return join(DIFF_DIR, `comment-${id}.log`);
 }
 
+/** How many lines either side of the commented one travel in the prompt. */
+const WINDOW_RADIUS = 12;
+
+/**
+ * The file around the commented line, numbered — so the run never spends a round FINDING it.
+ *
+ * This is the fix for the first thing every real comment hit: handed only `file:line` and a `+`-prefixed
+ * quote of one line, the model answered *"no file or specific comment was provided — I would need to use
+ * read_file to locate it"*, having just named the file itself. It had the path and still treated it as
+ * context rather than as a target. Now the bytes are in the prompt and the only move left is the edit.
+ *
+ * The numbers are a separate column and said to be no part of the file, because the next failure after
+ * "cannot find it" is a `str_replace` whose old_string begins with `45: `.
+ */
+function sourceWindow(absPath: string, lineNo: number): string {
+  let lines: string[];
+  try { lines = readFileSync(absPath, 'utf-8').split('\n'); }
+  catch (e) {
+    // A deleted or unreadable file is a real state — say so instead of shipping an empty block that
+    // reads as "the file is empty".
+    return `(could not read ${absPath} — ${e instanceof Error ? e.message : String(e)})`;
+  }
+  const from = Math.max(1, lineNo - WINDOW_RADIUS);
+  const to = Math.min(lines.length, lineNo + WINDOW_RADIUS);
+  const width = String(to).length;
+  const out: string[] = [];
+  for (let n = from; n <= to; n++) {
+    out.push(`${String(n).padStart(width)}${n === lineNo ? ' >' : '  '} ${lines[n - 1]}`);
+  }
+  return out.join('\n');
+}
+
 /** The instruction one run receives: the marker `prompts/ayin/system.txt` recognises, plus its own facts. */
 export function commentRunPrompt(c: DiffComment, pageUrl: string): string {
+  const absPath = isAbsolute(c.file) ? c.file : join(c.cwd, c.file);
   return getPrompt('diffCommentRun', {
     PAGE_URL: pageUrl,
     COMMENT_ID: c.id,
-    FILE: c.file,
+    ABS_PATH: absPath,
     LINE_NO: String(c.lineNo),
-    SIDE_LABEL: c.side === 'old' ? 'removed' : 'current',
-    SIDE_SIGN: c.side === 'old' ? '-' : '+',
+    SIDE_LABEL: c.side === 'old' ? 'removed by this change' : 'current',
+    // The exact bytes, unprefixed. It used to arrive as `+ <text>`, which is diff notation and not what
+    // the file contains — a str_replace built from it cannot match anything.
     LINE_TEXT: c.lineText,
+    WINDOW: sourceWindow(absPath, c.lineNo),
     COMMENT: c.text,
     CWD: c.cwd,
     LOG_PATH: runLogPath(c.id),

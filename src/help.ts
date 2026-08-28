@@ -207,7 +207,15 @@ export const HELP: HelpEntry[] = [
   { name: 'PgUp / PgDn', kind: 'key', section: 'Keys', short: 'Scroll an open overlay' },
 
   // ── from the shell ─────────────────────────────────────────────────────────────
-  { name: 'ayin diff', kind: 'cli', section: 'From your shell', short: 'The /diff page without starting the TUI · ayin diff <rev> · --no-open' },
+  {
+    name: 'ayin diff', kind: 'cli', section: 'From your shell',
+    short: 'Serve the /diff review page without a TUI and stay up · ayin diff <rev> · --no-open · --static',
+    tip: '`ayin diff` from any shell serves the review page — comment on a line and a headless run answers it.',
+  },
+  {
+    name: 'ayin sprint', kind: 'cli', section: 'From your shell',
+    short: 'Serve the /sprint board without a TUI and stay up · --no-open',
+  },
   {
     name: 'ayin launch', kind: 'cli', section: 'From your shell',
     short: 'Open a terminal window at the front Finder/Explorer directory, running ayin. For a hotkey — see docs/LAUNCH.md',

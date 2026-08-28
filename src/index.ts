@@ -59,7 +59,7 @@ if (NO_OWN_USAGE.has(helpArg ?? '')
  */
 function rejectUnknownFlags(): void {
   const SUBCOMMANDS = new Set([
-    'watch', 'unwatch', 'kill', 'indulge', 'launch', 'testrun', 'debug', 'diff', 'update',
+    'watch', 'unwatch', 'kill', 'indulge', 'launch', 'testrun', 'debug', 'diff', 'sprint', 'update',
     'explain', 'version', 'help', 'sentinaile-supervisor', 'unity', 'chore',
   ]);
   const args = process.argv.slice(2);

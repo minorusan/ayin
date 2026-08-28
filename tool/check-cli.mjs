@@ -6,20 +6,28 @@
  * the machine where the model had gone away, which is exactly when someone wants it undone. Nothing
  * failed; it was simply wrong in a way only a person watching would notice.
  *
- * Three lists decide this, in three files, and they were kept in step by memory:
+ * FOUR lists decide this, in four files, and they were kept in step by memory:
  *   - the DISPATCH in app.ts (`process.argv[2] === 'x'`) — what exists
+ *   - SUBCOMMANDS in index.ts — what the flag validator lets THROUGH to that dispatch
  *   - NO_TUI_COMMANDS in ui/headless.ts — what may not take the terminal
  *   - NO_MODEL_NEEDED in preflight.ts — what may not be gated behind configuring a model
+ *
+ * The second one was missing from this gate and immediately proved why it belongs: `ayin sprint` was
+ * dispatched, exempted from the TUI, exempted from the model gate and documented — and still answered
+ * `unknown command "sprint"`, because the validator that runs FIRST had never heard of it. Every other
+ * list said the feature existed.
  *
  * A new subcommand lands in the first and is forgotten in the other two. This gate makes that a build
  * failure instead of a bug report, and it asks for an explicit decision rather than a default: a
  * command that genuinely wants the TUI or genuinely needs a model says so HERE, by name.
  */
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const REPO = new URL('..', import.meta.url).pathname;
 const app = readFileSync(join(REPO, 'src/app.ts'), 'utf-8');
+const index = readFileSync(join(REPO, 'src/index.ts'), 'utf-8');
 const headless = readFileSync(join(REPO, 'src/ui/headless.ts'), 'utf-8');
 const preflight = readFileSync(join(REPO, 'src/preflight.ts'), 'utf-8');
 
@@ -44,6 +52,8 @@ const listBetween = (src, marker) => {
   return src.slice(at, end);
 };
 
+const validated = listBetween(index, 'const SUBCOMMANDS = new Set(');
+if (!validated) fail('SUBCOMMANDS not found in index.ts — this gate cannot check what the flag validator lets through');
 const noTui = listBetween(headless, 'NO_TUI_COMMANDS = new Set(');
 const noModel = listBetween(preflight, 'NO_MODEL_NEEDED = new Set(');
 if (!noTui) fail('NO_TUI_COMMANDS not found in ui/headless.ts — this gate cannot check anything');
@@ -56,6 +66,11 @@ if (dispatched.length < 5) fail(`only ${dispatched.length} subcommand(s) found i
 else ok(`${dispatched.length} subcommands dispatched in app.ts`);
 
 for (const cmd of dispatched) {
+  // FIRST, because it runs first: a name the flag validator does not know never reaches the dispatch at
+  // all — it is answered as a typo, with a suggestion naming the command it just refused.
+  if (!validated?.includes(`'${cmd}'`)) {
+    fail(`\`ayin ${cmd}\` is dispatched in app.ts but missing from SUBCOMMANDS in index.ts — the flag validator will reject it as a typo before it runs`);
+  }
   const quiet = noTui?.includes(`'${cmd}'`);
   if (!quiet && !WANTS_TUI.has(cmd)) {
     fail(`\`ayin ${cmd}\` opens the full-screen TUI — add it to NO_TUI_COMMANDS, or to WANTS_TUI here if it really wants the terminal`);
@@ -89,7 +104,7 @@ if (!failures.length) ok('no exemption points at a subcommand that has been remo
 // asserted statically, which is exactly the regression worth catching (a call site quietly deleted),
 // and the REJECTION is asserted by launching the real binary, where an exit code is the whole answer.
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 
 const fullMode = readFileSync(join(REPO, 'src/full-mode.ts'), 'utf-8');
 if (/argv\.includes\('--full'\)/.test(fullMode)) ok('--full is defined in exactly one place');
@@ -114,6 +129,16 @@ if (/if \(HEADLESS \|\| skipPermissions \|\| READONLY\) \{[\s\S]{0,240}?return '
   ok('a dangerous op is still DENIED under a skip flag — no flag turns that off');
 } else {
   failures.push('the dangerous-op guard no longer denies under skipPermissions');
+}
+
+/** Launch the real binary and return its stdout. */
+function launchOut(args) {
+  try {
+    return execFileSync(process.execPath, [join(REPO, 'dist/index.js'), ...args],
+      { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 25_000 });
+  } catch (e) {
+    return String(e.stdout ?? '');
+  }
 }
 
 /** Launch the real binary and report exit code + stderr. */
@@ -165,6 +190,90 @@ if (!help.suggestNames('prefabb', 'command').includes('prefab')) fail('a one-let
 else ok('a one-letter slip on a slash command resolves');
 if (help.suggestNames('xyzzy', 'cli').length !== 0) fail('a word like nothing at all suggests nothing');
 else ok('a word like nothing at all suggests nothing');
+
+/**
+ * THE TWO PAGE SERVERS ANSWER FOR THEMSELVES.
+ *
+ * `ayin diff` and `ayin sprint` park on a socket, so this cannot run them for real without leaving a
+ * server behind — but `--help` proves the whole path a missing list entry breaks: the flag validator let
+ * the word through, the dispatch found it, and the command printed instead of a session booting. That is
+ * exactly the failure `ayin sprint` shipped with for one build.
+ */
+for (const [cmd, expect] of [['diff', /serve the working tree/], ['sprint', /serve your Jira sprint/]]) {
+  const r = launch([cmd, '--help']);
+  if (r.code !== 0) fail(`\`ayin ${cmd} --help\` exited ${r.code} instead of printing usage: ${r.err.slice(0, 160)}`);
+  else ok(`\`ayin ${cmd} --help\` reaches the command and exits 0`);
+  const out = launchOut([cmd, '--help']);
+  if (!expect.test(out)) fail(`\`ayin ${cmd} --help\` does not describe a SERVED page — that is what these commands now do`);
+  else ok(`and says it serves a page, which is what parking on a socket is for`);
+}
+
+/**
+ * CTRL+C MUST ACTUALLY STOP IT, and the repo it serves must be the repo, not the directory.
+ *
+ * Both of these shipped broken for one afternoon. `parkUntilInterrupted` printed "stopped" and resolved
+ * a promise — but a listening socket keeps the event loop alive, so the process kept serving and held
+ * the port. Two of them accumulated on 7773 and 7774, and the next `ayin diff` bound 7775 while the
+ * first port anyone would try answered for a different repository. And launched from a subdirectory,
+ * every write on the page (stage, discard, a comment's run) resolved one level too deep.
+ *
+ * A real launch, a real SIGINT, and a real subdirectory. The static assertions could not see either.
+ */
+{
+  // realpath, because `git rev-parse --show-toplevel` resolves symlinks and macOS hands out
+  // /var/folders/… for a temp dir that is really /private/var/folders/… — the same difference the
+  // comment store's cwd key ran into.
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'ayin-cli-serve-')));
+  const g = (...a) => execFileSync('git', a, { cwd: repo, stdio: 'ignore' });
+  g('init', '-q', '.');
+  g('config', 'user.email', 'gate@example.invalid');
+  g('config', 'user.name', 'gate');
+  mkdirSync(join(repo, 'nested'), { recursive: true });
+  writeFileSync(join(repo, 'nested/a.ts'), 'export const a = 1;\n');
+  g('add', '-A'); g('commit', '-qm', 'base');
+  writeFileSync(join(repo, 'nested/a.ts'), 'export const a = 2;\n');
+
+  // Launched from the SUBDIRECTORY on purpose.
+  const child = spawn(process.execPath, [join(REPO, 'dist/index.js'), 'diff', '--no-open'],
+    { cwd: join(repo, 'nested'), stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  child.stdout.on('data', (b) => { out += b; });
+
+  const until = async (test, ms) => {
+    for (let i = 0; i < ms / 100; i++) {
+      if (test()) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return false;
+  };
+
+  const up = await until(() => /Ctrl\+C to stop/.test(out), 20_000);
+  if (!up) fail(`\`ayin diff\` never reported that it was serving: ${out.slice(0, 200)}`);
+  else ok('`ayin diff` from a subdirectory serves and says so');
+
+  if (!out.includes(`serving ${repo} `)) {
+    fail(`it serves the DIRECTORY rather than the repo — every write on the page would aim one level too deep: ${out.slice(0, 300)}`);
+  } else ok('and names the REPO ROOT as the tree it serves, not the subdirectory it was launched from');
+
+  const url = (out.match(/http:\/\/127\.0\.0\.1:(\d+)\/diff/) ?? [])[0];
+  if (!url) fail('no URL was printed — the page cannot be opened');
+  else {
+    const page = await fetch(url).then((r) => r.text()).catch((e) => `FETCH FAILED ${e}`);
+    if (!page.includes('nested/a.ts')) fail('the served page does not carry the changed file');
+    else ok('the page it serves is real — the changed file is on it');
+  }
+
+  child.kill('SIGINT');
+  const dead = await until(() => child.exitCode !== null || child.signalCode !== null, 10_000);
+  if (!dead) {
+    child.kill('SIGKILL');
+    fail('SIGINT did NOT stop it — the process kept the port, which is how a stale server ends up answering for the wrong repo');
+  } else ok('SIGINT stops it: the process exits and the port is released');
+  if (!/no longer served/.test(out)) fail('and it says the page is gone rather than dying silently');
+  else ok('and says the page is gone');
+
+  rmSync(repo, { recursive: true, force: true });
+}
 
 // A subcommand owns its own arguments — a whitelist applied to those would reject flags that are
 // valid one frame down, which is why the check returns early when argv[2] names a subcommand.

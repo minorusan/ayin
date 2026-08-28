@@ -1465,9 +1465,18 @@ async function main(): Promise<void> {
     return;
   }
   if (process.argv[2] === 'diff') {
-    // Same page as `/diff`, from a shell. No TUI, no model. See src/diff/.
+    // Same page as `/diff`, from a shell — and it SERVES it now rather than writing a snapshot, because
+    // a comment is answered by its own headless run and no longer needs a chat to land in. Parks until
+    // Ctrl+C. No TUI. See src/diff/ and src/serve-page.ts.
     const { runDiffCli } = await import('./diff/index.js');
     process.exitCode = await runDiffCli(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === 'sprint') {
+    // Same board as `/sprint`, from a shell. It has no static form — the cards fetch their own detail —
+    // so this serves it and parks. See src/sprint/.
+    const { runSprintCli } = await import('./sprint/index.js');
+    process.exitCode = await runSprintCli(process.argv.slice(3));
     return;
   }
   if (process.argv[2] === 'update') {

@@ -42,6 +42,10 @@ const NO_MODEL_NEEDED = new Set([
   'launch',
   // `diff` renders a page from git and opens it — git is the only dependency it has.
   'diff',
+  // `sprint` renders a board from JIRA. The runs it spawns bring their own model; the BOARD needs none,
+  // and refusing to show the operator their tickets because an endpoint is away would be the gate doing
+  // harm — the one moment you want the board is often the moment the machine is otherwise broken.
+  'sprint',
   // `debug` copies files that already exist — it must work when nothing else does.
   'debug',
   // `unity` reads and edits Unity assets and runs Unity's own test runner. Every part of it is a parser,

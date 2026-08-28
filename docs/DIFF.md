@@ -11,11 +11,17 @@ simplification and it is wrong: a new file is the part of a change most worth re
 that silently omits it teaches the reader to trust a picture missing its newest half.
 
 **Two pages, one renderer.** With an ayin session open on the repo, that session SERVES the page and
-the browser is pointed at its URL — which is what makes a line commentable (see below). With no
-session listening, the page is written to `~/.ayin-cli/diffs/` and opened from `file://`: one
-self-contained file, no CDN, no font, no fetch, because that page has to open on a machine with no
-network, and a stylesheet that fails to load turns a review into a wall of text. The served page
-writes that snapshot too — the live page dies with the session, and a review worth having is one you
+the browser is pointed at its URL — which is what makes a line commentable (see below).
+
+**`ayin diff` from a plain shell serves it too**, and parks until Ctrl+C (`src/serve-page.ts`). It used
+to write a snapshot instead, and that was right while a comment needed a chat to land in: with no
+session there was nothing to answer one. A comment spawns its own run now, so the only thing a shell
+was missing was the socket. A session already serving the repo is used instead of a second server —
+two servers on one tree would publish two records and split the comment store's readers across two
+ports. `--static` still writes the self-contained file to `~/.ayin-cli/diffs/` and opens it from
+`file://`: one file, no CDN, no font, no fetch, because that page has to open on a machine with no
+network, and a stylesheet that fails to load turns a review into a wall of text. Every served page
+writes that snapshot too — the live page dies with its process, and a review worth having is one you
 can still read tomorrow. The palette is naamah's, so the pages read as siblings.
 
 Zero external assets is a rule for both. The comment client is inlined into the served page and

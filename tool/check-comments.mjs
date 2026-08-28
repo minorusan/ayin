@@ -134,8 +134,18 @@ try {
   const prompt = commentRunPrompt(sample, `${base}/diff?rev=HEAD`);
   ok(prompt.startsWith(`<comment-response diffPath='${base}/diff?rev=HEAD' id="c-11111111">`),
     'it opens with the marker, the page URL and the id — the contract prompts/ayin/system.txt reads');
-  ok(prompt.includes('C.cs:2') && prompt.includes('this truncates the float'),
-    'and carries the file, the line and what was written');
+  ok(prompt.includes(`${REPO}/C.cs:2`) && prompt.includes('this truncates the float'),
+    'and carries the ABSOLUTE path, the line and what was written');
+  // THE REGRESSION THIS PINS. Handed only `file:line` and a `+`-prefixed quote of one line, a real run
+  // answered "no file or specific comment was provided — I would need read_file to locate it", having
+  // just named the file itself. The bytes travel in the prompt now, so there is nothing left to locate.
+  ok(/int x = \(int\)cfg\.ratio;/.test(prompt) && /class C \{/.test(prompt),
+    'and the FILE AROUND that line, so no round is spent finding what to edit');
+  ok(/\n\s*2 > /.test(prompt), 'with the commented line marked in a number column');
+  ok(prompt.includes('The numbers are NOT in the file'),
+    'and the numbers disowned — the failure after "cannot find it" is a str_replace starting with "2: "');
+  ok(!/^\+ /m.test(prompt),
+    'nothing is diff-prefixed: a str_replace built from `+ text` matches nothing in the file');
   ok(prompt.includes(runLogPath('c-11111111')),
     'and names its own log, so a run that cannot say anything is still findable');
   ok(!/\{\{[A-Z_]+\}\}/.test(prompt), 'every {{VAR}} was substituted — a literal placeholder is a silently degraded prompt');
