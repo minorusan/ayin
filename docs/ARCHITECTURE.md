@@ -1527,15 +1527,33 @@ It used to keep one line per call: the first non-empty line of the output, clipp
 is the entire memory of a tool call once the window's compression has eaten the result it is summarising,
 and it is nearly useless — the first ten lines of a failing `pytest` are its banner.
 
-Now every call this turn is listed **with the first ten lines of its output** (160 chars per line), spent
-from a **12,000-character budget, newest first**: the newest calls carry their heads, and once the budget
-is gone the older ones degrade to their first line. Every call still appears either way, and the file
-holding the full output is still named. Measured on a 30-call turn: all 30 listed, the newest 18 carrying
-heads, ~4k tokens — about 6% of a 65k window, in exchange for the re-runs it removes the reason for.
+Now every call this turn is listed with an **excerpt**: the first 10 lines, then up to 20 lines lifted out
+of the middle that name an error, and then the last 10 lines. Short output (under head+tail) is shown
+whole, with no sections and no elision marker — splitting fifteen lines into three parts invents structure
+to describe a thing that fits.
 
-The head is the first ten lines, not the last, which is a real trade: a failing command puts its summary at
-the END (`clipForWindow` keeps the tail for exactly that reason, and Maradel's `pileDigest` keeps the last
-five lines). The full output is one `read_file` away by design.
+**The middle filter is the part that earns its keep.** Head and tail alone miss the case that matters
+most: a long run whose failure is neither at the start nor at the very end. A 90-line `npm run build` puts
+`> tsc` in the head and `Build step finished` in the tail, and leaves `error TS2304: Cannot find name` in
+the 65 lines nobody sees. `LEDGER_SIGNAL_RE` is deterministic — no model, no judgement — and deliberately
+**generous rather than precise**, because this reads tool output, where a line containing the word "error"
+almost always is one: a false positive costs one line of prompt, a false negative costs the model the
+reason its build failed. It covers log levels (`ERROR`, `FATAL`, `CRITICAL`), Python (`Traceback`,
+`E   assert`, `File "x.py", line 3`), Node/TS (`TypeError`, `at fn (file:1:2)`, `error TS2304`), test
+runners (`FAILED`, `not ok`), and shells (`command not found`, `exit code`). It takes the **first** 20
+matches, not the last: the first error is usually the cause and the rest are its cascade, and the end of
+the output is already covered by the tail.
+
+**One budget, spent newest first, degrading rather than stopping.** 14,000 characters buys a full excerpt
+for the newest calls; when that no longer fits, older ones still get a **brief**; when even that does not
+fit, the call line stands alone — it still names the call and the file holding the output. A failure's
+brief is its matched error lines, or failing that the END of its output, never its first line: the first
+line of a failed command is its banner, the least informative line it has.
+
+A budget on the excerpts alone is not a budget. Measured on 300 long failing calls: 12k on excerpts and
+then a further 44k on unbounded briefs — 16k tokens, a quarter of the window, which is this section's own
+failure in reverse. With the ladder: **300 calls listed, 6.8k tokens**. A realistic 30-call turn costs
+~4k characters.
 
 ## Tool guard (`tool-guard.ts`)
 

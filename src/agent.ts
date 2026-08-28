@@ -1116,7 +1116,17 @@ const LOOP_NUDGE_EVERY = 12;
  * it is rebuilt into the volatile block each round rather than living in the history at all, which is
  * the whole point: the cheapest thing in this file, and the only one that cannot be thrown away.
  */
-interface RanCall { tool: string; params: string; ok: boolean; head: string[]; file: string; bytes: number }
+interface RanCall {
+  tool: string; params: string; ok: boolean; file: string; bytes: number;
+  /** First lines of the output. */
+  head: string[];
+  /** Lines from the MIDDLE that name an error, an assertion or an exception. Empty when none matched. */
+  signal: string[];
+  /** Last lines of the output — where a failing command puts its summary. */
+  tail: string[];
+  /** How many lines the excerpt does not show, so the model knows it is reading a sample. */
+  omitted: number;
+}
 const callLedger: RanCall[] = [];
 
 /**
@@ -1164,28 +1174,67 @@ export function resetSessionLedger(): void {
  * then refused, so it could neither remember the answer nor fetch it.
  */
 const LEDGER_HEAD_LINES = 10;
+/** The END is where a failing command puts its summary — pytest, tsc, a stack trace, a shell exit. */
+const LEDGER_TAIL_LINES = 10;
+/** How many matched middle lines may be lifted out. */
+const LEDGER_SIGNAL_LINES = 20;
 /** Per line, so one enormous line cannot eat the whole budget. */
 const LEDGER_HEAD_CHARS = 160;
+
+/**
+ * THE LINES WORTH LIFTING OUT OF THE MIDDLE — deterministic, no model, no judgement.
+ *
+ * The head and the tail between them miss the one case that matters most: a long run whose failure is
+ * neither at the start nor at the very end. A 200-line pytest puts its banner in the head and its short
+ * summary in the tail, and leaves the actual assertion — the line naming what was expected and what
+ * arrived — in the 180 lines nobody sees.
+ *
+ * Deliberately generous rather than precise. This reads TOOL OUTPUT, not prose, so a line containing the
+ * word "error" almost always is one; a false positive costs one line of prompt, a false negative costs
+ * the model the reason its build failed. Covers the shapes that recur across languages: log levels
+ * (`ERROR`, `FATAL`, `CRITICAL`, `E/`), Python (`Traceback`, `E   assert`, `File "x.py", line 3`),
+ * Node/TS (`TypeError`, `at fn (file:1:2)`, `error TS2304`), test runners (`FAILED`, `✗`, `not ok`),
+ * shells (`command not found`, `exit code 1`, `No such file`), and bare assertions.
+ */
+const LEDGER_SIGNAL_RE = new RegExp([
+  '\\b(error|errors|fatal|panic|critical|severe|exception|traceback|assert|assertion|failed|failure|refused|denied)\\b',
+  '\\b(SyntaxError|TypeError|ReferenceError|ValueError|KeyError|IndexError|RuntimeError|OSError|IOError)\\b',
+  '^\\s*(E|ERR|FAIL)\\s',              // pytest's `E   assert 4 == 5`, tap's `not ok`
+  '^\\s+at\\s+\\S+.*:\\d+',              // a JS/Java stack frame
+  '^\\s*File\\s+".*",\\s*line\\s*\\d+',   // a Python stack frame
+  '\\b(command not found|No such file or directory|permission denied|exit code|exited with)\\b',
+  '\\bnot ok\\b',
+].join('|'), 'i');
 /**
  * The TOTAL the heads may spend, newest first. A 30-call turn at ten lines each is ~10k tokens of
  * bookkeeping, which is the opposite failure — so the newest calls carry their heads, and once the
  * budget is gone the older ones degrade to their first line. Every call still appears either way.
  */
-const LEDGER_HEAD_BUDGET_CHARS = 12_000;
+const LEDGER_DETAIL_BUDGET_CHARS = 14_000;
 
 export function noteRanCall(tool: string, params: string, ok: boolean, outcome: string): void {
-  const head = outcome
-    .split('\n')
-    .map((l) => l.trimEnd())
-    .filter((l) => l.trim().length > 0)
-    .slice(0, LEDGER_HEAD_LINES)
-    .map((l) => (l.length > LEDGER_HEAD_CHARS ? `${l.slice(0, LEDGER_HEAD_CHARS - 1)}\u2026` : l));
+  const clip = (l: string) => (l.length > LEDGER_HEAD_CHARS ? `${l.slice(0, LEDGER_HEAD_CHARS - 1)}\u2026` : l);
+  const all = outcome.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim().length > 0);
+
+  // Short output is shown WHOLE. Splitting fifteen lines into a head, a middle and a tail invents three
+  // sections and an elision marker to describe a thing that fits.
+  const head = all.slice(0, LEDGER_HEAD_LINES).map(clip);
+  const tail = all.length > LEDGER_HEAD_LINES + LEDGER_TAIL_LINES
+    ? all.slice(-LEDGER_TAIL_LINES).map(clip)
+    : [];
+  const middle = all.length > LEDGER_HEAD_LINES + LEDGER_TAIL_LINES
+    ? all.slice(LEDGER_HEAD_LINES, all.length - LEDGER_TAIL_LINES)
+    : all.slice(LEDGER_HEAD_LINES);
+  // FIRST matches, not last: the first error is usually the cause and the rest are its cascade, and the
+  // end of the output is already covered by the tail.
+  const signal = middle.filter((l) => LEDGER_SIGNAL_RE.test(l)).slice(0, LEDGER_SIGNAL_LINES).map(clip);
+  const omitted = Math.max(0, middle.length - signal.length);
   // The FULL result is on disk. Naming the file here is what turns the ledger from "this ran" into "this
   // ran and here is the answer" — the difference between the model knowing a call happened and being
   // able to use what it returned after the history carrying it was compressed away.
   const cached = artifactFor(tool, params);
   callLedger.push({
-    tool, params, ok, head,
+    tool, params, ok, head, signal, tail, omitted,
     file: cached ? `${cached.id}-${cached.tool}.txt` : '',
     bytes: cached?.bytes ?? 0,
   });
@@ -1197,26 +1246,66 @@ export function renderCallLedger(): string {
   // EVERY call this turn, and the newest ones carry what they returned. The head budget is spent from
   // the newest backwards because "what did the thing I just ran say" is the question being answered;
   // a call whose head no longer fits still gets its line, its first line and its file.
-  const withHead = new Set<number>();
+  const excerptOf = (c: RanCall): string[] => {
+    const out = [...c.head];
+    if (c.signal.length) {
+      out.push(`... ${c.omitted} line(s) omitted, ${c.signal.length} naming an error/assert/exception:`);
+      out.push(...c.signal);
+    } else if (c.omitted > 0) {
+      out.push(`... ${c.omitted} line(s) omitted, none naming an error`);
+    }
+    if (c.tail.length) {
+      out.push('... last lines:');
+      out.push(...c.tail);
+    }
+    return out;
+  };
+
+  /**
+   * OUT OF BUDGET, AND A FAILURE STILL HAS TO SAY WHY. The first line of a failed command is its banner
+   * — `> tsc`, `=== test session starts ===` — the least informative line it has. So a failure degrades
+   * to its matched error lines, or failing that to the END of its output, where a command that failed
+   * puts the reason. Only a SUCCESS degrades to its first line.
+   */
+  const briefOf = (c: RanCall): string[] => (c.ok
+    ? [c.head[0] ?? 'ok']
+    : c.signal.length ? c.signal.slice(0, 3)
+      : c.tail.length ? c.tail.slice(-2)
+        : [c.head[0] ?? 'no detail']);
+
+  /**
+   * ONE BUDGET, SPENT NEWEST FIRST, DEGRADING RATHER THAN STOPPING. The newest calls get their full
+   * excerpt; when that no longer fits, older ones still get their brief; when even that does not fit,
+   * the call line stands alone — it still names the call and the file holding its output.
+   *
+   * A budget on the excerpts alone is not a budget. Measured: 300 long failing calls spent 12k on
+   * excerpts and then a further 44k on unbounded briefs — 16k tokens of bookkeeping, a quarter of the
+   * window, which is the failure this whole block exists to prevent, in reverse.
+   */
+  const cost = (ls: string[]) => ls.reduce((n, l) => n + l.length + 4, 0);
+  const detail = new Map<number, string[]>();
   let spent = 0;
   for (let i = callLedger.length - 1; i >= 0; i--) {
-    const cost = callLedger[i].head.reduce((n, l) => n + l.length + 1, 0);
-    if (spent + cost > LEDGER_HEAD_BUDGET_CHARS) break;
-    spent += cost;
-    withHead.add(i);
+    const c = callLedger[i];
+    if (!c.head.length) continue;
+    const full = excerptOf(c);
+    if (spent + cost(full) <= LEDGER_DETAIL_BUDGET_CHARS) { detail.set(i, full); spent += cost(full); continue; }
+    const brief = briefOf(c);
+    if (spent + cost(brief) <= LEDGER_DETAIL_BUDGET_CHARS) { detail.set(i, brief); spent += cost(brief); }
   }
 
   const lines = callLedger.map((c, i) => {
     const where = c.file ? `  [${humanBytes(c.bytes)} → ${c.file}]` : '';
     const status = c.ok ? '' : 'FAILED: ';
-    const first = c.head[0] ?? (c.ok ? 'ok' : 'no detail');
     const call = `${i + 1}. ${c.tool}(${c.params})${where}`;
+    const shown = detail.get(i);
+    // No detail left in the budget: the call line ALONE. It already names the call and the file holding
+    // the output, and a "(not shown)" line repeated two hundred times says that same nothing two hundred
+    // times — 15k characters of it, measured.
+    if (!shown) return `${call}${c.ok ? '' : '  FAILED'}`;
     // Indented under the call, so a reader — and a model — can tell the output from the next call.
-    if (withHead.has(i) && c.head.length) {
-      const more = c.bytes && c.file ? `\n     … full output in ${c.file}` : '';
-      return `${call}\n   ${status}${c.head.map((l) => l).join('\n   ')}${more}`;
-    }
-    return `${call}\n   ${status}${first}`;
+    const more = c.bytes && c.file && shown.length > 3 ? `\n     ... full output in ${c.file}` : '';
+    return `${call}\n   ${status}${shown.join('\n   ')}${more}`;
   });
   const head = lines;
   const earlier = earlierCalls.length
