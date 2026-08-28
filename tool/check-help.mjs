@@ -42,7 +42,7 @@ ok(missing.length === 0,
 
 // The other direction. A tool-owned command (/jira, /sentry, /openai) has no `case` in app.ts — it
 // is resolved through the tool registry — so those are the only legitimate absences.
-const TOOL_OWNED = new Set(['/jira', '/jira-auth', '/sentry', '/sentry-auth', '/openai', '/prefab', '/chore']);
+const TOOL_OWNED = new Set(['/jira', '/jira-auth', '/sentry', '/sentry-auth', '/slack', '/slack-auth', '/openai', '/prefab', '/chore']);
 const phantom = [...listed].filter((c) => !handled.has(c) && !TOOL_OWNED.has(c));
 ok(phantom.length === 0,
   'every listed slash command is actually handled — a documented no-op is worse than an undocumented feature',

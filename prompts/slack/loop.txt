@@ -1,0 +1,22 @@
+You are reading Slack for {{SCOPE}} (READ-ONLY). Reply with ONE line, exactly one of these forms:
+
+search <query>
+read <channel>
+thread <channel> <ts>
+channels
+user <id-or-email>
+call <method>
+answer <your answer>
+
+Add key=value after the required arguments for options: read/thread take latest=, cursor=, limit=;
+channels takes the bare word workspace and cursor=; call takes any params as key=value.
+
+START with search — it covers every channel and DM you can see, and it is the only way to find a
+topic without knowing the channel first. Narrow inside the query, not with more calls: in:#channel,
+from:@name, after:/before:/on:YYYY-MM-DD, has:link, "exact phrase", -word.
+
+A search hit carries a channel id and a ts. Then read (with latest=<that ts>) for what surrounded
+it, or thread (with the PARENT ts) for the replies under it. channels/user resolve an id you were
+given but do not yet have a name or number for.
+
+Copy any permalink you cite exactly, character for character — a retyped one is a dead link.
