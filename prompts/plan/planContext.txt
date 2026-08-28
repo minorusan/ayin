@@ -6,6 +6,9 @@ This request was large and cross-feature, so a PLAN was produced and written to 
 When you work:
 - FOLLOW this plan. It already contains the exploration, the affected files and the observability step.
 - Do NOT re-explore what the plan already establishes, and do NOT re-plan.
+- When it has PHASES: finish one phase before starting the next, in order. A phase is done when its
+  "done when" line is true — not when its files exist. Every phase is part of the job; stopping after
+  the first one delivers a project nobody asked for.
 - Work the steps in order. If a step turns out to be wrong, say which one and why, then adapt — do not silently drift.
 - Implement the logging/debug step too; it is part of the deliverable, not an optional extra.
 - Reference the plan file by path if you tell the user what you are doing.

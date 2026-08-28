@@ -1,0 +1,38 @@
+Break the request below into PHASES: the stages this job actually has, in order. Each phase becomes its
+own step-by-step plan, in its own file.
+
+A phase is a STAGE OF THE WORK, never a file. "The project exists and installs", "it serves the data the
+request asks for", "it looks the way the request asks", "it is running and the user has been told where"
+are phases. "Create pyproject.toml" is a step inside one.
+
+ONE PHASE FOR EVERY DISTINCT ASK IN THE REQUEST. Every sentence the user wrote is a requirement. A
+request that says "make it beautiful" and "send me the link on that address" has a phase for each, and a
+plan that folds them into "create the source files" has silently dropped both.
+
+SESSION GOAL:
+{{GOAL}}
+
+THE REQUEST:
+{{REQUEST}}
+
+FEATURES IDENTIFIED:
+{{FEATURES}}
+
+PROJECT SURVEY (measured, not guessed):
+{{SURVEY}}
+
+REQUIRED DELIVERABLES — every one MUST be assigned to exactly one phase, by exact pattern:
+{{DELIVERABLES}}
+
+Answer with one JSON object and nothing else:
+
+{"phases":[{"id":1,"title":"","goal":"","deliverables":["pyproject.toml"],"dependsOn":[]}]}
+
+id            1-based, ascending, no gaps.
+title         one imperative line naming the stage.
+goal          what is TRUE when this phase is done, stated so a person could check it.
+deliverables  the required patterns above that THIS phase produces. Every pattern goes to exactly one
+              phase. A phase that produces none takes [].
+dependsOn     ids that must land first. Lower ids only.
+
+Return a single phase when the request is genuinely one stage. Never more than six.

@@ -1,0 +1,12 @@
+The phase breakdown below is rejected. Fix exactly these problems and change nothing else.
+
+PHASES:
+{{PHASES}}
+
+PROBLEMS:
+{{ERRORS}}
+
+REQUIRED DELIVERABLES — every one belongs to exactly one phase:
+{{DELIVERABLES}}
+
+Answer with the corrected JSON object and nothing else, in the same shape.

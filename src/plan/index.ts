@@ -83,7 +83,7 @@ import { detectProject, describeProject } from '../executors/detect.js';
 import { planExecutorFor } from '../executors/registry.js';
 import type { ProjectContext } from '../executors/types.js';
 import { ensureToolRuntime } from '../tool-wiring.js';
-import { buildActionablePlan, isActionablePlanEnabled, renderDeliverableList } from './plan.js';
+import { buildActionablePlan, buildPhasedPlan, isActionablePlanEnabled, renderDeliverableList, renderPhaseIndex } from './plan.js';
 
 // This module imports tool implementations directly, so it must not depend on the registry having
 // been loaded by someone else first. Idempotent.
@@ -409,18 +409,21 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     // repair cycle producing typed steps a program has already checked (see plan/plan.ts), instead of
     // nine sections of prose in which a step with no verification is indistinguishable from a step with
     // one. Null when nothing usable came back, and then the prose document below runs as it always has.
-    const actionable = isActionablePlanEnabled()
-      ? await buildActionablePlan({
-        request: userInput, goal, features: t.features,
-        apiResearch, findings, grounding, ctx, executor,
-      })
-      : null;
+    const planInput = { request: userInput, goal, features: t.features, apiResearch, findings, grounding, ctx, executor };
+
+    // TWO LEVELS: the stages of the job, then the steps of each stage. See `PlanPhase` — a flat step
+    // list is written at one altitude and the model picks files, so "run it on a free port" and "send
+    // me the link" got no step at all on a request that asked for both.
+    const phased = isActionablePlanEnabled() ? await buildPhasedPlan(planInput) : null;
+    // The phase layer failing must not cost the plan: a flat plan is what ayin produced before it
+    // existed, and it is still better than no plan.
+    const actionable = phased ? null : (isActionablePlanEnabled() ? await buildActionablePlan(planInput) : null);
     if (actionable) {
       addMessage('system', `Plan mode: ${actionable.steps.length} actionable step(s) in ${actionable.attempts} model call(s)`
         + `${actionable.unresolved.length ? `, ${actionable.unresolved.length} problem(s) the validator still rejects` : ', validated'}.`);
     }
 
-    const body = actionable ? actionable.markdown : await llmChat([{
+    const body = phased ? '' : actionable ? actionable.markdown : await llmChat([{
       role: 'user',
       content: getPrompt('planDocument', {
         REQUEST: userInput.slice(0, 8000),
@@ -463,11 +466,59 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       '---',
       '',
     ].filter((l) => l !== undefined).join('\n');
-    writeFileSync(path, `${header}${body.trim()}\n`);
+    // EACH PHASE IS ITS OWN FILE, and the top-level document is the index that points at them. That is
+    // what makes a phase readable on its own — the sub-plan a person opens is the stage they are on,
+    // not twenty steps of four stages interleaved — and it is what lets a phase be re-read, or
+    // re-planned, without touching the rest.
+    let planBody = body;
+    /** What the turn's `<plan>` block carries — the index plus every phase inline. */
+    let contextBody = body;
+    if (phased) {
+      const stem = path.replace(/\.md$/, '');
+      const phaseFiles: string[] = [];
+      for (const p of phased.phases) {
+        if (!p.plan) { phaseFiles.push(''); continue; }
+        const slug = p.phase.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'phase';
+        const file = `${stem}-${p.phase.id}-${slug}.md`;
+        writeFileSync(file, [
+          `<!-- Phase ${p.phase.id} of ${phased.phases.length}: ${p.phase.title} -->`,
+          `<!-- Index: ${path} -->`,
+          '',
+          `# Phase ${p.phase.id} — ${p.phase.title}`,
+          '',
+          `**Done when:** ${p.phase.goal.trim()}`,
+          '',
+          p.plan.markdown.trim(),
+          '',
+        ].join('\n'));
+        phaseFiles.push(file);
+      }
+      planBody = renderPhaseIndex(phased.phases, phaseFiles, phased.unresolved);
+      // WHAT THE FILE HOLDS AND WHAT THE MODEL SEES ARE DIFFERENT ON PURPOSE. The index on disk points
+      // at the phase files, which is what makes each stage readable on its own and re-readable after a
+      // crash. The model gets the index AND every phase's steps inline: telling it to go and open four
+      // files first spends four tool calls to learn what the prompt could simply have carried.
+      contextBody = [
+        planBody,
+        ...phased.phases.map((p, i) => p.plan
+          ? `\n---\n\n# Phase ${p.phase.id} — ${p.phase.title}\n\n**Done when:** ${p.phase.goal.trim()}\n`
+            + `**Plan file:** \`${phaseFiles[i]}\`\n\n${p.plan.markdown.trim()}`
+          : ''),
+      ].filter(Boolean).join('\n');
+      const steps = phased.phases.reduce((n, p) => n + (p.plan?.steps.length ?? 0), 0);
+      const unplanned = phased.phases.filter((p) => !p.plan).length;
+      addMessage('system', `Plan mode: ${phased.phases.length} phase(s), ${steps} step(s) across them, `
+        + `${phased.attempts} model call(s)${phased.unresolved.length ? `, ${phased.unresolved.length} unresolved` : ', validated'}`
+        // A phase with no sub-plan is a hole in the job, and the index says so in writing — but the
+        // operator reads this line, not the file, while the turn is still running.
+        + `${unplanned ? `. ${unplanned} PHASE(S) COULD NOT BE PLANNED — their deliverables are unclaimed` : ''}.`);
+      for (const f of phaseFiles.filter(Boolean)) addMessage('system', `  ${f}`);
+    }
+    writeFileSync(path, `${header}${planBody.trim()}\n`);
 
-    log('INFO', 'plan_written', { path, chars: String(body.length), explorations: String(findings.length), trigger: explicit ? 'explicit' : 'size' });
+    log('INFO', 'plan_written', { path, chars: String(planBody.length), phases: String(phased?.phases.length ?? 0), explorations: String(findings.length), trigger: explicit ? 'explicit' : 'size' });
     addMessage('system', `Plan written: ${path}`);
-    return { kind: 'plan', path, body: body.trim(), features: t.features };
+    return { kind: 'plan', path, body: contextBody.trim(), features: t.features };
   } catch (err) {
     log('WARN', 'plan_failed', { error: err instanceof Error ? err.message : String(err) });
     return null;

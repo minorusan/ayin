@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
-const { inferDependencies, validateSteps, renderPlan } = await import(`file://${join(DIST, 'plan', 'plan.js')}`);
+const { inferDependencies, validateSteps, renderPlan, validatePhases, parsePlan, renderPhaseIndex } = await import(`file://${join(DIST, 'plan', 'plan.js')}`);
 const { detectProject } = await import(`file://${join(DIST, 'executors', 'detect.js')}`);
 const { planExecutorFor } = await import(`file://${join(DIST, 'executors', 'registry.js')}`);
 const { basePlanExecutor } = await import(`file://${join(DIST, 'executors', 'plan', 'base', 'index.js')}`);
@@ -122,6 +122,68 @@ console.log('\n— and the ordering reaches the agent that follows the plan —'
   ]);
   const md = renderPlan(fixed, [], []);
   ok(/after step 1/.test(md), 'the rendered plan says "after step 1" — which is the only way the executor learns it');
+}
+
+console.log('\n— a plan is two levels: the stages of the job, then the steps of each stage —');
+{
+  const phase = (over) => ({ id: 1, title: 'scaffold it', goal: 'the project installs', deliverables: [], dependsOn: [], ...over });
+
+  ok(validatePhases([phase({})], []).length === 0, 'a clean single-phase breakdown validates');
+  ok(/comes later/.test(validatePhases([phase({ id: 1, dependsOn: [2] }), phase({ id: 2 })], []).join(' ')),
+    'a forward phase dependency is refused — phases run in order');
+  ok(/no goal/.test(validatePhases([phase({ goal: '  ' })], []).join(' ')),
+    'a phase with no "done when" is refused — a stage nobody can check is not a stage');
+
+  // THE RULE THAT PAYS. A required deliverable assigned to no phase is a file the job never plans to
+  // produce, caught before a single sub-plan is drafted; assigned to two, it is two phases racing to
+  // write the same file, which is how a later phase silently overwrites an earlier one's work.
+  ok(/assigned to no phase/.test(validatePhases([phase({})], ['pyproject.toml']).join(' ')),
+    'a required deliverable owned by NO phase is refused');
+  ok(
+    /assigned to phases 1, 2/.test(validatePhases(
+      [phase({ id: 1, deliverables: ['pyproject.toml'] }), phase({ id: 2, deliverables: ['pyproject.toml'] })],
+      ['pyproject.toml'],
+    ).join(' ')),
+    'and one owned by TWO phases is refused just as loudly',
+  );
+  ok(validatePhases([phase({ deliverables: ['pyproject.toml'] })], ['pyproject.toml']).length === 0,
+    'exactly one owner validates');
+  ok(/not one of the required deliverables/.test(validatePhases([phase({ deliverables: ['invented.txt'] })], []).join(' ')),
+    'a phase cannot invent a deliverable that was never required');
+
+  const md = renderPhaseIndex(
+    [{ phase: phase({ id: 1, title: 'scaffold it' }), plan: { steps: [1, 2], gaps: [], markdown: '', attempts: 1, unresolved: [] } },
+     { phase: phase({ id: 2, title: 'ship it', dependsOn: [1] }), plan: null }],
+    ['/tmp/p-1.md', ''], [],
+  );
+  ok(/after phase 1/.test(md), 'the index states the phase ordering');
+  ok(/NOT PLANNED/.test(md), 'and a phase whose sub-plan failed says so in writing rather than vanishing');
+}
+
+console.log('\n— a truncated draft is salvaged, not thrown away —');
+{
+  // The real failure, reproduced: the model inlines whole file bodies into `action`, runs past the
+  // reply length and is cut off mid-object. The OUTER {"steps":[…]} is exactly the object that never
+  // closes, which is why a depth-0-only scanner found nothing inside it.
+  const truncated = [
+    '```json',
+    '{',
+    ' "steps": [',
+    '  {"id":1,"title":"a","files":["x.ts"],"action":"write { a brace } here","verify":"npm run build passes","dependsOn":[]},',
+    '  {"id":2,"title":"b","files":["y.ts"],"action":"do b","verify":"pytest -q shows green","dependsOn":[1]},',
+    '  {"id":3,"title":"Install package in editable mode and v',
+  ].join('\n');
+  const got = parsePlan(truncated);
+  ok(got !== null, 'a truncated reply still yields a plan');
+  ok(got && got.steps.length === 2, '  → the complete steps survive; the half-written one is dropped', `got ${got ? got.steps.length : 0}`);
+  ok(got && got.steps[0].action.includes('{ a brace }'), '  → a brace INSIDE a string value is not treated as structure');
+  ok(got && got.steps[1].dependsOn.join(',') === '1', '  → and the salvaged steps keep their dependencies');
+
+  // Whole, valid JSON must still take the fast path unchanged.
+  const whole = JSON.stringify({ steps: [{ id: 1, title: 't', files: ['a.ts'], action: 'do', verify: 'run the build', dependsOn: [] }], gaps: ['g'] });
+  const w = parsePlan(whole);
+  ok(w && w.steps.length === 1 && w.gaps.join() === 'g', 'a complete reply parses exactly as before, gaps included');
+  ok(parsePlan('there is no json here at all') === null, 'and prose with no plan in it is still null, never an empty plan');
 }
 
 console.log('\n— an empty directory reaches the executor that knows what a new project looks like —');

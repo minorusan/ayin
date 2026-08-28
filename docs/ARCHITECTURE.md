@@ -1273,6 +1273,75 @@ specific components are known.
 The document is on disk **before** implementation starts, so a machine that dies mid-feature leaves the
 thinking behind rather than only half the work.
 
+### A plan has two levels: the stages of the job, then the steps of each stage
+
+**A flat step list is written at ONE altitude, and the model picks the lowest one — files.** Measured on
+a real request: *"create directory testsite, build a beautiful python website that fetches the weather,
+run it on whatever empty port, send me the link as host:port, and research the Ukraine missile-alarm API
+for Poltava"* produced **four steps, every one of them file creation**. "Run it on a free port" got no
+step. "Send me the link" got no step at all — it survived only as a sentence inside a README that step 4
+wrote. Two of the five things asked for were gone, and neither the plan nor the validator could see it,
+because the validator checks the SHAPE of steps and the presence of deliverables, never whether the job
+was understood.
+
+So the two questions are asked separately. **What stages does this job have** is asked once, of the whole
+request (`planPhases.txt` → `PlanPhase[]`). **What files does THIS stage touch** is asked per stage,
+where a file-shaped answer is the right one. The same request now produces **5 phases, 18 steps**, and
+the last phase is *"Deploy and notify user of access details — done when the application is running on an
+available port and the user has received the connection string in host:port format"*.
+
+| | Flat | Phased |
+|---|---|---|
+| "run it on an empty port" | no step | phase 5, step 1 — find a free port, save it, launch |
+| "send me the link" | a string inside a README | phase 5, step 2 — construct and print `host:port` |
+| "beautiful looking" | one clause inside a step | phase 3, its own stage |
+
+**Deliverables are assigned, never broadcast.** Each phase owns the required patterns it produces, so the
+existing per-plan validator runs unchanged against that phase's own list — and `validatePhases` refuses a
+required deliverable owned by *no* phase (a file the job never plans to produce) or by *two* (two phases
+racing to write it, which is how a later one silently overwrites an earlier one's work).
+
+**One file per phase, plus an index.** `ayin-plan-<ts>.md` is the phase index; each phase gets
+`ayin-plan-<ts>-<n>-<slug>.md` with its own steps. That is what makes a stage readable on its own and
+re-readable after a crash. The model is sent the index **and** every phase inline — telling it to go and
+open four files first would spend four tool calls to learn what the prompt could carry.
+
+**Eager, not lazy.** Every sub-plan is drafted and written before any work starts, because that is the
+invariant plan mode already promises: the thinking is on disk before the machine can die holding it.
+Expanding a phase only when the previous one finishes would be cheaper and would adapt to what actually
+happened — and would lose everything not yet expanded to a power cut. A single-phase answer is the
+ordinary small request, and costs exactly one call more than a flat plan.
+
+**A phase whose sub-plan fails says so.** The index writes `NOT PLANNED` and the session line names the
+count, because a phase that quietly vanishes takes its deliverables with it — which is exactly what
+happened the first time this ran, and is what the next two paragraphs are about.
+
+### A truncated draft is salvaged, not thrown away
+
+Phases made a pre-existing hole visible. An unparsable draft used to route straight to `render`, return
+null, and drop the plan — harmless when there was one plan and a prose fallback behind it, and not
+harmless once a plan is one phase of a job: phase 1 of four came back unparsable **three runs running**
+and vanished carrying all of its required deliverables while the other phases planned cleanly around the
+hole.
+
+Two causes, both fixed. The model was **inlining whole file bodies** into `action` — entire heredocs of
+`pyproject.toml` — so the reply ran past its length and was cut off mid-object; `actionablePlan.txt` now
+says to name what a file must contain and never paste it. And the parser could not use what did arrive:
+it sliced from the first `{` to the last `}`, which on a truncated reply is not valid JSON. It now falls
+back to a **string-aware, brace-balancing scanner** that recovers every complete step object — borrowed
+from Maradel's `llm/salvage.ts`, which learned the same lesson: a regex cannot do this, because a brace
+inside a quoted value is not structure.
+
+The scanner keeps a **stack** of open positions rather than a depth counter with one start index. The
+first version used the counter, emitted only objects that closed back to depth 0, and found nothing —
+because on the reply this exists for, the outer `{"steps":[…]}` is precisely the object that never
+closes. `check:plan` pins both halves: a truncated reply yields its complete steps, and a whole reply
+still parses exactly as before.
+
+Finally, an unparsable draft is now **re-drafted** rather than sent to the repair prompt. Zero steps is
+not a plan with problems; it is no plan, and `actionablePlanRepair` would be handed an empty list and
+asked to correct it.
+
 ### The actionable plan (`plan/plan.ts`) — a LangGraph draft -> validate -> repair cycle
 
 Plan mode produces an **actionable plan**: typed, ordered steps a program has already checked.
