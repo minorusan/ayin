@@ -1,0 +1,12 @@
+TARGET LAYOUT — a typical TypeScript project. Create these paths; do not invent a second convention.
+
+  package.json     "type": "module", "main": "dist/index.js", scripts for build (tsc), test
+                   (node --test) and start. Dependencies only for what the request actually names.
+  tsconfig.json    "strict": true, target ES2022, module NodeNext, rootDir src, outDir dist.
+  src/index.ts     the entry point.
+  test/<thing>.test.ts   node:test and node:assert — built in, so no test framework to choose.
+  .gitignore       node_modules/, dist/, *.tsbuildinfo, .env
+  README.md        already created as a stub at the root — fill THAT file in.
+
+TypeScript is a devDependency, never assumed global: `npm i -D typescript @types/node`. Compilation is
+the proof a step landed — `npx tsc --noEmit` before any claim that something works.

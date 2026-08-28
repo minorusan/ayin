@@ -89,13 +89,25 @@ function fromTree(root: string): { type: ProjectType; evidence: string } | null 
  * Deliberately narrow. Each pattern names something that is not plausibly about anything else: a
  * board, a sketch extension, an Arduino core API call. "LED" alone is not enough (a web project has
  * LED indicators too); "LED" beside a pin/resistor/breadboard word is.
+ *
+ * ORDER IS THE TIE-BREAK, most specific first. `python` and `node` sit last because their vocabulary is
+ * the broadest — "a Python script that flashes the Arduino" is an Arduino request, and the arduino
+ * patterns above claim it first.
+ *
+ * `python`, `node` and `unity` are here so an EMPTY directory plus "set up a Python CLI" reaches the
+ * greenfield plan executor (`executors/plan/greenfield/`) instead of the generic Node/web survey, which
+ * on an empty directory reports missing bundlers and missing HTTP servers and steers the plan into work
+ * the project does not have. Without a match the type is `unknown`, `greenfield` stays false, and plan
+ * mode then spends two full `explore` loops discovering that an empty directory is empty.
  */
 const REQUEST_PATTERNS: Array<[ProjectType, RegExp]> = [
   ['arduino', /\barduino\b|\.ino\b|\bplatformio\b|\bbreadboard\b|\bpinMode\b|\bdigitalWrite\b|\banalogWrite\b|\barduino[- ]?(uno|nano|mega)\b|\b(uno|nano)\s+r[34]\b/i],
   ['arduino', /\b(led|servo|buzzer|potentiometer|photoresistor)\b[\s\S]{0,80}\b(pin|resistor|breadboard|circuit|wire|wiring|anode|cathode|gpio)\b/i],
   ['arduino', /\b(pin|gpio)\b[\s\S]{0,80}\b(led|servo|buzzer|button|switch|sensor)\b[\s\S]{0,80}\b(resistor|breadboard|circuit|wiring|solder)\b/i],
-  ['unity', /\bunity\b[\s\S]{0,40}\b(scene|prefab|monobehaviour|gameobject)\b|\bmonobehaviour\b|\bprefab\b/i],
+  ['unity', /\bunity\b[\s\S]{0,40}\b(scene|prefab|monobehaviour|gameobject|project|game|editor|urp|hdrp)\b|\b(project|game|app|prototype)\b[\s\S]{0,40}\bunity\b|\bmonobehaviour\b|\bprefab\b/i],
   ['flutter', /\bflutter\b|\bdart\b[\s\S]{0,40}\bwidget\b|\bpubspec\b/i],
+  ['python', /\bpython\b|\bpyproject\b|\bpytest\b|\bdjango\b|\bflask\b|\bfastapi\b|\.py\b/i],
+  ['node', /\btypescript\b|\bnode\.?js\b|\bnpm\b|\bpnpm\b|\byarn\b|\bvite\b|\bexpress\b|\breact\b|\bts\b[\s\S]{0,20}\b(project|app|cli|package|library|service)\b|\.tsx?\b/i],
 ];
 
 function fromRequest(request: string): { type: ProjectType; evidence: string } | null {

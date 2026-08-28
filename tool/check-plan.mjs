@@ -12,19 +12,28 @@
  *   - the INFERENCE derives what is already written in the data, and derives nothing else. A step that
  *     touches a file an earlier step touches depends on it; the model routinely leaves that off, and
  *     `dependsOn` is RENDERED into the plan a coding agent then follows, so a missing edge is a plan
- *     that does not state its own ordering.
+ *     that does not state its own ordering;
+ *   - the GREENFIELD path routes an EMPTY directory to the executor that knows what a new project of
+ *     that type looks like, and hands back exactly what `base` does once the project exists. Both
+ *     halves matter: the first is the feature, and the second is every Python, Node and Unity project
+ *     already on disk, which that executor is now also selected for.
  *
  * The inference is borrowed from Maradel, where the identical omission was a hard validation error that
  * cost a 9.4-second repair pass on most plans — a second model call to be told a fact the arguments
  * already contained. The shapes differ; the lesson does not.
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const { inferDependencies, validateSteps, renderPlan } = await import(`file://${join(DIST, 'plan', 'plan.js')}`);
+const { detectProject } = await import(`file://${join(DIST, 'executors', 'detect.js')}`);
+const { planExecutorFor } = await import(`file://${join(DIST, 'executors', 'registry.js')}`);
+const { basePlanExecutor } = await import(`file://${join(DIST, 'executors', 'plan', 'base', 'index.js')}`);
 
 let fails = 0;
 const ok = (cond, label, extra = '') => {
@@ -113,6 +122,70 @@ console.log('\n— and the ordering reaches the agent that follows the plan —'
   ]);
   const md = renderPlan(fixed, [], []);
   ok(/after step 1/.test(md), 'the rendered plan says "after step 1" — which is the only way the executor learns it');
+}
+
+console.log('\n— an empty directory reaches the executor that knows what a new project looks like —');
+
+/** A throwaway empty directory, so detection sees no project marker of any kind. */
+const inEmptyDir = (fn) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ayin-plan-gate-'));
+  try { return fn(dir); } finally { rmSync(dir, { recursive: true, force: true }); }
+};
+
+for (const [request, type, label, manifest] of [
+  ['set up an empty python project for a CLI that renames files', 'python', 'Python', 'pyproject.toml'],
+  ['create a new typescript project, a small library with tests', 'node', 'TypeScript', 'package.json'],
+  ['start a unity project for a 2d platformer prototype', 'unity', 'Unity', 'Packages/manifest.json'],
+]) {
+  inEmptyDir((dir) => {
+    const ctx = detectProject(dir, request);
+    ok(ctx.type === type && ctx.greenfield, `"${request.slice(0, 34)}…" is a greenfield ${type} project`, `got ${ctx.type}, greenfield=${ctx.greenfield}`);
+    if (ctx.type !== type) return;
+
+    const ex = planExecutorFor(ctx);
+    ok(ex.config.id === 'greenfield', `  → the greenfield plan executor`, `got "${ex.config.id}"`);
+
+    const patterns = ex.deliverables(ctx).map((d) => d.patterns[0]);
+    ok(patterns.includes(manifest), `  → \`${manifest}\` is a required deliverable, so a plan omitting it is rejected`, patterns.join(' '));
+    ok(patterns.includes('.gitignore'), '  → so is .gitignore — the repository is initialised empty and the first commit is where build output gets in');
+    ok(patterns.includes('README.md'), '  → and the README the base executor demands of every project');
+
+    // The whole point of the branch: the plan is validated against a layout, not against one README.
+    const errors = validateSteps([step({ files: ['README.md'] })], ex.deliverables(ctx).filter((d) => d.required).map((d) => d.patterns[0]));
+    ok(errors.length >= 2, '  → a plan that writes only a README is refused before a file is written', `${errors.length} error(s)`);
+
+    ok(ex.survey(ctx).includes(label), `  → the survey says ${label} instead of the generic Node/web one`);
+    ok(/NO SOURCE IS ON DISK YET/.test(ex.survey(ctx)), '  → and says plainly that nothing is on disk');
+    ok(ex.grounding(ctx, request).includes('TARGET LAYOUT'), '  → the layout is stated as grounding, so triage cannot veto the plan away');
+  });
+}
+
+console.log('\n— and `git init` happens once, at project start —');
+inEmptyDir((dir) => {
+  const ctx = detectProject(dir, 'set up an empty python project for a CLI');
+  const ex = planExecutorFor(ctx);
+  const made = ex.scaffold(ctx);
+  ok(existsSync(join(dir, '.git')), 'an empty git repository is initialised in the new project');
+  ok(existsSync(join(dir, 'README.md')), 'and the README stub is the first file it has ever seen');
+  ok(made.length === 2, 'both are reported to the operator, never done silently', `reported ${made.length}`);
+  ok(ex.scaffold(ctx).length === 0, 'a second pass creates nothing — scaffolding never overwrites');
+});
+
+console.log('\n— a project that ALREADY exists is handed straight back to the base executor —');
+{
+  // The registry selects on TYPE, not on greenfield-ness, so `plan/greenfield` is also chosen for every
+  // Python, Node and Unity project on disk. This is the half that must not have changed for them.
+  const ctx = detectProject(REPO, 'add a typescript module for X');
+  ok(ctx.type === 'node' && !ctx.greenfield, 'this repo is an existing node project', `${ctx.type}, greenfield=${ctx.greenfield}`);
+  const ex = planExecutorFor(ctx);
+  ok(ex.config.id === 'greenfield', 'which the greenfield executor is still selected for');
+  ok(ex.grounding(ctx, 'x') === basePlanExecutor.grounding(ctx, 'x'), '  → grounding is the base\'s (empty), so triage keeps its veto');
+  ok(
+    JSON.stringify(ex.deliverables(ctx)) === JSON.stringify(basePlanExecutor.deliverables(ctx)),
+    '  → deliverables are the base\'s, not a layout for a project that already has one',
+  );
+  ok(ex.observability(ctx) === basePlanExecutor.observability(ctx), '  → observability is the base\'s');
+  ok(ex.scaffold(ctx).length === 0, '  → and nothing is scaffolded into a repo that already has a README and a .git');
 }
 
 console.log(fails ? `\nplan check: ${fails} FAILED` : '\nplan check: all passed');

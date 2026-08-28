@@ -1686,10 +1686,11 @@ console.log('\nexecutors: detection + registry');
   // Every shipped config parses and cross-checks against an imported instance. loadRegistry THROWS
   // on any mismatch, so simply getting a list back is the assertion.
   const configs = reg.listExecutors();
-  // SEVEN since the Unity QA executor: base + arduino for plan/qa/present, plus qa/unity. The count is
-  // asserted rather than the names because `loadRegistry` already THROWS on a config with no imported
-  // instance (or the reverse) — this line is what notices an executor added to neither list.
-  ok(configs.length === 7, 'seven executors are declared and wired (base + arduino for plan/qa/present, plus qa/unity)', String(configs.length));
+  // EIGHT since the greenfield plan executor: base + arduino for plan/qa/present, plus qa/unity and
+  // plan/greenfield. The count is asserted rather than the names because `loadRegistry` already THROWS
+  // on a config with no imported instance (or the reverse) — this line is what notices an executor
+  // added to neither list.
+  ok(configs.length === 8, 'eight executors are declared and wired (base + arduino for plan/qa/present, plus qa/unity and plan/greenfield)', String(configs.length));
   ok(configs.some((c) => c.kind === 'qa' && c.id === 'unity' && c.factsOnly === true),
     'qa/unity declares factsOnly — a Unity turn is judged by a compiler, not by a model');
   ok(configs.every((c) => c.projectTypes.length > 0), 'every config declares at least one project type');

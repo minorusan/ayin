@@ -929,6 +929,7 @@ src/executors/
   deliverables.ts     glob-ish pattern → "is this file actually on disk"
   plan/base/          index.ts + config.json     ← exactly the old behaviour
   plan/arduino/       index.ts + config.json
+  plan/greenfield/    index.ts + config.json     ← an EMPTY directory: python / typescript / unity
   qa/base/            index.ts + config.json
   qa/arduino/         index.ts + config.json
   present/base/       index.ts + config.json
@@ -977,6 +978,13 @@ handed `(not an Arduino project — omit the Arduino reference section)` and wro
 The request said "arduino" in its first sentence. The request is never allowed to *override* the tree,
 only to speak when the tree has nothing to say.
 
+The request patterns are ordered most-specific first and cover `arduino`, `unity`, `flutter`, `python`
+and `node` — the last two sit at the end because their vocabulary is the broadest, so *"a Python script
+that flashes the Arduino"* is claimed by the arduino patterns above them. `python`, `node` and `unity`
+are there so an empty directory plus *"set up a Python CLI"* reaches the **greenfield plan executor**
+below. Without a match the type is `unknown`, `greenfield` stays false, and plan mode then spends two
+full `explore` loops discovering that an empty directory is empty.
+
 ### What each contract does
 
 | Contract | Methods | What the Arduino implementation adds |
@@ -990,6 +998,45 @@ criterion for a long time and was being enforced the expensive way — the agent
 notices the missing file, a whole fix pass is spent creating four lines of markdown. **A file that
 must exist is a `writeFileSync`, not a criterion for a model to remember.** It never overwrites: an
 existing README is the operator's, exactly as a materialized prompt is.
+
+### An EMPTY directory is its own plan executor (`plan/greenfield/`)
+
+Pointed at a directory with nothing in it, the base survey does not go quiet either — it reports *"no
+HTTP server or dev server present"*, *"no bundler and no existing HTML"*, *"NO logging facility found"*,
+and a planner writes steps for a project that does not exist yet. Meanwhile the one thing the turn
+actually has to decide, **the layout**, is never stated, and the base deliverable list is a single
+README — so the validator in `plan/plan.ts` accepts a plan for a new Python project that never mentions
+`pyproject.toml`.
+
+So `plan/greenfield` serves `python`, `node` and `unity` at priority 100, with **three branches**, one
+per type, because the folder structure of a typical project is exactly what differs:
+
+| Branch | Layout the plan is grounded in | Required deliverables beyond the README |
+|---|---|---|
+| Python (`python`) | src layout, venv, editable install, pytest | `pyproject.toml` · `src/*/__init__.py` · `tests/test_*.py` · `.gitignore` |
+| TypeScript (`node`) | `tsc` to `dist/`, ESM, `node --test` | `package.json` · `tsconfig.json` · `src/index.ts` · `test/*.test.ts` · `.gitignore` |
+| Unity (`unity`) | `Assets/Scripts`, editor-owned scenes and `.meta` | `Assets/Scripts/*.cs` · `Packages/manifest.json` · `ProjectSettings/ProjectVersion.txt` · `.gitignore` |
+
+Those deliverables are what makes the difference reach the plan: they are handed to the validator as
+`requiredPatterns`, so a plan that does not name the manifest **by exact path** in some step's `files`
+is rejected and repaired before a single file is written. The layouts and the observability text are
+`prompts/greenfield/*.txt` — content an operator will want bent to a house style, which is what a
+prompt file is for. Stating a layout as `grounding()` also means `hasDomainGrounding` is true, so
+triage's single-feature veto cannot make a new project skip its plan.
+
+**`scaffold()` runs `git init`.** A project's first commit should be able to contain its first file,
+and after *"create a Python CLI"* nobody remembers until something is already lost. Guarded on `.git`
+being absent from the resolved root — which is also what stops it creating a nested repository inside
+one that already exists, since `projectRoot()` returns the enclosing repo's top level when there is
+one. It never throws: git may be missing and the directory may be read-only, and neither is a reason
+to lose the plan.
+
+**It delegates wholesale once the project exists.** The registry selects on project *type* and has no
+way to express "only when greenfield" — priority is the only lever — so this executor is also chosen
+for every Python, Node and Unity project already on disk, and hands all five methods straight back to
+`plan/base` unless `ctx.greenfield` is true. `grounding()` in particular returns the base's empty
+string there, so triage keeps its veto on an established project. `npm run check:plan` asserts both
+halves.
 
 ### Hard facts are not submitted to the judge
 
@@ -1124,6 +1171,15 @@ job, greppable, no regression suite needed to keep tracking how people phrase th
    debugging** · risks.
 5. The plan is pre-prompted into the turn as a `<plan>` block, the same mechanism as auto-research and
    auto-diagram, with instructions not to re-plan or re-explore what it already establishes.
+
+**An empty directory takes a different route through the same steps.** Detection reads the request when
+the tree is silent, so *"set up a Python CLI"* in an empty folder is a greenfield `python` project and
+`plan/greenfield` is the executor (see "An EMPTY directory is its own plan executor"): the survey says
+what is being created rather than what a Node/web project is missing, the grounding is that type's
+folder layout, the required deliverables are its manifest and entry point, and `scaffold()` runs
+`git init` before the plan is written. Step 3 is **skipped entirely** — two `explore` loops over an
+empty directory are two agentic loops that can only report "nothing found", and skipping them is most
+of why a "create a new project" plan no longer takes minutes.
 
 Two sections earn their place. **Dependencies** must state, for a new webview specifically, what serves
 it, what builds it, *what interface it binds* and how it is reached from another machine — the survey
@@ -4067,7 +4123,8 @@ src/
 │   │                   any config↔import mismatch — a declared handler that never runs looks
 │   │                   exactly like support
 │   ├── deliverables.ts glob-ish pattern → "is this file actually on disk"
-│   ├── plan/{base,arduino}/     index.ts + config.json
+│   ├── plan/{base,arduino,greenfield}/  index.ts + config.json — greenfield is an EMPTY
+│   │                   directory: the python / typescript / unity layout, and git init
 │   ├── qa/{base,arduino}/       index.ts + config.json
 │   └── present/{base,arduino}/  index.ts + config.json
 ├── plan/               plan mode for big cross-feature prompts:

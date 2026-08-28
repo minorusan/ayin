@@ -1,0 +1,7 @@
+{
+  "id": "greenfield",
+  "kind": "plan",
+  "projectTypes": ["python", "node", "unity"],
+  "priority": 100,
+  "description": "Empty-project planning — the target folder structure, manifest, test convention and observability story for a new Python, TypeScript or Unity project, and `git init` at project start. Delegates to the base executor for every project of these types that already exists."
+}

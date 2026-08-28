@@ -1,0 +1,15 @@
+TARGET LAYOUT — a typical Python project. Create these paths; do not invent a second convention.
+
+  pyproject.toml              PEP 621 metadata: name, version, dependencies, [project.scripts] entry
+                              point, hatchling as the build backend.
+  src/<package>/__init__.py   the package. <package> is the project name, lowercase, underscores.
+  src/<package>/__main__.py   the `python -m <package>` entry point.
+  tests/test_<thing>.py       pytest — one test that imports the package and asserts real behaviour.
+  .gitignore                  __pycache__/, *.pyc, .venv/, dist/, *.egg-info/, .pytest_cache/
+  README.md                   already created as a stub at the root — fill THAT file in.
+
+SRC LAYOUT, never a flat package at the root: a flat layout imports the working directory instead of
+the installed package, so packaging bugs stay hidden until release.
+
+The environment is a venv and the package is installed editable:
+  python -m venv .venv && .venv/bin/pip install -e .
