@@ -152,6 +152,39 @@ export function validateSteps(steps: PlanStep[], requiredPatterns: string[]): st
   return errors;
 }
 
+/**
+ * A STEP THAT TOUCHES A FILE AN EARLIER STEP TOUCHES DEPENDS ON IT. Write that down instead of asking.
+ *
+ * The ordering is already in the data: `files` says what each step opens, so two steps naming the same
+ * path have an order between them and the later one is the dependent. There is nothing here for a model
+ * to decide, and the model routinely does not bother — it lists `dependsOn: []` on a step that edits the
+ * very file the step above creates.
+ *
+ * The consequence is quiet, because `dependsOn` is not executed here — it is RENDERED, as "· after step
+ * 1", into the plan a coding agent then follows. A missing edge is a plan that does not state its own
+ * ordering, handed to an executor that has no other way to learn it.
+ *
+ * Borrowed from Maradel, where the same omission was a hard validation error and cost a 9.4-second
+ * repair pass on most plans to be told a fact already written in the arguments. The lesson transfers
+ * even though the shape does not: what a program can derive, a program should derive.
+ *
+ * What the model DID declare survives — a step may legitimately depend on one it shares no file with
+ * (a build must run after the code it compiles). Only backwards edges are added, so this cannot create
+ * a cycle: the validator's "a dependency must be an earlier step" stays true by construction.
+ */
+export function inferDependencies(steps: PlanStep[]): PlanStep[] {
+  return steps.map((s) => {
+    const mine = new Set(s.files.map((f) => f.trim()).filter(Boolean));
+    if (mine.size === 0) return s;
+    const earlier = steps
+      .filter((o) => o.id < s.id && o.files.some((f) => mine.has(f.trim())))
+      .map((o) => o.id);
+    if (earlier.length === 0) return s;
+    const merged = [...new Set([...s.dependsOn, ...earlier])].sort((a, b) => a - b);
+    return merged.length === s.dependsOn.length ? s : { ...s, dependsOn: merged };
+  });
+}
+
 /** The plan as markdown: numbered, each step carrying what it touches, what to do, and its proof. */
 export function renderPlan(steps: PlanStep[], gaps: string[], unresolved: string[]): string {
   const lines: string[] = ['## Steps', ''];
@@ -248,6 +281,24 @@ export function actionablePlanGraph(input: ActionablePlanInput) {
     };
   };
 
+  /**
+   * Every node, timed to the log.
+   *
+   * "Why did planning take a minute" should be answerable by the thing that took the minute, not by
+   * someone reconstructing it from wall clocks. Borrowed from Maradel, where exactly this turned "the
+   * plan is slow" into "60 of the 98 seconds are one embedding loop" in a single run.
+   */
+  const timed =
+    <T, R>(name: string, fn: (s: T) => R | Promise<R>) =>
+    async (s: T): Promise<R> => {
+      const t0 = Date.now();
+      try {
+        return await fn(s);
+      } finally {
+        log('INFO', 'plan_phase', { phase: name, ms: String(Date.now() - t0) });
+      }
+    };
+
   const draft = async (s: typeof PlanState.State) => {
     setActivityDetail('drafting the actionable plan');
     const raw = await llmChat([{
@@ -277,7 +328,14 @@ export function actionablePlanGraph(input: ActionablePlanInput) {
   };
 
   /** The only judge of a plan in this file, and it is a program. */
-  const validate = (s: typeof PlanState.State) => ({ errors: validateSteps(s.steps, s.requiredPatterns) });
+  /**
+   * It NORMALISES before it judges — see `inferDependencies`. An ordering the `files` already imply is
+   * not a disagreement to take to a model.
+   */
+  const validate = (s: typeof PlanState.State) => {
+    const steps = inferDependencies(s.steps);
+    return { steps, errors: validateSteps(steps, s.requiredPatterns) };
+  };
 
   const repair = async (s: typeof PlanState.State) => {
     setActivityDetail(`repairing the plan (${s.errors.length} problem(s) the validator found)`);
@@ -308,11 +366,11 @@ export function actionablePlanGraph(input: ActionablePlanInput) {
   };
 
   return new StateGraph(PlanState)
-    .addNode('gather', gather)
-    .addNode('draft', draft)
-    .addNode('validate', validate)
-    .addNode('repair', repair)
-    .addNode('render', render)
+    .addNode('gather', timed('gather', gather))
+    .addNode('draft', timed('draft', draft))
+    .addNode('validate', timed('validate', validate))
+    .addNode('repair', timed('repair', repair))
+    .addNode('render', timed('render', render))
     .addEdge(START, 'gather')
     .addEdge('gather', 'draft')
     .addEdge('draft', 'validate')

@@ -60,18 +60,53 @@ g.guardBeginTurn();
  * The old ladder refused the second identical read and killed the third for the turn, so "read it again to
  * check the fix" was answered with "use the result already in your context" — the result from before the
  * fix. A repeat read costs milliseconds; a refused one costs the fix. So reads are annotated and counted,
- * never blocked, and the note names the cache.
+ * never blocked.
+ *
+ * SINCE 2026-08-28 A REPEAT WITH NOTHING CHANGED IS SERVED FROM THE ARTIFACT rather than re-run. Reaching
+ * that branch means the guard has already proven the answer cannot have moved — the witness is identical,
+ * no mutation has been noted, nothing has read the target since — so the tool would return exactly what is
+ * already on disk. It used to run anyway and append "nothing it reads has changed since the first one",
+ * which is a true sentence that costs a 200 KB grep.
+ *
+ * It also settles the cache-versus-file problem the old note had to warn around: the two are the same
+ * thing here, provably, so the model is handed the answer instead of a choice.
  */
 const rf = { path: join(TMP, 'x.ts') };
 ok(g.guardCheck('read_file', rf).allow === true, 'first read runs');
 const second = g.guardCheck('read_file', rf);
-ok(second.allow === true && /repeat 2/.test(second.label ?? ''), 'the second identical read RUNS, labelled as a repeat', second.label ?? '');
-ok(/CURRENT state/.test(second.note ?? '') && /cached file/.test(second.note ?? ''),
-  'its note says this call is how to get the current state, and where a scrolled-away result is cached',
+ok(second.allow === true && /repeat 2/.test(second.label ?? ''), 'the second identical read is allowed, labelled as a repeat', second.label ?? '');
+ok(second.serveCached === true, 'and is SERVED from the artifact rather than re-run — nothing it reads has changed', second.label ?? '');
+ok(/without running the tool again/.test(second.note ?? ''),
+  'its note says so, and says a write is what makes the next call run for real',
   (second.note ?? '').slice(0, 80));
+ok(/edit first/.test(second.note ?? ''), 'so "read it again to check my fix" still has an answer that works');
 const reads = Array.from({ length: 10 }, () => g.guardCheck('read_file', rf));
-ok(reads.every((r) => r.allow), 'a tenth identical read still runs — nothing read-only is ever dead for the turn');
-ok(/Answer with what you have/.test(reads[9].note ?? ''), 'but by then the note says so plainly', (reads[9].note ?? '').slice(-60));
+ok(reads.every((r) => r.allow), 'a tenth identical read is still allowed — nothing read-only is ever dead for the turn');
+ok(reads.every((r) => r.serveCached), 'and every one of them is served, not run');
+
+/**
+ * A POLL IS THE ONE QUESTION A CACHE MUST NEVER ANSWER. "Is it finished yet" served from the last
+ * answer is a loop that can never end, so `POLLABLE` keeps the old ladder — rate-limited and capped.
+ */
+/**
+ * AND THE AGENT HONOURS IT. A decision no caller acts on is a comment. Source assertions, in the style
+ * this file already uses for the retry guard: the loop must look the artifact up, must fall through to a
+ * real run when there is none, and must still record the call.
+ */
+const agentSrc = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
+const servedAt = agentSrc.indexOf('if (guard.serveCached)');
+ok(servedAt > 0, 'the agent loop acts on serveCached');
+const servedBlock = agentSrc.slice(servedAt, servedAt + 1400);
+ok(/artifactFor\(/.test(servedBlock), 'it looks the earlier result up rather than inventing one');
+ok(/log\('INFO', 'tool_cache_miss_running'/.test(agentSrc),
+  'and FALLS THROUGH to a real run when there is no artifact — an early session, a pruned folder, a result never saved');
+ok(/noteRanCall\(/.test(servedBlock),
+  'a served call still reaches the ledger — a saving the operator cannot see is indistinguishable from a tool that silently did not run');
+
+const pollArgs = { taskId: 't1' };
+g.guardCheck('task_status', pollArgs);
+const polled = g.guardCheck('task_status', pollArgs);
+ok(!polled.serveCached, 'a poll is never served from cache — it exists to ask whether the world moved');
 ok(!/read_file/.test(g.guardDirective()), 'a read is never written into the blocked list');
 
 // A tool with side effects keeps the ladder: `bash` twice in a row is the loop this guard exists to close.
@@ -2277,8 +2312,24 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
   const guardEnd = mgrSrc.indexOf('emitLlmCall(', guardAt);
   const guard = mgrSrc.slice(guardAt, guardEnd > guardAt ? guardEnd : guardAt + 1400);
   ok(!/while|for \(/.test(guard), 'ONE retry — a guard that can loop is worse than the behaviour it corrects');
-  ok(/if \(retry\.trim\(\)\) reply = retry;/.test(guard),
+  /**
+   * THE SHAPE, NOT THE SPELLING.
+   *
+   * This asserted the literal text `if (retry.trim()) reply = retry;` and went RED the moment the
+   * guard was refactored — `stripLeakedReasoning` was added and the local renamed to `cleaned`. The
+   * INVARIANT was untouched: an empty retry still keeps the original reply. So the gate failed on a
+   * change that could not break what the gate is for, and a red gate is worse than no gate, because
+   * from then on nobody can tell new breakage from the failure everyone has learned to ignore.
+   *
+   * Matching `<ident>.trim()) reply = <ident>` tests the rule — the assignment is conditional on the
+   * retry being non-empty — and survives any renaming of the local. There are ~88 source-text
+   * assertions across these gates; every one of them is a refactor away from this, and each should be
+   * written as a shape or an invariant rather than a quotation when it is next touched.
+   */
+  ok(/if \((\w+)\.trim\(\)\) reply = \1;/.test(guard),
     'and an EMPTY retry keeps the original — replacing a bad reply with nothing is not an improvement');
+  ok(!/^\s*reply = (?!.*trim)/m.test(guard),
+    'nothing overwrites the reply unconditionally — that is the same rule, from the other side');
 
   // ── slash-only tools: the operator may run them, the agent may not ─────────
   {
