@@ -7,7 +7,8 @@
  */
 
 import blessed from 'blessed';
-import { renderMarkdown, inlineFormat } from '../../markdown.js';
+import { inlineFormat, renderMarkdownWrapped } from '../../markdown.js';
+import { wrapPlain } from '../../dialog.js';
 import { HEADLESS, noopBox } from '../headless.js';
 import { screen, render } from '../screen.js';
 import { bleachTags, bleached, blend, theme } from '../theme.js';
@@ -23,6 +24,41 @@ import { launchTip } from '../../help.js';
  */
 const GUTTER = '  ';
 const TOOL_INDENT = '    ';
+
+/**
+ * THE TRANSCRIPT WRAPS ITSELF. Blessed cannot, because blessed does not know about the gutter.
+ *
+ * A box with `tags` wraps at its own edge, and every wrapped continuation line starts at column 0 —
+ * while the line it continues started two to six columns in, behind the speaker glyph or TOOL_INDENT.
+ * On a wide terminal a paragraph rarely reaches the edge and nobody notices. On a phone every
+ * paragraph does, and the left margin alternates down the whole screen.
+ *
+ * So the width is computed here and every line type is wrapped to what is actually available before
+ * its gutter goes on. `renderMarkdownWrapped` already existed for exactly this and was used only by
+ * the dialog; the transcript was calling the unwrapped `renderMarkdown`.
+ *
+ * `screen.width - 3` is the box's usable width — the same figure the OBJECTIVE card computes: one
+ * column of padding each side plus the scrollbar. Read at DRAW time, so a resize reflows (the screen's
+ * `resize` handler already calls `redraw`).
+ */
+function usableCols(): number {
+  return Math.max(12, Number(screen.width ?? 80) - 3);
+}
+
+/**
+ * Hard-wrap PREFORMATTED text — tool output, code, JSON, diffs — continuation marked with a arrow.
+ *
+ * Deliberately not `wrapPlain`: that reflows on whitespace, which is right for prose and destroys an
+ * aligned table or a diff. This only breaks a line genuinely too long to fit, and marks the break so a
+ * continuation is not misread as a new record.
+ */
+function wrapPre(line: string, width: number): string[] {
+  const w = Math.max(8, Math.floor(width) || 8);
+  if (line.length <= w) return [line];
+  const out: string[] = [line.slice(0, w)];
+  for (let i = w; i < line.length; i += w - 2) out.push('\u21B3 ' + line.slice(i, i + w - 2));
+  return out;
+}
 /**
  * How far mid-turn prose is washed toward `subtle`. Read on a real terminal against the answer above it:
  * enough that the eye goes to the answer first, not so much that the words have to be looked for.
@@ -363,7 +399,9 @@ export class ChatLog {
 
       if (msg.role === 'user') {
         lines.push('', ''); // a new exchange starts — the widest gap in the transcript
-        for (const line of msg.content.split('\n')) {
+        // Wrapped like everything else: a pasted paragraph is the commonest long line on a phone,
+        // and its continuation used to start at column 0 while the glyph sat two columns in.
+        for (const line of wrapPlain(msg.content, usableCols() - 2)) {
           lines.push(`{${theme.accent}-fg}▌{/} {bold}${escapeBlessedTags(line)}{/bold}`);
         }
       } else if (msg.role === 'assistant' && msg.interim) {
@@ -379,7 +417,7 @@ export class ChatLog {
          * paper. Hues survive, contrast does not — which is what bleach does to a printed page.
          */
         lines.push('');
-        const rendered = renderMarkdown(msg.content).split('\n');
+        const rendered = renderMarkdownWrapped(msg.content, usableCols() - TOOL_INDENT.length - 2, wrapPlain);
         rendered.forEach((line, i2) => {
           const glyph = i2 === 0 ? `{${bleached(theme.accent, 0.5)}-fg}\u25E6{/} ` : '  ';
           lines.push(`${TOOL_INDENT}${glyph}{${bleached(theme.text, INTERIM_BLEACH)}-fg}${bleachTags(line, INTERIM_BLEACH)}{/}`);
@@ -393,7 +431,7 @@ export class ChatLog {
           const wm = this.goalWatermark();
           if (wm) lines.push(wm);
         }
-        const rendered = renderMarkdown(msg.content).split('\n');
+        const rendered = renderMarkdownWrapped(msg.content, usableCols() - GUTTER.length, wrapPlain);
         rendered.forEach((line, i2) => {
           lines.push(i2 === 0 ? `{${theme.accent}-fg}◉{/} ${line}` : `${GUTTER}${line}`);
         });
@@ -408,8 +446,10 @@ export class ChatLog {
         // card from the tail of the current one — separating on every tool message would split cards
         // down the middle. The ▸ header is the card boundary: blank before it, nothing before a result.
         if (startsToolCard(msg.content)) lines.push('');
-        for (const line of msg.content.split('\n')) {
-          lines.push(`${TOOL_INDENT}${line}`);
+        for (const raw of msg.content.split('\n')) {
+          for (const line of wrapPre(raw, usableCols() - TOOL_INDENT.length)) {
+            lines.push(`${TOOL_INDENT}${line}`);
+          }
         }
         if (msg.cost) lines.push(`${TOOL_INDENT}{${theme.subtle}-fg}${msg.cost}{/}`);
       } else {
@@ -419,7 +459,7 @@ export class ChatLog {
         // line, every `/set` confirmation and every "not configured, run X" instruction were all but
         // invisible. A notice nobody can read is not quiet, it is missing. Quietness comes from the `·`
         // gutter and the lack of a speaker glyph; it does not need to come from contrast too.
-        msg.content.split('\n').forEach((line, i) => {
+        wrapPlain(msg.content, usableCols() - GUTTER.length - 2).forEach((line, i) => {
           lines.push(`${GUTTER}{${theme.subtle}-fg}${i === 0 ? '· ' : '  '}${line}{/}`);
         });
       }
