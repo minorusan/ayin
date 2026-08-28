@@ -167,9 +167,14 @@ console.log('\nthe repeat guard must not block the recovery the read guard presc
   const first = guardCheck('str_replace', params);
   ok(first.allow, 'the first edit attempt is allowed (readGuard is what refuses it)');
 
+  // THE LOOP IS CLOSED BY THE GUARD THAT OWNS IT, not by this one. `requireRead` lives inside
+  // `str_replace`/`write_file` and refuses an edit to unread lines every time, however many times it is
+  // asked — verified directly: two identical attempts with no read between them both come back
+  // "refused — you have not read". The repeat guard was a second fence around the same hole, and per
+  // the comment above it was that second fence which broke a live run.
   const repeatNoRead = guardCheck('str_replace', params);
-  ok(!repeatNoRead.allow, 'an identical retry with NOTHING in between is still refused — the loop case stays closed',
-    repeatNoRead.label);
+  ok(repeatNoRead.allow && /repeat/.test(repeatNoRead.label ?? ''),
+    'the repeat guard lets the prescribed retry through and merely labels it', repeatNoRead.label);
 
   guardNoteRead([f]);
   const afterRead = guardCheck('str_replace', params);
@@ -177,7 +182,9 @@ console.log('\nthe repeat guard must not block the recovery the read guard presc
   ok(/READ the file since/.test(afterRead.note ?? ''), '...and the note says why', (afterRead.note ?? '').slice(0, 64));
 
   const againNoRead = guardCheck('str_replace', params);
-  ok(!againNoRead.allow, 'and a further identical call with no new read is refused again', againNoRead.label);
+  ok(againNoRead.allow && /repeat/.test(againNoRead.label ?? ''),
+    'and a further identical call is still only labelled — readGuard, not this, decides whether it may edit',
+    againNoRead.label);
 }
 
 console.log('\nunexecutedCallText — a call in an invented format is not a finished answer');

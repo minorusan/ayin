@@ -1518,8 +1518,24 @@ than some of each session's files, so a surviving session keeps everything it ha
 legitimately searches again — but it now folds each call's FILE into a session tail (12 entries, newest per
 call) rendered under the current turn's list. Dropping it at the boundary meant "read the controller I
 inspected two questions ago" had nowhere to point, and a 6-second inspect was re-run for a file already on
-disk. Only what is needed to fetch the result is carried: the call and its file, never the gist, which
+disk. Only what is needed to fetch the result is carried: the call and its file, never the output, which
 belonged to the turn that asked.
+
+### The ledger carries what each call RETURNED, not that it ran
+
+It used to keep one line per call: the first non-empty line of the output, clipped to 100 characters. That
+is the entire memory of a tool call once the window's compression has eaten the result it is summarising,
+and it is nearly useless — the first ten lines of a failing `pytest` are its banner.
+
+Now every call this turn is listed **with the first ten lines of its output** (160 chars per line), spent
+from a **12,000-character budget, newest first**: the newest calls carry their heads, and once the budget
+is gone the older ones degrade to their first line. Every call still appears either way, and the file
+holding the full output is still named. Measured on a 30-call turn: all 30 listed, the newest 18 carrying
+heads, ~4k tokens — about 6% of a 65k window, in exchange for the re-runs it removes the reason for.
+
+The head is the first ten lines, not the last, which is a real trade: a failing command puts its summary at
+the END (`clipForWindow` keeps the tail for exactly that reason, and Maradel's `pileDigest` keeps the last
+five lines). The full output is one `read_file` away by design.
 
 ## Tool guard (`tool-guard.ts`)
 
@@ -1545,11 +1561,39 @@ Everything with a side effect keeps the ladder:
 | Attempt | Read-only tool | Side-effecting tool | Pollable tool (`status`) |
 |---|---|---|---|
 | 1st | runs | runs | runs |
-| 2nd identical | runs + "identical call 2, here is where the cached result is" | skipped, told the result is already in context | runs + `[POLLING NOTICE]`, throttled under `pollMinIntervalMs` |
-| 3rd identical | runs + note | **BLOCKED for the turn** | runs, still throttled |
-| 9th identical | runs + "answer or change approach" | — | — |
+| 2nd identical | runs + "identical call 2, here is where the cached result is" | runs + `[REPEAT 2]`, pointed at the ledger | runs + `[POLLING NOTICE]`, throttled under `pollMinIntervalMs` |
+| 3rd identical | runs + note | runs + `[REPEAT 3]` | runs, still throttled |
+| 9th identical | runs + "answer or change approach" | runs + note | — |
 | past `pollMaxPerTurn` | — | — | **BLOCKED for the turn** |
 | after a user **deny** | **BLOCKED immediately, for the turn** | same | same |
+
+### A repeat is a symptom, and refusing it treated the symptom
+
+Nothing with a side effect is refused for repeating any more, and the reason is upstream of this file. A
+model repeats a call when it **cannot see what the call returned**: the result went into the history, the
+history was compressed to fit the window, and what survived in the ledger was the first non-empty line of
+the output clipped to a hundred characters — so `bash(pytest …)` was remembered as
+`============ test session starts ============`, which says pytest ran and nothing about what it found.
+Refused the repeat, the model had no way to remember the answer *and* no way to fetch it, so it guessed,
+gave up, or reported work it had not done.
+
+The fix is the ledger carrying real output (below). What is left here is a **note** — you already have
+this, here is where the rest of it lives — attached to a call that runs anyway. Two further reasons the
+ban was the wrong instrument:
+
+- **Some repeats are the point.** "Has the server come up", "does the test pass now", "did that write
+  land" are the same call twice deliberately, and only the second answer is useful. A guard cannot tell
+  those from a loop without knowing what changed, and it does not.
+- **The loop it was closing is closed by the guard that owns it.** `requireRead` lives inside
+  `write_file`/`str_replace` and refuses an edit to unread lines every time it is asked — verified
+  directly, two identical attempts with no read between them both come back `refused — you have not
+  read`. The repeat ladder was a second fence around the same hole, and per `check:readguard`'s own
+  comment it was that second fence which broke a live run: `readGuard` prescribes "read it, then make the
+  same call again", and the repeat guard blocked the prescribed retry, so the edit never landed while the
+  turn reported *Done*.
+
+A **denial** is still refused on sight for the whole turn, and the poll cap still applies. Those are
+decisions about permission and cost, not about freshness.
 
 The note is worded to send the model to the FILE, not to the cache: told the cache held the result, the
 first live run of this policy read `t3-read_file.txt` — a snapshot of what that call returned — when what
@@ -4250,7 +4294,8 @@ src/
 │                       diagram.ts (validated PlantUML) · send-push.ts ·
 │                       arduino-{db,components-data,explain,diagram,toolchain}.ts
 │                       (toolchain.ts is the one place that knows arduino-cli and PWM pin maps)
-├── tool-guard.ts       per-turn repeat/deny/poll policy: warn → BLOCK → say so in the system prompt
+├── tool-guard.ts       per-turn deny/poll policy + repeat NOTES (a repeat is never refused; the
+│                       ledger carries the earlier answer instead)
 ├── deferral.ts         "the fix is to locate X" is not an answer — one nudge, no LLM
 ├── edit-truth.ts       per-turn edit ledger: a REPORTED change with nothing written, and repeated
 │                       misses on one file. Unconditional (QA is opt-in and declines here)

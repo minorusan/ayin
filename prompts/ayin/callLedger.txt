@@ -1,5 +1,7 @@
-Calls already made this turn. Each one has an answer — above, or compressed out of the history above.
-Repeating a read returns what you already have; the cached file is the cheaper way back to it.
+Every call made this turn, in order, with the head of what each returned — including the ones whose
+results the history above has since compressed away. Use these answers rather than running a call again.
+When you genuinely need it again — something changed, or you need the part not shown here — run it; the
+full output of any call is also a file you can read.
 {{CACHE}}
 {{CALLS}}
 {{EARLIER}}

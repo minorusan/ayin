@@ -109,15 +109,30 @@ const polled = g.guardCheck('task_status', pollArgs);
 ok(!polled.serveCached, 'a poll is never served from cache — it exists to ask whether the world moved');
 ok(!/read_file/.test(g.guardDirective()), 'a read is never written into the blocked list');
 
-// A tool with side effects keeps the ladder: `bash` twice in a row is the loop this guard exists to close.
+/**
+ * A REPEAT IS ANNOTATED, NEVER REFUSED — and this gate used to assert the opposite.
+ *
+ * The ladder (skip the second identical call, block the third for the turn) was closing a real loop, but
+ * it was treating a symptom. A model repeats a call when it cannot see what the call returned: the result
+ * went into the history, the history was compressed to fit the window, and what survived in the ledger
+ * was the first line of the output clipped to a hundred characters. Refused the repeat, it had no way to
+ * remember the answer AND no way to fetch it.
+ *
+ * The fix is upstream — the ledger now carries the first ten lines of EVERY call's output for the whole
+ * turn (`agent.ts#renderCallLedger`) — so the note here can say "you already have this, and here is where
+ * the rest of it lives" and let the call run. Some repeats are also genuinely the point: "has the server
+ * come up", "does the test pass now", "did that write land" are the same call twice on purpose, and only
+ * the second answer is useful.
+ */
 const buildCmd = { command: 'npm run build' };
 ok(g.guardCheck('bash', buildCmd).allow === true, 'first bash runs');
 const bashSecond = g.guardCheck('bash', buildCmd);
-ok(bashSecond.allow === false && /identical repeat/.test(bashSecond.label ?? ''), 'the second identical command is skipped');
+ok(bashSecond.allow === true && /repeat 2/.test(bashSecond.label ?? ''), 'the second identical command RUNS, labelled a repeat', bashSecond.label ?? '');
 const bashThird = g.guardCheck('bash', buildCmd);
-ok(bashThird.allow === false && /blocked/.test(bashThird.label ?? ''), 'the third is BLOCKED for the turn');
-ok(/BLOCKED/.test(g.guardCheck('bash', buildCmd).note ?? ''), 'the block persists after it is set');
-ok(/bash/.test(g.guardDirective()), 'and is stated in the system-prompt directive');
+ok(bashThird.allow === true && /repeat 3/.test(bashThird.label ?? ''), 'so does the third — the guard never bans an identical call');
+ok(/REPEAT 3/.test(bashThird.note ?? ''), 'and it is told it is a repeat rather than being silently re-run');
+ok(/call ledger/.test(bashThird.note ?? ''), 'the note points at where the earlier answer already is');
+ok(!/bash/.test(g.guardDirective()), 'a repeat is NEVER written into the blocked list — only a denial is');
 
 // A DRIVER'S REPEAT IS ITS PURPOSE. `entangle op=next` returns a different type every time — the answer is
 // a function of what has landed. The repeat guard read it as a loop and blocked it, and the run died: the
@@ -128,7 +143,8 @@ ok(drive.every((d) => !/POLLING/.test(d.note ?? '')), 'nor rate-limited: a poll 
 const statusFirst = g.guardCheck('entangle', { op: 'status' });
 g.guardCheck('entangle', { op: 'status' });
 const statusThird = g.guardCheck('entangle', { op: 'status' });
-ok(statusFirst.allow && !statusThird.allow, 'other entangle ops are still guarded normally');
+ok(statusFirst.allow && statusThird.allow && /repeat/.test(statusThird.label ?? ''),
+  'other entangle ops run too, and are merely labelled', statusThird.label ?? '');
 
 /**
  * A REPEAT IS NOT A LOOP WHEN THE WORLD MOVED.
@@ -144,7 +160,8 @@ const fresh = { path: freshFile, content: 'x' };
 g.guardCheck('write_file', fresh);
 g.guardCheck('write_file', fresh);
 const blockedWrite = g.guardCheck('write_file', fresh);
-ok(blockedWrite.allow === false, 'an unchanged file still blocks the third identical WRITE');
+ok(blockedWrite.allow === true && /repeat/.test(blockedWrite.label ?? ''),
+  'a third identical WRITE to an unchanged file runs, and says it is a repeat', blockedWrite.label ?? '');
 writeFileSync(freshFile, 'export const a = 2;\nexport const b = 3;\n');   // mtime AND size move
 const afterEdit = g.guardCheck('write_file', fresh);
 ok(afterEdit.allow === true && /target changed/.test(afterEdit.label ?? ''),
@@ -152,15 +169,15 @@ ok(afterEdit.allow === true && /target changed/.test(afterEdit.label ?? ''),
   `${afterEdit.allow} ${afterEdit.label ?? ''}`);
 ok(!/guard-fresh/.test(g.guardDirective()), 'and it is no longer named as blocked in the system prompt');
 const againUnchanged = g.guardCheck('write_file', fresh);
-ok(againUnchanged.allow === false,
-  'the ladder restarts rather than resetting the policy: unchanged repeats are refused again');
+ok(againUnchanged.allow === true && /repeat/.test(againUnchanged.label ?? ''),
+  'and once the file stops changing the label goes back to naming the repeat', againUnchanged.label ?? '');
 
 // A directory-scoped call has no single file to witness, so any write is the signal. Shown on a tool that
 // HAS a ladder, since a grep no longer has one to lift.
 const dirCall = { path: TMP, content: 'y' };
 g.guardCheck('write_file', dirCall);
 g.guardCheck('write_file', dirCall);
-ok(g.guardCheck('write_file', dirCall).allow === false, 'a repeat with nothing written since is blocked');
+ok(/repeat/.test(g.guardCheck('write_file', dirCall).label ?? ''), 'a repeat with nothing written since is named as one');
 g.guardNoteMutation('str_replace', [join(TMP, 'other.ts')], 'str_replace|path=other.ts');
 const afterWrite = g.guardCheck('write_file', dirCall);
 ok(afterWrite.allow === true && /files written since/.test(afterWrite.label ?? ''),
@@ -178,8 +195,10 @@ g.guardCheck('bash', build);
 g.guardNoteMutation('bash', [], buildKey);          // as the loop does after every non-read tool
 g.guardCheck('bash', build);
 g.guardNoteMutation('bash', [], buildKey);
-ok(g.guardCheck('bash', build).allow === false, 'a repeated identical command is blocked, its own writes notwithstanding');
-ok(g.guardCheck('bash', build).allow === false, 'and stays blocked no matter how many times it ran');
+// The self-exclusion still matters: without it a bash call's own epoch bump would make every repeat look
+// like a fresh question ("files written since"), and the model would never be told it was repeating.
+ok(/repeat/.test(g.guardCheck('bash', build).label ?? ''),
+  'a repeated identical command is still NAMED a repeat, its own writes notwithstanding', g.guardCheck('bash', build).label ?? '');
 g.guardNoteMutation('write_file', [join(TMP, 'fix.ts')], 'write_file|path=fix.ts');
 ok(g.guardCheck('bash', build).allow === true, 're-running it AFTER an edit is a different question, and runs');
 
@@ -203,7 +222,7 @@ ok(/DENIED/.test(g.guardCheck('bash', denied).note ?? ''), 'a denied call is ref
 g.guardBeginTurn();
 const cmd = { command: 'curl -s http://127.0.0.1:1/' };
 g.guardCheck('bash', cmd); g.guardCheck('bash', cmd);
-ok(/sleep/.test(g.guardCheck('bash', cmd).note ?? ''), 'a blocked bash call is told its wait-escape-hatch');
+ok(/REPEAT/.test(g.guardCheck('bash', cmd).note ?? ''), 'a repeated bash call carries the repeat notice');
 ok(!/read_file/.test(g.guardDirective()), 'a new turn starts with a clean slate');
 
 // ── search tools: the model's patterns must actually be honoured ─────

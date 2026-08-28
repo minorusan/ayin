@@ -1116,7 +1116,7 @@ const LOOP_NUDGE_EVERY = 12;
  * it is rebuilt into the volatile block each round rather than living in the history at all, which is
  * the whole point: the cheapest thing in this file, and the only one that cannot be thrown away.
  */
-interface RanCall { tool: string; params: string; ok: boolean; gist: string; file: string; bytes: number }
+interface RanCall { tool: string; params: string; ok: boolean; head: string[]; file: string; bytes: number }
 const callLedger: RanCall[] = [];
 
 /**
@@ -1154,24 +1154,38 @@ export function resetSessionLedger(): void {
 }
 
 /**
- * Lines rendered. The full ledger is kept — only the RENDER is bounded, and by the tail, because "what
- * did I just try" is asked far more often than "what did I try first". A 300-call turn would otherwise
- * put 13k tokens of its own bookkeeping in front of the model, which is the failure this fixes in
- * reverse.
+ * EVERY call this turn is listed. Only how much of each OUTCOME is shown is bounded.
+ *
+ * It used to keep one line — the first non-empty line of the output, clipped to 100 characters — and
+ * that is the whole memory of a tool call once the window's compression has eaten the result it is
+ * summarising. So the ledger said `bash(pytest …) → ============ test session starts ===========`,
+ * which tells the model that pytest ran and nothing whatever about what it found. A model that cannot
+ * see what a call returned has one way to find out, and it is to run the call again — which the guard
+ * then refused, so it could neither remember the answer nor fetch it.
  */
-const LEDGER_LINES = 60;
-/** Enough of an outcome to decide whether a repeat could help. Not enough to be a second copy of it. */
-const LEDGER_GIST_CHARS = 100;
+const LEDGER_HEAD_LINES = 10;
+/** Per line, so one enormous line cannot eat the whole budget. */
+const LEDGER_HEAD_CHARS = 160;
+/**
+ * The TOTAL the heads may spend, newest first. A 30-call turn at ten lines each is ~10k tokens of
+ * bookkeeping, which is the opposite failure — so the newest calls carry their heads, and once the
+ * budget is gone the older ones degrade to their first line. Every call still appears either way.
+ */
+const LEDGER_HEAD_BUDGET_CHARS = 12_000;
 
 export function noteRanCall(tool: string, params: string, ok: boolean, outcome: string): void {
-  const gist = outcome.split('\n').map((l) => l.trim()).find((l) => l.length > 0) ?? '';
+  const head = outcome
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim().length > 0)
+    .slice(0, LEDGER_HEAD_LINES)
+    .map((l) => (l.length > LEDGER_HEAD_CHARS ? `${l.slice(0, LEDGER_HEAD_CHARS - 1)}\u2026` : l));
   // The FULL result is on disk. Naming the file here is what turns the ledger from "this ran" into "this
   // ran and here is the answer" — the difference between the model knowing a call happened and being
   // able to use what it returned after the history carrying it was compressed away.
   const cached = artifactFor(tool, params);
   callLedger.push({
-    tool, params, ok,
-    gist: gist.length > LEDGER_GIST_CHARS ? `${gist.slice(0, LEDGER_GIST_CHARS - 1)}\u2026` : gist,
+    tool, params, ok, head,
     file: cached ? `${cached.id}-${cached.tool}.txt` : '',
     bytes: cached?.bytes ?? 0,
   });
@@ -1180,16 +1194,31 @@ export function noteRanCall(tool: string, params: string, ok: boolean, outcome: 
 /** The ledger as prompt text, or '' when nothing has run yet. Exported for `check:window`. */
 export function renderCallLedger(): string {
   if (callLedger.length === 0 && earlierCalls.length === 0) return '';
-  const shown = callLedger.slice(-LEDGER_LINES);
-  const omitted = callLedger.length - shown.length;
-  const lines = shown.map((c, i) => {
-    const n = omitted + i + 1;
-    // The file, when there is one, goes at the END of the line: the outcome is what decides whether to
-    // read it at all, and a reader who has decided needs the name last, not first.
+  // EVERY call this turn, and the newest ones carry what they returned. The head budget is spent from
+  // the newest backwards because "what did the thing I just ran say" is the question being answered;
+  // a call whose head no longer fits still gets its line, its first line and its file.
+  const withHead = new Set<number>();
+  let spent = 0;
+  for (let i = callLedger.length - 1; i >= 0; i--) {
+    const cost = callLedger[i].head.reduce((n, l) => n + l.length + 1, 0);
+    if (spent + cost > LEDGER_HEAD_BUDGET_CHARS) break;
+    spent += cost;
+    withHead.add(i);
+  }
+
+  const lines = callLedger.map((c, i) => {
     const where = c.file ? `  [${humanBytes(c.bytes)} → ${c.file}]` : '';
-    return `${n}. ${c.tool}(${c.params}) \u2192 ${c.ok ? '' : 'FAILED: '}${c.gist || (c.ok ? 'ok' : 'no detail')}${where}`;
+    const status = c.ok ? '' : 'FAILED: ';
+    const first = c.head[0] ?? (c.ok ? 'ok' : 'no detail');
+    const call = `${i + 1}. ${c.tool}(${c.params})${where}`;
+    // Indented under the call, so a reader — and a model — can tell the output from the next call.
+    if (withHead.has(i) && c.head.length) {
+      const more = c.bytes && c.file ? `\n     … full output in ${c.file}` : '';
+      return `${call}\n   ${status}${c.head.map((l) => l).join('\n   ')}${more}`;
+    }
+    return `${call}\n   ${status}${first}`;
   });
-  const head = omitted > 0 ? [`[${omitted} earlier call(s) not listed]`, ...lines] : lines;
+  const head = lines;
   const earlier = earlierCalls.length
     ? `\nFrom earlier turns this session — the answers are still on disk, read the file rather than re-running:\n`
       + earlierCalls.map((c) => `  ${c.file}  ${c.tool}(${c.params})  ${humanBytes(c.bytes)}`).join('\n')
