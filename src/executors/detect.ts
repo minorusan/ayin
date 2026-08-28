@@ -26,6 +26,7 @@
 
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { log } from '../log.js';
 import { projectRoot } from '../qa/probes.js';
 import type { ProjectContext, ProjectType } from './types.js';
 
@@ -57,12 +58,61 @@ function findFile(root: string, re: RegExp, maxDepth = 4): string | null {
 }
 
 /**
+ * Root-level markers only — "is THIS directory a project", never "does it contain one". No walk.
+ *
+ * Separate from `fromTree` because the two questions have different answers and only one of them is
+ * safe to ask about somebody else's directory.
+ */
+function hasShallowMarker(dir: string): boolean {
+  const has = (p: string) => existsSync(join(dir, p));
+  return has('platformio.ini') || has('sketch.yaml') || (has('Assets') && has('ProjectSettings'))
+    || has('pubspec.yaml') || has('Cargo.toml') || has('go.mod') || has('package.json')
+    || has('pyproject.toml') || has('requirements.txt');
+}
+
+/** Two is a pattern. One project beside a `docs/` folder is a project with a docs folder. */
+const CONTAINER_MIN_PROJECTS = 2;
+
+/**
+ * A DIRECTORY THAT HOLDS PROJECTS IS NOT ITSELF A PROJECT, and asking the tree what type it is
+ * produces an answer that is not merely useless but confidently wrong.
+ *
+ * Measured, from a real session: `~/…/Projects` holds ten unrelated things. The `.ino` search below
+ * walks four levels, found a sibling's `Arduino/2/Janitor/Janitor.ino`, and declared the container an
+ * Arduino project — so *"build a Python website in testwebsite-2"* was planned with the Arduino
+ * executor, the component catalog and the sketch-naming rule. The evidence line said which file
+ * decided it, which is the only reason this took minutes to find rather than an afternoon.
+ *
+ * The test is deliberately about the CHILDREN and never about depth: a monorepo whose root carries its
+ * own `package.json` answers on the line below before this is ever consulted, and a container by
+ * definition has no marker of its own. Cheap — one `readdirSync` plus a handful of `existsSync`.
+ */
+export function isProjectContainer(root: string): boolean {
+  if (hasShallowMarker(root)) return false;
+  let entries: string[];
+  try {
+    entries = readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return false;
+  }
+  let found = 0;
+  for (const entry of entries) {
+    if (SKIP_DIR_RE.test(entry) || entry.startsWith('.')) continue;
+    if (hasShallowMarker(join(root, entry)) && ++found >= CONTAINER_MIN_PROJECTS) return true;
+  }
+  return false;
+}
+
+/**
  * What the FILES say. Ordered most-specific first: an Arduino sketch inside a repo that also has a
  * `package.json` (a tooling repo shipping an example sketch) is still, for the directory the operator
  * is standing in, an Arduino project — and the Arduino gates are the ones that produce useful output
  * there.
  */
 function fromTree(root: string): { type: ProjectType; evidence: string } | null {
+  // Before anything else, because a container's contents can only mislead about the container.
+  if (isProjectContainer(root)) return null;
+
   const has = (p: string) => existsSync(join(root, p));
 
   if (has('platformio.ini')) return { type: 'arduino', evidence: 'platformio.ini' };
@@ -123,25 +173,88 @@ function isEmptyOfProjects(root: string): boolean {
 }
 
 /**
+ * Entries that do not make a directory USED: what ayin itself writes at project start, plus OS noise.
+ * Listed so that re-running plan mode in a folder it already scaffolded still sees an empty project.
+ */
+const SCAFFOLD_ENTRY_RE = /^(\.git|\.DS_Store|README\.md|ayin-plan-.*\.md)$/;
+
+/** Nothing in it but what ayin put there. */
+export function isFreshDirectory(dir: string): boolean {
+  try {
+    return readdirSync(dir).every((e) => SCAFFOLD_ENTRY_RE.test(e));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The directory named in the request, validated — or `''`, which refuses it.
+ *
+ * ONE PATH SEGMENT AND NOTHING ELSE. This name is derived from prose by a model (plan mode's triage
+ * call), so it reaches here as untrusted text and then decides where a `git init` and a `mkdir`
+ * happen. `..`, an absolute path and a nested path are all refused rather than sanitised, because a
+ * name this function cannot vouch for is one the caller is better off not having.
+ *
+ * An existing directory is accepted only when it is FRESH. A name that already points at somebody's
+ * work is not a new project to create, and scaffolding into it would be writing into a project ayin
+ * was never asked to touch.
+ */
+export function resolveTargetDir(root: string, name: string): string {
+  const clean = name.trim().replace(/^\.\//, '').replace(/\/+$/, '');
+  if (!clean || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(clean)) return '';
+  const full = join(root, clean);
+  try {
+    const st = statSync(full);
+    if (!st.isDirectory() || !isFreshDirectory(full)) return '';
+  } catch { /* it does not exist yet — the normal case, and the point */ }
+  return clean;
+}
+
+/**
  * The one entry point. `request` is the user's own text for this turn — pass it whenever it is
  * available (plan mode has it; the QA gate does not, and does not need it: by the time QA runs, the
  * files the turn created are on disk and the tree answers).
+ *
+ * `targetDir` is a NEW project folder the request named, from plan mode's triage call. When it
+ * resolves, it wins outright: a request that says where to create the project has said something the
+ * tree cannot contradict, and the directory the operator happens to be standing in — a folder holding
+ * ten other projects, most often — is not evidence about a project that does not exist yet.
  */
-export function detectProject(cwd = process.cwd(), request = ''): ProjectContext {
+export function detectProject(cwd = process.cwd(), request = '', targetDir = ''): ProjectContext {
   const root = projectRoot(cwd);
+  const target = resolveTargetDir(root, targetDir);
+
+  if (target) {
+    // Only with a KNOWN type: `unknown` has no executor that would use the target, so claiming a
+    // greenfield project there would be a half-state nothing acts on. Say nothing instead.
+    const asked = fromRequest(request);
+    if (asked) {
+      return { root, targetDir: target, type: asked.type, evidence: `the request — creating ${target}/`, greenfield: true };
+    }
+    log('INFO', 'detect_target_unused', { target, reason: 'the request does not say what kind of project' });
+  }
 
   const tree = fromTree(root);
-  if (tree) return { root, type: tree.type, evidence: tree.evidence, greenfield: false };
+  if (tree) return { root, targetDir: '', type: tree.type, evidence: tree.evidence, greenfield: false };
+
+  // A CONTAINER IS NEVER GREENFIELD WITHOUT A FOLDER TO CREATE THE PROJECT IN. It has no marker of its
+  // own, so it looks empty of projects to the line below — and treating it as a new project would run
+  // `git init` and drop a README across somebody's whole projects directory. With a target it is
+  // already handled above; without one, the honest answer is that this is not a project.
+  if (isProjectContainer(root)) {
+    return { root, targetDir: '', type: 'unknown', evidence: 'a directory that holds several projects, not a project itself', greenfield: false };
+  }
 
   if (request.trim() && isEmptyOfProjects(root)) {
     const asked = fromRequest(request);
-    if (asked) return { root, type: asked.type, evidence: asked.evidence, greenfield: true };
+    if (asked) return { root, targetDir: '', type: asked.type, evidence: asked.evidence, greenfield: true };
   }
 
-  return { root, type: 'unknown', evidence: 'no project marker found', greenfield: false };
+  return { root, targetDir: '', type: 'unknown', evidence: 'no project marker found', greenfield: false };
 }
 
 /** One line for a log field or a plan header. */
 export function describeProject(ctx: ProjectContext): string {
-  return `${ctx.type}${ctx.greenfield ? ' (greenfield)' : ''} — ${ctx.evidence}`;
+  const where = ctx.targetDir ? ` into ${ctx.targetDir}/` : '';
+  return `${ctx.type}${ctx.greenfield ? ' (greenfield)' : ''}${where} — ${ctx.evidence}`;
 }

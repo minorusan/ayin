@@ -23,7 +23,7 @@
  * already contained. The shapes differ; the lesson does not.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -158,6 +158,69 @@ for (const [request, type, label, manifest] of [
     ok(/NO SOURCE IS ON DISK YET/.test(ex.survey(ctx)), '  → and says plainly that nothing is on disk');
     ok(ex.grounding(ctx, request).includes('TARGET LAYOUT'), '  → the layout is stated as grounding, so triage cannot veto the plan away');
   });
+}
+
+console.log('\n— a directory that HOLDS projects is not a project —');
+{
+  // The reproduced failure: standing in a folder of ten projects, "build a Python website in
+  // testwebsite-2" found a sibling's Arduino/2/Janitor/Janitor.ino three levels down and planned the
+  // whole container as an Arduino project, catalog and all.
+  const container = mkdtempSync(join(tmpdir(), 'ayin-container-'));
+  mkdirSync(join(container, 'Arduino', '2', 'Janitor'), { recursive: true });
+  writeFileSync(join(container, 'Arduino', '2', 'Janitor', 'Janitor.ino'), 'void setup(){}\n');
+  mkdirSync(join(container, 'webthing'), { recursive: true });
+  writeFileSync(join(container, 'webthing', 'package.json'), '{"name":"webthing"}\n');
+  mkdirSync(join(container, 'pything'), { recursive: true });
+  writeFileSync(join(container, 'pything', 'pyproject.toml'), '[project]\nname="pything"\n');
+
+  const request = 'Build a Python website in testwebsite-2 displaying weather for a city';
+  const bare = detectProject(container, request);
+  ok(bare.type !== 'arduino', 'a sibling project\'s sketch no longer decides the container\'s type', `got ${bare.type}`);
+  ok(!bare.greenfield, 'and the container is not itself scaffolded — nothing git-inits a folder of projects', `greenfield=${bare.greenfield}`);
+
+  const ctx = detectProject(container, request, 'testwebsite-2');
+  ok(ctx.type === 'python' && ctx.greenfield, 'with the folder the request named, it is a greenfield python project', `${ctx.type}, greenfield=${ctx.greenfield}`);
+  ok(ctx.targetDir === 'testwebsite-2', '  → and the project is created in that folder', `targetDir=${JSON.stringify(ctx.targetDir)}`);
+  ok(ctx.root === container, '  → while root stays where the AGENT is, because plan paths are relative to it');
+
+  const ex = planExecutorFor(ctx);
+  const patterns = ex.deliverables(ctx).map((d) => d.patterns[0]);
+  ok(
+    patterns.every((p) => p.startsWith('testwebsite-2/')),
+    '  → every deliverable is stated as the agent must write it, prefixed with the folder',
+    patterns.join(' '),
+  );
+  ok(ex.survey(ctx).includes('testwebsite-2/…'), '  → and the survey says paths are never bare');
+
+  const made = ex.scaffold(ctx);
+  ok(existsSync(join(container, 'testwebsite-2')), 'the project directory is created');
+  ok(existsSync(join(container, 'testwebsite-2', '.git')), 'the git repository is initialised INSIDE it, not over the container');
+  ok(!existsSync(join(container, '.git')), 'the container itself is left alone');
+  ok(existsSync(join(container, 'testwebsite-2', 'README.md')), 'and the README stub lands in the project, not beside it');
+  ok(made.length === 3, 'all three are reported', `reported ${made.length}`);
+
+  rmSync(container, { recursive: true, force: true });
+}
+
+console.log('\n— a name derived from prose is never trusted —');
+{
+  const dir = mkdtempSync(join(tmpdir(), 'ayin-target-'));
+  mkdirSync(join(dir, 'existing'), { recursive: true });
+  writeFileSync(join(dir, 'existing', 'main.py'), 'x\n');
+  writeFileSync(join(dir, 'afile'), 'x\n');
+  const req = 'set up a python project';
+  for (const [name, why] of [
+    ['../escape', 'a parent traversal is refused'],
+    ['/etc', 'an absolute path is refused'],
+    ['a/b', 'a nested path is refused'],
+    ['existing', 'a directory that already holds someone\'s work is refused'],
+    ['afile', 'a name that is a file is refused'],
+    ['', 'an empty name is refused'],
+  ]) {
+    ok(detectProject(dir, req, name).targetDir === '', why, `targetDir=${JSON.stringify(detectProject(dir, req, name).targetDir)}`);
+  }
+  ok(detectProject(dir, req, 'brand-new_2').targetDir === 'brand-new_2', 'a plain new folder name is accepted');
+  rmSync(dir, { recursive: true, force: true });
 }
 
 console.log('\n— and `git init` happens once, at project start —');

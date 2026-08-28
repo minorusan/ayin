@@ -978,6 +978,16 @@ handed `(not an Arduino project — omit the Arduino reference section)` and wro
 The request said "arduino" in its first sentence. The request is never allowed to *override* the tree,
 only to speak when the tree has nothing to say.
 
+**A directory that HOLDS projects is not a project**, and the tree's answer about one is not merely
+useless but confidently wrong. Measured, from a real session: `~/…/Projects` holds ten unrelated
+things, the four-level `.ino` search found a sibling's `Arduino/2/Janitor/Janitor.ino`, and *"build a
+Python website in testwebsite-2"* was planned with the Arduino executor and the component catalog. So
+`fromTree` returns null when the root carries no marker of its own and **two or more immediate children
+each do** (`isProjectContainer`) — a test about the children, never about depth, so a monorepo whose
+root has its own `package.json` answers before it is consulted. A container is also never treated as
+greenfield on its own: without a folder to create the project in, `git init` there would run over
+somebody's whole projects directory.
+
 The request patterns are ordered most-specific first and cover `arduino`, `unity`, `flutter`, `python`
 and `node` — the last two sit at the end because their vocabulary is the broadest, so *"a Python script
 that flashes the Arduino"* is claimed by the arduino patterns above them. `python`, `node` and `unity`
@@ -1030,6 +1040,20 @@ being absent from the resolved root — which is also what stops it creating a n
 one that already exists, since `projectRoot()` returns the enclosing repo's top level when there is
 one. It never throws: git may be missing and the directory may be read-only, and neither is a reason
 to lose the plan.
+
+**The request can name the folder to create.** People set a project up from one level above it —
+*"build a Python website in testwebsite-2"*, typed in a container — so plan mode's triage call, which
+already had to read the request, also returns `projectDir`. Nothing trusts that answer:
+`resolveTargetDir` refuses anything that is not a single safe path segment (`..`, an absolute path and
+a nested path are rejected rather than sanitised) naming a directory that is absent or empty, and a
+name that resolves reaches `ProjectContext.targetDir`. When it is set, `scaffold()` creates the
+directory, `git init`s **inside** it and puts the README there, and the deliverable patterns are
+**prefixed** with it rather than resolved against it — `root` stays where the agent is standing,
+because every path a plan states is relative to that. The plan then reads
+`testwebsite-2/pyproject.toml`, which is what the agent has to write.
+
+It rides on triage rather than a regex over the prose because the thing being extracted is a name in a
+sentence, and plan mode has retired one natural-language regex already. It costs no extra call.
 
 **It delegates wholesale once the project exists.** The registry selects on project *type* and has no
 way to express "only when greenfield" — priority is the only lever — so this executor is also chosen
@@ -4307,6 +4331,15 @@ lazily on first use — boot is when it is worth knowing):
 
 `.shipped.json` in each local namespace dir maps id → sha256 of the bytes shipped at the time it was
 written. No record means "unknown", which falls through to the drift check rather than overwriting.
+
+**An install older than the sidecar has no record for anything, so the first row above could never
+fire on it and a shipped fix could never land.** Measured: a field added to the triage prompt's JSON
+contract stayed invisible on a machine whose copy was byte-identical to the previous release — the
+code reading the field was simply dead there, and nothing in any log said so, because the parse
+tolerates a missing field by design. So when there is no record AND the local text is **identical to
+what we ship right now**, the record is seeded: there is nothing of the operator's to lose, and the
+refresh works from the next change onward. A copy that DIFFERS is still never assumed to be ours —
+that one may be theirs, and guessing would overwrite it.
 
 Every refresh and repair is ANNOUNCED in the session. A prompt replaced silently is the same class of
 problem as one never replaced: text the operator cannot reason about.

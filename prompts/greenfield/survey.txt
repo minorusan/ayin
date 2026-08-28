@@ -9,5 +9,7 @@ README: {{README_STATE}}
 
 Toolchain the plan must use: {{TOOLCHAIN}}
 
+{{PATH_RULE}}
+
 The earliest steps create the directory layout and the manifest below, in that order. A step that
 writes a source file into a directory no earlier step created is a step that fails.

@@ -257,6 +257,18 @@ class PromptsService {
           }
 
           kept.push(id);
+          // AN INSTALL OLDER THAN THIS SIDECAR HAS NO RECORD FOR ANYTHING, so "local equals what we
+          // last shipped" can never be true above and a shipped FIX can never reach it. Measured: a
+          // field added to the triage prompt's JSON contract stayed invisible on a machine whose copy
+          // was byte-identical to the previous release — the feature that read the field was simply
+          // dead there, with nothing in any log to say why.
+          //
+          // When the two texts are IDENTICAL there is nothing of the operator's to lose, so the record
+          // is seeded and the refresh above works from the next change onward. Never assumed for a copy
+          // that differs: that one may be theirs, and guessing would overwrite it.
+          if (local !== null && shippedRecord[id] === undefined && local === shipped) {
+            shippedRecord[id] = sha(shipped);
+          }
           // The variable CONTRACT is checked even though the text is not touched. Wording is the
           // operator's; placeholders are the code's interface to the text, and a local copy that
           // cannot receive what the code now passes is broken, not customised.

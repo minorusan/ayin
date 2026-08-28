@@ -16,8 +16,14 @@ List them even when the request only implies them, and leave the list empty when
 local. This list is mandatory input to a fresh documentation lookup, so a missed API means the plan
 gets written from stale memory.
 
+If the request names a NEW FOLDER to create the project in — "a website in testwebsite-2", "set up
+foo-service" — give that folder's name in `projectDir`: one path segment, no slashes, exactly as
+written. Empty when the request names no folder, and empty when it only names a language, a framework
+or the thing being built.
+
 Respond with exactly one JSON object and nothing else:
 {"complex": true|false,
  "features": ["one line per independently-shippable piece of work"],
  "apis": ["third-party service names, [] if none"],
+ "projectDir": "the new folder named in the request, \"\" if none",
  "reason": "one sentence"}

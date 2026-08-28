@@ -21,18 +21,25 @@
  * `ctx.greenfield` is true. That keeps established projects on exactly the behaviour they had, and
  * keeps the selection rule in `registry.ts` the readable one-liner it is.
  *
+ * IT CREATES THE DIRECTORY WHEN THE REQUEST NAMED ONE. People set a project up from one level above
+ * it — *"build a Python website in testwebsite-2"*, typed in a folder holding ten other projects — so
+ * `ctx.targetDir` carries that folder and everything here is written into it. The deliverable patterns
+ * are PREFIXED rather than resolved against it, because every path a plan states is relative to where
+ * the agent actually is, and the agent is still standing one level up.
+ *
  * `scaffold()` INITIALISES THE GIT REPO. A project's first commit should be able to contain its first
  * file, and after "create a Python CLI" nobody remembers to run `git init` until something is already
- * lost. Guarded on `.git` being absent from the resolved root, which is also what stops it creating a
- * nested repository inside one that already exists — `projectRoot()` returns the enclosing repo's top
- * level when there is one, so the guard sees that repo's own `.git`.
+ * lost. `projectRoot()` answers `git rev-parse --show-toplevel`, so asking it about the directory we
+ * are about to use is what refuses to nest a repository inside one that already exists — whether that
+ * directory is the repo root itself or a new folder made inside it.
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from '../../../log.js';
 import { prompts, packagePath } from '../../../prompts-service.js';
+import { projectRoot } from '../../../qa/probes.js';
 import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext, ProjectType } from '../../types.js';
 import { basePlanExecutor, ensureReadme } from '../base/index.js';
 
@@ -179,7 +186,12 @@ function rootEntries(root: string): string[] {
 }
 
 /**
- * `git init` when the resolved root is not already inside a repository. Returns the path it created.
+ * `git init` when `root` is not already inside a repository. Returns the path it created.
+ *
+ * The guard is `projectRoot()`, not `existsSync('.git')`: a new folder made inside an existing
+ * repository has no `.git` of its own, and initialising one there produces a nested repository whose
+ * contents the outer repo silently stops tracking. `git rev-parse --show-toplevel` is the only thing
+ * that knows the difference, and it already ships here.
  *
  * Never throws: git may not be installed and the directory may be read-only, and neither is a reason to
  * lose the plan. The failure is logged rather than swallowed — a scaffold step that quietly did nothing
@@ -188,6 +200,11 @@ function rootEntries(root: string): string[] {
 export function ensureGitRepo(root: string): string[] {
   const dotGit = join(root, '.git');
   if (existsSync(dotGit)) return [];
+  const enclosing = projectRoot(root);
+  if (enclosing !== root) {
+    log('INFO', 'scaffold_git_init_skipped', { root, enclosing });
+    return [];
+  }
   try {
     execFileSync('git', ['init'], { cwd: root, timeout: 10_000, stdio: ['ignore', 'ignore', 'ignore'] });
     log('INFO', 'scaffold_git_init', { root });
@@ -205,22 +222,39 @@ function branchFor(ctx: ProjectContext): BranchFacts | null {
   return branch ? FACTS[branch] : null;
 }
 
+/** Where the files actually go — `root` itself, or the new folder the request named inside it. */
+function targetRoot(ctx: ProjectContext): string {
+  return ctx.targetDir ? join(ctx.root, ctx.targetDir) : ctx.root;
+}
+
+/** A deliverable path as the PLAN must state it: relative to where the agent is, which is `root`. */
+function prefixed(ctx: ProjectContext, deliverables: Deliverable[]): Deliverable[] {
+  if (!ctx.targetDir) return deliverables;
+  return deliverables.map((d) => ({ ...d, patterns: d.patterns.map((p) => `${ctx.targetDir}/${p}`) }));
+}
+
 export const greenfieldPlanExecutor: PlanExecutor = {
   config,
 
   survey(ctx: ProjectContext): string {
     const facts = branchFor(ctx);
     if (!facts) return basePlanExecutor.survey(ctx);
-    const entries = rootEntries(ctx.root);
+    const dir = targetRoot(ctx);
+    const entries = rootEntries(dir);
     return greenfieldPrompts.get('survey', {
-      ROOT: ctx.root,
+      ROOT: dir,
       LABEL: facts.label,
       DETECTED_FROM: ctx.evidence,
+      // The one instruction the model cannot derive: the agent's cwd is NOT the project directory, so
+      // every path it writes has to carry the prefix. Stated as the paths themselves, not as a rule.
+      PATH_RULE: ctx.targetDir
+        ? `EVERY path in this plan is relative to ${ctx.root}, where the agent is standing — so the project's own files are \`${ctx.targetDir}/…\`, never bare.`
+        : 'Paths in this plan are relative to the project root above, which is where the agent is standing.',
       ROOT_ENTRIES: entries.length ? entries.join(', ') : 'nothing',
-      GIT_STATE: existsSync(join(ctx.root, '.git'))
+      GIT_STATE: existsSync(join(dir, '.git'))
         ? 'a git repository is already initialised here'
         : 'none — ayin runs `git init` at project start',
-      README_STATE: existsSync(join(ctx.root, 'README.md'))
+      README_STATE: existsSync(join(dir, 'README.md'))
         ? 'present'
         : 'MISSING — ayin creates a stub at project start; fill it in',
       TOOLCHAIN: facts.toolchain,
@@ -238,7 +272,7 @@ export const greenfieldPlanExecutor: PlanExecutor = {
   deliverables(ctx: ProjectContext): Deliverable[] {
     const facts = branchFor(ctx);
     if (!facts) return basePlanExecutor.deliverables(ctx);
-    return [...facts.deliverables, ...basePlanExecutor.deliverables(ctx)];
+    return prefixed(ctx, [...facts.deliverables, ...basePlanExecutor.deliverables(ctx)]);
   },
 
   observability(ctx: ProjectContext): string {
@@ -249,7 +283,20 @@ export const greenfieldPlanExecutor: PlanExecutor = {
 
   scaffold(ctx: ProjectContext): string[] {
     if (!branchFor(ctx)) return basePlanExecutor.scaffold(ctx);
-    // Git first: the README is then the first file the new repository has ever seen.
-    return [...ensureGitRepo(ctx.root), ...ensureReadme(ctx.root)];
+    const dir = targetRoot(ctx);
+    const made: string[] = [];
+    if (ctx.targetDir && !existsSync(dir)) {
+      try {
+        mkdirSync(dir, { recursive: true });
+        log('INFO', 'scaffold_project_dir', { dir });
+        made.push(dir);
+      } catch (err) {
+        // Nothing below can work without it, and a plan is still worth writing — so report and stop.
+        log('WARN', 'scaffold_project_dir_failed', { dir, error: err instanceof Error ? err.message : String(err) });
+        return made;
+      }
+    }
+    // Git next: the README is then the first file the new repository has ever seen.
+    return [...made, ...ensureGitRepo(dir), ...ensureReadme(dir)];
   },
 };

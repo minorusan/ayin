@@ -175,26 +175,34 @@ function planFilename(now = new Date()): string {
   return `ayin-plan-${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}.md`;
 }
 
-/** Is this big request actually multi-feature, and whose APIs does it touch? One cheap call. */
-async function triage(userInput: string): Promise<{ complex: boolean; features: string[]; apis: string[]; reason: string }> {
+/**
+ * Is this big request actually multi-feature, whose APIs does it touch, and — when it is setting a
+ * project up — WHICH FOLDER does it name? One cheap call, which already had to read the request.
+ *
+ * `projectDir` rides along here rather than being pattern-matched out of the prose because the thing
+ * being extracted is a name in a sentence, and this repo has retired one natural-language regex on
+ * plan mode already. Nothing trusts the answer: `resolveTargetDir` refuses anything that is not a
+ * single safe path segment naming a directory that is empty or absent (`executors/detect.ts`).
+ */
+async function triage(userInput: string): Promise<{ complex: boolean; features: string[]; apis: string[]; projectDir: string; reason: string }> {
   try {
     const raw = await llmCall(getPrompt('planTriage', { REQUEST: userInput.slice(0, 6000) }));
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     if (start >= 0 && end > start) {
-      const obj = JSON.parse(raw.slice(start, end + 1)) as { complex?: unknown; features?: unknown; apis?: unknown; reason?: unknown };
+      const obj = JSON.parse(raw.slice(start, end + 1)) as { complex?: unknown; features?: unknown; apis?: unknown; projectDir?: unknown; reason?: unknown };
       const features = Array.isArray(obj.features) ? obj.features.map((f) => String(f)).filter(Boolean).slice(0, 12) : [];
       const apis = Array.isArray(obj.apis) ? obj.apis.map((a) => String(a).trim()).filter(Boolean).slice(0, 6) : [];
       const complex = obj.complex === true || String(obj.complex).toLowerCase() === 'true' || features.length > 1;
-      return { complex, features, apis, reason: String(obj.reason ?? '').slice(0, 300) };
+      return { complex, features, apis, projectDir: String(obj.projectDir ?? '').trim().slice(0, 120), reason: String(obj.reason ?? '').slice(0, 300) };
     }
     // No JSON — read it conservatively. Planning a simple request wastes minutes; skipping a plan
     // for a complex one only costs what we have today, so an unparseable answer means "no".
     const yes = /\b(complex|multi-?feature|cross-?feature|yes)\b/i.test(raw) && !/\bnot\s+complex\b/i.test(raw);
-    return { complex: yes, features: [], apis: [], reason: raw.trim().slice(0, 200) };
+    return { complex: yes, features: [], apis: [], projectDir: '', reason: raw.trim().slice(0, 200) };
   } catch (err) {
     log('WARN', 'plan_triage_failed', { error: err instanceof Error ? err.message : String(err) });
-    return { complex: false, features: [], apis: [], reason: 'triage call failed' };
+    return { complex: false, features: [], apis: [], projectDir: '', reason: 'triage call failed' };
   }
 }
 
@@ -322,7 +330,9 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     });
 
     // Detected here rather than after the veto, because the veto has to be able to consult it.
-    const ctx = detectProject(process.cwd(), userInput);
+    // Triage's `projectDir` is the folder the request named to create the project in — validated in
+    // `detectProject`, which refuses anything that is not an empty or absent single path segment.
+    const ctx = detectProject(process.cwd(), userInput, t.projectDir);
     const executor = planExecutorFor(ctx);
 
     // TRIAGE'S VETO IS ABOUT FEATURE COUNT, AND THAT IS NOT THE ONLY REASON TO PLAN.
