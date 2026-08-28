@@ -1086,6 +1086,23 @@ because every path a plan states is relative to that. The plan then reads
 It rides on triage rather than a regex over the prose because the thing being extracted is a name in a
 sentence, and plan mode has retired one natural-language regex already. It costs no extra call.
 
+**A hard fact nobody can satisfy is worse than no fact.** `readmeSubstance()` is `qa/base`'s check and
+`qa/base` serves `"*"` — yet it used to end with two ARDUINO demands. So a Python project plan mode had
+just created failed a **hard** QA fact on *"no `arduino-cli compile`/`upload` command and no mention of
+the Arduino IDE"*. Measured on a real run: the gate spent **all three** fix passes on it and the model
+refused every time, correctly calling it a misconfiguration, so the turn ended `out of QA passes — the
+issues above are NOT fixed` with nothing else looked at. The board-specific half now lives in
+`arduinoReadmeSubstance()`, which `qa/arduino` calls; the shared check asks only what every project type
+can answer — the file exists, it is not the stub, it is not trivially short.
+
+**And the stub no longer fails its own check.** The banner `scaffold()` writes is an instruction *to the
+agent*, not part of the document, so a model that filled in every section and left it alone was doing
+what it was told — and shipped 570 characters of real documentation whose first line said it documented
+nothing, because that line contained the word `TODO`. The banner now carries no marker word of its own
+(only the section bodies do, so an untouched stub still fails), says to delete itself, and is caught by
+the shared `README_STUB_BANNER` sentinel — one string, written by the stub and refused by the check, so
+the two can never drift.
+
 **It delegates wholesale once the project exists.** The registry selects on project *type* and has no
 way to express "only when greenfield" — priority is the only lever — so this executor is also chosen
 for every Python, Node and Unity project already on disk, and hands all five methods straight back to
@@ -1106,7 +1123,7 @@ something else → `QA PASS 2/3`. Handing a deterministic fact to a model and le
 is not enforcement — it is a request addressed to a different reader.
 
 Reserved for facts that are **binary and unarguable**: a compiler's exit code, a required file's
-existence, a README still carrying the scaffold's TODO markers. Never for anything with a defensible
+existence, a README still carrying the scaffold's stub markers. Never for anything with a defensible
 exception — a hard gate over a judgement call is how a QA loop becomes unfalsifiable. The distinction
 the design turns on: a compile that **could not run** (no `arduino-cli` on the machine) is `hard: false`,
 because an unknown is not a defect; only a compiler that *ran and rejected* the sketch hard-fails.

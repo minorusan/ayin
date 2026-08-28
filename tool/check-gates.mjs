@@ -1722,6 +1722,53 @@ console.log('\nexecutors: detection + registry');
   const again = bp.basePlanExecutor.scaffold({ root: empty, targetDir: '', type: 'unknown', evidence: 'test', greenfield: false });
   ok(again.length === 0 && readFileSync(join(empty, 'README.md'), 'utf8') === '# mine\n', 'scaffold NEVER overwrites an existing README — it is the operator\'s');
   rmSync(empty, { recursive: true, force: true });
+
+  // ── the README check must be answerable by the project it is asked about ──
+  //
+  // It was not. `readmeSubstance` is `qa/base`'s, and `qa/base` serves `"*"` — but it ended with two
+  // ARDUINO demands, so a Python project created by plan mode failed a HARD fact on "no `arduino-cli
+  // compile`/`upload` command and no mention of the Arduino IDE". Measured: the gate spent all three
+  // fix passes on it and the model refused each time, correctly calling it a misconfiguration. A hard
+  // fact nobody can satisfy does not enforce anything; it burns the budget that would have fixed
+  // something real.
+  const dl = await import(`file://${join(DIST, 'executors/deliverables.js')}`);
+  const bpx = await import(`file://${join(DIST, 'executors/plan/base/index.js')}`);
+  const mkReadme = (body) => {
+    const d = mkdtempSync(join(tmpdir(), 'ayin-readme-'));
+    writeFileSync(join(d, 'README.md'), body);
+    return d;
+  };
+  const filled = '# demo\n\n## What this is\nA CLI that converts CSV to JSON.\n\n## How to run it\n'
+    + 'pip install -e . then `csv2json in.csv --pretty`\n\n## How to verify it works\n'
+    + '`pytest -q` shows three passing tests covering the flag and the error path.\n';
+
+  const stubDir = mkReadme(bpx.readmeStub('demo'));
+  ok(!dl.readmeSubstance(stubDir).ok, 'an untouched stub still fails — that is the whole point of writing one');
+
+  // THE BANNER IS AN INSTRUCTION TO THE AGENT, NOT PART OF THE DOCUMENT. It used to open with the word
+  // TODO, so a model that filled in every section and left the instruction alone — doing exactly what
+  // it was told — shipped 570 characters of real documentation that failed on that one word.
+  ok(!/\bTODO\b/.test(bpx.readmeStub('demo').split('## What this is')[0]),
+    'the stub BANNER carries no TODO of its own — only the section bodies do');
+  const bannerLeft = mkReadme(bpx.readmeStub('demo').split('## What this is')[0] + filled);
+  const bl = dl.readmeSubstance(bannerLeft);
+  ok(!bl.ok && /stub banner/.test(bl.detail), 'a filled-in README that KEPT the banner is still refused, and told which block to delete', bl.detail.slice(0, 60));
+
+  const cleanDir = mkReadme(filled);
+  const cl = dl.readmeSubstance(cleanDir);
+  ok(cl.ok, 'and the same content with the banner deleted PASSES — no board, no pins, no arduino-cli', cl.detail);
+  ok(!/arduino/i.test(cl.detail) && !/pin map/i.test(cl.detail),
+    'the generic verdict never mentions arduino or a pin map — it is asked of every project type');
+
+  // The arduino demands did not go away; they moved to the executor that can satisfy them.
+  const ar = dl.arduinoReadmeSubstance(cleanDir);
+  ok(!ar.ok && /arduino-cli/.test(ar.detail), 'arduinoReadmeSubstance still demands build/upload instructions', ar.detail.slice(0, 50));
+  const qaArd = readFileSync(join(REPO, 'src/executors/qa/arduino/index.ts'), 'utf-8');
+  ok(/arduinoReadmeSubstance\(ctx\.root\)/.test(qaArd), 'and the arduino QA executor is the one asking for it');
+  const qaBase = readFileSync(join(REPO, 'src/executors/qa/base/index.ts'), 'utf-8');
+  ok(!/arduinoReadmeSubstance/.test(qaBase), 'while base QA — which serves every other project type — does not');
+
+  for (const d of [stubDir, bannerLeft, cleanDir]) rmSync(d, { recursive: true, force: true });
 }
 
 // ── arduino_diagram: the pure PUML renderer, esp. the free-form-leg-name fuzzy matcher ──

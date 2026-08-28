@@ -18,6 +18,7 @@ import { basename, join } from 'node:path';
 import { log } from '../../../log.js';
 import { renderSurvey, surveyProject } from '../../../plan/survey.js';
 import { prompts, packagePath } from '../../../prompts-service.js';
+import { README_STUB_BANNER } from '../../deliverables.js';
 import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext } from '../../types.js';
 
 /** The `plan` namespace, shared with plan mode itself — same directory, materialized once. */
@@ -33,20 +34,28 @@ const config: ExecutorConfig = {
  * place to write into), not to pretend the project is documented — a fabricated README describing
  * features nobody built would be worse than none. The headings name what has to be filled in.
  *
- * EVERY LINE IS A TODO MARKER, and that is deliberate. An empty stub is in one respect WORSE than no
- * README at all: it satisfies "the project has a README" for anything that only checks existence,
- * while containing nothing. Measured on the Arduino benchmark — on the grounding-only path (no plan
- * document to say "fill in the README"), the stub shipped untouched. So the stub announces its own
- * incompleteness in a form both a reader and a checker can see, and the deliverable list that reaches
- * the model says plainly that a stub counts as MISSING.
+ * EVERY SECTION BODY IS A TODO MARKER, and that is deliberate. An empty stub is in one respect WORSE
+ * than no README at all: it satisfies "the project has a README" for anything that only checks
+ * existence, while containing nothing. Measured on the Arduino benchmark — on the grounding-only path
+ * (no plan document to say "fill in the README"), the stub shipped untouched. So the stub announces
+ * its own incompleteness in a form both a reader and a checker can see, and the deliverable list that
+ * reaches the model says plainly that a stub counts as MISSING.
+ *
+ * THE BANNER CARRIES NO `TODO` OF ITS OWN, and that is the fix for a measured own-goal. It used to open
+ * `> **TODO — this README is an empty stub…**`, which is an INSTRUCTION to the agent rather than part
+ * of the document — so a model that filled in every section and left the instruction alone was doing
+ * exactly what it was told, and shipped 570 characters of real documentation whose first line said it
+ * documented nothing. `readmeSubstance` counted that one word and failed the gate. The banner now says
+ * to delete itself, contains no marker word, and is checked by `README_STUB_BANNER` instead — so a
+ * leftover banner is still caught, and a filled-in README is not.
  */
 export function readmeStub(projectName: string): string {
   return [
     `# ${projectName}`,
     '',
-    '> **TODO — this README is an empty stub created by ayin at project start.** Fill in THIS file,',
-    '> at the project root; do not write a second README somewhere else and leave this one as-is.',
-    '> A stub is worse than no README: it looks like documentation and says nothing.',
+    `> **This README is ${README_STUB_BANNER}.** Fill in THIS file, at the project root; do not`,
+    '> write a second README somewhere else and leave this one as-is. A stub is worse than no README:',
+    '> it looks like documentation and says nothing. DELETE THIS BLOCK once you have filled the file in.',
     '',
     '## What this is',
     '',

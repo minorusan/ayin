@@ -109,7 +109,16 @@ export function readmeHasPinMap(text: string): boolean {
 }
 
 /**
- * Is the README real documentation, or the scaffold stub with its TODOs still in it?
+ * The sentence the scaffold stub opens with, and the ONE place its wording is decided.
+ *
+ * `readmeStub()` writes it and the check below refuses any README that still contains it, so a banner
+ * left in a finished file is caught rather than shipped. Two copies of this string would eventually
+ * disagree, and the failure would be a check that silently stopped checking.
+ */
+export const README_STUB_BANNER = 'an empty stub created by ayin at project start';
+
+/**
+ * Is the README real documentation, or the scaffold stub with its markers still in it?
  *
  * A DELIBERATELY DETERMINISTIC CHECK, because the alternative is hoping. `scaffold()` writes a stub so
  * the file exists and has structure — but an untouched stub is in one respect WORSE than no README at
@@ -117,9 +126,13 @@ export function readmeHasPinMap(text: string): boolean {
  * Measured on the benchmark: on the grounding-only path the stub shipped untouched, because the plan
  * document had been the only thing telling the agent to fill it in.
  *
- * The deliverable list now tells the model a stub counts as missing, and this makes the gate enforce it
- * rather than trust it — the same reason the compile probe exists instead of asking a model whether the
- * sketch builds.
+ * GENERIC, AND IT HAD TO BE SPLIT TO BECOME SO. This is `qa/base`'s check, and `qa/base` serves `"*"` —
+ * every project type without a handler of its own. It used to end with two ARDUINO requirements, so a
+ * Python project that had just been created by plan mode failed QA on
+ * "no `arduino-cli compile`/`upload` command and no mention of the Arduino IDE". Measured: the gate
+ * spent all three of its fix passes on it, and the model refused each time — correctly, calling it a
+ * misconfiguration — so the turn ended with the budget gone and nothing fixed. The board-specific half
+ * now lives in `arduinoReadmeSubstance`, where the board-specific executor can ask for it.
  */
 export function readmeSubstance(root: string): { ok: boolean; detail: string } {
   const path = join(root, 'README.md');
@@ -131,22 +144,43 @@ export function readmeSubstance(root: string): { ok: boolean; detail: string } {
   if (todos > 0) {
     return {
       ok: false,
-      detail: `README.md still carries ${todos} TODO marker(s) from the scaffold stub — it exists but documents nothing. Replace every TODO with the real parts list, pin map, and build/upload commands.`,
+      detail: `README.md still carries ${todos} TODO marker(s) from the scaffold stub — it exists but documents nothing. Replace every TODO with what this is, how to run it, and how to check it works.`,
+    };
+  }
+  // The banner is an instruction TO the agent, so a model that fills the sections in and leaves it
+  // alone is doing what it was told — and ships a documented README whose first line says it documents
+  // nothing. Measured on a real run: 570 chars of genuine content under a surviving banner.
+  if (text.includes(README_STUB_BANNER)) {
+    return {
+      ok: false,
+      detail: 'README.md still opens with the scaffold\'s stub banner — delete that block; it is an instruction to you, not part of the document.',
     };
   }
   if (text.trim().length < 200) {
-    return { ok: false, detail: `README.md is only ${text.trim().length} chars — too short to carry a parts list and a pin map` };
+    return { ok: false, detail: `README.md is only ${text.trim().length} chars — too short to say what this is, how to run it and how to check it works` };
   }
+  return { ok: true, detail: `README.md is present and filled in (${text.length} chars, no stub markers left)` };
+}
 
-  // ENFORCE, DO NOT REQUEST — the lesson from the TODO markers, applied to the next soft requirement
-  // that turned out to be a coin flip. The confirmation run's reaction-timer shipped a README with a
-  // parts list and a pin map and NO way to build the thing; the same project with the same prompt had
-  // produced them one run earlier. A requirement the deliverable list asks for and nothing checks is
-  // satisfied at the model's discretion, which is another way of saying sometimes.
-  //
-  // Two facts, both cheap to state and both useless if absent: how do I build this, and which pin goes
-  // where. A README missing either is not documentation of an Arduino project, it is a description of
-  // one.
+/**
+ * The generic check, plus the two facts an ARDUINO README is useless without.
+ *
+ * ENFORCE, DO NOT REQUEST — the lesson from the TODO markers, applied to the next soft requirement
+ * that turned out to be a coin flip. The confirmation run's reaction-timer shipped a README with a
+ * parts list and a pin map and NO way to build the thing; the same project with the same prompt had
+ * produced them one run earlier. A requirement the deliverable list asks for and nothing checks is
+ * satisfied at the model's discretion, which is another way of saying sometimes.
+ *
+ * Two facts, both cheap to state and both useless if absent: how do I build this, and which pin goes
+ * where. A README missing either is not documentation of an Arduino project, it is a description of
+ * one. Asked for HERE and not in the shared check, because on a Python project they are not merely
+ * irrelevant — they are unsatisfiable, and a hard fact nobody can satisfy eats the whole fix budget.
+ */
+export function arduinoReadmeSubstance(root: string): { ok: boolean; detail: string } {
+  const generic = readmeSubstance(root);
+  if (!generic.ok) return generic;
+
+  const text = readFileSync(join(root, 'README.md'), 'utf8');
   if (!/arduino-cli|Arduino IDE|\bupload\b/i.test(text)) {
     return {
       ok: false,
@@ -156,8 +190,7 @@ export function readmeSubstance(root: string): { ok: boolean; detail: string } {
   if (!readmeHasPinMap(text)) {
     return { ok: false, detail: 'README.md names no pins — a wiring section with no pin map cannot be followed' };
   }
-
-  return { ok: true, detail: `README.md is present and filled in (${text.length} chars, no TODO markers, has a pin map and build instructions)` };
+  return { ok: true, detail: `README.md is present and filled in (${text.length} chars, no stub markers, has a pin map and build instructions)` };
 }
 
 export function checkDeliverables(root: string, deliverables: Deliverable[]): DeliverableStatus[] {
