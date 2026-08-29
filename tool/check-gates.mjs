@@ -199,6 +199,39 @@ g.guardNoteMutation('bash', [], buildKey);
 // like a fresh question ("files written since"), and the model would never be told it was repeating.
 ok(/repeat/.test(g.guardCheck('bash', build).label ?? ''),
   'a repeated identical command is still NAMED a repeat, its own writes notwithstanding', g.guardCheck('bash', build).label ?? '');
+
+/**
+ * A WRITE MUST NOT LIFT ITS OWN REPEAT BY CHANGING THE FILE IT WRITES.
+ *
+ * `filesWritten` already excluded the call's own bump; `fileChanged` did not, and `write_file` mutates
+ * its own target by definition — so after every write the witness differed, the guard read it as "the
+ * world moved", reset the counter to 1, and the ladder could never advance for exactly the calls it
+ * exists for. MEASURED: a subagent wrote the same `index.html` twelve times running, byte-identical
+ * (md5 unchanged throughout), with 21 `guard_repeat_allowed_stale` events all reasoning "the file it
+ * reads has changed since". It reached 89 rounds and was not going to stop.
+ */
+{
+  const wf = join(TMP, 'loop-target.html');
+  writeFileSync(wf, 'v0');
+  g.guardBeginTurn();
+  const call = { path: wf, content: '<html>same</html>' };
+  const k = g.callKey('write_file', call);
+  const labels = [];
+  for (let i = 0; i < 5; i++) {
+    labels.push(g.guardCheck('write_file', call).label ?? '');
+    writeFileSync(wf, '<html>same</html>');        // the tool's own effect
+    g.guardNoteMutation('write_file', [wf], k);    // what the agent loop does after a write
+  }
+  ok(/repeat 5/.test(labels[4]),
+    'a write repeating itself ESCALATES — its own effect no longer resets the ladder', labels.join(' | '));
+  ok(!labels.some((l) => /target changed/.test(l)),
+    '  → and none of them is excused as "the world moved", because it was the call that moved it');
+
+  // An outside change is still the world moving, and must still lift it.
+  writeFileSync(wf, 'somebody else edited this');
+  ok(/target changed/.test(g.guardCheck('write_file', call).label ?? ''),
+    'while a change made by ANYTHING ELSE still resets it — that is what staleness is for');
+}
 g.guardNoteMutation('write_file', [join(TMP, 'fix.ts')], 'write_file|path=fix.ts');
 ok(g.guardCheck('bash', build).allow === true, 're-running it AFTER an edit is a different question, and runs');
 

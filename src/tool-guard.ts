@@ -167,7 +167,40 @@ export function guardNoteMutation(tool: string, paths: string[], key = ''): void
   mutationEpoch++;
   bumps.push({ epoch: mutationEpoch, key });
   if (bumps.length > BUMPS_KEPT) bumps.splice(0, bumps.length - BUMPS_KEPT);
+
+  /**
+   * A WRITE MUST NOT LIFT ITS OWN REPEAT BY CHANGING THE FILE IT WRITES.
+   *
+   * `filesWritten` below already excludes the call's own bump — `b.key !== key` — but `fileChanged`
+   * did not, and `write_file` mutates its own target by definition. So after every write the witness
+   * differed from the one recorded before it, the guard read that as "the world moved", reset the
+   * counter to 1, and the ladder could never advance. The escalation was unreachable for exactly the
+   * calls it exists for.
+   *
+   * MEASURED, and it is why this is here: a subagent wrote the same `index.html` twelve times running —
+   * byte-identical, `md5` unchanged across the whole stretch — with 21 `guard_repeat_allowed_stale`
+   * events all giving the reason "the file it reads has changed since". It had reached 89 rounds and
+   * was not going to stop on its own.
+   *
+   * So the stored witness is refreshed to what the call itself just produced. A LATER change by anything
+   * else still differs from it and still counts as the world moving; the call's own effect no longer
+   * does.
+   */
+  if (key) {
+    const prior = calls.get(key);
+    if (prior) prior.witness = witnessOfKeyTargets(paths);
+  }
   log('INFO', 'guard_mutation_noted', { tool, epoch: String(mutationEpoch), paths: paths.slice(0, 3).join(',') });
+}
+
+/** The witness of the first real path this call touched — the same shape `witnessOf` produces. */
+function witnessOfKeyTargets(paths: string[]): string {
+  for (const p of paths) {
+    if (!p?.trim()) continue;
+    const w = witnessOf({ path: p });
+    if (w) return w;
+  }
+  return '';
 }
 
 /**
