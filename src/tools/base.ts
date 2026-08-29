@@ -94,6 +94,19 @@ export interface Tool {
    * Requires `slash`, or the tool would be unreachable by anyone. The registry enforces that at boot.
    */
   readonly slashOnly?: boolean;
+  /**
+   * ONE GLYPH, shown on this tool's card in the transcript. Optional; a tool without one gets `\u25B8`.
+   *
+   * NOT AN EMOJI, and this is enforced. blessed reports `strWidth` 1 for an emoji while every terminal
+   * draws it 2 cells, and ayin wraps by CHARACTER COUNT (`wrapPlain`, `wrapPre`) — so one emoji makes
+   * every line that carries it wrap a cell early, and smartCSR then re-emits the shifted rows. That has
+   * shipped twice (U+1F512, U+23F3). `tool/check-glyphs.mjs` runs as `prebuild` and fails the build on a
+   * surrogate pair or an `Emoji_Presentation` codepoint here, exactly as it does for the TUI sources.
+   *
+   * Pick a BMP symbol with Emoji_Presentation=false: `\u2315` `\u25A4` `\u270E` `\u2691` `\u26BF` `\u25CE`.
+   */
+  readonly icon?: string;
+
   /** Source prompts directory shipped by this tool, if it has prompts. Read-only at runtime. */
   readonly promptsSourceDir?: string;
   /** Called by the registry with the LOCAL bundle once its prompts are materialized. */
@@ -105,6 +118,9 @@ export abstract class BaseTool implements Tool {
   abstract description: string;
   abstract parameters: ToolParameter[];
   abstract execute(params: Record<string, string>): Promise<string>;
+
+  /** Override with one BMP symbol — see `Tool.icon`. Never an emoji; the glyph gate enforces it. */
+  readonly icon?: string;
 
   /** Override in a tool that ships prompts. Absolute path to its `prompts/` directory. */
   readonly promptsSourceDir?: string;

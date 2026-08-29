@@ -11,6 +11,7 @@ import { sentryStatus } from '../connectors/sentry/loop.js';
  */
 export const tool: Tool = {
   name: 'sentry_auth',
+  icon: '⚿',
   description:
     'Set up or refresh the Sentry credential from pasted text (auth token, organization slug, optional '
     + 'project — any order). Call with no arguments to report what is configured and whether it works.',

@@ -22,6 +22,7 @@ import { plainPage, topicPage } from '../../help-page.js';
  */
 export const tool: Tool = {
   name: 'ayin_help',
+  icon: '⍰',
   description:
     'Read ayin\'s own help — every slash command, launch flag, key binding and shell trick available in this '
     + 'session, exactly as `ayin --help` prints it. Pass topic (e.g. "/diff", "indulge") for one command in '

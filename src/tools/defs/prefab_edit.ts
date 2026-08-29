@@ -7,6 +7,7 @@ import { resolveProject } from '../explore/index.js';
 
 export const tool: Tool = {
     name: 'prefab_edit',
+    icon: '⌗',
     description:
       'Set ONE property in a Unity .prefab, .unity scene or .asset — surgically, so the file differs by one line. '
       + 'Point a reference at another asset BY FILE NAME (asset="Hero_SkeletonData.asset"): the name is '

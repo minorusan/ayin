@@ -3726,7 +3726,10 @@ tree knows about the internals). Design rules:
 - **Speaker anchors** (`widgets/chat.ts#redraw`): the transcript is parseable by the left
   gutter alone — `▌ bold` = the user (indigo bar, every line of a multi-line prompt),
   `◉ text` = ayin speaking (ayin = "eye"; accent glyph on the first line, markdown body),
-  indented `▸/│/╰` amber frames = tool cards (a dedicated `tool` message role, not `system`),
+  indented `<icon>/│/╰` amber frames = tool cards (a dedicated `tool` message role, not `system`) —
+  the header glyph is **the tool's own** (`Tool.icon`: `⌕` grep, `❯` bash, `✎` write_file, `⚑` jira,
+  `▤` read_file …), so the left column alone says which tool ran; `▸` is the fallback for a tool that
+  declares none,
   `· dim` = system notices (the quietest thing on screen). The input prompt is the matching
   accent `❯`. User lines are tag-escaped like tool output (braces in prompts are literal).
 - **Vertical rhythm + indent** (`widgets/chat.ts`: `GUTTER`, `TOOL_INDENT`, `startsToolCard`):
@@ -3734,7 +3737,11 @@ tree knows about the internals). Design rules:
   prompt gets **two** blank lines (it starts a new exchange), an assistant turn and a system notice
   get one on a speaker change, and **each tool card gets one before its `▸` header**. The header —
   not the message boundary — is the separator because a card is *two* messages (call, then
-  result+footer), so splitting on role would cut cards in half. Tool lines are indented
+  result+footer), so splitting on role would cut cards in half. **The boundary test is the header's
+  markup, not its glyph** (`startsToolCard` → `TOOL_HEADER`): it was `startsWith('▸')` until per-tool
+  icons arrived, and a detector keyed to one character would have silently stopped seeing cards —
+  costing that blank line AND putting the token-cost label on the header instead of the result.
+  `tool/check-tool-icons.mjs` holds the pairing together. Tool lines are indented
   `TOOL_INDENT` (4 cells, a tab step) vs the `GUTTER` (2) used for wrapped speaker text, so machine
   output reads as subordinate to the conversation instead of competing with it at the same margin.
 - **Tool cards** (`widgets/chat.ts`): a call opens with a styled header
@@ -3967,6 +3974,13 @@ can finish — see the warning in `SETUP.md`.
   blocked tool) that takes the row for a ttl and then falls back to the sticky one. Height 0 when there
   is nothing to say, because a permanently lit red bar teaches you to ignore red bars. Same GLYPH RULE
   as the status bar — `▲`/`■` are BMP, non-emoji-presentation, width 1; `npm run check:glyphs` enforces it.
+- **Tool icons obey the same rule, and are gated twice.** `Tool.icon` is one BMP symbol with
+  Emoji_Presentation=false — never an emoji. ayin wraps by CHARACTER COUNT (`wrapPlain`, `wrapPre`),
+  so a two-cell glyph makes every line carrying it wrap a cell early and smartCSR re-emits the shifted
+  rows: measured, `🔧 guarded · …` reports 51 characters and paints 52 cells. `check-glyphs.mjs` now
+  scans `src/tools/defs/` for the icon value and fails the build on one. That gate cannot see a tool
+  loaded from `AYIN_TOOL_DIRS`, so `formatToolCallForChat` re-checks at paint time and falls back to
+  `▸` — a plain triangle is a cosmetic loss, a shifted transcript is not.
 - **Sessions + `/resume`** (`session-store.ts` reads, `session-record.ts` writes). Every run appends
   one JSON line per prompt / tool call / answer to `~/.ayin-cli/sessions/<id>.jsonl`, each line
   carrying its `cwd`; `syncSession()` (called each turn by the agent) keeps a
@@ -4131,6 +4145,8 @@ src/
 
 tool/
 ├── check-glyphs.mjs    `prebuild` — blessed lies about emoji width; this fails the build on it
+│                       (UI sources AND every `Tool.icon` in src/tools/defs/)
+├── check-tool-icons.mjs `postbuild` — every tool has a one-cell icon, and a card still reads as a card
 ├── check-gates.mjs     `npm run check:gates` — the deterministic halves of the three gates, against
 │                       dist. Binds real sockets (that is the point: it caught a pooled-keep-alive
 │                       socket making a live server look dead), so it is NOT in prebuild. Run it

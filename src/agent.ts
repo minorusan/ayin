@@ -1892,7 +1892,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
       }
 
       setAgentState('tool', `Running ${name}(${paramPreview})`);
-      addMessage('tool', formatToolCallForChat(name, paramPreview));
+      addMessage('tool', formatToolCallForChat(name, paramPreview, getTool(name)?.icon));
       log('INFO', 'tool_call', { tool: name, params: JSON.stringify(params).substring(0, 200) });
 
       // Internal critic — when model writes substantial output and has gathered facts,
@@ -2039,7 +2039,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
           saveArtifact(name, paramPreview, r);
           recordTool(name, paramPreview, r, true);
           transcribeTool({ round, tool: name, params, result: r, ms: Date.now() - toolStarted, backgrounded: true });
-          addMessage('tool', `${formatToolCallForChat(name, `task ${taskId} completed`)}\n${formatToolResultForChat(name, r, Date.now() - toolStarted)}`);
+          addMessage('tool', `${formatToolCallForChat(name, `task ${taskId} completed`, getTool(name)?.icon)}\n${formatToolResultForChat(name, r, Date.now() - toolStarted)}`);
           pushToWindow('user', renderToolResult(`Background ${name} (task ${taskId}) completed:\n${clipForWindow(r)}`));
           pushMessage('assistant', `[tool: ${name}(${paramPreview}) → ${r.substring(0, 150)}]`);
           log('INFO', 'tool_background_complete', { tool: name, taskId, resultLength: String(r.length) });

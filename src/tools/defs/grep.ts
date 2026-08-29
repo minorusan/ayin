@@ -29,6 +29,7 @@ const NEVER_RECURSE = [
 
 export const tool: Tool = {
     name: 'grep',
+    icon: '⌕',
     description: 'Search file contents RECURSIVELY under a directory (or in one file). The pattern is an EXTENDED regex — alternation (a|b), ?, +, () all work. Returns matching lines with file paths and line numbers. Prefer this over a shell grep: it prunes .git/node_modules/Library/dist, caps output, and takes exclude/count/only_matching/invert so a second pass or a pipe is rarely needed.',
     parameters: [
       { name: 'pattern', type: 'string', description: 'Extended-regex pattern, e.g. "IsPickBooster|_skippedBalls"', required: true },

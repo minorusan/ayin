@@ -14,6 +14,7 @@ import { jiraStatus } from '../connectors/jira/loop.js';
  */
 export const tool: Tool = {
   name: 'jira_auth',
+  icon: '⚿',
   description:
     'Set up or refresh the Jira credential from pasted text (token, site, email, expiry — any order). '
     + 'Call with no arguments to report who is authenticated and when the token expires.',

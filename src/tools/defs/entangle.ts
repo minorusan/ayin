@@ -4,6 +4,7 @@ import { entangle, entangledTo, gateAdoption, nextBrief } from '../../entangle/i
 
 export const tool: Tool = {
     name: 'entangle',
+    icon: '⧗',
     description:
       'Bind this session to a design diagram (a naama HTML page or a .puml), so that from now on every ' +
       'file you write is checked against it mechanically. Call this when the operator says the design is ' +

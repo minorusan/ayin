@@ -12,6 +12,7 @@ import {
 
 export const tool: Tool = {
     name: 'naama',
+    icon: '⚘',
     description:
       'Author a DESIGN DOCUMENT one fact per line — types, their members, what each member must do, the ' +
       'domains (assembly/package) that own them and what those may reference. Use this during the design ' +

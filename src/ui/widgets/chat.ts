@@ -65,11 +65,29 @@ function wrapPre(line: string, width: number): string[] {
  */
 const INTERIM_BLEACH = 0.6;
 
-/** Does this tool message OPEN a card (the `▸ tool · params` header) rather than continue one?
- *  Matched on the glyph after any leading blessed tags, which is what the header always starts with. */
-function startsToolCard(content: string): boolean {
-  return content.replace(/^(?:\{[^}]*\})+/, '').startsWith('▸');
+/**
+ * Does this tool message OPEN a card (the `⌕ tool · params` header) rather than continue one?
+ *
+ * Exported for `tool/check-tool-icons.mjs`. Nothing else calls it from outside — but the pairing it
+ * guards (header format ↔ detector) is invisible when it breaks, so a gate has to be able to see it.
+ */
+export function startsToolCard(content: string): boolean {
+  return TOOL_HEADER.test(content);
 }
+
+/**
+ * A call header, by its SHAPE rather than by its glyph.
+ *
+ * This used to be `startsWith('▸')`, which was exact while every card opened with the same character.
+ * Per-tool icons ended that: a `\u2315 grep …` header is still a header, and a detector keyed to one
+ * glyph would have quietly stopped seeing them — costing the blank line before each card AND
+ * misattributing the token-cost label, which skips a header and lands on the result (see `takeCost`).
+ * Neither failure throws; both just look like the layout got worse.
+ *
+ * So the test is the markup only a header has: the tool colour, exactly one character, closed, then
+ * the bold tool name. `formatToolCallForChat` is the sole producer, three lines below.
+ */
+const TOOL_HEADER = new RegExp(`^\\{${theme.tool.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-fg\\}[^{}]\\{/\\} \\{bold\\}`);
 
 /** OBJECTIVE card: label + how many wrapped rows of goal text it may grow to. */
 const TITLE = 'OBJECTIVE';
@@ -638,10 +656,38 @@ function budgeted(lines: string[], maxLines: number, maxChars = PREVIEW_CHAR_BUD
   return { shown, hiddenLines: lines.length - shown.length, hiddenChars };
 }
 
-/** Styled tool-call header shown when a tool starts: `▸ bash · cat package.json` */
-export function formatToolCallForChat(tool: string, params: string): string {
+/** When a tool declares no `icon` of its own. What every card used to show, unconditionally. */
+const DEFAULT_TOOL_GLYPH = '▸';
+
+/**
+ * Styled tool-call header shown when a tool starts: `⌕ grep · pattern=foo path=src`.
+ *
+ * THE GLYPH COMES FROM THE TOOL (`Tool.icon`), passed in by the caller rather than looked up here: the
+ * UI does not import the tool registry, and it should not start now — `tools.ts` reaches into the UI
+ * for permission prompts, so the edge would be a cycle.
+ *
+ * IT MUST BE ONE CELL, and that is not a style preference. ayin wraps by character count
+ * (`wrapPlain`, `wrapPre`), so a two-cell emoji here makes every line carrying it wrap a cell early and
+ * smartCSR re-emits the shifted rows — measured: `\u{1F527} guarded · …` reports 51 characters and
+ * paints 52 cells. `tool/check-glyphs.mjs` fails the build on one in `src/tools/defs/`.
+ *
+ * THE GATE CANNOT SEE EVERY TOOL, which is why the same rule is enforced again here. `AYIN_TOOL_DIRS`
+ * loads tools from directories outside this repo — the whole point of it — and nothing builds those
+ * with our prebuild. A third-party icon is checked at paint time and falls back to the default rather
+ * than being drawn: a tool with a plain triangle is a cosmetic loss, a shifted transcript is not.
+ */
+export function formatToolCallForChat(tool: string, params: string, icon?: string): string {
   const p = params ? ` {${theme.muted}-fg}· ${escapeBlessedTags(params)}{/}` : '';
-  return `{${theme.tool}-fg}▸{/} {bold}{${theme.accent}-fg}${tool}{/${theme.accent}-fg}{/bold}${p}`;
+  return `{${theme.tool}-fg}${toolGlyph(icon)}{/} {bold}{${theme.accent}-fg}${tool}{/${theme.accent}-fg}{/bold}${p}`;
+}
+
+/** One code point, no emoji presentation, or the default. The same rule the build gate applies. */
+function toolGlyph(icon?: string): string {
+  if (!icon) return DEFAULT_TOOL_GLYPH;
+  const cps = [...icon];
+  if (cps.length !== 1) return DEFAULT_TOOL_GLYPH; // a flag, a skin tone, a ZWJ sequence
+  if (/\p{Emoji_Presentation}/u.test(icon) || icon.length > 1) return DEFAULT_TOOL_GLYPH;
+  return icon;
 }
 
 function formatToolMs(ms: number): string {

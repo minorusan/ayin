@@ -4,6 +4,7 @@ import { DEFAULT_COMMITS } from '../../chore/index.js';
 
 export const tool: Tool = {
     name: 'chore',
+    icon: '⌬',
     description:
       'Find members added in recent commits that NOTHING uses — dead code while it is still fresh. Takes the '
       + 'files the last N commits touched (10 by default), extracts the methods, properties and fields those '

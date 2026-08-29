@@ -6,6 +6,7 @@ const CWD = process.cwd();
 
 export const tool: Tool = {
     name: 'bash',
+    icon: '❯',
     description: 'Execute a shell command and return its output. Use for: running scripts, builds, installs, git, docker, checking system state. For LISTING a directory use list_dir, for searching use grep/find_files, for reading use read_file — they are bounded and cheaper. Pass cwd instead of `cd X && …`. Commands are killed after 120s by default — raise timeout_seconds for a build, and put anything open-ended (a server, a watcher) in the background yourself.',
     parameters: [
       { name: 'command', type: 'string', description: 'The shell command to execute', required: true },
