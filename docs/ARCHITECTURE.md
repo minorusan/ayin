@@ -1110,6 +1110,41 @@ for every Python, Node and Unity project already on disk, and hands all five met
 string there, so triage keeps its veto on an established project. `npm run check:plan` asserts both
 halves.
 
+### Does it compile? (`qa/buildcheck.ts`)
+
+Unity has had this question since `qa/unity/compile.ts`: one measurable answer that outranks every
+opinion, because code that does not compile is not worth reviewing. **Every other language had nobody
+asking it.** Measured on a greenfield Python project ayin built end to end, `__main__.py` shipped as:
+
+```python
+if __name__ == "__main__':      # mismatched quote
+```
+
+The declared entry point was dead. The tests passed — they import the package's other module and never
+touch `__main__`. QA passed — nothing asked a compiler. The plan's own verification for that step was
+`ls -R src/csv2json`: the file existed, so the step was "proved". A syntax error survived every check
+ayin had.
+
+`buildCheck(ctx, files)` runs in `qa/base`, which serves `"*"`, and dispatches on the detected type:
+
+| type | check | why this one |
+|---|---|---|
+| `python` | `py_compile` on the changed `.py` | syntax only — needs no venv, no install, no deps, so it works on the turn that CREATED the project, which is the turn that shipped the quote |
+| `node` | `tsc --noEmit` | whole-project by nature: a file's types are a function of everything it imports |
+| `go` | `go build ./...` | |
+| `rust` | `cargo check` | |
+| `unity`, `arduino` | **null** | they have real compile probes; a generic one must not second-guess them |
+
+**An absent toolchain is not a failure.** `tsc` with no `node_modules`, no `python3` on PATH, no
+`tsconfig.json` — all come back `ok: true` and **not hard**, reported as *"build not checked: …"*. Only
+a compiler that RAN and said no fails the gate. This is the arduino-README lesson applied before it can
+happen again: a hard fact nobody can satisfy does not enforce anything, it burns the fix budget that
+would have fixed something real.
+
+**Only what changed.** A whole-project build every turn is a minute the operator waits for an answer
+they already have. TypeScript is the exception, because there is no per-file equivalent that means
+anything.
+
 ### Hard facts are not submitted to the judge
 
 A `ProbeFact` may be marked **`hard`**, and a hard fact that fails **fails the gate outright** —

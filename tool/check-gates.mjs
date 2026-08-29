@@ -249,6 +249,50 @@ ok(!/read_file/.test(g.guardDirective()), 'a new turn starts with a clean slate'
     missing.join(', '));
 }
 
+// ── does it compile? asked deterministically, for the ordinary languages ──
+console.log('\nbuild check');
+{
+  const { mkdtempSync: mkt, writeFileSync: wf, mkdirSync: md } = await import('node:fs');
+  const bc = await import(`file://${join(DIST, 'executors/qa/buildcheck.js')}`);
+  const ctxOf = (root, type) => ({ root, targetDir: '', type, evidence: 'gate', greenfield: false });
+  const filesOf = (...p) => p.map((path) => ({ path, kind: 'code', exists: true, bytes: 1, lines: 1, mtimeMs: Date.now() }));
+
+  // THE BUG THIS EXISTS FOR. A greenfield Python project ayin built shipped `__main__.py` with a
+  // mismatched quote: tests passed (they import the other module), QA passed (nothing asked a
+  // compiler), and the step's own verification was `ls -R` — the file existed, so it was "proved".
+  const py = mkt(join(tmpdir(), 'ayin-bc-py-'));
+  md(join(py, 'src'), { recursive: true });
+  wf(join(py, 'src/core.py'), 'def add(a, b):\n    return a + b\n');
+  wf(join(py, 'src/__main__.py'), 'if __name__ == "__main__\':\n    pass\n');
+  const broken = bc.buildCheck(ctxOf(py, 'python'), filesOf('src/core.py', 'src/__main__.py'));
+  ok(broken && !broken.ok && broken.hard === true, 'a Python syntax error FAILS the gate, hard');
+  ok(/SyntaxError|unterminated/i.test(broken.detail), '  → in the compiler\'s own words', broken.detail.split('\n')[1]?.trim().slice(0, 50));
+
+  wf(join(py, 'src/__main__.py'), 'if __name__ == "__main__":\n    pass\n');
+  const fixed = bc.buildCheck(ctxOf(py, 'python'), filesOf('src/core.py', 'src/__main__.py'));
+  ok(fixed.ok && fixed.hard === true, 'and clean Python passes it, also hard — a green compile is a fact too');
+  rmSync(py, { recursive: true, force: true });
+
+  // AN ABSENT TOOLCHAIN IS NOT A FAILURE. This is the arduino-README lesson applied before it can
+  // happen again: a hard fact nobody can satisfy does not enforce anything, it burns the fix budget
+  // that would have fixed something real.
+  const ts = mkt(join(tmpdir(), 'ayin-bc-ts-'));
+  wf(join(ts, 'tsconfig.json'), '{}');
+  wf(join(ts, 'a.ts'), 'export const x = 1;\n');
+  const noTsc = bc.buildCheck(ctxOf(ts, 'node'), filesOf('a.ts'));
+  ok(noTsc.ok && !noTsc.hard, 'a project with no compiler installed is NOT failed');
+  ok(/not checked/.test(noTsc.detail), '  → it is reported as not checked, which is a different thing', noTsc.detail.slice(0, 50));
+  rmSync(ts, { recursive: true, force: true });
+
+  // The types that already have a real compile probe must not be second-guessed by a generic one.
+  ok(bc.buildCheck(ctxOf('/tmp', 'unity'), filesOf('A.cs')) === null, 'unity is left to qa/unity');
+  ok(bc.buildCheck(ctxOf('/tmp', 'arduino'), filesOf('S.ino')) === null, 'arduino is left to qa/arduino');
+  ok(bc.buildCheck(ctxOf('/tmp', 'python'), []) === null, 'and a turn that changed nothing is not compiled at all');
+
+  const baseSrc = readFileSync(join(REPO, 'src/executors/qa/base/index.ts'), 'utf-8');
+  ok(/buildCheck\(ctx, files\)/.test(baseSrc), 'base QA — which serves every project type — asks the question');
+}
+
 // ── the arbitration tier: what each level is allowed to hold ─────────
 console.log('\narbiter tier');
 {
