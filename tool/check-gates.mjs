@@ -225,6 +225,61 @@ g.guardCheck('bash', cmd); g.guardCheck('bash', cmd);
 ok(/REPEAT/.test(g.guardCheck('bash', cmd).note ?? ''), 'a repeated bash call carries the repeat notice');
 ok(!/read_file/.test(g.guardDirective()), 'a new turn starts with a clean slate');
 
+// ── subagents: the arbitration level, and the two rules that keep it one level ────
+console.log('\nsubagents');
+{
+  const sa = await import(`file://${join(DIST, 'subagents.js')}`);
+
+  // RULE 1: a subagent may not spawn subagents. Enforced by WITHHOLDING the tool, not by refusing the
+  // call — a tool the model can see and cannot use costs a round to discover that.
+  const depthWas = process.env.AYIN_SUBAGENT_DEPTH;
+  const flagWas = process.env.AYIN_SUBAGENTS;
+  delete process.env.AYIN_SUBAGENT_DEPTH; delete process.env.AYIN_SUBAGENTS;
+  ok(sa.subagentsAllowed(), 'the top level may delegate');
+  ok(!sa.isSubagent() && sa.subagentDepth() === 0, 'and knows it is the top level');
+  process.env.AYIN_SUBAGENT_DEPTH = '1';
+  ok(!sa.subagentsAllowed(), 'a SUBAGENT may not delegate — the level stays one deep');
+  ok(sa.isSubagent() && sa.subagentDepth() === 1, 'and knows it is one');
+  process.env.AYIN_SUBAGENT_DEPTH = '3';
+  ok(!sa.subagentsAllowed(), 'nor at any greater depth');
+  delete process.env.AYIN_SUBAGENT_DEPTH;
+  process.env.AYIN_SUBAGENTS = '0';
+  ok(!sa.subagentsAllowed(), 'and an operator can switch delegation off entirely');
+  delete process.env.AYIN_SUBAGENTS;
+  if (depthWas !== undefined) process.env.AYIN_SUBAGENT_DEPTH = depthWas;
+  if (flagWas !== undefined) process.env.AYIN_SUBAGENTS = flagWas;
+
+  // RULE 2: parallel is off until asked for. Two agents editing one tree lose each other's writes, and
+  // nothing in any output says so.
+  const parWas = process.env.AYIN_PARALLEL_SUBAGENTS;
+  delete process.env.AYIN_PARALLEL_SUBAGENTS;
+  ok(!sa.parallelSubagentsAllowed(), 'parallel subagents are OFF by default');
+  ok(sa.prewarmSubagents([{ task: 'a' }, { task: 'b' }]) === 0, 'so nothing is pre-warmed, however many were asked for');
+  process.env.AYIN_PARALLEL_SUBAGENTS = '1';
+  ok(sa.parallelSubagentsAllowed(), 'and on when the operator asks');
+  ok(sa.prewarmSubagents([{ task: 'only-one' }]) === 0, 'a single call is never "parallel" — nothing to overlap');
+  if (parWas !== undefined) process.env.AYIN_PARALLEL_SUBAGENTS = parWas; else delete process.env.AYIN_PARALLEL_SUBAGENTS;
+  sa.resetSubagents();
+
+  // The report is the child's ANSWER, not its transcript: the parent delegated precisely so it would
+  // not have to hold that.
+  const r = sa.extractReport('[system] Connected\n[tool] ▸ bash · command=ls\n│ out\n╰ ✓ 0.1s\nI built it.\n\n--- HANDOFF (x) ---\nnoise\n');
+  ok(r.report === 'I built it.', 'the report is the prose, with the tool cards and the handoff stripped', JSON.stringify(r.report));
+  ok(r.toolCalls === 1, 'and the child\'s tool calls are counted — a report with zero of them is a description, not work');
+
+  // A DELEGATED TASK IS WAITED FOR, NOT POLLED. Backgrounded, the first live delegation polled `status`
+  // six times, hit pollMaxPerTurn, and ended the turn never having seen the report — while the child
+  // had done the job correctly.
+  const agentSrc2 = readFileSync(join(REPO, 'src/agent.ts'), 'utf-8');
+  ok(/const WAIT_FOR_IT = name === 'subagent';/.test(agentSrc2), 'the loop never backgrounds a subagent');
+  ok(/fires on the NEXT TICK/.test(agentSrc2),
+    'and does it by SKIPPING the race — a non-finite setTimeout delay is clamped to 1ms, which would background it instantly');
+
+  const toolsSrc = readFileSync(join(REPO, 'src/tools.ts'), 'utf-8');
+  ok(/subagentsAllowed\(\) \? report\.tools : report\.tools\.filter/.test(toolsSrc),
+    'discovery withholds the tool rather than registering one that would refuse');
+}
+
 // ── search tools: the model's patterns must actually be honoured ─────
 console.log('\nsearch tools');
 const toolsMod = await import(`file://${join(DIST, 'tools.js')}`);

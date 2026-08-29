@@ -87,6 +87,7 @@ function rejectUnknownFlags(): void {
   const KNOWN = new Set([
     '-p', '--prompt', '--non-interactive',              // headless; these take a value
     '--full', '--debug', '--dangerously-skip-permissions', '--thinking', '--transcribe',
+    '--disallow-subagents', '--allow-parallel-subagents',
     '--help', '-h', '--version', '-v',
   ]);
   const TAKES_VALUE = new Set(['-p', '--prompt', '--non-interactive']);

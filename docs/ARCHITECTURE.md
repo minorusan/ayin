@@ -1273,6 +1273,63 @@ specific components are known.
 The document is on disk **before** implementation starts, so a machine that dies mid-feature leaves the
 thinking behind rather than only half the work.
 
+## Subagents (`subagents.ts`) — the arbitration level
+
+A plan whose steps are *create file a*, *create file b*, *edit d in c* is written at the wrong altitude,
+and the agent following it spends its context remembering the plan instead of doing the work. Measured
+on a real request: a five-phase plan totalling **27,138 characters** was inlined into every round's
+prompt against a **12,000-character cap**, so phases 4 and 5 were cut off — and phase 5 was *"run the
+server and give the user the link"*, which is what the request was for. The agent read its own plan file
+repeatedly and produced a `pyproject.toml`. At round 20 the prompt was 2,222 tokens of system, **5,120 of
+conversation and 13,972 of bookkeeping**.
+
+The shape that works is one level up. A plan says what STAGES exist; each stage goes to a subagent with
+its own context, its own tools and its own plan file, and comes back with a report. The `<plan>` block
+now carries the **phase index only**, and the top-level agent calls `subagent` once per phase.
+
+**A child process, not an in-process loop.** The agent's state — conversation window, call ledger, tool
+guard counters, edit ledger — is module-level and per-turn. A second loop inside the first would share
+every one of them: the child's reads would age the parent's repeat counters and the child's window would
+evict the parent's question. A child process is the isolation the design already has — it is exactly
+what `ayin -p` is.
+
+### Two rules, both enforced in `subagents.ts`
+
+**A subagent may not spawn subagents.** Depth travels in `AYIN_SUBAGENT_DEPTH`, and at depth ≥ 1
+`loadTools` **withholds** the tool — it cannot be called because it does not exist. Withheld rather than
+refused: a tool the model can see and cannot use costs a round to discover that. Without this the
+arbitration level is not a level, only recursion. `--disallow-subagents` (or `AYIN_SUBAGENTS=0`) sets the
+same state for an operator who wants a plain agent.
+
+**Parallel is off until asked for.** Two agents editing one tree race on every file they share and the
+loser's write vanishes with nothing in any output to say so. `--allow-parallel-subagents` (or
+`AYIN_PARALLEL_SUBAGENTS=1`) turns it on. It is *prepared, not proven* — nothing here has yet measured
+two agents on one tree, and the flag exists so that measurement needs no code change.
+
+**How parallel works without touching the agent loop.** That loop does a great deal per call — the
+guard, the ledger, the artifact cache, the on-screen card, the window pair — all in order, and
+interleaving it would be a rewrite. So the loop **pre-warms**: every subagent call in a batch is started
+at once before the loop begins, and the loop then consumes the already-running promises in its normal
+sequential way. The bookkeeping stays ordered; only the waiting overlaps.
+
+### A delegated task is waited for, never backgrounded
+
+Backgrounding exists so a slow shell command does not freeze a turn. A subagent is slow *by design* and
+the parent has nothing to do until it reports — so `BACKGROUND_TIMEOUT` does not apply to it. Measured on
+the first live delegation, backgrounded: the parent polled `status` six times, hit `pollMaxPerTurn`, was
+told `blocked (poll cap 6)` and ended the turn **never having seen the report**, while the child had
+finished the job correctly. Waiting instead: one tool call, no polling, and an accurate report.
+
+The mechanism is a `WAIT_FOR_IT` branch that **skips the race** rather than passing it a large number —
+`setTimeout(fn, Infinity)` fires on the next tick, because Node clamps a non-finite delay to 1 ms, which
+would have backgrounded it instantly.
+
+### Reading a subagent's result
+
+It opens with the child's own statistics — `subagent finished — 6 tool call(s), 56s`. **Zero tool calls
+means it changed nothing**: it described the work rather than doing it, and a report of work never done
+reads exactly like a report of work done. The result says so in as many words when that happens.
+
 ### A plan has two levels: the stages of the job, then the steps of each stage
 
 **A flat step list is written at ONE altitude, and the model picks the lowest one — files.** Measured on

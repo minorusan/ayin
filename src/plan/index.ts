@@ -498,13 +498,15 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       // at the phase files, which is what makes each stage readable on its own and re-readable after a
       // crash. The model gets the index AND every phase's steps inline: telling it to go and open four
       // files first spends four tool calls to learn what the prompt could simply have carried.
-      contextBody = [
-        planBody,
-        ...phased.phases.map((p, i) => p.plan
-          ? `\n---\n\n# Phase ${p.phase.id} — ${p.phase.title}\n\n**Done when:** ${p.phase.goal.trim()}\n`
-            + `**Plan file:** \`${phaseFiles[i]}\`\n\n${p.plan.markdown.trim()}`
-          : ''),
-      ].filter(Boolean).join('\n');
+      // THE INDEX ONLY. Inlining every phase is what broke the first real request this shipped against:
+      // five phases totalling 27,138 characters against a 12,000-character cap, so phases 4 and 5 were
+      // CUT OFF — and phase 5 was "run the server and give the user the link", which is what the request
+      // was for. The plan then cost 4,000 tokens of every round to say less than the index does.
+      //
+      // Each phase's steps live in its own file, and the agent hands that file to a SUBAGENT rather than
+      // reading it itself. That is the whole point of the two levels: this agent arbitrates, and never
+      // holds twenty-four steps in its head.
+      contextBody = planBody;
       const steps = phased.phases.reduce((n, p) => n + (p.plan?.steps.length ?? 0), 0);
       const unplanned = phased.phases.filter((p) => !p.plan).length;
       addMessage('system', `Plan mode: ${phased.phases.length} phase(s), ${steps} step(s) across them, `

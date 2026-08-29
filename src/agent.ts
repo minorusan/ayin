@@ -43,6 +43,7 @@ import { isLogCoverage, isVerbose } from './modes.js';
 import { pendingCorpus } from './indulge/inject.js';
 import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
+import { prewarmSubagents, resetSubagents } from './subagents.js';
 import { extractSignals } from './tools/signals.js';
 import { qaBeginTurn, qaChangedFiles, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn, qaPreparedUnits } from './qa/index.js';
 import { regenerateTouchedDiagrams } from './arduino-diagram-regen.js';
@@ -1329,6 +1330,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
   // Per TURN, not per session: a second question legitimately searches again from scratch.
   const toolUseCounts = new Map<string, number>();
   resetCallLedger();
+  resetSubagents();
   // Discovery, once. Idempotent, so every entry point can insist rather than assume.
   await loadTools();
   currentGoal = userInput;
@@ -1807,6 +1809,16 @@ async function runAgentTurn(userInput: string): Promise<void> {
     /** Same clipping the transcript uses — a preview, not the params. */
     const paramPreviewOf = (p: Record<string, string>): string =>
       Object.entries(p).map(([k, v]) => `${k}=${v.length > 60 ? `${v.substring(0, 57)}...` : v}`).join(', ');
+    // PARALLEL SUBAGENTS, when the operator has asked for them. Off by default, because two agents
+    // editing one tree race on every file they share and the loser's write is lost with nothing in any
+    // output to say so. The loop below is untouched either way — this only starts the children early,
+    // and the loop collects them in its normal order. See `subagents.ts#prewarmSubagents`.
+    const subagentCalls = parsed.toolCalls
+      .filter((c) => c.name === 'subagent' && (c.params.task ?? '').trim())
+      .map((c) => ({ task: c.params.task, cwd: c.params.cwd, plan: c.params.plan }));
+    const prewarmed = prewarmSubagents(subagentCalls);
+    if (prewarmed > 1) addMessage('system', `Running ${prewarmed} subagents in parallel.`);
+
     for (let tcIdx = 0; tcIdx < parsed.toolCalls.length; tcIdx++) {
       const { name, params } = parsed.toolCalls[tcIdx];
       const firstInBatch = tcIdx === 0;
@@ -2024,7 +2036,17 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // explore is a sub-investigation that may take 1-3 minutes — never background it.
       // Other tools may go background after 20s.
       // explore and web_search need long timeouts — they do real work
+      /**
+       * A DELEGATED TASK IS WAITED FOR, NOT POLLED. Backgrounding exists so a slow shell command does
+       * not freeze a turn; a `subagent` is slow BY DESIGN — it is a whole stage of the work — and the
+       * parent has nothing else to do until it reports. Backgrounded, it went the other way: the parent
+       * polled `status` six times, hit `pollMaxPerTurn`, was told "blocked (poll cap 6)" and ended the
+       * turn having never seen the report, while the child had in fact finished the job correctly.
+       * Measured on the first live delegation; the files were right and the parent did not know.
+       */
       const BACKGROUND_TIMEOUT = (name === 'explore' || name === 'web_search') ? 600_000 : 20_000;
+      /** Never backgrounded, whatever it costs in wall clock — see the note above. */
+      const WAIT_FOR_IT = name === 'subagent';
       const toolStarted = Date.now();
       // Tools are timed too: a ten-minute turn is as often one shell command that never returned as
       // it is a slow model, and the status line cannot tell them apart.
@@ -2066,10 +2088,14 @@ async function runAgentTurn(userInput: string): Promise<void> {
       ).finally(() => liveTool(null));
 
       let result: string | null = null;
-      const timeoutResult = await Promise.race([
-        toolPromise.then(r => { result = r; return 'done' as const; }),
-        new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), BACKGROUND_TIMEOUT)),
-      ]);
+      // `setTimeout(fn, Infinity)` fires on the NEXT TICK — Node clamps a non-finite delay to 1ms — so
+      // "never background this" has to skip the race, not pass it a big number.
+      const timeoutResult = WAIT_FOR_IT
+        ? await toolPromise.then((r) => { result = r; return 'done' as const; })
+        : await Promise.race([
+          toolPromise.then(r => { result = r; return 'done' as const; }),
+          new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), BACKGROUND_TIMEOUT)),
+        ]);
 
       if (interrupted && immediateCancel) {
         setAgentStatus('');
