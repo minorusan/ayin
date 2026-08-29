@@ -1273,6 +1273,59 @@ specific components are known.
 The document is on disk **before** implementation starts, so a machine that dies mid-feature leaves the
 thinking behind rather than only half the work.
 
+## Runs (`runs.ts`) — management instead of timeouts
+
+A tool that prints nothing is indistinguishable from a tool that has hung, and ayin's only answer to
+that used to be a clock. There were four of them: `BACKGROUND_TIMEOUT` at 20 seconds,
+`EXEC_TIMEOUT_MS` at two minutes, `subagentTimeoutMs` at fifteen, `pollMaxPerTurn` at six. **A timeout
+is a guess about how long work should take, made by something that cannot see the work**, and every one
+of those guesses was wrong here in a measured way — the subagent one cost a whole turn its result:
+backgrounded at 20s, polled six times, `blocked (poll cap 6)`, turn over, report never read, while the
+child had finished the job correctly.
+
+The alternative is not a longer clock. It is knowing what is running. `runs.ts` is the **one door**
+every tool call goes through:
+
+| | |
+|---|---|
+| `currentRuns()` | what is running, for how long, and the last thing it said |
+| `cancelRun(id)` | stop **one** call and let the turn continue |
+| `cancelAllRuns()` | the operator pressed stop |
+| `onRunsChanged(cb)` | a subscription the status line paints from, ticked once a second |
+
+**A tool that narrates cannot look hung.** The contract widened to `execute(params, ctx?)` where
+`ctx = { signal, onStatus }` — optional, so every existing tool compiles unchanged. Each `onStatus`
+note is stamped with the seconds since the *previous* note, so two tools' timings are comparable and
+the slow step of a long run is visible. The ticker re-publishes every live run once a second whether or
+not it has spoken, turning "nothing is happening" into `bash 23s — npm run build`.
+
+**Cancelled is not failed, and the signal decides.** A killed child usually returns its partial output
+through the normal path rather than throwing, so a cancelled command comes back looking exactly like a
+successful one — a green tick over a truncated result handed to the model as the answer. `aborted` is
+consulted after the call returns, whatever the call chose to do. Taken from Maradel's
+`tasks/service.ts`, which had it first and records that it was verified live before the fix.
+
+**Per-call cancellation** is the half ayin never had. `interruptAgent()` now cancels *every* live run
+rather than the one `activeToolCancel` happened to point at — with several runs live, which is exactly
+what `--allow-parallel-subagents` produces, stopping the turn used to stop one and orphan the rest.
+
+### What was removed
+
+- **The backgrounding race is gone.** Every tool call is awaited. Nothing is taken away from the model
+  and turned into a task it has to poll.
+- **`execAsync` has no default timeout** — `timeoutMs` is honoured when a caller passes one explicitly,
+  and `AYIN_EXEC_TIMEOUT_MS` is an operator backstop that is off unless set. `bash` passes the run's
+  signal, so a cancelled call kills its child rather than leaving it running with nobody waiting.
+- **The subagent kill-timer is gone.** A stage of the work takes as long as it takes; the signal stops
+  it.
+
+Verified live: `sleep 45 && echo awake` ran to completion in one call — `run_done … ok:true,
+cancelled:false, ms:45031` — where before it would have been backgrounded at 20 seconds.
+
+`tools/` still imports nothing outside `tools/`, so `RunContext` is declared in `tools/base.ts` and
+`runs.ts` imports it; the contract belongs to the contract's file. `check:gates` learned that a
+**type-only** import creates no runtime edge, so it no longer demands `ensureToolRuntime()` for one.
+
 ## Subagents (`subagents.ts`) — the arbitration level
 
 A plan whose steps are *create file a*, *create file b*, *edit d in c* is written at the wrong altitude,

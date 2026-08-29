@@ -34,7 +34,6 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { log } from './log.js';
-import { getConfig } from './prompts.js';
 
 /** How deep we already are. `0` is the operator's own session; `1` is a subagent it spawned. */
 export function subagentDepth(): number {
@@ -144,13 +143,13 @@ export function prewarmSubagents(calls: Array<{ task: string; cwd?: string; plan
  * Run one task to completion in a fresh agent, or collect one already running. Never throws — a
  * subagent that dies is a report the parent has to act on, not an exception that ends the parent's turn.
  */
-export async function runSubagent(task: string, opts: { cwd?: string; plan?: string } = {}): Promise<SubagentResult> {
+export async function runSubagent(task: string, opts: { cwd?: string; plan?: string; signal?: AbortSignal } = {}): Promise<SubagentResult> {
   const running = inFlight.get(keyOf(task, opts));
   if (running) return running;
   return spawnSubagent(task, opts);
 }
 
-async function spawnSubagent(task: string, opts: { cwd?: string; plan?: string } = {}): Promise<SubagentResult> {
+async function spawnSubagent(task: string, opts: { cwd?: string; plan?: string; signal?: AbortSignal } = {}): Promise<SubagentResult> {
   const started = Date.now();
   const cwd = opts.cwd || process.cwd();
   // The plan file is named, never inlined: reading it is the child's first act and costs one tool call,
@@ -159,7 +158,6 @@ async function spawnSubagent(task: string, opts: { cwd?: string; plan?: string }
     ? `${task}\n\nA plan for this task has already been written to ${opts.plan}. Read that file first and follow it.`
     : task;
 
-  const timeoutMs = getConfig('subagentTimeoutMs', 900_000);
   log('INFO', 'subagent_start', { cwd, plan: opts.plan ?? '', chars: String(prompt.length) });
 
   return new Promise<SubagentResult>((resolve) => {
@@ -190,10 +188,16 @@ async function spawnSubagent(task: string, opts: { cwd?: string; plan?: string }
     child.on('error', (err) => finish(false, `subagent failed to start: ${err.message}`));
     child.on('close', (code) => finish(code === 0, code === 0 ? '' : `subagent exited ${code}`));
 
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      finish(false, `subagent exceeded ${Math.round(timeoutMs / 1000)}s and was killed — what it had done up to that point stands`);
-    }, timeoutMs);
-    child.on('close', () => clearTimeout(timer));
+    // NO TIMEOUT. A stage of the work takes as long as it takes, and a clock cannot tell a subagent
+    // that is thinking from one that is stuck — only the signal can, and the signal comes from the
+    // operator or from the turn. See `runs.ts`.
+    if (opts.signal) {
+      const stop = (): void => {
+        child.kill('SIGTERM');
+        setTimeout(() => child.kill('SIGKILL'), 2000).unref?.();
+      };
+      if (opts.signal.aborted) stop();
+      else opts.signal.addEventListener('abort', stop, { once: true });
+    }
   });
 }

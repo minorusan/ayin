@@ -15,6 +15,20 @@
 
 import type { ToolPrompts as PromptBundle } from './runtime.js';
 
+/**
+ * What a tool is handed so it can narrate and be stopped.
+ *
+ * DECLARED HERE, not in `runs.ts`, because `tools/` imports nothing outside `tools/` — the boundary
+ * `check:gates` enforces, and the reason a tool package can live in its own repo. `runs.ts` imports
+ * this instead; the contract belongs to the contract's file.
+ */
+export interface RunContext {
+  /** Aborted when this call is cancelled, or when the turn is. */
+  signal: AbortSignal;
+  /** Say what you are doing. The only thing between a slow tool and a hung-looking one. */
+  onStatus(note: string): void;
+}
+
 export interface ToolParameter {
   name: string;
   type: string;
@@ -79,7 +93,13 @@ export interface Tool {
   name: string;
   description: string;
   parameters: ToolParameter[];
-  execute(params: Record<string, string>): Promise<string>;
+  /**
+   * `ctx` is OPTIONAL so every existing tool compiles unchanged, and is how a tool becomes something
+   * other than opaque: `ctx.onStatus(note)` narrates, `ctx.signal` says when to stop. A tool that
+   * takes neither is fine — it simply cannot be cancelled mid-flight or report progress, which is the
+   * state every tool was in before `runs.ts`. See `runs.ts` for why that mattered.
+   */
+  execute(params: Record<string, string>, ctx?: RunContext): Promise<string>;
   /** Run this tool directly from a slash command. See ToolSlash. */
   readonly slash?: ToolSlash;
   /**
@@ -104,7 +124,7 @@ export abstract class BaseTool implements Tool {
   abstract name: string;
   abstract description: string;
   abstract parameters: ToolParameter[];
-  abstract execute(params: Record<string, string>): Promise<string>;
+  abstract execute(params: Record<string, string>, ctx?: RunContext): Promise<string>;
 
   /** Override in a tool that ships prompts. Absolute path to its `prompts/` directory. */
   readonly promptsSourceDir?: string;

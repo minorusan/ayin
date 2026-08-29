@@ -225,6 +225,61 @@ g.guardCheck('bash', cmd); g.guardCheck('bash', cmd);
 ok(/REPEAT/.test(g.guardCheck('bash', cmd).note ?? ''), 'a repeated bash call carries the repeat notice');
 ok(!/read_file/.test(g.guardDirective()), 'a new turn starts with a clean slate');
 
+// ── runs: management instead of timeouts ─────────────────────────────
+console.log('\nruns');
+{
+  const R = await import(`file://${join(DIST, 'runs.js')}`);
+  R.resetRuns();
+
+  // A LONG TOOL IS NOT A HUNG TOOL, and no clock decides which. It narrates, and the notes carry the
+  // delta since the previous one so two tools' timings are comparable.
+  const seen = [];
+  const off = R.onRunsChanged((runs) => { if (runs.length) seen.push(runs[0]); });
+  const slow = R.startRun('slowtool', 'x=1', async (ctx) => {
+    ctx.onStatus('step one');
+    await new Promise((res) => setTimeout(res, 60));
+    ctx.onStatus('step two');
+    return 'finished normally';
+  });
+  ok(R.currentRuns().some((r) => r.tool === 'slowtool'), 'a running tool is visible from OUTSIDE the await');
+  const a = await slow.done;
+  ok(a.ok && !a.cancelled && a.output === 'finished normally', 'and is never killed for taking time');
+  ok(/^\[\+[\d.]+s\] step one\n\[\+[\d.]+s\] step two$/.test(slow.notes()),
+    'its narration is stamped with the delta since the previous note', JSON.stringify(slow.notes()));
+  ok(R.currentRuns().length === 0, 'and it leaves the registry when it finishes');
+  off();
+
+  // CANCELLED IS NOT FAILED, AND THE SIGNAL DECIDES. A killed child returns its partial output through
+  // the normal path rather than throwing, so a cancelled run looks exactly like a successful one unless
+  // `aborted` is consulted — a green tick over a truncated result handed to the model as the answer.
+  const sneaky = R.startRun('bashlike', 'cmd=sleep', async (ctx) => {
+    await new Promise((res) => { ctx.signal.addEventListener('abort', res, { once: true }); setTimeout(res, 3000); });
+    return 'partial output that looks fine';          // note: does NOT throw
+  });
+  R.cancelRun(sneaky.id, 'test');
+  const b = await sneaky.done;
+  ok(b.cancelled, 'a cancelled run is marked cancelled even though the tool returned normally');
+  ok(!b.ok, '  → and is NOT reported as a success');
+  ok(/Cancelled before it finished/.test(b.output), '  → and says so where the model will read it');
+
+  // PER-CALL. Stopping one tool must leave the rest of the turn alone — the half ayin never had.
+  const one = R.startRun('t1', '', async (ctx) => {
+    await new Promise((res) => { ctx.signal.addEventListener('abort', res, { once: true }); setTimeout(res, 3000); });
+    return 'one';
+  });
+  const two = R.startRun('t2', '', async () => { await new Promise((res) => setTimeout(res, 30)); return 'two'; });
+  R.cancelRun(one.id);
+  const [o, t] = await Promise.all([one.done, two.done]);
+  ok(o.cancelled && !t.cancelled && t.output === 'two', 'cancelling one run leaves the others running');
+
+  // A tool that throws is a RESULT, never an exception that ends the turn.
+  const boom = await R.startRun('boom', '', async () => { throw new Error('nope'); }).done;
+  ok(!boom.ok && /Error: nope/.test(boom.output), 'a throwing tool comes back as a result the model can read');
+
+  ok(R.cancelAllRuns() === 0, 'and nothing is left running afterwards');
+  R.resetRuns();
+}
+
 // ── subagents: the arbitration level, and the two rules that keep it one level ────
 console.log('\nsubagents');
 {
@@ -270,10 +325,11 @@ console.log('\nsubagents');
   // A DELEGATED TASK IS WAITED FOR, NOT POLLED. Backgrounded, the first live delegation polled `status`
   // six times, hit pollMaxPerTurn, and ended the turn never having seen the report — while the child
   // had done the job correctly.
+  // NOTHING is backgrounded by a clock any more — `runs.ts` replaced the race entirely, so the
+  // subagent-specific exemption that used to live here has no race left to be exempt from.
   const agentSrc2 = readFileSync(join(REPO, 'src/agent.ts'), 'utf-8');
-  ok(/const WAIT_FOR_IT = name === 'subagent';/.test(agentSrc2), 'the loop never backgrounds a subagent');
-  ok(/fires on the NEXT TICK/.test(agentSrc2),
-    'and does it by SKIPPING the race — a non-finite setTimeout delay is clamped to 1ms, which would background it instantly');
+  ok(!/BACKGROUND_TIMEOUT/.test(agentSrc2), 'the loop has no background timeout at all');
+  ok(/startRun\(/.test(agentSrc2), 'every tool call goes through the run registry — the one door');
 
   const toolsSrc = readFileSync(join(REPO, 'src/tools.ts'), 'utf-8');
   ok(/subagentsAllowed\(\) \? report\.tools : report\.tools\.filter/.test(toolsSrc),
@@ -1207,6 +1263,14 @@ const directConsumers = execFileSync(
 ).split('\n').filter(Boolean);
 const unwired = directConsumers.filter((f) => {
   const body = readFileSync(f, 'utf-8');
+  // A TYPE-ONLY import is erased at compile time, so there is no module to initialise and no order to
+  // trust — `runs.ts` importing the `RunContext` interface from `tools/base.ts` creates no runtime
+  // edge at all. Only a value import can be initialisation-by-import-order.
+  const valueImports = body
+    .split('\n')
+    .filter((l) => /from '\.{1,2}(\/\.\.)*\/tools\/[a-z-]+\.js'/.test(l))
+    .filter((l) => !/^\s*(import|export)\s+type\s/.test(l));   // `export type … from` is erased too
+  if (valueImports.length === 0) return false;
   // Either it wires the runtime, or it pulls in the registry (which does).
   return !/ensureToolRuntime\(\)/.test(body) && !/from '\.{1,2}\/tools\.js'/.test(body);
 });

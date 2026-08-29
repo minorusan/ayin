@@ -41,14 +41,19 @@ export const tool: Tool = {
       required: false,
     },
   ],
-  async execute(params) {
+  async execute(params, ctx) {
     const task = String(params.task ?? '').trim();
     if (!task) return 'Error: task required';
 
+    // NARRATION, because a stage of the work is minutes long and a silent one looks hung. The child's
+    // own progress is its business; what the parent can honestly report is that it is still going.
+    ctx?.onStatus('delegating…');
     const result = await runSubagent(task, {
       cwd: params.cwd ? String(params.cwd) : undefined,
       plan: params.plan ? String(params.plan) : undefined,
+      signal: ctx?.signal,
     });
+    ctx?.onStatus(result.ok ? `done — ${result.toolCalls} tool call(s)` : 'failed');
 
     // THE STATS LINE IS NOT DECORATION. A subagent that reports success having made zero tool calls did
     // not do the work — it described it — and that is the one failure the parent cannot see from the

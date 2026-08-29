@@ -44,6 +44,7 @@ import { pendingCorpus } from './indulge/inject.js';
 import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { prewarmSubagents, resetSubagents } from './subagents.js';
+import { cancelAllRuns, currentRuns, onRunsChanged, resetRuns, startRun, type RunContext } from './runs.js';
 import { extractSignals } from './tools/signals.js';
 import { qaBeginTurn, qaChangedFiles, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn, qaPreparedUnits } from './qa/index.js';
 import { regenerateTouchedDiagrams } from './arduino-diagram-regen.js';
@@ -64,9 +65,43 @@ let immediateCancel = false;
 let nudgeForQueuedMessage = false;
 const queuedUserInputs: string[] = [];
 
+/**
+ * The status line, painted from what is actually running.
+ *
+ * A tool that prints nothing is indistinguishable from one that has hung, and the operator's only move
+ * then is to kill it. `runs.ts` re-publishes every live run once a second with its elapsed time and the
+ * last thing it said, so "nothing is happening" becomes "bash 23s — still running" at worst and the
+ * real work at best.
+ *
+ * SUBSCRIBED ONCE, not per turn: a subscription taken at the top of `runAgentTurn` would have to be
+ * released at every one of its returns, and the one that gets missed leaks a listener per turn.
+ */
+let runTickerInstalled = false;
+function installRunTicker(): void {
+  if (runTickerInstalled) return;
+  runTickerInstalled = true;
+  onRunsChanged((runs) => {
+    if (runs.length === 0) return;
+    setAgentStatus(runs.map((r) => {
+      const secs = Math.round(r.ms / 1000);
+      return `${r.tool} ${secs}s${r.note ? ` — ${r.note.slice(0, 60)}` : ' — still running'}`;
+    }).join(' · '));
+  });
+}
+
 export function interruptAgent(): void {
   interrupted = true;
-  immediateCancel = cancelActiveThinking() || cancelActiveToolExecution() || immediateCancel;
+  // EVERY LIVE RUN, NOT JUST THE ONE `activeToolCancel` HAPPENS TO POINT AT. That single handle was set
+  // by the last `execAsync` to start, so with several runs live — which is what parallel subagents are
+  // for — stopping the turn stopped one of them and orphaned the rest. `runs.ts` knows all of them.
+  const stopped = cancelAllRuns('the operator interrupted the turn');
+  turnAbort.abort('the operator interrupted the turn');
+  immediateCancel = cancelActiveThinking() || cancelActiveToolExecution() || stopped > 0 || immediateCancel;
+}
+
+/** What is running right now — for `/status`, and for anything that wants to look in mid-turn. */
+export function runningTools(): ReturnType<typeof currentRuns> {
+  return currentRuns();
 }
 
 export function enqueueAgentMessage(message: string): void {
@@ -1044,6 +1079,7 @@ const DIAGRAM_TRIGGER = new RegExp([
 ].join('|'), 'i');
 
 let diagramContext = ''; // pre-prompted into the base call for this turn
+let turnAbort = new AbortController();  // aborted on interrupt; every run is chained to it
 let planContext = '';    // a plan produced before the turn (plan/index.ts), pre-prompted the same way
 
 async function runDiagram(userInput: string): Promise<void> {
@@ -1331,6 +1367,13 @@ async function runAgentTurn(userInput: string): Promise<void> {
   const toolUseCounts = new Map<string, number>();
   resetCallLedger();
   resetSubagents();
+  /**
+   * THE TURN'S SIGNAL. Every run is chained to it, so cancelling the turn cancels its tools — and
+   * cancelling ONE tool leaves the turn alone, which is the half ayin never had.
+   */
+  turnAbort = new AbortController();
+  resetRuns();
+  installRunTicker();
   // Discovery, once. Idempotent, so every entry point can insist rather than assume.
   await loadTools();
   currentGoal = userInput;
@@ -2044,9 +2087,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * turn having never seen the report, while the child had in fact finished the job correctly.
        * Measured on the first live delegation; the files were right and the parent did not know.
        */
-      const BACKGROUND_TIMEOUT = (name === 'explore' || name === 'web_search') ? 600_000 : 20_000;
-      /** Never backgrounded, whatever it costs in wall clock — see the note above. */
-      const WAIT_FOR_IT = name === 'subagent';
+
       const toolStarted = Date.now();
       // Tools are timed too: a ten-minute turn is as often one shell command that never returned as
       // it is a slow model, and the status line cannot tell them apart.
@@ -2082,20 +2123,27 @@ async function runAgentTurn(userInput: string): Promise<void> {
           + `If the thing you are looking for may not exist under that name, say so and work from what you have.`));
         log('INFO', 'tool_loop_nudge', { tool: name, uses: String(used) });
       }
-      const toolPromise = timed('tool', name, () => tool.execute(params),
-        (line) => { addMessage('system', line); }).catch(
-        (err: unknown) => `Error: ${err instanceof Error ? err.message : String(err)}`,
-      ).finally(() => liveTool(null));
+      /**
+       * THROUGH THE ONE DOOR. `runs.ts` owns what is running, its narration, and how it stops — see
+       * that file for why a clock was the wrong instrument for all three.
+       *
+       * The call is AWAITED. It used to race a 20-second timer and, on losing, be "backgrounded" into
+       * a task the model was told to poll with `status` — which is a timeout wearing a helpful face,
+       * and it cost a turn its whole result an hour before this was written: a subagent backgrounded
+       * at 20s, polled six times, `blocked (poll cap 6)`, turn over, report never read, while the
+       * child had done the job. A tool that narrates does not need to be taken away from the model to
+       * stop looking hung.
+       */
+      const started = timed('tool', name, () => startRun(
+        name,
+        paramPreview,
+        (ctx: RunContext) => tool.execute(params, ctx),
+        { signal: turnAbort.signal },
+      ).done, (line) => { addMessage('system', line); }).finally(() => liveTool(null));
 
-      let result: string | null = null;
-      // `setTimeout(fn, Infinity)` fires on the NEXT TICK — Node clamps a non-finite delay to 1ms — so
-      // "never background this" has to skip the race, not pass it a big number.
-      const timeoutResult = WAIT_FOR_IT
-        ? await toolPromise.then((r) => { result = r; return 'done' as const; })
-        : await Promise.race([
-          toolPromise.then(r => { result = r; return 'done' as const; }),
-          new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), BACKGROUND_TIMEOUT)),
-        ]);
+      const outcome = await started;
+      let result: string | null = outcome.output;
+      if (outcome.cancelled) log('INFO', 'tool_cancelled', { tool: name, ms: String(outcome.ms) });
 
       if (interrupted && immediateCancel) {
         setAgentStatus('');
@@ -2129,34 +2177,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
         pushToWindow('assistant', textPrefix ? `${textPrefix}\n\n${callXml}` : callXml);
       }
 
-      if (timeoutResult === 'timeout') {
-        const taskId = registerTask(name, paramPreview);
-        addMessage('system', `${name} still running (>${BACKGROUND_TIMEOUT / 1000}s), continuing... [task ${taskId}]`);
-        log('INFO', 'tool_backgrounded', { tool: name, taskId });
-
-        pushToWindow('user', renderToolResult(`${name} is still running in the background (task ${taskId}). It started ${BACKGROUND_TIMEOUT / 1000}s ago. You can call the \`status\` tool to check progress, or continue with other work — the result will also arrive automatically.`));
-        noteRanCall(name, paramPreview, true, `still running in the background as task ${taskId}`);
-        pushMessage('assistant', `[tool: ${name}(${paramPreview}) → backgrounded, task ${taskId}]`);
-
-        toolPromise.then(r => {
-          completeTask(taskId, r);
-          saveArtifact(name, paramPreview, r);
-          recordTool(name, paramPreview, r, true);
-          transcribeTool({ round, tool: name, params, result: r, ms: Date.now() - toolStarted, backgrounded: true });
-          addMessage('tool', `${formatToolCallForChat(name, `task ${taskId} completed`)}\n${formatToolResultForChat(name, r, Date.now() - toolStarted)}`);
-          pushToWindow('user', renderToolResult(`Background ${name} (task ${taskId}) completed:\n${clipForWindow(r)}`));
-          pushMessage('assistant', `[tool: ${name}(${paramPreview}) → ${r.substring(0, 150)}]`);
-          log('INFO', 'tool_background_complete', { tool: name, taskId, resultLength: String(r.length) });
-        }).catch((err: unknown) => {
-          const errMsg = err instanceof Error ? err.message : String(err);
-          failTask(taskId, errMsg);
-          log('ERROR', 'tool_background_error', { tool: name, taskId, error: errMsg });
-        });
-
-        // If a tool went background, subsequent batch calls may depend on its
-        // result — bail and let the next LLM round see the bg-task message.
-        continue roundLoop;
-      }
+      // (a tool is never backgrounded any more — see the note above)
 
       result = result!;
       /**
