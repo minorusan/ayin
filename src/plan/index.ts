@@ -72,6 +72,7 @@ import { join } from 'node:path';
 import { llmChat } from '../llm/manager.js';
 import { llmCall } from '../llm.js';
 import { log } from '../log.js';
+import { notePostmortemContext } from '../postmortem.js';
 import { getConfig, getPrompt } from '../prompts.js';
 import { prompts as promptsService, packagePath } from '../prompts-service.js';
 import { recentPrompts } from '../session-record.js';
@@ -518,6 +519,8 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     }
     writeFileSync(path, `${header}${planBody.trim()}\n`);
 
+    // A run killed mid-plan should say WHICH plan it was working, not only that there was one.
+    notePostmortemContext({ plan: path });
     log('INFO', 'plan_written', { path, chars: String(planBody.length), phases: String(phased?.phases.length ?? 0), explorations: String(findings.length), trigger: explicit ? 'explicit' : 'size' });
     addMessage('system', `Plan written: ${path}`);
     return { kind: 'plan', path, body: contextBody.trim(), features: t.features };

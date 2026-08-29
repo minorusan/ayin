@@ -34,6 +34,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { log } from './log.js';
+import { postmortemEnabled } from './postmortem.js';
 
 /** How deep we already are. `0` is the operator's own session; `1` is a subagent it spawned. */
 export function subagentDepth(): number {
@@ -168,6 +169,10 @@ async function spawnSubagent(task: string, opts: { cwd?: string; plan?: string; 
       env: {
         ...process.env,
         AYIN_SUBAGENT_DEPTH: String(subagentDepth() + 1),
+        // A CHILD THIS PROCESS MAY LATER KILL MUST LEAVE A NOTE. Cancelling a subagent kills a process
+        // nobody was watching, and everything it had learned dies with it unless it wrote it down.
+        // Inherited rather than always-on: the operator asked for postmortems, or did not.
+        ...(postmortemEnabled() ? { AYIN_POSTMORTEM: '1' } : {}),
         // It has a plan already; re-planning would spend the whole gate again on a task that IS one
         // phase of a plan.
         AYIN_PLAN: '0',

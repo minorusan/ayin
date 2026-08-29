@@ -48,6 +48,7 @@ import { startUpdateWatch, checkForUpdate } from './updater.js';
 import { getSessionArtifacts, readArtifact } from './artifacts.js';
 import { renderMarkdown } from './markdown.js';
 import { HEADLESS } from './ui.js';
+import { armPostmortem, markCleanExit } from './postmortem.js';
 import { loadRules } from './rules.js';
 import { runBang, cancelBang, bangRunning } from './bang.js';
 import { setConfigValue, resetPromptsToDefaults, promptDriftWarnings, KNOWN_CONFIG_KEYS } from './prompts.js';
@@ -1510,7 +1511,12 @@ async function main(): Promise<void> {
     return;
   }
   if (HEADLESS) {
+    // ARMED BEFORE THE WORK, MARKED CLEAN AFTER IT. Anything between the two that ends the process —
+    // a signal from a parent cancelling this subagent, an uncaught throw, a bare process.exit — leaves
+    // a note saying where it got to. See `postmortem.ts`.
+    armPostmortem();
     await runHeadless();
+    markCleanExit();   // belt: runHeadless exits on its own path, and marks itself there
     return;
   }
   await runInteractive();
@@ -1655,6 +1661,9 @@ async function runHeadless(): Promise<void> {
 
   flushTranscript(); // belt and braces — the exit hook covers the rest
   await disconnect();
+  // THE EXPECTED EXIT SEQUENCE. `runHeadless` exits the process itself, so marking it in the caller
+  // after the await never ran — every clean headless run wrote a postmortem saying it had died.
+  markCleanExit();
   process.exit(0);
 }
 

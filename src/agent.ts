@@ -45,6 +45,7 @@ import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { prewarmSubagents, resetSubagents } from './subagents.js';
 import { cancelAllRuns, currentRuns, onRunsChanged, resetRuns, startRun, type RunContext } from './runs.js';
+import { notePostmortemContext } from './postmortem.js';
 import { extractSignals } from './tools/signals.js';
 import { qaBeginTurn, qaChangedFiles, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn, qaPreparedUnits } from './qa/index.js';
 import { regenerateTouchedDiagrams } from './arduino-diagram-regen.js';
@@ -1377,6 +1378,8 @@ async function runAgentTurn(userInput: string): Promise<void> {
   // Discovery, once. Idempotent, so every entry point can insist rather than assume.
   await loadTools();
   currentGoal = userInput;
+  // So a note left by a kill says what this run was for, not only where it stopped.
+  notePostmortemContext({ goal: userInput.replace(/\s+/g, ' ').slice(0, 300) });
   recordPrompt(userInput); // consolidated per-session record (prompts + tools + answers)
   transcribePrompt(userInput); // full transcript (no-op unless /transcribe)
   pushToWindow('user', userInput);

@@ -1273,6 +1273,51 @@ specific components are known.
 The document is on disk **before** implementation starts, so a machine that dies mid-feature leaves the
 thinking behind rather than only half the work.
 
+## Postmortems (`postmortem.ts`) — a run that dies says where it got to
+
+A headless run that is killed leaves nothing: an exit code and a scrollback that stops mid-sentence.
+That matters more now that ayin spawns ayin — a parent cancelling a subagent kills a process nobody was
+watching, and everything it had learned dies with it. `--postmortem` (or `AYIN_POSTMORTEM=1`) makes it
+write down where it got to; a subagent **inherits** the flag from its parent.
+
+**"Unexpected" is defined by its complement.** A clean run calls `markCleanExit()` on the way out, and
+anything reaching an exit without having done so is unexpected — a signal, an uncaught throw, a bare
+`process.exit`. The inversion is deliberate: a list of "bad" exits is a list you have to keep complete,
+and the one you forget is the one that loses the work. `markCleanExit()` lives where `runHeadless`
+*actually* exits, not in its caller — put in the caller it never ran, and every clean run wrote a note.
+
+The section that earns the feature is **what was running**, read from `runs.ts`:
+
+```
+- **bash**(command=sleep 120) — 20s in, last said: sleep 120
+```
+
+No log reconstructs that. Plus why it died, the goal, the plan file, and the last 40 session events.
+
+**Two copies**: `./ayin-postmortem-<stamp>-<pid>.md` and `~/.ayin-cli/postmortems/` (with an
+`index.jsonl`). A note only in the cache is a note nobody finds; a note only in the work tree dies with
+the tree. Every write is synchronous — this runs inside signal handlers, where a promise never settles.
+
+## `ayin_help` answers a question, not only a topic name
+
+`topic` required already knowing the name of the thing — exactly what someone asking *"can you talk to
+Jira?"* does not have. `question` scores every command, flag, key **and tool** against the words asked.
+Tools are half the answer (nothing in `HELP` mentions `web_search`) and the operator's slash commands
+are the other half, which the model cannot see at all.
+
+**It answers "no" out loud.** A search that matches nothing returns `NOTHING IN AYIN MATCHES "…"` and
+tells the model to say so rather than invent a command. That is the most useful answer this tool has.
+
+No model call: it is term overlap over ~90 short entries, and the agent that called it is already the
+one composing the answer.
+
+**Two traps, both paid for.** The def may not `import … from '../../tools.js'` at module scope — that is
+a cycle through discovery, so the import is lazy, inside `execute`. And one dropped `*/` swallowed the
+whole `export const tool` into a doc comment: discovery reported **no failure** (the module imported
+cleanly, it simply had nothing on it), the tool silently ceased to exist, and the model answered *"I
+cannot call ayin_help as it is not a tool available to me"*. `check:gates` now asserts that **every
+shipped def actually registers**.
+
 ## Runs (`runs.ts`) — management instead of timeouts
 
 A tool that prints nothing is indistinguishable from a tool that has hung, and ayin's only answer to

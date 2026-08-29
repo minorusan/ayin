@@ -225,6 +225,103 @@ g.guardCheck('bash', cmd); g.guardCheck('bash', cmd);
 ok(/REPEAT/.test(g.guardCheck('bash', cmd).note ?? ''), 'a repeated bash call carries the repeat notice');
 ok(!/read_file/.test(g.guardDirective()), 'a new turn starts with a clean slate');
 
+// ── every shipped def actually registers ─────────────────────────────
+//
+// A def that fails to export `tool` is not a failure discovery reports: the module imports cleanly, it
+// simply has nothing on it, so `report.failed` is empty and the tool silently does not exist. Measured
+// the hard way — one dropped `*/` swallowed a whole tool object into a doc comment, `ayin_help`
+// vanished from the catalogue, and the model answered "I cannot call ayin_help as it is not a tool
+// available to me". Nothing anywhere said why.
+{
+  const { readdirSync: rd } = await import('node:fs');
+  const defsDir = join(REPO, 'src/tools/defs');
+  const shipped = rd(defsDir).filter((f) => f.endsWith('.ts')).map((f) => f.replace(/\.ts$/, '')).sort();
+  const tl = await import(`file://${join(DIST, 'tools.js')}`);
+  await tl.loadTools();
+  const missing = shipped.filter((name) => {
+    // A file may export several tools under other names, so ask the module rather than assuming the
+    // filename is the tool name.
+    return !tl.getTool(name);
+  });
+  ok(shipped.length > 20, `the scan found the def directory — ${shipped.length} files`);
+  ok(missing.length === 0,
+    'every shipped tool definition actually registers — a def that exports nothing fails SILENTLY',
+    missing.join(', '));
+}
+
+// ── postmortem: a run that dies unexpectedly says where it got to ────
+console.log('\npostmortem');
+{
+  const pm = await import(`file://${join(DIST, 'postmortem.js')}`);
+
+  // ENABLED BY ASKING. Off by default, because a note nobody asked for in every working directory is
+  // litter, and the operator who wants them wants them everywhere.
+  const flagWas = process.env.AYIN_POSTMORTEM;
+  delete process.env.AYIN_POSTMORTEM;
+  ok(!pm.postmortemEnabled(), 'postmortems are off unless asked for');
+  process.env.AYIN_POSTMORTEM = '1';
+  ok(pm.postmortemEnabled(), 'and on via the environment, for a harness that cannot pass flags');
+
+  // THE NOTE NAMES WHAT WAS RUNNING. This is the part no log reconstructs — "killed during npm run
+  // build, 43 seconds in" rather than "killed" — and it is why `runs.ts` is the thing it reads.
+  const R = await import(`file://${join(DIST, 'runs.js')}`);
+  R.resetRuns();
+  const live = R.startRun('bash', 'command=sleep 120', async (ctx) => {
+    ctx.onStatus('sleep 120');
+    await new Promise((res) => { ctx.signal.addEventListener('abort', res, { once: true }); setTimeout(res, 3000); });
+    return '';
+  });
+  await new Promise((res) => setTimeout(res, 30));
+  const note = pm.renderPostmortem('killed by SIGTERM');
+  ok(/reason: \*\*killed by SIGTERM\*\*/.test(note), 'the note leads with WHY it died');
+  ok(/\*\*bash\*\*\(command=sleep 120\)/.test(note), 'and names the call that was in flight');
+  ok(/last said: sleep 120/.test(note), '  → with the last thing that call narrated');
+  ok(/## Where to resume/.test(note) && /## The tail/.test(note), 'and carries where to resume, and the tail');
+  R.cancelRun(live.id);
+  await live.done;
+
+  // Between calls, it says so rather than leaving the section blank — a blank section reads as lost data.
+  R.resetRuns();
+  ok(/Nothing — it was between tool calls/.test(pm.renderPostmortem('x')), 'an idle death says it was idle');
+
+  // THE EXPECTED EXIT SEQUENCE is the ONLY thing that suppresses a note — see `postmortem.ts` on why
+  // the definition is inverted. A clean headless run must leave nothing.
+  const appSrc = readFileSync(join(REPO, 'src/app.ts'), 'utf-8');
+  ok(/markCleanExit\(\);\n  process\.exit\(0\);/.test(appSrc),
+    'headless marks the clean exit where it ACTUALLY exits — marking it in the caller never ran, and every clean run wrote a note');
+  ok(/armPostmortem\(\)/.test(appSrc), 'and arms the handlers before the work starts');
+
+  const subSrc = readFileSync(join(REPO, 'src/subagents.ts'), 'utf-8');
+  ok(/postmortemEnabled\(\) \? \{ AYIN_POSTMORTEM: '1' \}/.test(subSrc),
+    'a subagent inherits postmortems — cancelling one kills a process nobody was watching');
+
+  if (flagWas !== undefined) process.env.AYIN_POSTMORTEM = flagWas; else delete process.env.AYIN_POSTMORTEM;
+}
+
+// ── ayin_help answers a QUESTION, not only a topic name ──────────────
+console.log('\nayin_help: semantic capability search');
+{
+  const t = await import(`file://${join(DIST, 'tools.js')}`);
+  await t.loadTools();
+  const ah = await import(`file://${join(DIST, 'tools/defs/ayin_help.js')}`);
+
+  ok(/\/jira/.test(ah.answerCapability('can you talk to jira')), 'a question finds the command that answers it');
+  ok(/\/diff/.test(ah.answerCapability('how do I review a diff')), 'and phrasing it as a task still finds it');
+  // TOOLS ARE CAPABILITIES TOO. Nothing in HELP mentions web_search, so a catalogue of commands alone
+  // answers "can you search the web" with silence.
+  // The tool half is passed IN — the def cannot import `tools.js` at module scope without closing a
+  // cycle through discovery, so `execute` hands it over at call time.
+  const toolList = t.modelTools().map((x) => ({ name: x.name, description: x.description }));
+  ok(/web_search/.test(ah.answerCapability('can ayin search the web', toolList)),
+    'and the TOOL catalogue is searched, not only the commands');
+
+  // THE MOST USEFUL ANSWER THIS TOOL HAS. A capability that does not exist must be said out loud, or
+  // the model fills the silence with a command it invented.
+  const no = ah.answerCapability('can you send me a fax');
+  ok(/NOTHING IN AYIN MATCHES/.test(no), 'a capability ayin does not have is refused in as many words');
+  ok(/it cannot/.test(no), '  → and the model is told to say so rather than suggest something that does not exist');
+}
+
 // ── runs: management instead of timeouts ─────────────────────────────
 console.log('\nruns');
 {
