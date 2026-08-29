@@ -249,6 +249,73 @@ ok(!/read_file/.test(g.guardDirective()), 'a new turn starts with a clean slate'
     missing.join(', '));
 }
 
+// ── the arbitration tier: what each level is allowed to hold ─────────
+console.log('\narbiter tier');
+{
+  const sa = await import(`file://${join(DIST, 'subagents.js')}`);
+  const keep = { d: process.env.AYIN_SUBAGENT_DEPTH, a: process.env.AYIN_ARBITER };
+  const set = (depth, arbiter) => {
+    if (depth) process.env.AYIN_SUBAGENT_DEPTH = depth; else delete process.env.AYIN_SUBAGENT_DEPTH;
+    if (arbiter) process.env.AYIN_ARBITER = arbiter; else delete process.env.AYIN_ARBITER;
+  };
+
+  // OFF BY DEFAULT. ayin is not only a builder — "read this file and tell me what it does" is an
+  // ordinary turn, and an arbiter that must spawn a child to run one shell command has made the common
+  // case worse to improve the rare one.
+  set(null, null);
+  ok(!sa.arbiterMode(), 'arbiter mode is OFF by default');
+  ok(!sa.toolWithheld('bash') && !sa.toolWithheld('str_replace'), 'so the primitives are all present');
+
+  // THE ARBITRATOR GIVES UP THE PRIMITIVES THAT INVITE IT TO DO THE WORK ITSELF, and keeps what it
+  // needs to decide and to VERIFY a child's report.
+  set(null, '1');
+  ok(sa.arbiterMode(), 'and on when asked for');
+  for (const t of ['bash', 'str_replace', 'write_file', 'grep', 'find_files', 'list_dir']) {
+    ok(sa.toolWithheld(t), `  → ${t} is withheld from the arbitrator`);
+  }
+  for (const t of ['read_file', 'explore', 'perform_edit', 'find_relevant_files', 'subagent']) {
+    ok(!sa.toolWithheld(t), `  → ${t} is kept — deciding and verifying still need it`);
+  }
+
+  // A SUBAGENT IS WHERE THE WORK HAPPENS, so it keeps its hands — and loses the arbitration tools, or
+  // it would delegate instead of working, which is the recursion rule wearing a different hat.
+  set('1', '1');
+  ok(!sa.arbiterMode(), 'a subagent is never in arbiter mode, whatever the parent was');
+  for (const t of ['bash', 'str_replace', 'grep']) ok(!sa.toolWithheld(t), `  → a subagent keeps ${t}`);
+  for (const t of ['perform_edit', 'find_relevant_files', 'subagent']) {
+    ok(sa.toolWithheld(t), `  → and is denied ${t}`);
+  }
+  set(keep.d, keep.a);
+}
+
+// ── perform_edit / find_relevant_files: the deterministic halves ─────
+console.log('\nperform_edit + find_relevant_files');
+{
+  const pe = await import(`file://${join(DIST, 'tools/defs/perform_edit.js')}`);
+
+  // A FENCE WRITTEN TO DISK IS A SYNTAX ERROR in every language ayin edits, and it is the one thing a
+  // model reliably adds.
+  ok(pe.stripFence('```python\nx = 1\n```') === 'x = 1', 'a fence around the whole answer is stripped');
+  ok(pe.stripFence('x = 1') === 'x = 1', 'and an unfenced answer is untouched');
+  ok(pe.stripFence('a\n```\nb\n```\nc') === 'a\n```\nb\n```\nc', 'a fence INSIDE the file is left alone');
+
+  // THE DIFF IS EVIDENCE, NOT A CLAIM. "I made the change" reads exactly like "I did not"; a diff does
+  // not. This is the failure ayin has measured repeatedly.
+  const d = pe.lineDiff('a\nb\nc\n', 'a\nB2\nc\n');
+  ok(/@@ line 2 @@/.test(d) && /^- b$/m.test(d) && /^\+ B2$/m.test(d), 'the diff names the line and both sides', d.split('\n')[0]);
+  ok(pe.lineDiff('x\n', 'x\n').includes('-0 +0'), 'an unchanged file diffs to nothing');
+
+  const fr = await import(`file://${join(DIST, 'tools/defs/find_relevant_files.js')}`);
+  // EVERY PATH IS VERIFIED. A confident list of files that do not exist is worse than no list: the
+  // caller acts on it and the first failure looks like an unrelated bug three tools later.
+  const parsed = fr.parseFileReport('FILE: src/log.ts | writes the log\nFILE: nope/ghost.ts | invented\nchatty prose\n', REPO);
+  ok(parsed.files.length === 1 && parsed.files[0].path === 'src/log.ts', 'a real path survives with its reason');
+  ok(parsed.invented.length === 1, 'and an invented one is DROPPED and reported, never passed on');
+  ok(fr.parseFileReport('NONE', REPO).none, '"NONE" is an answer, not an empty result');
+  ok(fr.parseFileReport('I think you should look at the uploader.', REPO).files.length === 0,
+    'prose instead of the format yields nothing — the caller asked for files');
+}
+
 // ── postmortem: a run that dies unexpectedly says where it got to ────
 console.log('\npostmortem');
 {
@@ -429,8 +496,8 @@ console.log('\nsubagents');
   ok(/startRun\(/.test(agentSrc2), 'every tool call goes through the run registry — the one door');
 
   const toolsSrc = readFileSync(join(REPO, 'src/tools.ts'), 'utf-8');
-  ok(/subagentsAllowed\(\) \? report\.tools : report\.tools\.filter/.test(toolsSrc),
-    'discovery withholds the tool rather than registering one that would refuse');
+  ok(/report\.tools\.filter\(\(t\) => !toolWithheld\(t\.name\)\)/.test(toolsSrc),
+    'discovery withholds a tool rather than registering one that would refuse — one predicate for every tier');
 }
 
 // ── search tools: the model's patterns must actually be honoured ─────

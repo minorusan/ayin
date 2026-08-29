@@ -1,0 +1,17 @@
+Apply the requested edit to this file and return the COMPLETE file, nothing else.
+
+FILE: {{PATH}}
+
+CURRENT CONTENTS:
+{{CONTENT}}
+
+THE EDIT:
+{{EDIT}}
+
+Return the whole file with the edit applied, from its first line to its last. No fence, no commentary,
+no summary — the next thing that happens to your answer is that it is written to disk verbatim.
+
+Change ONLY what the edit asks for. Every other line comes back byte-identical, including imports,
+comments, blank lines and trailing whitespace. If the edit is already present, return the file unchanged.
+If it cannot be applied — it names something that is not here, or contradicts the file — return the file
+unchanged and nothing else; the caller detects that and reports it.

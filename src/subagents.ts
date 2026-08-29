@@ -71,6 +71,43 @@ export function parallelSubagentsAllowed(): boolean {
     || process.argv.includes('--allow-parallel-subagents');
 }
 
+/**
+ * ARBITER MODE — the top level delegates instead of typing.
+ *
+ * The observation this comes from, measured on a real five-phase build: the arbitrator delegated all
+ * five phases correctly, and the CHILDREN then made 103 tool calls of which **zero** were `explore`.
+ * They groped file by file, because `read_file` and `grep` were right there and composing an exact
+ * `str_replace` anchor is what an agent does when it has one. The primitives are not wrong; having them
+ * at the ARBITRATION level is, because an agent holding twenty files' exact bytes has no room left to
+ * arbitrate.
+ *
+ * So in arbiter mode the top level keeps only what it needs to decide and verify — `read_file`,
+ * `explore`, `perform_edit`, `find_relevant_files`, `subagent` — and the primitives that invite it to
+ * do the work itself are withheld. Subagents are unaffected: at depth ≥ 1 the full set is present,
+ * which is where the work actually happens.
+ *
+ * OFF BY DEFAULT, because ayin is not only a builder. "Read src/log.ts and tell me what it does" is an
+ * ordinary turn, and an arbiter that must spawn a child to run one shell command has made the common
+ * case worse to improve the rare one. `--arbiter` opts in; measurement decides whether it becomes the
+ * default.
+ */
+const ARBITER_WITHHELD = new Set(['write_file', 'str_replace', 'bash', 'grep', 'find_files', 'list_dir']);
+
+export function arbiterMode(): boolean {
+  if (isSubagent()) return false;              // a child does the work; it keeps its hands
+  return process.env.AYIN_ARBITER === '1' || process.argv.includes('--arbiter');
+}
+
+/** True when this tool is hidden from THIS process. Consulted by `loadTools`. */
+export function toolWithheld(name: string): boolean {
+  if (name === 'subagent' && !subagentsAllowed()) return true;
+  // `perform_edit` and `find_relevant_files` are the arbiter's replacements for what it gives up, and
+  // a subagent that had them would delegate rather than work — which is the recursion rule again,
+  // wearing a different hat.
+  if (isSubagent() && (name === 'perform_edit' || name === 'find_relevant_files')) return true;
+  return arbiterMode() && ARBITER_WITHHELD.has(name);
+}
+
 export interface SubagentResult {
   ok: boolean;
   /** What the subagent said when it finished — its answer, not its transcript. */

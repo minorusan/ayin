@@ -1371,6 +1371,72 @@ cancelled:false, ms:45031` — where before it would have been backgrounded at 2
 `runs.ts` imports it; the contract belongs to the contract's file. `check:gates` learned that a
 **type-only** import creates no runtime edge, so it no longer demands `ensureToolRuntime()` for one.
 
+## The arbitration tier (`--arbiter`) — what each level is allowed to hold
+
+Measured on the first full five-phase build that worked end to end: the arbitrator delegated all five
+phases correctly, and the children then made **103 tool calls of which zero were `explore`**. They
+groped file by file — because `read_file` and `grep` were right there, and composing an exact
+`str_replace` anchor is what an agent does when it has one.
+
+The primitives are not wrong. Holding them at the ARBITRATION level is, because an agent carrying
+twenty files' exact bytes has no room left to arbitrate. So `--arbiter` splits the tool surface by
+level:
+
+| level | withheld | given |
+|---|---|---|
+| arbitrator (depth 0, `--arbiter`) | `bash` `grep` `find_files` `list_dir` `write_file` `str_replace` | `read_file` `explore` **`perform_edit`** **`find_relevant_files`** `subagent` |
+| subagent (depth ≥ 1) | `perform_edit` `find_relevant_files` `subagent` | everything else — this is where the work happens |
+
+A subagent is denied the arbitration tools for the same reason it is denied `subagent`: a child that
+could delegate would delegate rather than work. One predicate, `toolWithheld(name)`, decides both, and
+`loadTools` filters on it — **withheld, never registered-and-refusing**, because a tool the model can
+see and cannot use costs a round to discover that.
+
+**Off by default.** Ayin is not only a builder: *"read src/log.ts and tell me what it does"* is an
+ordinary turn, and an arbiter that must spawn a child to run one shell command has made the common case
+worse to improve the rare one.
+
+### `perform_edit` — say what to change, not where
+
+`str_replace` is exact and unforgiving: the caller must already know the file's precise bytes, so it
+reads the file, holds it in context, composes an anchor, and burns a round when the anchor is off by a
+space. That is the right primitive for an agent inside the file's context and the wrong one for an
+arbitrator that is not.
+
+`perform_edit(file, edit)` takes the change in words. One model call — `toolLlm().ask`, which declares
+no tools, so it cannot wander off reading other files — sees the whole file and returns the whole file.
+Then the deterministic half: snapshot before, compare after, and return **the real line diff**:
+
+```
+Edit was made to calc.py with changes:
+
+@@ line 10 @@  -0 +3
++
++ def mul(a, b):
++     return a * b
+```
+
+or `NO CHANGE`, which is a fact the caller must act on rather than a claim it must trust. **A model
+saying "I made the change" reads exactly like a model that did not; a diff does not** — the failure ayin
+has measured repeatedly. The answer's outer ``` fence is stripped (an unstripped one written to disk is
+a syntax error in every language ayin edits); a fence *inside* the file is left alone.
+
+### `find_relevant_files` — a search agent with a parsed contract
+
+`explore` is deterministic localization and stays that way — it answers *"where is `ScoringId`
+mentioned"* in ~400 ms. It is blind to *"which files would I change to add a retry to the uploader"*,
+which needs someone to read what it finds and judge. So this delegates to a **subagent** (through the
+runtime's `subagent` seam, since `tools/` imports nothing outside `tools/`) with a strict output shape:
+
+```
+FILE: <path> | <why this file matters>
+```
+
+Parsed here, and **every path verified against the filesystem**. A file the agent invented is dropped
+and named as dropped — a confident list of paths that do not exist is worse than no list, because the
+caller acts on it and the first failure looks like an unrelated bug three tools later. Prose instead of
+the format yields nothing: the caller asked for files.
+
 ## Subagents (`subagents.ts`) — the arbitration level
 
 A plan whose steps are *create file a*, *create file b*, *edit d in c* is written at the wrong altitude,

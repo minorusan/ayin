@@ -117,6 +117,17 @@ export interface ToolServices {
    * (`send_push`). '' when there is no such host, which those tools report as being unconfigured.
    */
   backendUrl(): string;
+  /**
+   * DELEGATE A WHOLE TASK to a fresh agent, and get back what it did.
+   *
+   * A seam rather than a direct import for the usual reason — `tools/` imports nothing outside
+   * `tools/`, and `subagents.ts` reaches deep into core to spawn a process. Tools that need an agent
+   * rather than an answer (`find_relevant_files`) come through here.
+   *
+   * The host is responsible for refusing to recurse: at depth ≥ 1 there is no subagent to give, and
+   * this throws rather than quietly spawning one. See `subagents.ts`.
+   */
+  subagent(task: string, opts?: { cwd?: string; plan?: string }): Promise<{ ok: boolean; report: string; toolCalls: number; ms: number }>;
 }
 
 let services: ToolServices | null = null;
@@ -145,6 +156,10 @@ export function toolLlm(): ToolLlm {
 }
 
 /** The log, for a tool that has something worth recording. */
+export function toolSubagent(): ToolServices['subagent'] {
+  return require_().subagent;
+}
+
 export function toolLog(): ToolLogger {
   return require_().log;
 }
