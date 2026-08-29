@@ -468,6 +468,16 @@ console.log('\nsubagents');
   if (depthWas !== undefined) process.env.AYIN_SUBAGENT_DEPTH = depthWas;
   if (flagWas !== undefined) process.env.AYIN_SUBAGENTS = flagWas;
 
+  // A CWD THAT DOES NOT EXIST must not come back blaming node. `spawn` raises ENOENT for a missing
+  // working directory exactly as it does for a missing executable, so the message named the
+  // interpreter and sent the reader after a broken install — measured, on a model that mistyped its
+  // own cwd by one character.
+  const badCwd = await sa.runSubagent('anything', { cwd: '/tmp/ayin-no-such-dir-for-a-gate' });
+  ok(!badCwd.ok && badCwd.toolCalls === 0, 'a subagent with a missing cwd fails cleanly');
+  ok(/does not exist/.test(badCwd.report) && /ayin-no-such-dir-for-a-gate/.test(badCwd.report) && !/ENOENT/.test(badCwd.report),
+    '  → naming the directory, and never as a spawn ENOENT that reads like a broken install',
+    badCwd.report.slice(0, 60));
+
   // RULE 2: parallel is off until asked for. Two agents editing one tree lose each other's writes, and
   // nothing in any output says so.
   const parWas = process.env.AYIN_PARALLEL_SUBAGENTS;

@@ -32,6 +32,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { log } from './log.js';
 import { postmortemEnabled } from './postmortem.js';
@@ -190,6 +191,22 @@ export async function runSubagent(task: string, opts: { cwd?: string; plan?: str
 async function spawnSubagent(task: string, opts: { cwd?: string; plan?: string; signal?: AbortSignal } = {}): Promise<SubagentResult> {
   const started = Date.now();
   const cwd = opts.cwd || process.cwd();
+
+  // A CWD THAT DOES NOT EXIST IS REPORTED AS A MISSING NODE. `spawn` raises ENOENT for a missing
+  // working directory exactly as it does for a missing executable, so the message names the
+  // interpreter — "spawn /usr/local/Cellar/node/26.5.0/bin/node ENOENT" — and sends the reader after a
+  // broken install. Measured: a model mistyped its own cwd by one character (`arb-l0qlD` for
+  // `arb-lqlD`), and that is what came back.
+  if (!existsSync(cwd)) {
+    log('WARN', 'subagent_bad_cwd', { cwd });
+    return {
+      ok: false,
+      report: `Cannot start a subagent: the directory ${cwd} does not exist. Check the path — this is a `
+        + 'cwd you passed, not a problem with ayin or node.',
+      toolCalls: 0,
+      ms: Date.now() - started,
+    };
+  }
   // The plan file is named, never inlined: reading it is the child's first act and costs one tool call,
   // where inlining it would put the whole phase into the PARENT's tool result as well.
   const prompt = opts.plan
