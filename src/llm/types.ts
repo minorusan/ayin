@@ -40,6 +40,19 @@ export interface ModelDialect {
    * Optional: a dialect that cannot tell says nothing and the old behaviour stands.
    */
   truncated?(raw: string): boolean;
+  /**
+   * Remove a leaked REASONING channel from a raw reply, for a family whose serving path sometimes
+   * fails to split it off (see `dialects/reasoning.ts` for the measured case).
+   *
+   * Optional, and absent is the right answer for most dialects: when the runtime separates the
+   * channels properly the reasoning never reaches `content`, and a strip that runs anyway is only a
+   * chance to eat a real answer. A dialect implements this when its own family is measured leaking.
+   *
+   * Applied in `manager.ts#llmChat`, once, to the reply every consumer shares — NOT in `parse()`.
+   * `parse()` would clean the prose and miss the three branches in `agent.ts` that push the RAW
+   * response into the window, which is exactly where a monologue must not land.
+   */
+  stripReasoning?(raw: string): string;
   /** Re-render an assistant tool-call turn when replaying it into the window. */
   renderToolCall(call: ParsedToolCall): string;
   /** Frame a message (tool output, error, warning) as the model's tool-result turn. */

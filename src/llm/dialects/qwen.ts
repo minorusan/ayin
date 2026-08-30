@@ -8,6 +8,7 @@
  */
 
 import { XmlToolCallDialect } from './xml.js';
+import { stripReasoning } from './reasoning.js';
 
 /**
  * The inner block, WITHOUT the `<tool_call>` wrapper the model was trained to emit. That looks wrong
@@ -50,4 +51,11 @@ export class QwenDialect extends XmlToolCallDialect {
   private servedModel = '';
   matches(modelId: string): boolean { this.servedModel = modelId; return /qwen/i.test(modelId); }
   toolCallInstructions(): string { return TOOL_CALL_FORMAT; }
+  /**
+   * Qwen is the family measured leaking its reasoning into `content` on this serving path — with
+   * `think` already OFF, because the flag stops the runtime SPLITTING the channel, not the model
+   * THINKING. See `reasoning.ts` for the shapes and why the monologue costs more than it looks like
+   * it does.
+   */
+  stripReasoning(raw: string): string { return stripReasoning(raw); }
 }

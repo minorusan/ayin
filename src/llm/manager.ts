@@ -406,6 +406,35 @@ export function parseToolCalls(raw: string): ParseAllResult {
   }
   return result;
 }
+/**
+ * Drop a leaked reasoning channel from a raw reply, if the active dialect knows its family leaks.
+ *
+ * ONE PLACE, ON THE SHARED PATH — the same argument the `tool_call_without_tools` guard above makes,
+ * for the same reason: the dialect layer is what knows how a family formats itself, and one fix here
+ * serves agent, QA, plan, presenter, explore, indulge and every connector. Fixing it in `agent.ts`
+ * would leave the others to meet it separately and solve it separately.
+ *
+ * Reported when it fires, because a strip that removes 1400 characters is a fact about the model that
+ * the operator should be able to see in the log rather than infer from a short answer. Logged, not
+ * written to disk: the leak was 3 replies in 220, and a record per call would be churn for nothing.
+ *
+ * Never throws — a dialect bug must not take down a turn that otherwise succeeded.
+ */
+function stripLeakedReasoning(raw: string): string {
+  const d = activeDialect();
+  if (!d.stripReasoning || !raw) return raw;
+  let out: string;
+  try { out = d.stripReasoning(raw); } catch { return raw; }
+  if (out === raw) return raw;
+  log('INFO', 'reasoning_channel_stripped', {
+    dialect: d.id,
+    model: cachedModelId || '(unknown)',
+    removed: String(raw.length - out.length),
+    left: String(out.length),
+  });
+  return out;
+}
+
 export function renderToolCall(call: ParsedToolCall): string { return activeDialect().renderToolCall(call); }
 /**
  * THE FINISHED-REPLY MARKER SURVIVES A TOOL TURN — or it costs a round, every task.
@@ -682,11 +711,11 @@ async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}, p
   const promptChars = messages.reduce((n, m) => n + m.content.length, 0);
   const started = Date.now();
   try {
-    let reply = await narrateWait('thinking', async () => {
+    let reply = stripLeakedReasoning(await narrateWait('thinking', async () => {
       const r = await provider.generate(messages, tools ? { tools } : undefined);
       if (r.usage) recordUsage(r.usage, purpose, promptChars);
       return r.content;
-    });
+    }));
 
     // A TOOL-TRAINED MODEL ANSWERS WITH A TOOL CALL EVEN WHEN IT HAS NONE.
     //
@@ -724,7 +753,11 @@ async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}, p
           + 'and is discarded. Answer directly, in exactly the format the instructions asked for. '
           + 'If you need something you would have used a tool for, say what and why instead.' },
       ], undefined)).content);
-      if (retry.trim()) reply = retry;
+      // The retry is a second generation from the same model, so it leaks the same way. Stripped on
+      // the same terms — and `.trim()` on the STRIPPED text, so a retry that was nothing but a
+      // monologue does not overwrite the first reply with an empty string.
+      const cleaned = stripLeakedReasoning(retry);
+      if (cleaned.trim()) reply = cleaned;
     }
     emitLlmCall({
       model: cachedModelId, promptChars, replyChars: reply.length,
