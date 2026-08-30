@@ -233,7 +233,7 @@ export const HELP: HelpEntry[] = [
     tip: 'ayin unity test --assemblies lists what can be run and which are PlayMode — then ayin unity test Asm1,Asm2.',
   },
   { name: 'ayin explain', kind: 'cli', section: 'From your shell', short: 'ayin explain "<question>" — prints the narrative and exits' },
-  { name: 'ayin watch', kind: 'cli', section: 'From your shell', short: 'Repo watcher daemon — reviews what lands, resumes itself after a reboot' },
+  { name: 'ayin watch', kind: 'cli', section: 'From your shell', short: 'Repo watcher daemon — reviews what lands, weaves the design to match the source (--weave), resumes after a reboot' },
   { name: 'ayin unwatch', kind: 'cli', section: 'From your shell', short: 'Stop watching this repo: remove the hooks it installed and deregister it (--all, --stop)' },
   { name: 'ayin -p', kind: 'cli', section: 'From your shell', short: 'Headless: ayin -p "<task>". Auto-approves writes and shell — run it on a tree you can revert' },
   { name: 'ayin debug', kind: 'cli', section: 'From your shell', short: 'ayin debug [dir] — the same bundle without the TUI, for a run nobody was sitting in front of' },

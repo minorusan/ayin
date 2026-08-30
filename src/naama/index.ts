@@ -441,14 +441,23 @@ export function naamahAvailable(): boolean {
   return existsSync(NAAMAH);
 }
 
-export async function renderDesign(pumlPath: string): Promise<string> {
+/**
+ * `outPath` names where the page goes.
+ *
+ * Without it naamah writes `<name>.html` **beside where the process was run**, which is fine for an
+ * interactive session standing in the repo root and wrong for anything else: a daemon renders into
+ * whatever directory it was started in, leaving the page nowhere near the design it draws. A caller
+ * that is not a person should say where it wants the file.
+ */
+export async function renderDesign(pumlPath: string, outPath?: string): Promise<string> {
   if (!naamahAvailable()) {
     return `Cannot render: the naamah submodule is not present (${NAAMAH}). `
       + 'Run `git submodule update --init` to fetch it. The design itself is unaffected — it is authored '
       + 'and enforced without a renderer.';
   }
+  const args = outPath ? ['weave', resolve(pumlPath), resolve(outPath)] : ['weave', resolve(pumlPath)];
   return new Promise((done) => {
-    execFile(process.execPath, [NAAMAH, 'weave', resolve(pumlPath)], { timeout: 120_000 }, (err, stdout, stderr) => {
+    execFile(process.execPath, [NAAMAH, ...args], { timeout: 120_000 }, (err, stdout, stderr) => {
       const out = `${stdout}${stderr}`.trim();
       if (!err) { done(out || 'rendered.'); return; }
       // plantuml is naamah's own dependency, not ayin's, so say which layer is missing rather than

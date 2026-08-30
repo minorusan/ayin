@@ -42,6 +42,10 @@ import { prompts, packagePath, writeAtomic } from './prompts-service.js';
 import { log } from './log.js';
 import { HOUND_MARKERS, HOUND_SCRIPT_NAME, LEGACY_HOUND_SCRIPT, houndOffPath, isHoundOff } from './hound-off.js';
 import { ensureAccelerator } from './unity-accelerator.js';
+import {
+  discoverDesign, registerWeave, renderDelta, unregisterWeave, weaveRepo, weaveRepos, WEAVE_CHECK_MS,
+  type WeaveDelta,
+} from './weave/index.js';
 // Re-exported for the callers that had them from here before they moved (see hound-off.ts).
 export { HOUND_MARKERS, HOUND_SCRIPT_NAME, LEGACY_HOUND_SCRIPT };
 
@@ -240,8 +244,11 @@ async function installHook(repo: string): Promise<void> {
     if (!/disabled|not a Unity project/.test(acc.why)) out(`Unity Accelerator: ${acc.why}`);
   }
   // Register the repo (the set the daemon watches + self-heals + reviews the working tree of).
+  // MERGED, not replaced: the entry carries more than the timestamp now — a weave registration lives
+  // there too, and re-running `ayin watch --repo <path>` to reinstall a hook must not silently switch
+  // weaving off for that repo.
   const repos = existsSync(REPOS_FILE) ? JSON.parse(readFileSync(REPOS_FILE, 'utf-8')) : {};
-  repos[repo] = { installedAt: new Date().toISOString() };
+  repos[repo] = { ...(repos[repo] ?? {}), installedAt: new Date().toISOString() };
   writeFileSync(REPOS_FILE, JSON.stringify(repos, null, 2));
 }
 
@@ -1116,6 +1123,45 @@ async function runWorktreePass(): Promise<void> {
 
 // ── daemon ───────────────────────────────────────────────────────────
 
+// ── weave: the design follows the source ─────────────────────────────
+
+/**
+ * The instruction one weave run receives. The prompt is a FILE (`prompts/watch/weaveRun.txt`); this
+ * only fills it, so an operator can retune how the weaver behaves without a rebuild.
+ */
+function buildWeavePrompt(args: { design: string; delta: WeaveDelta; logPath: string }): string {
+  const lines = renderDelta(args.delta);
+  return watchPrompts.get('weaveRun', {
+    DESIGN: args.design,
+    ADDED: lines.added,
+    REMOVED: lines.removed,
+    DRIFTED: lines.drifted,
+    MOVED: lines.moved,
+  });
+}
+
+/**
+ * One pass over every repo registered for weaving.
+ *
+ * Serialized with the rest of the loop on purpose — one door to the model. A weave spawns a whole
+ * headless ayin, and two of them editing one `.puml` would fight over the same file.
+ */
+async function runWeavePass(): Promise<void> {
+  // A weave run IS a headless ayin, and a headless ayin must never start a weaver of its own.
+  if (process.env.AYIN_WEAVE_CHILD === '1') return;
+  for (const { repo, design } of weaveRepos(REPOS_FILE)) {
+    try {
+      const r = await weaveRepo(repo, design, { prompt: buildWeavePrompt });
+      // Quiet states are the common case and would drown the log: only real outcomes are announced.
+      if (r.status === 'quiet' || r.status === 'no-delta' || r.status === 'busy' || r.status === 'backoff') continue;
+      out(`weave ${repo}: ${r.note}`);
+      log('INFO', 'weave_pass', { repo, status: r.status, note: r.note.slice(0, 300) });
+    } catch (err) {
+      log('ERROR', 'weave_pass_error', { repo, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}
+
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
@@ -1187,7 +1233,14 @@ async function processBacklog(retryState: Map<string, { attempts: number; nextTr
 
 export async function runWatch(args: string[]): Promise<void> {
   const repoIdx = args.indexOf('--repo');
-  const repoArg = repoIdx !== -1 ? args[repoIdx + 1] : null;
+  const weaveIdx = args.indexOf('--weave');
+  const weaving = weaveIdx !== -1;
+  // `--weave [design.puml]` — the path is optional; without one the design is discovered the way the
+  // hound discovers it. A following `--flag` is the next flag, not a filename.
+  const weaveArg = weaving && args[weaveIdx + 1] && !args[weaveIdx + 1].startsWith('--') ? args[weaveIdx + 1] : null;
+  // `--weave` on its own means THIS working tree: the operator is standing in the repo whose diagram
+  // they want kept current, and making them also type `--repo .` is ceremony.
+  const repoArg = repoIdx !== -1 ? args[repoIdx + 1] : (weaving ? '.' : null);
   const once = args.includes('--once');
 
   mkdirSync(WATCH_DIR, { recursive: true });
@@ -1198,7 +1251,20 @@ export async function runWatch(args: string[]): Promise<void> {
       process.stderr.write(`ayin watch: ${repoArg} is not a git repository\n`);
       process.exit(1);
     }
-    await installHook(res.stdout.trim());
+    const repo = res.stdout.trim();
+    await installHook(repo);
+    if (weaving) {
+      // Discover NOW rather than on the first pass, so a repo with no design says so while the
+      // operator is still looking at the terminal.
+      const design = weaveArg ?? (await discoverDesign(repo));
+      if (!design) {
+        process.stderr.write(
+          'ayin watch --weave: no .puml in this tree declares a type, so there is no design to keep '
+          + 'current. Author one (`naama`) or name it: ayin watch --weave <design.puml>\n');
+        process.exit(1);
+      }
+      out(`weave registered: ${registerWeave(REPOS_FILE, repo, design)}`);
+    }
   }
   // No --repo → run the daemon over the global queue (the boot/launchd resume path:
   // hooks are already installed in the watched repos, the queue is shared).
@@ -1220,9 +1286,13 @@ export async function runWatch(args: string[]): Promise<void> {
   await selfHealHooks();
   let lastHookHealAt = Date.now();
   let lastWorktreeAt = 0; // 0 → first working-tree pass runs shortly after boot, then every 10 min
+  let lastWeaveAt = 0;    // same: the first weave check happens shortly after boot
 
   // Backlog first — anything committed while we were down (or in flight at the power cut).
   await processBacklog(retryState);
+  // A weave interrupted by the power cut is picked up here: the snapshot only advances on success, so
+  // the delta that was in flight is still the delta, and this pass recomputes and re-runs it.
+  await runWeavePass();
   if (once) { cleanupPidfile(); out('backlog processed — exiting (--once).'); return; }
 
   const shutdownSignal = async () => {
@@ -1244,6 +1314,10 @@ export async function runWatch(args: string[]): Promise<void> {
       if (Date.now() - lastWorktreeAt >= WORKTREE_REVIEW_MS) {
         lastWorktreeAt = Date.now();
         await runWorktreePass(); // autostage + smell review of any watched repo whose tree changed
+      }
+      if (Date.now() - lastWeaveAt >= WEAVE_CHECK_MS) {
+        lastWeaveAt = Date.now();
+        await runWeavePass(); // keep each weave repo's design in step with its source
       }
     } catch (err) {
       log('ERROR', 'watch_loop_error', { error: err instanceof Error ? err.message : String(err) });
@@ -1356,6 +1430,11 @@ export async function runUnwatch(args: string[]): Promise<void> {
         }
       } catch { out('  hound: settings.json unparseable — left alone'); }
     }
+
+    // The weave registration AND its source snapshot. Deleting the repos.json entry alone would
+    // leave the snapshot behind, so re-adding the repo later would diff today's source against a
+    // months-old surface and weave a delta nobody asked for.
+    if (unregisterWeave(REPOS_FILE, repo)) out('  weave: deregistered and its source snapshot dropped');
 
     // DEREGISTER LAST, and this is the step that actually ends it: while the repo is registered the
     // daemon's self-heal puts every hook back within five minutes.

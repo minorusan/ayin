@@ -388,7 +388,36 @@ dialect  ── toolCallInstructions (→ system prompt) · parse(raw) · render
 ```
 
 - **`types.ts`** — the `ModelDialect` interface: `matches(modelId)`, `toolCallInstructions()`,
-  `parse(raw)`, `renderToolCall(call)`, `renderToolResult(body)`.
+  `parse(raw)`, `renderToolCall(call)`, `renderToolResult(body)`, and the optional
+  `stripReasoning(raw)` below.
+- **`dialects/reasoning.ts`** — **the leaked reasoning channel.** A thinking model emits two channels
+  and the runtime is supposed to separate them, so the reasoning arrives in a field of its own
+  (Ollama's `message.thinking`) that ayin never reads. When that separation fails the monologue
+  arrives inside `content` instead. Measured on a `qwen3.8` class model *with the runtime already told
+  `think: false`* — the flag stops the runtime **splitting** the channel, not the model **thinking**,
+  so the block lands in `content` behind the model's own `[thinking]` header, which carries no angle
+  brackets and never closes. Three replies in 220; intermittent, which is why this is a strip and not
+  a setting. `stripReasoning()` removes closed `<think>…</think>`/`<thinking>…</thinking>` blocks
+  anywhere, and drops an unterminated opener (a `<think>` that never closes, or a line that is exactly
+  `[thinking]`) to end of text. The `[thinking]` form is anchored to a line start so prose that merely
+  mentions it survives; over-stripping would eat a real answer, which is the worse failure.
+  It **may return empty**, on purpose — see below. Gated by `npm run check:qwen`.
+- Why it costs more than an ugly reply: Qwen's guidance is that historical turns carry the final
+  output only, never the thinking. Left in, the monologue is replayed into every later prompt, so the
+  window grows and the model is primed to do it again — the same mechanism `agent.ts` documents for a
+  neighbouring bug, where anything sitting in an assistant turn becomes a worked example the model
+  imitates. It is also where "this model feels slow" comes from: the tokens are real and they are
+  spent on text nobody wanted.
+- **Applied in `manager.ts#llmChat`, once, to the reply every consumer shares — deliberately NOT in
+  `parse()`.** `parse()` would clean the prose and still miss the three branches in `agent.ts`
+  (continue-nudge, deferral, unwritten-claim) that push the **raw** response into the window, which is
+  exactly where a monologue must not land. One place on the shared path serves agent, QA, plan,
+  presenter, explore, indulge and every connector — the same argument the `tool_call_without_tools`
+  guard beside it makes. It logs `reasoning_channel_stripped` when it fires, and never throws.
+- **Empty is a legal result here, unlike Maradel's chat path.** An agent loop's correct answer to "the
+  model produced only reasoning" is to notice there is no answer and re-ask, which `agent.ts` already
+  does bounded by `MAX_CONTINUE_NUDGES`. Maradel makes the opposite choice for its chat UI (a bubble
+  with a monologue beats an empty bubble, and there is no loop there to re-ask).
 - **`dialects/xml.ts`** — a shared base for models that use ayin's XML tool-call convention
   (`<function=name><parameter=key>value</parameter></function>`, results framed in
   `<tool_response>…</tool_response>`).
@@ -3042,7 +3071,8 @@ remains registered the daemon is stopped too. The queue and past reports are kep
 
 `ayin watch --repo <path>` installs a `post-commit` hook and runs a foreground daemon;
 bare `ayin watch` is the boot/launchd resume path (hooks already installed); `--once`
-processes the backlog and exits.
+processes the backlog and exits. `--weave` additionally keeps that repo's naamah design
+matching its source — see *Weave* at the end of this section.
 
 The moving parts, designed to survive interruption at any point:
 
@@ -3214,6 +3244,79 @@ The moving parts, designed to survive interruption at any point:
 - `npm run check:watch` (`tool/check-watch.mjs`) is the offline gate for both halves of what
   `ayin watch` writes into a repo: the hound's deterministic facts and this allowlist. No model, no
   network — it builds a throwaway Unity-ish repo in the temp dir and asserts each decision.
+
+### Weave — the design follows the source (`src/weave/`)
+
+`ayin watch --weave` adds a second watch to a repo: the daemon keeps its naamah design diagram
+matching its source, on the WORKING TREE, before anything is committed. Note the direction —
+**`entangle` stops code that breaks the design; weave updates a design the code has outgrown.** They
+are opposite arrows on the same edge, and pointing `--weave` at a design you are entangling to would
+let the contract amend itself to match whatever was just written.
+
+A diagram is written once, during the conversation where it is useful, and is wrong within a week.
+Not through carelessness: updating it is a separate act with no immediate reward, performed by the one
+person who already knows what changed and therefore needs the diagram least. Everyone downstream pays.
+So it is a daemon's job.
+
+**A set operation decides *whether*; a model decides *what*.** Every pass hashes the repo's source
+files and compares the types and public members they declare (`entangle`'s `SurfaceLanguage` — C#,
+TypeScript/JavaScript, Dart) against the ones the `.puml` declares (`naama`'s `parsePuml`, the only
+puml parser ayin has). That is arithmetic: free, instant, identical every time. Most edits are method
+bodies, and a body is not a surface, so most passes cost one `git ls-files` and nothing else. Only a
+real surface delta spends a model — and the model is handed the delta rather than the diff, because
+"which types are missing" is arithmetic and only "which domain does this belong in, and what is this
+member FOR" is judgment.
+
+- **`delta.ts`** — the arithmetic. `added` / `removed` / `drifted` / `moved`.
+  - Member **names**, public only. Not signatures: a diagram writes `Feed(Telemetry)` where the code
+    writes `public void Feed(Telemetry t)`, and comparing those reports drift on every member forever.
+    Not private members: a private helper is implementation freedom, and putting it on an architecture
+    diagram is noise.
+  - **A type whose file disappeared is not automatically a removal.** A rename or a move is one file
+    deleted and another added; dropping the type on the way through would delete it and its edges and
+    re-add it bare, losing the intent prose only the diagram was carrying. A name that leaves one file
+    and appears in another is `moved` — reported, nothing to do. The snapshot stores each file's
+    declared type names, which is what makes this answerable without walking the whole repo.
+  - **Zero parsed members means UNKNOWN, not empty.** `SurfaceLanguage` reads declarations line by
+    line, so `interface IGauge { read(): number; }` on one line parses as having none — measured on the
+    first real repo this ran against. Believing it would report every member as lost and send the
+    weaver to delete design facts that are true. So a type with no parsed members claims no member
+    drift. The trade is one-directional and deliberate: a genuinely emptied type is reported late, at
+    the next real edit; a false removal destroys prose nothing else holds.
+- **`index.ts`** — the pass. Registration lives in `repos.json` under a `weave` key (design path
+  stored **repo-relative**, so a moved or re-cloned checkout keeps a registration that still means
+  something); the source snapshot lives in `weave-state.json`; one line per weave lands in
+  `weave-log.jsonl`; each run's log under `watch/weave/`.
+  - **The quiet window.** A surface delta releases a run only after the tree has been **still for 45
+    seconds**, and any movement restarts the clock. A refactor in progress emits a different delta on
+    every save — a type half-renamed, a file that exists but declares nothing yet — and the cost of
+    firing then is not a slow diagram, it is a design amended to describe a state the code was
+    passing through.
+  - **First sight is a baseline, not a job.** Registering a repo whose diagram is years behind would
+    otherwise spawn one run holding every type in the tree, which is a prompt nothing can act on. The
+    gap is reported and the snapshot taken; from then on it reacts to changes.
+  - **The result is verified, never trusted.** After the run the design is re-parsed, re-validated
+    (`naama validate`) and re-diffed. An agent saying it is done is not evidence that the file parses.
+  - **Survives the power cut with no queue.** The snapshot advances **only** after a verified weave, so
+    a machine that dies mid-run wakes with the old snapshot, recomputes the same delta and runs it
+    again; the work is idempotent because the design either has the type or does not. A queue would be
+    a second source of truth that could disagree with the snapshot. Attempts and backoff live in the
+    same file, keyed to the delta's own fingerprint — a design the model cannot satisfy must not
+    respawn a run every quiet period forever, and a delta that has moved on gets a fresh attempt.
+  - **It never reads its own footprints.** `.claude/**`, `reviews/**` and the agent-pointer files are
+    excluded from the source scan: `watch` installs a hound `.mjs` into every repo it watches, which
+    the TypeScript surface language happily claims, so without that exclusion every hook self-heal
+    would look like the tree had moved.
+- **The run** is a whole headless ayin (`-p`), not a single LLM call, because reconciling a design is
+  tool work: read it, apply authoring lines through `naama`, check, render. It edits that one `.puml`
+  and nothing else, and it never commits. Its instruction is `prompts/watch/weaveRun.txt` — a file, so
+  how the weaver behaves is tunable without a rebuild.
+- **What it does NOT do:** infer relations. `implements`/`extends` are parsed but not turned into
+  arrows, because only the author knows which of a codebase's types belong on *this* diagram.
+- `npm run check:weave` (`tool/check-weave.mjs`) drives the whole decision tree offline: it injects
+  both the prompt builder and the runner, so no agent is ever launched, and it moves `$HOME` to a
+  throwaway dir first — a gate that cleared the real `weave-state.json` would silently delete the
+  snapshot of every repo the operator weaves.
 
 ## Prompts (`prompts-service.ts`, `prompts.ts`, `prompts/`)
 

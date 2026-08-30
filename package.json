@@ -60,6 +60,7 @@
     "check:vision": "node tool/check-vision.mjs",
     "check:parser": "node tool/check-parser.mjs",
     "check:glm": "node tool/check-glm.mjs",
+    "check:qwen": "node tool/check-qwen.mjs",
     "check:rename": "node tool/check-rename.mjs",
     "check:qa-unity": "node tool/check-qa-unity.mjs",
     "unity:compile": "node tool/unity-compile.mjs",
@@ -70,7 +71,11 @@
     "check:jira-indulge": "node tool/check-indulge-jira.mjs",
     "check:explore-corpus": "node tool/check-explore-corpus.mjs",
     "check:cost": "node tool/check-cost.mjs",
-    "check:dart": "node tool/check-dart.mjs"
+    "check:dart": "node tool/check-dart.mjs",
+    "check:weave": "node tool/check-weave.mjs",
+    "check:plan": "node tool/check-plan.mjs",
+    "check:announced": "node tool/check-announced.mjs",
+    "check:wrap": "node tool/check-wrap.mjs"
   },
   "dependencies": {
     "@langchain/core": "^1.2.9",

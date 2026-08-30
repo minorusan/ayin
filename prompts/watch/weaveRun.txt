@@ -1,0 +1,23 @@
+{{DESIGN}} is this repo's design diagram and the source has moved past it. Reconcile it with the naama tool, and change no other file.
+
+The delta below was computed from the working tree by parsing declarations. It is authoritative — do not re-derive it from the code.
+
+ADDED — declared in the source, absent from the design:
+{{ADDED}}
+
+REMOVED — on the design, and the file that declared them is gone:
+{{REMOVED}}
+
+DRIFTED — on both, with a different public surface:
+{{DRIFTED}}
+
+MOVED — the same type, now in another file. The design is already right about these; nothing to do.
+{{MOVED}}
+
+Start with naama path={{DESIGN}} op=show, to see which domains exist and how the diagram is organised. Then op=add, one fact per line: `domain` before anything is placed in it, `type <Name> : <kind> @ <domain>` to place a type, `member`/`private` for its surface, `drop type <Name>` for a removal, `edge <A> -> <B> : <kind>` where the code makes a relation plain. The "code unit" named beside an added type is the assembly or package the file sits in — a hint about where it belongs, not the answer; the diagram's own domains win.
+
+Every member row ends with an em dash and what it MUST DO. The signature is already in the code and can be re-read at any time; the intent is what a diagram exists to carry and the one thing nobody can recover later.
+
+Leave off what does not belong on an architecture diagram — a test double, generated code, a shape with no behaviour — and say what you left off and why.
+
+Finish with op=check, then op=render. NEVER add a type the delta does not name.
