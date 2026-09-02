@@ -3353,8 +3353,9 @@ Gate: `npm run check:testrun`.
 
 `/diff` (and `ayin diff`) renders the working tree — staged, unstaged **and untracked** — as one
 self-contained HTML page and opens it. Laid out in the order a diff is actually read: **triage**
-(sidebar with per-file weight and status), **filter** (extension chips, `.cs .asset .ts .js .py` on
-and everything else one click away), **read** (unified hunks with the changed token marked).
+(sidebar with per-file weight and status), **filter** (extension chips, defaulted to the project's
+shape — the Unity set `.cs .asset .ts .js .py`, or the whole text surface for everything else —
+with the rest one click away), **read** (unified hunks with the changed token marked).
 
 **`ayin diff` and `ayin sprint` serve their own page and park on it** (`src/serve-page.ts`). Neither
 needed a TUI for anything except the socket once a comment and a ticket question became their own

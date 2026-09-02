@@ -44,9 +44,24 @@ Sorted **tracked first, then by churn**. `j` / `k` step through files; the sideb
 
 ### 2 · Filter — the chips
 
-`.cs` `.asset` `.ts` `.js` `.py` start **on**; every other extension in the tree starts **off**, one
-click away. A Unity tree is mostly `.meta`, a Node tree is mostly lockfile — facts to confirm, not
+**The default-on set is the project's shape, because one list cannot be right for both.**
+
+In a **Unity** tree — `Assets/` and `ProjectSettings/` both present — `.cs` `.asset` `.ts` `.js` `.py`
+start on and everything else starts off. That default has to be aggressive: measured on a real
+project, the tree is 12,484 `.meta`, 3,101 `.cs`, 2,682 `.png`, 978 `.prefab`. Facts to confirm, not
 text to read.
+
+**Everywhere else the whole text surface starts on** — the script family (`.ts` `.tsx` `.mts` `.cts`
+`.js` `.jsx` `.mjs` `.cjs`), `.py` `.cs`, `.html` `.css` `.scss`, `.json` `.yaml` `.yml` `.toml`,
+`.md`, `.sh` `.sql` — and the binaries, images and lockfile-adjacent bulk stay one click away. A
+TypeScript project has the opposite problem to Unity's: its whole review surface *is* text, and the
+Unity list turned off the `.tsx` component, the `.html` page, the `.css` beside it, the `package.json`
+that added the dependency and the README that documents it — every one of them a file the reviewer
+came to read, hidden behind a chip.
+
+Two explicit lists, not a rule inferred from the diff: the Unity default is measured and must not
+drift, and a set derived from what happened to be edited would change what is on screen from one run
+to the next, which is the one thing a remembered filter must never do.
 
 The chips are generated from what is actually in the diff, with a count on each, so the shape of the
 change is visible before anything is opened.

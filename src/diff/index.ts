@@ -24,7 +24,7 @@ import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { collectDiff, type DiffSet } from './collect.js';
-import { DEFAULT_EXTENSIONS, renderDiffPage } from './render.js';
+import { defaultExtensions, renderDiffPage } from './render.js';
 import { openExternal } from '../open-external.js';
 import { existingServer, repoRoot } from '../serve-page.js';
 
@@ -87,7 +87,7 @@ export function buildDiffPage(repo: string, against = 'HEAD'): DiffResult {
     files: set.files.length,
     additions: set.files.reduce((n, f) => n + f.additions, 0),
     deletions: set.files.reduce((n, f) => n + f.deletions, 0),
-    hiddenByDefault: set.files.filter((f) => !DEFAULT_EXTENSIONS.includes(f.ext)).length,
+    hiddenByDefault: set.files.filter((f) => !defaultExtensions(set.repo).includes(f.ext)).length,
     opened: false,
   };
 }
@@ -111,7 +111,7 @@ export function buildAndOpen(repo: string, against = 'HEAD'): DiffResult {
       files: set.files.length,
       additions: set.files.reduce((n, f) => n + f.additions, 0),
       deletions: set.files.reduce((n, f) => n + f.deletions, 0),
-      hiddenByDefault: set.files.filter((f) => !DEFAULT_EXTENSIONS.includes(f.ext)).length,
+      hiddenByDefault: set.files.filter((f) => !defaultExtensions(set.repo).includes(f.ext)).length,
       opened: openExternal(served.url),
     };
   }
@@ -199,7 +199,7 @@ export async function runDiffCli(argv: string[]): Promise<number> {
       files: set.files.length,
       additions: set.files.reduce((n, f) => n + f.additions, 0),
       deletions: set.files.reduce((n, f) => n + f.deletions, 0),
-      hiddenByDefault: set.files.filter((f) => !DEFAULT_EXTENSIONS.includes(f.ext)).length,
+      hiddenByDefault: set.files.filter((f) => !defaultExtensions(set.repo).includes(f.ext)).length,
       opened: page.opened,
     })}\n`);
     if (!page.own) {

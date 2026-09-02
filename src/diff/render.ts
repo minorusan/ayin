@@ -24,6 +24,7 @@
 import type { DiffLine, DiffSet, FileDiff } from './collect.js';
 import type { DiffComment } from './comments.js';
 import { renderWebMarkdown } from '../web-markdown.js';
+import { isUnityRepo } from './stage.js';
 
 /**
  * Comments exist only on the SERVED page. A `file://` page has no session to send one to, so the
@@ -131,8 +132,42 @@ function threadHtml(list: DiffComment[]): string {
   return `<div class="thread">${items}</div>`;
 }
 
-/** On by default. Everything else in the tree starts hidden and is one click away. */
-export const DEFAULT_EXTENSIONS = ['.cs', '.asset', '.ts', '.js', '.py'];
+/**
+ * On by default. Everything else in the tree starts hidden and is one click away.
+ *
+ * PROJECT-SHAPED, because one list cannot be right for both. The Unity set exists because a Unity tree
+ * is 12,484 `.meta` and 2,682 `.png` around the handful of files a person changed — the default has to
+ * be aggressive or the page is a wall. A TypeScript project has the opposite problem: its whole review
+ * surface IS text, so `.cs .asset .ts .js .py` turned OFF the `.tsx` component, the `.html` page, the
+ * `.css` beside it, the `package.json` that added the dependency and the README that documents it —
+ * every one of them a file the reviewer came to read, hidden behind a chip, on a page whose only job
+ * is to show a change.
+ *
+ * Kept as two explicit lists rather than "everything textual": the Unity default is measured and must
+ * not drift, and a rule inferred from the diff would change what is on screen depending on what
+ * happened to be edited, which is the one thing a remembered filter must never do.
+ */
+const UNITY_DEFAULT_EXTENSIONS = ['.cs', '.asset', '.ts', '.js', '.py'];
+
+const SOURCE_DEFAULT_EXTENSIONS = [
+  '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs',   // the web/script family, whole
+  '.py', '.cs',                                                    // the other two ayin plans for
+  '.html', '.css', '.scss',                                        // a web project's other half
+  '.json', '.yaml', '.yml', '.toml',                               // package.json IS the change, often
+  '.md',                                                           // and the README that documents it
+  '.sh', '.sql',
+];
+
+/** The default-on set for this repo. Unity is the exception; everything else reviews as text. */
+export function defaultExtensions(repo: string): string[] {
+  return isUnityRepo(repo) ? UNITY_DEFAULT_EXTENSIONS : SOURCE_DEFAULT_EXTENSIONS;
+}
+
+/**
+ * The Unity list, for callers with no repo to ask about. Kept so nothing silently changes shape;
+ * anything that HAS a repo path must call `defaultExtensions` instead.
+ */
+export const DEFAULT_EXTENSIONS = UNITY_DEFAULT_EXTENSIONS;
 
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1080,6 +1115,7 @@ function commentClient(o: Resolved): string {
 
 export function renderDiffPage(set: DiffSet, opts: RenderOptions = {}): string {
   const o = resolve(opts);
+  const defaultExts = defaultExtensions(set.repo);
   const exts = new Map<string, number>();
   for (const f of set.files) exts.set(f.ext || '(none)', (exts.get(f.ext || '(none)') ?? 0) + 1);
   const chips = [...exts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
@@ -1092,7 +1128,7 @@ export function renderDiffPage(set: DiffSet, opts: RenderOptions = {}): string {
   // of the outer and the chip stops laying out, silently. Enter and Space are wired in the client to
   // replace what a real button gave for free. The bin is served-only: it is a git write.
   const chipHtml = chips.map(([ext, n]) => {
-    const on = DEFAULT_EXTENSIONS.includes(ext);
+    const on = defaultExts.includes(ext);
     const bin = o.interactive
       ? `<button class="cbin" data-ext="${esc(ext)}" aria-label="Discard all changed ${esc(ext)} files"`
         + ` title="Discard changes in every ${esc(ext)} file">`
@@ -1477,7 +1513,7 @@ ${iconSprite()}
 ${o.interactive ? commitPreview() + clearCommentsFab() + discardFab() + refreshFab() : ''}
 <script>
 (function(){
-  var DEF = ${JSON.stringify(DEFAULT_EXTENSIONS)};
+  var DEF = ${JSON.stringify(defaultExts)};
 
   // ── the filter, remembered ──────────────────────────────────────────────────
   // A cookie rather than localStorage because the served page and the operator's browser already agree
