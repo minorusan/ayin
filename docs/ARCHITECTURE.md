@@ -155,6 +155,22 @@ reports **its own sentence** within ~200ms instead of the operator waiting out a
 vaguer: `NaamahSession.error` carries what it said, and `spawn`'s `error` event is handled rather than
 left to throw, because a missing optional submodule is an ordinary state.
 
+**A design file may be `.js`.** A browser project's source is `.js`, and a design directory whose files
+cannot share the extension of the code they describe is one more thing to explain to everyone who opens
+it. The CONTENT is unchanged — a design is `declare class X { … }` whatever it is called — so naamah
+typechecks a `.js` design through a `.ts` **shadow** in a temp directory and maps the diagnostics back
+to the real filename (`TS2304` reports as `Game.js:3:19`, not as the shadow's path). tsc picks its
+parser from the extension, which is why a shadow is needed and `--allowJs` is not enough.
+
+**The TypeScript scaffold ships a design that BUILDS.** `.naamah/README.md` described the format and
+shipped nothing in it, so the first `naamah build` an agent ran was against an empty directory — the
+design gate's first contact with a new project was a failure, on the one turn where nothing is wrong
+yet. `.naamah/scaffold/HttpServer.ts` is one real annotated declaration of `src/server.ts`, the file it
+sits beside: it typechecks and renders from the moment the project exists, and the next design is
+written by copying a file that works rather than from a description of one. It says `unknown` where
+node:http says `Server`, because a design directory has no `@types/node` on its own compile line and an
+unresolvable name is the one thing that fails this build.
+
 **The submodule pin is a version dependency, and a stale one cost a whole turn.** The `naamah` tool
 resolves the binary from ayin's own build, not from `PATH` — one door, deliberately. So when the pin sat
 two commits behind the `build` subcommand while the machine's global install had it, ayin ran a naamah

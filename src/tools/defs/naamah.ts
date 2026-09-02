@@ -30,6 +30,11 @@ async function naamah(args: string[], cwd: string): Promise<{ code: number; out:
   return { code: r.status ?? 1, out: `${r.stdout ?? ''}${r.stderr ?? ''}`.trim() };
 }
 
+/**
+ * The design language a filename implies. `.js` is TypeScript here — a design is `declare class X { … }`
+ * whatever it is called, and naamah typechecks a `.js` design through a `.ts` shadow. The extension
+ * exists so a browser project's design can match the extension of the code it describes.
+ */
 const LANG_OF = (f: string) => (/\.cs$/i.test(f) ? 'cs' : 'ts');
 
 /**
@@ -118,7 +123,7 @@ export const tool: Tool = {
   parameters: [
     { name: 'dir', type: 'string', description: 'The design directory, one per task — .naamah/<task-slug>/. Created on first sketch.', required: true },
     { name: 'op', type: 'string', description: 'sketch | build | show. Default sketch.', required: false },
-    { name: 'file', type: 'string', description: 'For sketch: the file to write, e.g. NoteService.ts or NoteService.cs. One type per file is the convention.', required: false },
+    { name: 'file', type: 'string', description: 'For sketch: the file to write, e.g. NoteService.ts, Game.js or NoteService.cs — match the extension of the code it describes. One type per file is the convention.', required: false },
     { name: 'content', type: 'string', description: 'For sketch: the whole file. Declarations only — no method bodies.', required: false },
     { name: 'scope', type: 'string', description: 'For build: limit enforcement to one domain, e.g. Rewards. Omit to enforce the whole design.', required: false },
   ],
@@ -188,8 +193,8 @@ export const tool: Tool = {
     // ── sketch ────────────────────────────────────────────────────────
     if (!params.file) return 'Error: file required for sketch — e.g. NoteService.ts';
     if (!params.content) return 'Error: content required for sketch — the whole file, declarations only';
-    if (!/\.(ts|cs)$/i.test(params.file)) {
-      return `Error: a design file is .ts or .cs, not "${params.file}". PlantUML is not a design format here.`;
+    if (!/\.(ts|js|mjs|cjs|cs)$/i.test(params.file)) {
+      return `Error: a design file is .ts, .js or .cs, not "${params.file}". PlantUML is not a design format here.`;
     }
     if (/^naamah\.(ts|cs)$/i.test(basename(params.file))) {
       return 'Refused: naamah.ts / Naamah.cs is the VOCABULARY and naamah writes it itself. Sketch your own types instead.';

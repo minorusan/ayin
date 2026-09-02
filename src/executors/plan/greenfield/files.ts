@@ -587,6 +587,32 @@ gitignored, because the design is the part most worth reviewing.
 
 // ── the table ─────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The scaffold's OWN design, and it must BUILD — not a placeholder.
+ *
+ * `.naamah/README.md` described the format and shipped nothing in it, so the first `naamah build` an
+ * agent ran was against an empty directory: the design gate's first contact with a new project was a
+ * failure, on the one turn where nothing is wrong yet. This is one real annotated declaration of the
+ * server the scaffold just wrote, which means `naamah build .naamah/scaffold` typechecks and renders
+ * from the moment the project exists, and the next design is written by copying a file that works
+ * rather than by reading a description of one.
+ *
+ * IT DESCRIBES `src/server.ts`, the file it sits beside — a design of something else would be a lie
+ * that compiles. `createServer` returns Server from node:http; the design says `unknown` because a
+ * design directory has no `@types/node` on its own compile line and a name it cannot resolve is the
+ * one thing that fails this build.
+ */
+const TS_DESIGN = `@Domain('HTTP')
+@Remark('The server the scaffold wrote. Replace this file with the design of YOUR feature.')
+declare class HttpServer {
+  // MUST return the server WITHOUT listening — that is what lets a test bind port 0.
+  createServer(): unknown;
+
+  // MUST read process.env.PORT and listen on it. The QA gate boots the project and checks that port.
+  listen(port: number): void;
+}
+`;
+
 /** One branch's files, as `relative path → contents`, given the project directory. */
 export function branchFiles(branch: Branch, dir: string): Record<string, string> {
   if (branch === 'typescript') {
@@ -601,6 +627,7 @@ export function branchFiles(branch: Branch, dir: string): Record<string, string>
       'public/index.html': TS_PAGE(name),
       'test/server.test.ts': TS_TEST,
       '.naamah/README.md': NAAMAH_README('TypeScript'),
+      '.naamah/scaffold/HttpServer.ts': TS_DESIGN,
     };
   }
   if (branch === 'python') {
