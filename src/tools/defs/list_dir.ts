@@ -22,7 +22,7 @@ import { join } from 'node:path';
  */
 export const tool: Tool = {
   name: 'list_dir',
-  icon: '▦',
+  icon: '📁',
   description:
     'List a directory: names, dir/file, size, and how recently each changed. Prefer this over `ls` in bash — '
     + 'it is bounded, sorted (directories first), and says when it truncated. Use recursive=true for a shallow '

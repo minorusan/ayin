@@ -14,7 +14,7 @@ import { runSubagent } from '../../subagents.js';
  */
 export const tool: Tool = {
   name: 'subagent',
-  icon: '◍',
+  icon: '🤖',
   description:
     'Hand one whole task to a fresh agent that has its own context, its own tools and its own budget, '
     + 'and report back what it did. Use it for a STAGE of the work — "research the public alarm API and '

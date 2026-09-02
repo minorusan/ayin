@@ -189,8 +189,13 @@ function entryPoint(): string {
  * (`[tool] │ …`, `[tool] ╰ …`) are excluded explicitly. The TUI has the same problem and solves it the
  * same way in `chat.ts#startsToolCard`, against blessed markup instead of plaintext — two renderers,
  * so two matchers, and `check-tool-icons.mjs` asserts this one so it cannot rot again silently.
+ *
+ * `u` AND `{1,2}` ARE BOTH LOAD-BEARING, now that an icon may be an emoji. Without the `u` flag `\S`
+ * matches one UTF-16 code UNIT, so a surrogate pair is two of them and the header stops matching —
+ * which is this same counter breaking a second time, for a second reason. `{1,2}` covers a pictograph
+ * carrying a variation selector, which is two code points and one glyph.
  */
-export const HEADLESS_TOOL_HEADER = /^\[tool\] (?![│╰])\S \S/gm;
+export const HEADLESS_TOOL_HEADER = /^\[tool\] (?![│╰])\S{1,2} \S/gmu;
 
 export function extractReport(stdout: string): { report: string; toolCalls: number } {
   const upToHandoff = stdout.split('--- HANDOFF')[0];

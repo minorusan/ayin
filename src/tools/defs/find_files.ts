@@ -7,7 +7,7 @@ const CWD = process.cwd();
 
 export const tool: Tool = {
     name: 'find_files',
-    icon: '⌖',
+    icon: '🔎',
     description: 'Find files by name, recursively. Takes max_depth, modified_since ("2h", "3d") and exclude, so a shell `find` is rarely needed. A pattern containing "/" is matched against the whole path (e.g. "*/GameServices/*.cs"); otherwise against the file name. Returns matching file paths.',
     parameters: [
       { name: 'path', type: 'string', description: 'Directory to search in', required: true },

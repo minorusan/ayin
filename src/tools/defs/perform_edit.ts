@@ -27,7 +27,7 @@ import { toolLlm, toolLog } from '../runtime.js';
  */
 class PerformEdit extends BaseTool {
   readonly name = 'perform_edit';
-  readonly icon = '✐';
+  readonly icon = '✏️';
   readonly description =
     'Make a change to ONE file by describing it. Pass `file` and `edit` — the edit in plain words, with '
     + 'the code to add or the behaviour to change. A model reads the file and places the change; you do '

@@ -17,6 +17,17 @@
 
 import blessed from 'blessed';
 import { HEADLESS, noopScreen } from './headless.js';
+import { installWidthPatch } from './width.js';
+
+/**
+ * BEFORE THE SCREEN EXISTS, because the screen is the first thing to measure anything.
+ *
+ * blessed's own width table predates emoji and answers 1 for a glyph the terminal paints in 2 cells —
+ * see `width.ts` for what that costs. Installed here rather than in `index.ts` so that any entry point
+ * reaching a screen has already been through it; it is idempotent and touches only the unicode module,
+ * so running it in headless too is free and keeps the two paths measuring identically.
+ */
+installWidthPatch();
 
 export const screen: blessed.Widgets.Screen = HEADLESS
   ? noopScreen

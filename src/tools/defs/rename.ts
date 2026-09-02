@@ -17,7 +17,7 @@ import { RenameRefusal, formatPlan, renameSymbol } from '../rename/index.js';
  */
 export const tool: Tool = {
   name: 'rename',
-  icon: '↻',
+  icon: '🏷️',
   description:
     'Rename a symbol and EVERY reference to it, across C# or TypeScript/JS files, in one operation. '
     + 'Prefer this over str_replace or a shell sed for any rename: it matches whole identifiers only (never inside '

@@ -38,15 +38,21 @@ for (const name of defs) {
   text.split('\n').forEach((line, i) => {
     for (const m of line.matchAll(ICON)) {
       const icon = m[2];
-      // ONE CELL, so also one code point: a flag, a skin tone or a ZWJ sequence is several.
-      if ([...icon].length !== 1) {
-        console.error(`${file}:${i + 1}  icon ${JSON.stringify(icon)} is ${[...icon].length} code points — an icon is ONE cell`);
-        bad++;
-        continue;
-      }
-      const wide = /\p{Emoji_Presentation}/u.test(icon) || icon.length > 1;
-      if (wide) {
-        console.error(`${file}:${i + 1}  double-width icon U+${icon.codePointAt(0).toString(16).toUpperCase()} — terminals draw it 2 cells, ayin wraps by character count`);
+      /**
+       * A TOOL ICON MAY BE AN EMOJI. It is painted in the scrolling chat log, and since `ui/width.ts`
+       * patched blessed's `charWidth` the layout knows a two-cell glyph is two cells — so the reason
+       * this was ever banned (blessed measuring 1 and the terminal painting 2) no longer holds here.
+       *
+       * The RULE THAT REMAINS is measurability, not width. One code point, optionally followed by a
+       * variation selector, is the largest thing whose painted width is knowable: a ZWJ sequence, a
+       * flag (two regional indicators) or a skin-tone modifier is one cluster in one emulator and
+       * several in another, and no width is right in both. `toolGlyph()` enforces the same line at
+       * paint time for tools loaded from `AYIN_TOOL_DIRS`, which this gate never sees.
+       */
+      const cps = [...icon];
+      const selector = cps.length === 2 && (cps[1] === '️' || cps[1] === '︎');
+      if (cps.length !== 1 && !selector) {
+        console.error(`${file}:${i + 1}  icon ${JSON.stringify(icon)} is ${cps.length} code points — a flag, skin tone or ZWJ sequence has no width a terminal agrees on`);
         bad++;
       }
     }

@@ -23,7 +23,7 @@ import { toolLog, toolSubagent } from '../runtime.js';
  */
 class FindRelevantFiles extends BaseTool {
   readonly name = 'find_relevant_files';
-  readonly icon = '⍟';
+  readonly icon = '🗂️';
   readonly description =
     'Ask which files a task would touch, and get back a verified list with a note on each. Hand it the '
     + 'task in plain words — "add a retry to the uploader", "where does the session id get set" — and an '

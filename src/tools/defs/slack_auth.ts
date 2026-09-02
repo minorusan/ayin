@@ -10,7 +10,7 @@ import { slackStatus } from '../connectors/slack/loop.js';
  */
 export const tool: Tool = {
   name: 'slack_auth',
-  icon: '⚿',
+  icon: '🔑',
   description:
     'Set up or refresh the Slack credential from a pasted User OAuth Token (xoxp-…). Call with no '
     + 'arguments to report what is configured and whether it works.',

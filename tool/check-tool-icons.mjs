@@ -57,10 +57,17 @@ for (const [tool, icon] of icons) {
 ok(wrongWidth.length === 0, `every icon paints as itself, one cell${wrongWidth.length ? ` — ${wrongWidth.join(' ')}` : ''}`);
 
 // ── 3 · the runtime fallback, for tools no build gate can see ───────────────
-ok(strip(formatToolCallForChat('t', '', '\u{1F527}')).startsWith('▸'),
-  'an emoji from an AYIN_TOOL_DIRS tool falls back to the default glyph, never paints 2 cells');
+// AN EMOJI IS KEPT NOW. It was downgraded because blessed measured it as one cell and the terminal
+// painted two; `ui/width.ts` patches that measurement, so a two-cell glyph is simply a two-cell glyph
+// and the layout knows it. What still falls back is anything whose width no terminal agrees on.
+ok(strip(formatToolCallForChat('t', '', '\u{1F527}')).startsWith('\u{1F527}'),
+  'an emoji icon is PAINTED, not downgraded — width.ts taught blessed it is two cells');
+ok(strip(formatToolCallForChat('t', '', '⚙️')).startsWith('⚙️'),
+  'so is a pictograph carrying a variation selector — one character, two cells');
 ok(strip(formatToolCallForChat('t', '', '\u{1F468}‍\u{1F469}‍\u{1F466}')).startsWith('▸'),
-  'a ZWJ sequence falls back too — one code point is not the same as one cell');
+  'a ZWJ sequence still falls back — one cluster in one emulator, three glyphs in another');
+ok(strip(formatToolCallForChat('t', '', '\u{1F1FA}\u{1F1E6}')).startsWith('▸'),
+  'and so does a flag — two regional indicators have no width every terminal agrees on');
 ok(strip(formatToolCallForChat('t', '', undefined)).startsWith('▸'),
   'a tool with no icon gets the default glyph');
 
@@ -82,7 +89,9 @@ ok(!startsToolCard('plain system notice'), 'and neither is untagged text');
 // icons silently zeroed it — children that built whole projects reported 0 tool call(s). Two
 // renderers, two matchers; this asserts the plaintext one against every real icon.
 const { HEADLESS_TOOL_HEADER } = await import('../dist/subagents.js');
-const headlessCount = (s) => (s.match(new RegExp(HEADLESS_TOOL_HEADER.source, 'gm')) ?? []).length;
+// FLAGS AND ALL. Rebuilding it as `'gm'` dropped the `u`, so the gate tested a DIFFERENT regex from
+// the one that ships — and reported the shipped one broken for every emoji icon while it was fine.
+const headlessCount = (s) => (s.match(new RegExp(HEADLESS_TOOL_HEADER.source, HEADLESS_TOOL_HEADER.flags)) ?? []).length;
 const missedHeadless = [];
 for (const [tool, icon] of icons) {
   if (headlessCount(`[tool] ${icon} ${tool} · x=1`) !== 1) missedHeadless.push(`${tool}:${icon}`);
@@ -95,6 +104,37 @@ ok(headlessCount('[tool] │ subagent finished — 0 tool call(s), 61s') === 0,
 ok(headlessCount('[tool] ╰ ✓ 1m1s') === 0, 'and neither is the card footer');
 ok(headlessCount('[tool] ◍ subagent · task=x\n[tool] │ body\n[tool] ❯ bash · command=ls') === 2,
   'two headers among their bodies count as two');
+
+// ── 6 · the WIDTH PATCH: blessed must agree with the terminal ────────────────
+//
+// This is what makes an emoji icon safe at all. blessed's double-wide table predates emoji and answers
+// 1 for a glyph terminals paint in 2 cells; a row laid out on that answer spills past the right edge,
+// the terminal wraps it onto a line blessed does not know exists, and smartCSR redraws everything
+// after it one position off. It burned the status bar twice. `ui/width.ts` corrects the measurement —
+// asserted here BOTH ways, because a patch that over-corrects (CJK, combining marks, plain ASCII)
+// would break far more than it fixed.
+const { installWidthPatch, displayWidth } = await import('../dist/ui/width.js');
+installWidthPatch();
+const blessedLib = (await import('blessed')).default;
+const W = (s) => blessedLib.unicode.strWidth(s);
+const WIDTHS = [
+  ['\u{1F527}', 2, 'an emoji is two cells — the case blessed got wrong'],
+  ['\u{1F4E6}', 2, 'and so is another, from a different block'],
+  ['⚙️', 2, 'a pictograph plus VS16 is two — the selector promotes it'],
+  ['⚙', 1, 'the same pictograph bare is one — the selector is the difference'],
+  ['⚙︎', 1, 'VS15 forces text presentation back to one'],
+  ['漢', 2, 'CJK is still two — the part blessed already had right'],
+  ['Ａ', 2, 'a fullwidth letter is still two'],
+  ['ｱ', 1, 'halfwidth kana is still one'],
+  ['❯', 1, 'an ordinary BMP symbol is still one'],
+  ['abc', 3, 'ASCII is untouched'],
+  ['á', 1, 'a combining mark still adds nothing'],
+];
+const wrong = WIDTHS.filter(([s, want]) => W(s) !== want || displayWidth(s) !== want);
+for (const [s, want, why] of WIDTHS) {
+  ok(W(s) === want && displayWidth(s) === want, `${why} — blessed ${W(s)}, displayWidth ${displayWidth(s)}, want ${want}`);
+}
+ok(wrong.length === 0, 'blessed and the terminal agree on every case above');
 
 if (bad) {
   console.error(`\n${bad} tool-icon check(s) failed.`);

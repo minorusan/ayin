@@ -7,7 +7,7 @@ import { resolveProject } from '../explore/index.js';
 
 export const tool: Tool = {
     name: 'animator_inspect',
-    icon: '▷',
+    icon: '🎬',
     description:
       'READ a Unity .controller as a map of states and transitions instead of raw YAML. Per transition: '
       + 'whether it has an EXIT TIME (without one it fires the moment its conditions hold, cutting the clip '

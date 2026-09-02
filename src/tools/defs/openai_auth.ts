@@ -53,7 +53,7 @@ async function verify(key: string): Promise<{ ok: true } | { ok: false; reason: 
 
 export const tool: Tool = {
   name: 'openai_auth',
-  icon: '⚿',
+  icon: '🔑',
   description:
     'Store the OpenAI API key (verified against OpenAI before saving), optionally with a model name. '
     + 'Call with no arguments to report whether a key is configured. Does not switch ayin to OpenAI — /model openai does that.',

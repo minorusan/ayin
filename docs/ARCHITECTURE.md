@@ -1635,6 +1635,40 @@ The mechanism is a `WAIT_FOR_IT` branch that **skips the race** rather than pass
 `setTimeout(fn, Infinity)` fires on the next tick, because Node clamps a non-finite delay to 1 ms, which
 would have backgrounded it instantly.
 
+## Glyph width (`ui/width.ts`) — teaching blessed what a terminal paints
+
+`blessed.unicode.strWidth('\u{1F527}')` returns **1**. Every terminal draws that wrench **2 cells**.
+blessed's double-wide table was written before emoji: it covers CJK, Hangul, fullwidth forms and Yi,
+and stops. So blessed lays out a row believing it is a cell narrower than it will be painted, the last
+cell spills past the right edge, the terminal wraps onto a line blessed does not know exists, and
+`smartCSR` redraws every following row one position off — on screen, the input bar swallowing the
+thinking line, or text appearing twice.
+
+That happened twice (U+1F512 in `/lock`, U+23F3 in the queue segment) and both times the answer was to
+**ban the glyph**. Banning treats the symptom: the *measurement* is what is wrong, and it is wrong for
+every consumer, not the two segments someone noticed.
+
+`installWidthPatch()` replaces `unicode.charWidth` with one that knows `\p{Emoji_Presentation}` is two
+cells, that VS16 promotes a text-default pictograph to two and VS15 forces it back to one, and that a
+selector itself occupies none. Everything else falls through to the original — a width table is easy to
+make worse, and CJK is the part with the most users. It reaches blessed's own wrapping, alignment and
+cursor maths because `element.js` calls `unicode.strWidth(text)` as a property lookup at call time, not
+a binding captured at load. Installed in `screen.ts` at module scope, above the `blessed.screen()` that
+is the first thing to measure anything.
+
+**So tool icons can be emoji now**, and are. What is still refused — by `toolGlyph()` at paint time and
+`check-glyphs.mjs` at build time — is anything whose width no terminal agrees on: a ZWJ sequence, a flag
+(two regional indicators), a skin-tone modifier. One code point, optionally plus a variation selector,
+is the largest thing whose painted width is knowable. The **status bar keeps its ban** on wide glyphs
+regardless: it is one row with no slack, and correctness there depends on the emulator honouring the
+width too.
+
+Three matchers had to learn the same lesson, all of them counting UTF-16 code units where a surrogate
+pair is two: `startsToolCard` (blessed markup), `HEADLESS_TOOL_HEADER` (child stdout) and `wrapPre`,
+which additionally sliced *through* pairs and painted two replacement characters on separate rows.
+`check-tool-icons.mjs` asserts the widths in both directions — the emoji cases blessed got wrong, and
+the CJK / halfwidth / combining / ASCII cases it already had right, which a careless patch would break.
+
 ### Reading a subagent's result
 
 It opens with the child's own statistics — `subagent finished — 6 tool call(s), 56s`. **Zero tool calls

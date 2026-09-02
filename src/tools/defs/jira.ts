@@ -10,7 +10,7 @@ import { askJira } from '../connectors/jira/loop.js';
  */
 export const tool: Tool = {
   name: 'jira',
-  icon: '⚑',
+  icon: '🎫',
   description:
     'Answer a question about the current Jira sprint for the authenticated user: which tickets are assigned, '
     + 'their status and priority, and what a ticket says or who commented on it. Ask in plain language, not JQL. '

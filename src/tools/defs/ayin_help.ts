@@ -36,7 +36,7 @@ import { HELP } from '../../help.js';
  */
 export const tool: Tool = {
   name: 'ayin_help',
-  icon: '⍰',
+  icon: '❓',
   description:
     'ANSWER ANY QUESTION ABOUT WHAT AYIN CAN OR CANNOT DO. Pass `question` in the operator\'s own words — '
     + '"can you talk to jira", "how do I review a diff", "can it run tests" — and it searches every slash '

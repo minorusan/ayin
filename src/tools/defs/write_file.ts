@@ -11,7 +11,7 @@ const PROMPTS_FILE = join(homedir(), '.ayin-cli', 'prompts.json');
 
 export const tool: Tool = {
     name: 'write_file',
-    icon: '✎',
+    icon: '📝',
     description: 'Write content to a file. Creates parent directories if needed. Use for creating new files or completely rewriting existing ones.',
     parameters: [
       { name: 'path', type: 'string', description: 'Absolute file path', required: true },

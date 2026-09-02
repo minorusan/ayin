@@ -11,7 +11,7 @@ import { AROUND_DEFAULT, centeredWindow, clampSpan, describeSpans, slideWindow, 
 
 export const tool: Tool = {
     name: 'read_file',
-    icon: '▤',
+    icon: '📄',
     description: 'Read a file and return its contents with line numbers. For a large file: `around=<line>` centres the window on a line (paste a grep hit straight in), and calling it again with no offset SLIDES to the next part you have not read yet rather than repeating the top. Use offset/limit to pick a window by hand. For image files (png/jpg/jpeg/webp/gif/avif/tiff/bmp) the image is downscaled and attached to the next LLM call for vision processing instead of returning bytes.',
     parameters: [
       { name: 'path', type: 'string', description: 'Absolute file path', required: true },

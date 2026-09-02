@@ -80,7 +80,7 @@ function hint(out: string): string {
 
 export const tool: Tool = {
   name: 'naamah',
-  icon: '⚘',
+  icon: '🌸',
   description:
     'Sketch the SOLUTION\'S INTERFACE before implementing it, as plain TypeScript or C#, and have a real '
     + 'compiler check it. This is the only design door — never author a .puml, and never hand-write the '

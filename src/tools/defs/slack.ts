@@ -10,7 +10,7 @@ import { askSlack } from '../connectors/slack/loop.js';
  */
 export const tool: Tool = {
   name: 'slack',
-  icon: '≣',
+  icon: '💬',
   description:
     'Answer a question about the operator\'s Slack: search every channel and DM they can see, read a '
     + "channel's history or a thread, list their channels, or look up a person. Ask in plain language. "

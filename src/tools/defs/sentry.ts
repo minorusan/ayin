@@ -10,7 +10,7 @@ import { askSentry } from '../connectors/sentry/loop.js';
  */
 export const tool: Tool = {
   name: 'sentry',
-  icon: '◉',
+  icon: '🚨',
   description:
     'Answer a question about errors in production from Sentry: which issues are unresolved, how often they '
     + 'fire, how many users they affect, and what the stacktrace of one says. Ask in plain language. '

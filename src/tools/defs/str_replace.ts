@@ -6,7 +6,7 @@ import { readBackAfter, requireRead } from '../readGuard.js';
 
 export const tool: Tool = {
     name: 'str_replace',
-    icon: '⇄',
+    icon: '🔁',
     description:
       'Make a SURGICAL edit to an existing file: replace ONE exact, unique block of text with new text. ' +
       'PREFER THIS over write_file for editing existing files — it changes only the targeted lines and cannot ' +

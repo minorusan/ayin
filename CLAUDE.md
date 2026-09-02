@@ -261,9 +261,13 @@ Doing what was asked is half the job. These three are always on.
    break in production?" Write the answer down and close the real ones. The bug you don't look for is
    the two-day bug.
 
-Note for agents: blessed lies about width (`strWidth(emoji) === 1`, two cells in a real terminal),
-which is why `tool/check-glyphs.mjs` runs as `prebuild`. **Paint the UI and read it** rather than
-assuming it renders.
+Note for agents: blessed lies about width — `strWidth(emoji)` is 1 where a terminal paints 2 — so
+`ui/width.ts` patches `unicode.charWidth` before the screen exists, and `tool/check-glyphs.mjs` still
+runs as `prebuild` for the glyphs no measurement can save (a ZWJ sequence or a flag is one cluster in
+one emulator and several in another). Tool icons may be emoji; the status bar may not. **Paint the UI
+and read it** rather than assuming it renders — that is how the three separate matchers counting UTF-16
+code units were found, each of which stopped seeing a card header the moment its icon was a surrogate
+pair.
 
 ---
 

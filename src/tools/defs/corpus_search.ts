@@ -12,7 +12,7 @@ import { corpusSearch } from '../../indulge/inject.js';
  */
 export const tool: Tool = {
   name: 'corpus_search',
-  icon: '◈',
+  icon: '📚',
   description:
     'Search what a previous `ayin indulge` run already answered about THIS repo — questions, answers and the code they cite. '
     + 'Use it before investigating something from scratch: the answer may already exist, with citations. '

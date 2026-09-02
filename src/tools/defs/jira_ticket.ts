@@ -27,7 +27,7 @@ const KEY = /^[A-Za-z][A-Za-z0-9_]*-\d+$/;
  */
 export const tool: Tool = {
   name: 'jira_ticket',
-  icon: '◰',
+  icon: '🎟️',
   description:
     'Read one Jira ticket by key (e.g. PROJ-1234): title, status, type, priority, full description and all '
     + 'comments. One request, any ticket the token can see — open or closed, any sprint, any assignee. Use it '

@@ -52,11 +52,50 @@ function usableCols(): number {
  * aligned table or a diff. This only breaks a line genuinely too long to fit, and marks the break so a
  * continuation is not misread as a new record.
  */
+/**
+ * Hard-wrap a preformatted line, NEVER through the middle of a character.
+ *
+ * `slice()` cuts code UNITS, so an emoji \u2014 a surrogate pair \u2014 landing on the boundary was split in
+ * half, and the two halves paint as replacement characters on separate rows. Cutting on code points
+ * fixes that; a `[...line]` array is also the only honest thing to index when the line may contain
+ * astral characters at all.
+ *
+ * THE BUDGET IS STILL CODE-UNIT LENGTH, on purpose, and it is not an oversight. The line arrives
+ * carrying blessed tags (`{green-fg}\u2026{/}`) which occupy no cells, so the count already over-estimates
+ * and this wraps earlier than it strictly must. Erring toward a shorter line is the safe direction \u2014
+ * a line that stops before the edge cannot spill past it \u2014 and a surrogate pair counting 2 happens to
+ * be exactly what a terminal paints for an emoji. Making the budget "accurate" would have to strip
+ * tags first, which lengthens every line in the transcript: a layout change for every message, to
+ * gain nothing this function needs.
+ */
 function wrapPre(line: string, width: number): string[] {
   const w = Math.max(8, Math.floor(width) || 8);
   if (line.length <= w) return [line];
-  const out: string[] = [line.slice(0, w)];
-  for (let i = w; i < line.length; i += w - 2) out.push('\u21B3 ' + line.slice(i, i + w - 2));
+  const cps = [...line];
+  /** Take code points until their combined code-unit length would exceed `budget`. */
+  const take = (from: number, budget: number): { text: string; next: number } => {
+    let used = 0;
+    let i = from;
+    for (; i < cps.length; i++) {
+      const size = cps[i].length;               // 2 for a surrogate pair, 1 otherwise
+      if (used + size > budget) break;
+      used += size;
+    }
+    return { text: cps.slice(from, i).join(''), next: i };
+  };
+  const first = take(0, w);
+  const out: string[] = [first.text];
+  for (let i = first.next; i < cps.length;) {
+    const chunk = take(i, w - 2);
+    // A budget too small for even one character would loop forever; take one and move on.
+    if (chunk.next === i) {
+      out.push('\u21B3 ' + cps[i]);
+      i++;
+      continue;
+    }
+    out.push('\u21B3 ' + chunk.text);
+    i = chunk.next;
+  }
   return out;
 }
 /**
@@ -87,7 +126,10 @@ export function startsToolCard(content: string): boolean {
  * So the test is the markup only a header has: the tool colour, exactly one character, closed, then
  * the bold tool name. `formatToolCallForChat` is the sole producer, three lines below.
  */
-const TOOL_HEADER = new RegExp(`^\\{${theme.tool.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-fg\\}[^{}]\\{/\\} \\{bold\\}`);
+// `u` AND `{1,2}`: `[^{}]` matches one UTF-16 code UNIT, so an emoji icon — a surrogate pair — stopped
+// being recognised as a header the moment icons could be emoji. Two code points also covers a
+// pictograph carrying a variation selector. Same fix, same reason, as `HEADLESS_TOOL_HEADER`.
+const TOOL_HEADER = new RegExp(`^\\{${theme.tool.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-fg\\}[^{}]{1,2}\\{/\\} \\{bold\\}`, 'u');
 
 /** OBJECTIVE card: label + how many wrapped rows of goal text it may grow to. */
 const TITLE = 'OBJECTIVE';
@@ -681,12 +723,31 @@ export function formatToolCallForChat(tool: string, params: string, icon?: strin
   return `{${theme.tool}-fg}${toolGlyph(icon)}{/} {bold}{${theme.accent}-fg}${tool}{/${theme.accent}-fg}{/bold}${p}`;
 }
 
-/** One code point, no emoji presentation, or the default. The same rule the build gate applies. */
+/**
+ * ONE GLYPH THE TERMINAL CAN MEASURE — which now includes emoji.
+ *
+ * This used to reject anything with `Emoji_Presentation`, for the reason the whole width problem
+ * exists: blessed measured such a glyph as one cell and the terminal painted two, so a card header
+ * could spill past the edge and shift the rows after it. `width.ts` fixes the measurement itself, so
+ * the ban is no longer what is protecting the layout — an emoji is now simply a two-cell character,
+ * and blessed lays it out as one.
+ *
+ * WHAT IS STILL REFUSED, and why it is a different question. A ZWJ sequence (family), a flag (two
+ * regional indicators) and a skin-tone modifier are SEVERAL code points that a terminal may or may not
+ * combine into one cluster — the same string is one glyph in one emulator and three in another, so no
+ * width is correct everywhere. One code point, optionally followed by a variation selector, is the
+ * largest thing whose painted width is knowable, and that is the line.
+ *
+ * (Named rather than pasted: this file is scanned by `tool/check-glyphs.mjs`, which cannot tell a
+ * glyph in a comment from one in a template literal — and it is right not to try.)
+ */
 function toolGlyph(icon?: string): string {
   if (!icon) return DEFAULT_TOOL_GLYPH;
   const cps = [...icon];
-  if (cps.length !== 1) return DEFAULT_TOOL_GLYPH; // a flag, a skin tone, a ZWJ sequence
-  if (/\p{Emoji_Presentation}/u.test(icon) || icon.length > 1) return DEFAULT_TOOL_GLYPH;
+  // One code point, or one plus a variation selector (⚙️ = U+2699 U+FE0F) — nothing wider.
+  const bare = cps.length === 1;
+  const withSelector = cps.length === 2 && (cps[1] === '️' || cps[1] === '︎');
+  if (!bare && !withSelector) return DEFAULT_TOOL_GLYPH; // a flag, a skin tone, a ZWJ sequence
   return icon;
 }
 
