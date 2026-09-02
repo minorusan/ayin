@@ -1078,14 +1078,33 @@ actually has to decide, **the layout**, is never stated, and the base deliverabl
 README — so the validator in `plan/plan.ts` accepts a plan for a new Python project that never mentions
 `pyproject.toml`.
 
-So `plan/greenfield` serves `python`, `node` and `unity` at priority 100, with **three branches**, one
-per type, because the folder structure of a typical project is exactly what differs:
+So `plan/greenfield` carries **three branches**, one per type, because the folder structure of a
+typical project is exactly what differs:
 
 | Branch | Layout the plan is grounded in | Required deliverables beyond the README |
 |---|---|---|
 | Python (`python`) | src layout, venv, editable install, pytest | `pyproject.toml` · `src/*/__init__.py` · `tests/test_*.py` · `.gitignore` |
 | TypeScript (`node`) | `tsc` to `dist/`, ESM, `node --test` | `package.json` · `tsconfig.json` · `src/index.ts` · `test/*.test.ts` · `.gitignore` |
 | Unity (`unity`) | `Assets/Scripts`, editor-owned scenes and `.meta` | `Assets/Scripts/*.cs` · `Packages/manifest.json` · `ProjectSettings/ProjectVersion.txt` · `.gitignore` |
+
+#### Who is SELECTED for each of those types — one owner, never a tie
+
+`plan/greenfield` is registered for `python` and `unity`. **TypeScript is `plan/node`'s**, and it is
+the same three branches underneath: `plan/node` delegates `survey`, `grounding`, `deliverables` and
+`observability` straight to `plan/greenfield`, whose `typescript` branch is keyed on `ctx.type ===
+'node'` and so still answers. What it adds is the half greenfield does not have — a **deterministic
+file bootstrap**: `package.json`, `tsconfig.json`, `.gitignore` and a `src/index.ts` that starts a
+`node:http` server, written with no model call, plus grounding that tells the plan what the bootstrap
+already decided. Without that, *"give me an empty TS endpoint for notes"* produced a plan naming a
+manifest that nothing ever wrote, and the model reached for Express and imported a package that was
+not installed.
+
+The two were written independently for the same complaint and merged in 7200cee. Selection is
+**highest priority, ties broken by id**, so both claiming `node` at priority 100 would have let an
+alphabetical accident decide which one bootstraps a project — which is why the split is asserted in
+`check-gates.mjs` from both directions (`plan/node` includes `node`; `plan/greenfield` does not) and
+the owner is asserted per type in `check-plan.mjs`. The deliverable list stays greenfield's alone, so
+the two cannot drift into disagreeing about what a TypeScript project must contain.
 
 Those deliverables are what makes the difference reach the plan: they are handed to the validator as
 `requiredPatterns`, so a plan that does not name the manifest **by exact path** in some step's `files`
@@ -4502,6 +4521,26 @@ than the running build: checked at boot and every 10 minutes. The registry is
 configured registry **only when that is a private one** — a checkout pointed at public npmjs gets
 no passive check, since `ayin` is a plausible public name and that would both phone home uninvited
 and risk advertising a stranger's package as your update. `AYIN_UPDATE_CHECK=0` disables it.
+
+### `ayin update` on a linked checkout: the two ways it used to hurt
+
+The registry path is not what runs on a machine whose `ayin` resolves to a git checkout, so
+`updateFromCheckout()` pulls that tree, installs, builds and re-points the global bin. Two of its
+steps were unbounded or out of order, and both were measured on this repo:
+
+**The fetch has a ceiling and names its remote.** `git fetch --quiet` against an unreachable host does
+not fail — it sits in the TCP connect for minutes, printing nothing, and the operator's only move is
+Ctrl+C. It is now bounded at 45s, the line says which URL is being waited on, and a timeout is
+reported as *the network or the host, not this checkout*, with the `ssh -T` command that settles it.
+An update that looked broken for two days was a network outage wearing a silent command's clothes.
+
+**Divergence is refused BEFORE anything is touched.** `--force` stashes the working tree and then
+pulls. On a diverged branch `pull --ff-only` cannot succeed however clean the tree is, so the old
+sequence was: move the operator's uncommitted work into a stash, fail, exit — maximum damage at the
+first possible step, for an update that was never going to land. `updateFromCheckout` now counts both
+directions and, when both are non-zero, refuses with the merge command and leaves the tree untouched.
+It does not merge on its own: a merge can conflict, and a build from a half-merged tree matches no
+commit. A checkout that is only AHEAD says so and stops rather than reporting "0 commits behind".
 
 **A successful `ayin update` restarts a running `watch` daemon.** `ayin watch` is a long-lived
 background process nobody sits and watches — left alone after an update it would keep reviewing

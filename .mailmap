@@ -1,0 +1,12 @@
+# One person, two spellings of the same name, one email.
+#
+# Commits arrive from two machines and one of them has a typo'd `user.name`. Same author, same
+# address — but `git log`, `git shortlog -sn` and every forge's contributor list read the NAME, so
+# the history shows two people who have never disagreed about anything.
+#
+# This maps the typo onto the spelling that matches the address. Fix the source too, on whichever
+# machine still spells it the other way:
+#
+#     git config --global user.name "Kliment Shchukin"
+#
+Kliment Shchukin <kliment.shchukin@play-perfect.com> Klyment Shchukin <kliment.shchukin@play-perfect.com>

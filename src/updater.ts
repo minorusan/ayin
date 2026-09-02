@@ -121,18 +121,40 @@ export function startUpdateWatch(everyMs = 10 * 60 * 1000): () => void {
 
 // ── `ayin update` ─────────────────────────────────────────────────────
 
-function run(cmd: string, args: string[], opts: { inherit?: boolean } = {}): Promise<{ code: number; out: string }> {
+function run(
+  cmd: string,
+  args: string[],
+  opts: { inherit?: boolean; timeoutMs?: number } = {},
+): Promise<{ code: number; out: string; timedOut?: boolean }> {
   return new Promise((resolve) => {
+    let timedOut = false;
     const child = execFile(cmd, args, { maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (timer) clearTimeout(timer);
       const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : 1) : 0;
-      resolve({ code, out: `${stdout}${stderr}`.trim() });
+      resolve({ code: timedOut ? 1 : code, out: `${stdout}${stderr}`.trim(), timedOut });
     });
+    /**
+     * A NETWORK CALL WITH NO CEILING IS INDISTINGUISHABLE FROM A HANG.
+     *
+     * `git fetch` over ssh to an unreachable host does not fail — it sits in the TCP connect until the
+     * kernel gives up, minutes later, having printed nothing because the fetch is `--quiet`. Twice
+     * (2026-08-31 and 2026-09-02) the operator's only signal was a command that appeared frozen, and
+     * the reasonable conclusion — "the update is broken" — sent them looking at git identities rather
+     * than at the network that was actually down. A bounded wait turns that into one legible line.
+     */
+    const timer = opts.timeoutMs
+      ? setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, opts.timeoutMs)
+      : null;
+    timer?.unref?.();
     if (opts.inherit) {
       child.stdout?.pipe(process.stdout);
       child.stderr?.pipe(process.stderr);
     }
   });
 }
+
+/** How long a fetch may sit before it is called unreachable rather than slow. */
+const FETCH_TIMEOUT_MS = 45_000;
 
 function normalizeRegistry(url: string): string {
   return url.endsWith('/') ? url : `${url}/`;
@@ -216,7 +238,9 @@ const SELF_WRITTEN = new Set(['package-lock.json', 'npm-shrinkwrap.json']);
 
 async function updateFromCheckout(root: string, opts: { check: boolean; force: boolean }): Promise<void> {
   const current = getCurrentVersion();
-  const git = (...args: string[]): Promise<{ code: number; out: string }> => run('git', ['-C', root, ...args]);
+  const git = (...args: string[]): Promise<{ code: number; out: string; timedOut?: boolean }> => run('git', ['-C', root, ...args]);
+  /** The one git call that talks to the network, and therefore the one that needs a ceiling. */
+  const gitTimed = (timeoutMs: number, ...args: string[]) => run('git', ['-C', root, ...args], { timeoutMs });
 
   const branch = (await git('rev-parse', '--abbrev-ref', 'HEAD')).out.trim();
   process.stdout.write(`ayin ${current}  ·  checkout ${root}${branch ? ` (${branch})` : ''}\n`);
@@ -227,10 +251,20 @@ async function updateFromCheckout(root: string, opts: { check: boolean; force: b
   }
 
   const before = (await git('rev-parse', 'HEAD')).out.trim();
-  process.stdout.write('Fetching…\n');
-  const fetched = await git('fetch', '--quiet');
+  // NAME WHAT IS BEING WAITED ON. "Fetching…" alone does not distinguish a slow network from a
+  // misconfigured remote, and this is the line the operator stares at when the box is offline.
+  const remoteUrl = (await git('remote', 'get-url', 'origin')).out.trim();
+  process.stdout.write(`Fetching from ${remoteUrl || 'origin'} (up to ${FETCH_TIMEOUT_MS / 1000}s)…\n`);
+  const fetched = await gitTimed(FETCH_TIMEOUT_MS, 'fetch', '--quiet');
   if (fetched.code !== 0) {
-    process.stderr.write(`ayin update: git fetch failed — ${fetched.out.trim() || 'no detail'}\n`);
+    if (fetched.timedOut) {
+      process.stderr.write(`ayin update: git fetch got no answer from ${remoteUrl || 'origin'} within ${FETCH_TIMEOUT_MS / 1000}s.\n`);
+      process.stderr.write('             That is the network or the host, not this checkout — nothing was changed.\n');
+      process.stderr.write(`             Check it with: ssh -T ${(remoteUrl.match(/^[^:]*@[^:]+/) ?? ['git@github.com'])[0]}\n`);
+    } else {
+      process.stderr.write(`ayin update: git fetch failed — ${fetched.out.trim() || 'no detail'}\n`);
+      process.stderr.write(`             Remote: ${remoteUrl || '(none configured)'}. Nothing was changed.\n`);
+    }
     process.exit(fetched.code || 1);
     return;
   }
@@ -240,6 +274,31 @@ async function updateFromCheckout(root: string, opts: { check: boolean; force: b
     return;
   }
   const behind = (await git('rev-list', '--count', `${before}..origin/${branch}`)).out.trim();
+  const ahead = (await git('rev-list', '--count', `origin/${branch}..${before}`)).out.trim();
+
+  /**
+   * DIVERGENCE IS CHECKED BEFORE ANYTHING IS TOUCHED — and that ordering is the whole point.
+   *
+   * `--force` stashes the working tree and THEN pulls. On a branch that has diverged, `pull --ff-only`
+   * cannot succeed no matter how clean the tree is, so the sequence was: move the operator's
+   * uncommitted work into a stash, fail, exit. Maximum damage at the first possible step, for an
+   * update that was never going to land. Refusing here costs nothing and leaves the tree exactly as
+   * it was.
+   *
+   * Not auto-merged: a merge can conflict, and a build from a half-merged tree matches no commit.
+   * That is a decision for someone who can read the diff.
+   */
+  if (Number(ahead) > 0 && Number(behind) > 0) {
+    process.stderr.write(`ayin update: ${root} has DIVERGED from origin/${branch} — ${ahead} local commit(s) it does not have, ${behind} it has that this does not.\n`);
+    process.stderr.write('             A fast-forward is impossible, so nothing was fetched into the tree and nothing was stashed.\n');
+    process.stderr.write(`             Reconcile it by hand: git -C ${root} merge origin/${branch}\n`);
+    process.exit(1);
+    return;
+  }
+  if (Number(ahead) > 0 && Number(behind) === 0) {
+    process.stdout.write(`This checkout is ${ahead} commit(s) AHEAD of origin/${branch} and behind by none — nothing to pull.\n`);
+    if (!opts.force) return;
+  }
   process.stdout.write(`Update available: ${behind || '?'} commit(s) behind origin/${branch}.\n`);
   if (opts.check) return;
 
