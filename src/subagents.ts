@@ -109,6 +109,51 @@ export function toolWithheld(name: string): boolean {
   return arbiterMode() && ARBITER_WITHHELD.has(name);
 }
 
+/**
+ * WHAT TO DO INSTEAD — because "unknown tool" is a lie the model routes around, and it routes around
+ * it by trying the same call again.
+ *
+ * A withheld tool is not absent, it is refused, and the two need different sentences. Measured on the
+ * first real arbiter build: the model wanted a shell, `bash` had been withheld, `loadTools` had
+ * therefore dropped it, and the generic not-found branch matched `bash` against its own shell-command
+ * regex and answered *"There is no bash tool. To run shell commands use the bash tool"*. It complied,
+ * 28 times, and created no files at all. The refusal has to name the replacement or it is a loop.
+ *
+ * Returns null when the tool is genuinely not withheld here, so the caller can fall through to the
+ * ordinary unknown-tool path.
+ */
+export function withheldRedirect(name: string): string | null {
+  if (!toolWithheld(name)) return null;
+  if (name === 'subagent') {
+    // TWO REASONS, TWO SENTENCES. A child told "--disallow-subagents" would look for a flag nobody
+    // set; the real limit is its depth, and it is permanent for this process.
+    return isSubagent()
+      ? 'you ARE a subagent, and a subagent cannot spawn subagents — that is what keeps arbitration one '
+        + 'level deep instead of recursing. Do this stage yourself with the primitives you have; you may '
+        + 'still plan it.'
+      : 'subagent is switched off for this run (--disallow-subagents). Work every phase yourself.';
+  }
+  if (name === 'perform_edit' || name === 'find_relevant_files') {
+    return `${name} belongs to the arbitration level, and you are the agent doing the work. `
+      + 'Use write_file / str_replace to change a file, and grep / find_files / explore to locate one.';
+  }
+  // Arbiter mode. Name the one replacement that actually covers this primitive — a list of five
+  // alternatives is another way of saying "guess".
+  const instead: Record<string, string> = {
+    bash: 'you have no shell at this level. Anything that runs a command — npm, git, a build, a test — '
+      + 'goes to a child: subagent(task="…"), which has the full primitive set including bash.',
+    write_file: 'describe the change instead: perform_edit(file="…", edit="…"). To create a file that '
+      + 'does not exist yet, hand the whole stage to subagent(task="…").',
+    str_replace: 'describe the change instead: perform_edit(file="…", edit="…") — it reads the file and '
+      + 'places the edit, so you do not need its exact current bytes.',
+    grep: 'use explore, or find_relevant_files(task="…") for the files a task touches.',
+    find_files: 'use find_relevant_files(task="…"), which verifies every path it returns against disk.',
+    list_dir: 'use explore, or find_relevant_files(task="…").',
+  };
+  const how = instead[name] ?? 'hand the work to subagent(task="…").';
+  return `${name} is withheld at the arbitration level — you decide and verify, you do not type. ${how}`;
+}
+
 export interface SubagentResult {
   ok: boolean;
   /** What the subagent said when it finished — its answer, not its transcript. */
@@ -130,9 +175,25 @@ function entryPoint(): string {
  * would put the child's entire working transcript into the parent's window — the parent delegated
  * precisely so it would not have to hold that. So: the prose lines, up to the handoff.
  */
+/**
+ * A CALL HEADER IN HEADLESS STDOUT, BY SHAPE — never by one glyph.
+ *
+ * `[tool] ▸ name · args` was exact while every card opened with the same character, and per-tool icons
+ * ended that: `[tool] ◍ subagent · task=…` stopped matching, so `toolCalls` came back 0 for children
+ * that had built an entire project. That number is not decoration — the subagent help tells the
+ * operator that **zero tool calls means the child changed nothing**, so a stale regex turned the one
+ * signal they are told to trust into a lie in the safe direction's opposite.
+ *
+ * The shape is: the prefix, one glyph that is not a body-line rule, then the tool name. Body lines
+ * (`[tool] │ …`, `[tool] ╰ …`) are excluded explicitly. The TUI has the same problem and solves it the
+ * same way in `chat.ts#startsToolCard`, against blessed markup instead of plaintext — two renderers,
+ * so two matchers, and `check-tool-icons.mjs` asserts this one so it cannot rot again silently.
+ */
+export const HEADLESS_TOOL_HEADER = /^\[tool\] (?![│╰])\S \S/gm;
+
 export function extractReport(stdout: string): { report: string; toolCalls: number } {
   const upToHandoff = stdout.split('--- HANDOFF')[0];
-  const toolCalls = (stdout.match(/^\[tool\] ▸/gm) ?? []).length;
+  const toolCalls = (stdout.match(HEADLESS_TOOL_HEADER) ?? []).length;
   const prose = upToHandoff
     .split('\n')
     .filter((l) => l.trim() && !/^\[(tool|system)\]/.test(l) && !/^[│╰]/.test(l) && !/^\s{2,}…/.test(l))
@@ -227,9 +288,21 @@ async function spawnSubagent(task: string, opts: { cwd?: string; plan?: string; 
         // nobody was watching, and everything it had learned dies with it unless it wrote it down.
         // Inherited rather than always-on: the operator asked for postmortems, or did not.
         ...(postmortemEnabled() ? { AYIN_POSTMORTEM: '1' } : {}),
-        // It has a plan already; re-planning would spend the whole gate again on a task that IS one
-        // phase of a plan.
-        AYIN_PLAN: '0',
+        /**
+         * A CHILD MAY PLAN. It may not DELEGATE — those are different limits, and this line used to
+         * enforce the wrong one.
+         *
+         * The recursion rule is about `subagent`, and it is already enforced where it belongs:
+         * `subagentsAllowed()` is false at depth ≥ 1, so the tool is not registered for a child at
+         * all. Hard-disabling plan mode as well took away a child's ability to decompose its own
+         * stage — a phase like "implement the entry point and the server" is often several steps that
+         * benefit from being written down first, and the child was forbidden from doing that while
+         * the parent, which is not doing the work, was allowed.
+         *
+         * So: only suppress planning when the child was HANDED a plan. Then it already has one, and
+         * re-planning would spend the whole gate again to rediscover the phase it was given.
+         */
+        ...(opts.plan ? { AYIN_PLAN: '0' } : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

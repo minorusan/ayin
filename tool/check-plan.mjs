@@ -266,7 +266,13 @@ console.log('\n— a directory that HOLDS projects is not a project —');
   ok(existsSync(join(container, 'testwebsite-2', '.git')), 'the git repository is initialised INSIDE it, not over the container');
   ok(!existsSync(join(container, '.git')), 'the container itself is left alone');
   ok(existsSync(join(container, 'testwebsite-2', 'README.md')), 'and the README stub lands in the project, not beside it');
-  ok(made.length === 3, 'all three are reported', `reported ${made.length}`);
+  // Every path is reported, never done silently — the directory, the repo, and each project file.
+  // Asserted as a floor plus membership rather than an exact count: the branch file tables are meant
+  // to grow, and a gate that has to be edited every time one does is a gate people edit without
+  // reading. What must hold is that nothing happens off the record.
+  ok(made.length >= 3, 'the directory, the repo and the project files are all reported', `reported ${made.length}`);
+  ok(made.every((p) => existsSync(p)), 'and every reported path actually exists on disk');
+  ok(made.some((p) => p.endsWith('pyproject.toml')), '  → including the manifest the deliverables demand');
 
   rmSync(container, { recursive: true, force: true });
 }
@@ -299,7 +305,32 @@ inEmptyDir((dir) => {
   const made = ex.scaffold(ctx);
   ok(existsSync(join(dir, '.git')), 'an empty git repository is initialised in the new project');
   ok(existsSync(join(dir, 'README.md')), 'and the README stub is the first file it has ever seen');
-  ok(made.length === 2, 'both are reported to the operator, never done silently', `reported ${made.length}`);
+  ok(made.length >= 2, 'the repo and the project files are reported to the operator, never done silently', `reported ${made.length}`);
+
+  // THE SCAFFOLD MUST SATISFY THE DELIVERABLES IT WILL BE JUDGED AGAINST.
+  //
+  // These are two lists written in two places — `branchFiles()` says what is written, the branch's
+  // `deliverables` says what QA and the plan validator will demand — and they disagreed already: the
+  // old TypeScript table wrote no test while the deliverables required `test/*.test.ts`. A plan for
+  // the project the scaffold had just built was therefore rejectable. Asserted for every literal
+  // (non-glob) required pattern, in every branch.
+  for (const [request, label] of [
+    ['set up an empty python project for a CLI', 'python'],
+    ['create a new typescript project, a small library with tests', 'typescript'],
+    ['start a unity project for a 2d platformer prototype', 'unity'],
+  ]) {
+    inEmptyDir((d) => {
+      const c = detectProject(d, request);
+      const e = planExecutorFor(c);
+      e.scaffold(c);
+      const required = e.deliverables(c).filter((x) => x.required).map((x) => x.patterns[0]);
+      const literal = required.filter((p) => !p.includes('*'));
+      const absent = literal.filter((p) => !existsSync(join(d, p)));
+      ok(absent.length === 0,
+        `${label}: the scaffold writes every literal required deliverable`,
+        absent.length ? `missing: ${absent.join(' ')}` : `${literal.length} checked`);
+    });
+  }
   ok(ex.scaffold(ctx).length === 0, 'a second pass creates nothing — scaffolding never overwrites');
 });
 

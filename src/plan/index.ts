@@ -139,13 +139,24 @@ export interface PlanResult {
  * still gets through, once, regardless of the toggle.
  */
 /**
- * `AYIN_PLAN=1` is the mirror of the existing `AYIN_PLAN=0` kill switch: force the session toggle ON
- * from the environment. It exists because headless (`-p`) has no TUI and therefore no way to type
- * `/plan`, which made plan mode untestable in any automated harness — including the Arduino benchmark,
- * whose whole subject is how well ayin plans. A feature that can only be exercised by a human pressing
- * keys cannot be regression-tested.
+ * ON BY DEFAULT. `AYIN_PLAN=0` turns it off; `/plan` toggles it for the session.
+ *
+ * It was opt-in, and opt-in made it unreachable exactly where it matters most. Headless (`-p`) has no
+ * TUI and therefore no way to type `/plan`, so every scripted run — a harness, a cron job, an operator
+ * demonstrating the thing — silently got no plan, no phases, and no `executor.scaffold()`. Measured on
+ * a greenfield request: without the flag the agent improvised a project and never entered plan mode at
+ * all; with it, the same request produced a deterministic scaffold, a grounded plan and three
+ * validated phases. A feature whose default is "off" in the mode nobody can toggle is a feature that
+ * does not run.
+ *
+ * The cost is bounded and was already designed for: `runPlan` still returns before spending anything
+ * on a request under `planToggledMinChars`, and triage's veto still refuses to plan a single-feature
+ * ask. What changes is that the door is open.
+ *
+ * `AYIN_PLAN=1` is kept as an explicit force — it now agrees with the default rather than creating it,
+ * and a harness that sets it keeps working.
  */
-let sessionEnabled = process.env.AYIN_PLAN === '1';
+let sessionEnabled = process.env.AYIN_PLAN !== '0';
 
 export function togglePlanSession(): boolean {
   sessionEnabled = !sessionEnabled;

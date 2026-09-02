@@ -75,6 +75,27 @@ ok(startsToolCard(formatToolCallForChat('t', 'x', undefined)), 'so is a default-
 ok(!startsToolCard('{yellow-fg}│{/} some tool output'), 'a card BODY is not a boundary — it would double the blank lines');
 ok(!startsToolCard('plain system notice'), 'and neither is untagged text');
 
+// ── 5 · the OTHER renderer: headless stdout, which a parent agent counts ─────
+//
+// `subagents.ts` counts tool calls out of a child's headless output, and that count is the number the
+// subagent help tells the operator means "the child changed nothing". It was keyed to `▸`, so per-tool
+// icons silently zeroed it — children that built whole projects reported 0 tool call(s). Two
+// renderers, two matchers; this asserts the plaintext one against every real icon.
+const { HEADLESS_TOOL_HEADER } = await import('../dist/subagents.js');
+const headlessCount = (s) => (s.match(new RegExp(HEADLESS_TOOL_HEADER.source, 'gm')) ?? []).length;
+const missedHeadless = [];
+for (const [tool, icon] of icons) {
+  if (headlessCount(`[tool] ${icon} ${tool} · x=1`) !== 1) missedHeadless.push(`${tool}:${icon}`);
+}
+ok(missedHeadless.length === 0,
+  `every per-tool header is counted in headless stdout${missedHeadless.length ? ` — missed: ${missedHeadless.join(' ')}` : ''}`);
+ok(headlessCount('[tool] ▸ t · x=1') === 1, 'so is a default-glyph header');
+ok(headlessCount('[tool] │ subagent finished — 0 tool call(s), 61s') === 0,
+  'a card BODY is not counted — that line is the result, not a second call');
+ok(headlessCount('[tool] ╰ ✓ 1m1s') === 0, 'and neither is the card footer');
+ok(headlessCount('[tool] ◍ subagent · task=x\n[tool] │ body\n[tool] ❯ bash · command=ls') === 2,
+  'two headers among their bodies count as two');
+
 if (bad) {
   console.error(`\n${bad} tool-icon check(s) failed.`);
   process.exit(1);

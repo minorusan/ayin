@@ -19,147 +19,54 @@
  * cost of being wrong here is editing a stranger's project.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { log } from '../../../log.js';
 import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext } from '../../types.js';
-import { ensureReadme } from '../base/index.js';
 import { greenfieldPlanExecutor } from '../greenfield/index.js';
 
 const config: ExecutorConfig = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'config.json'), 'utf-8'),
 ) as ExecutorConfig;
 
-/** A safe npm package name from a directory name. `My Notes!` -> `my-notes`. */
-function packageName(root: string): string {
-  const n = (basename(root) || 'app').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
-  return n || 'app';
-}
-
-/** Write a file only if it is absent. Returns the path when it wrote, so the caller can report it. */
-function writeIfMissing(path: string, body: string): string[] {
-  if (existsSync(path)) return [];
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, body);
-    log('INFO', 'scaffold_node_file', { path });
-    return [path];
-  } catch (err) {
-    // A read-only directory is worth reporting, never worth aborting the plan for.
-    log('WARN', 'scaffold_node_failed', { path, error: err instanceof Error ? err.message : String(err) });
-    return [];
-  }
-}
-
-const PKG = (name: string) => `${JSON.stringify({
-  name,
-  version: '0.1.0',
-  private: true,
-  type: 'module',
-  scripts: {
-    dev: 'node --watch --experimental-strip-types src/index.ts',
-    build: 'tsc',
-    start: 'node dist/index.js',
-    typecheck: 'tsc --noEmit',
-  },
-  devDependencies: { typescript: '^5.9.0', '@types/node': '^22.0.0' },
-}, null, 2)}\n`;
-
-/**
- * `allowImportingTsExtensions` + `rewriteRelativeImportExtensions` ARE LOAD-BEARING, not tidiness.
- *
- * Without them the two ways to run this project disagree. TS/ESM convention is to import the
- * COMPILED name — `from './notes.js'` — which is right for `npm run build`, and which the model
- * correctly wrote; but the `dev` script executes the .ts directly through Node's type stripping,
- * where `./notes.js` resolves literally and there is no such file. Measured: a bootstrapped project
- * with a route added died on `Cannot find module .../src/notes.js`, and neither the scaffold nor the
- * model was wrong — the scripts were.
- *
- * With these two, imports carry the `.ts` extension: Node runs them as written, and tsc rewrites them
- * to `.js` on the way into dist. Verified both directions.
- */
-const TSCONFIG = `${JSON.stringify({
-  compilerOptions: {
-    target: 'ES2022',
-    module: 'ESNext',
-    moduleResolution: 'bundler',
-    outDir: 'dist',
-    rootDir: 'src',
-    strict: true,
-    skipLibCheck: true,
-    esModuleInterop: true,
-    declaration: false,
-    sourceMap: true,
-    allowImportingTsExtensions: true,
-    rewriteRelativeImportExtensions: true,
-  },
-  include: ['src/**/*.ts'],
-}, null, 2)}\n`;
-
-/**
- * An entry point that RUNS, with nothing in it but the wiring.
- *
- * Node's own http module, no framework: a bootstrap that installs Express has chosen an architecture
- * on the operator's behalf, and one `createServer` call is not the part anybody wanted help with. The
- * routes the task actually asked for get added by the plan that follows this.
- */
-const INDEX_TS = `import { createServer } from 'node:http';
-
-const PORT = Number(process.env.PORT ?? 3000);
-
-const server = createServer((req, res) => {
-  res.writeHead(404, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ error: \`no route \${req.method} \${req.url}\` }));
-});
-
-server.listen(PORT, () => {
-  console.log(\`listening on http://localhost:\${PORT}\`);
-});
-`;
-
-
-/**
- * A README THAT NAMES THE FIRST COMMAND.
- *
- * The generic stub does not, and the bootstrap has a trap without it: `devDependencies` are written
- * but nothing is installed, so `npm run typecheck` fails on a fresh bootstrap with four errors about
- * `node:http` and `process` that look like broken scaffolding rather than "you have not installed
- * yet". Measured on the first run of this executor. So the very first line of the README is the
- * install, and this file is written BEFORE `ensureReadme` so the generic stub never wins.
- */
-const README = (name: string) => `# ${name}
-
-## Run it
-
-\`\`\`bash
-npm install        # required first — the type definitions come from here
-npm run dev        # watch mode on http://localhost:3000
-npm run typecheck  # fails until npm install has run
-\`\`\`
-
-## Layout
-
-- \`src/index.ts\` — the entry point. It starts a server and 404s every route; the routes this
-  project is for get added on top of it.
-- Import local files with the \`.ts\` extension (\`./notes.ts\`) — this tsconfig rewrites it to
-  \`.js\` on build, and Node runs it as written in dev.
-
-## Notes
-
-This project was bootstrapped deterministically — the manifest, the TypeScript configuration and the
-entry point were written without a model, so they are the same every time.
-`;
-
-const GITIGNORE = `node_modules/
-dist/
-*.log
-.env
-`;
-
 /** Where the files actually go — `root`, or the folder the request named inside it. Mirrors greenfield. */
 function targetRoot(ctx: ProjectContext): string {
   return ctx.targetDir ? join(ctx.root, ctx.targetDir) : ctx.root;
+}
+
+/** How long the bootstrap install may take before the project is handed over without it. */
+const INSTALL_TIMEOUT_MS = 120_000;
+
+/**
+ * `npm install`, ONCE, AT BOOTSTRAP — because without it the compile check is theatre.
+ *
+ * `qa/buildcheck.ts` runs `node_modules/.bin/tsc --noEmit`, and when that binary is absent it returns
+ * *ok, unverified: typescript is not installed here*. On a freshly scaffolded project that is always
+ * the case, so QA reported a green "valid build and test pipeline" for a project it had compiled zero
+ * files of — measured, on a run whose `npm test` exited 1 for having no tests at all. An install here
+ * is what turns that fact from skipped into answered.
+ *
+ * FIRE AND FORGET, DELIBERATELY. `scaffold()` is synchronous and runs before the plan; blocking it on
+ * a registry would make an offline machine wait two minutes to be told nothing. So this starts the
+ * install and returns, and everything downstream already treats a missing toolchain as unknown rather
+ * than broken. Failure is logged, never thrown: a project that cannot install is still a project worth
+ * planning, and the operator has a README that says to run it.
+ */
+function startBootstrapInstall(dir: string): void {
+  if (existsSync(join(dir, 'node_modules'))) return;
+  log('INFO', 'scaffold_npm_install_start', { dir });
+  const child = execFile(
+    'npm', ['install', '--no-audit', '--no-fund', '--loglevel', 'error'],
+    { cwd: dir, timeout: INSTALL_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
+    (err) => {
+      if (err) log('WARN', 'scaffold_npm_install_failed', { dir, error: err.message.slice(0, 200) });
+      else log('INFO', 'scaffold_npm_install_done', { dir });
+    },
+  );
+  // Never hold the process open for it — a plan that finished should not wait on a registry.
+  child.unref?.();
 }
 
 /**
@@ -214,19 +121,26 @@ export const nodePlanExecutor: PlanExecutor = {
       'Then implement from it. Skipping this is not a shortcut on a small task; it is the step that',
       'makes the implementation transcription instead of invention.',
       '',
-      'THIS PROJECT WAS JUST BOOTSTRAPPED. It already exists and already runs — do not recreate it.',
+      'THIS PROJECT WAS JUST BOOTSTRAPPED. It already exists, already serves a page and already has a',
+      'passing test — do not recreate any of it.',
       '',
-      '  package.json   type: module · scripts: dev, build, start, typecheck',
-      '  tsconfig.json  ES2022, strict, src -> dist',
-      '  src/index.ts   THE ENTRY POINT. A node:http server that 404s every route.',
+      '  package.json        type: module · scripts: dev, build, start, typecheck, test',
+      '  tsconfig.json       ES2022, strict, src+test -> dist',
+      '  src/server.ts       THE ROUTES. `createServer()` returns the server WITHOUT listening.',
+      '  src/index.ts        the entry point: reads PORT, listens. Four lines; leave it alone.',
+      '  public/index.html   the page. Everything in public/ is served as-is.',
+      '  test/server.test.ts node:test over real HTTP on port 0. `npm test` passes right now.',
       '',
-      'NO FRAMEWORK IS INSTALLED. There is no express, fastify or nest here, and nothing has been',
-      'installed at all yet — `node_modules` is empty until `npm install` runs. So:',
-      '  - Add routes to the EXISTING node:http server in src/index.ts. Do not replace it.',
+      'ADD ROUTES IN src/server.ts, inside `handle()`, above the static fallback. Keep `createServer()`',
+      'returning an unlistened server — that is what lets the test bind port 0 instead of colliding.',
+      '',
+      'NO FRAMEWORK IS INSTALLED. There is no express, fastify or nest here, and the dependency set is',
+      'typescript and @types/node. So:',
       '  - Importing a package that is not in package.json makes the project fail to start. If a',
       '    dependency is genuinely needed, add it to package.json in the same change and say that',
       '    `npm install` must be run.',
-      '  - Prefer the standard library. node:http is enough for an endpoint.',
+      '  - Prefer the standard library. node:http serves the page and node:test tests it.',
+      '  - Every route you add gets a case in test/server.test.ts. The suite is green now; keep it.',
       '',
       'IMPORT LOCAL FILES WITH THE .ts EXTENSION — `import { x } from \'./notes.ts\'`. This tsconfig',
       'sets allowImportingTsExtensions and rewriteRelativeImportExtensions, so Node runs that as',
@@ -253,22 +167,20 @@ export const nodePlanExecutor: PlanExecutor = {
    * Everything is written into `targetRoot`, never `ctx.root`: people set a project up from one level
    * above it, and a package.json in the folder-of-projects is worse than none.
    */
+  /**
+   * THE FILES ARE GREENFIELD'S — this adds the install, and nothing else.
+   *
+   * The TypeScript file table used to live here, duplicating what greenfield's `typescript` branch
+   * declares as deliverables. Two lists of what a new TS project contains is one list too many: the
+   * validator rejects a plan for the project the scaffold just built the moment they disagree, and
+   * they disagreed already (the table wrote no test; the deliverables required one). One table now,
+   * in `greenfield/files.ts`, checked against the deliverables by `check-plan.mjs`.
+   */
   scaffold(ctx: ProjectContext): string[] {
-    // THE GUARD, FIRST. Only a directory that asked to become a Node project and holds none yet.
-    // Anywhere else this is exactly what greenfield does, which for a non-greenfield ctx is the base.
     const made = greenfieldPlanExecutor.scaffold(ctx);
     if (!ctx.greenfield || ctx.type !== 'node') return made;
-    const dir = targetRoot(ctx);
-    // Ours before the generic stub, so the README that survives is the one naming `npm install`.
-    // `ensureReadme` is idempotent, and greenfield already called it — this is the overwrite-nothing
-    // path either way, so the file that exists is whichever landed first.
-    made.push(...writeIfMissing(join(dir, 'README.md'), README(packageName(dir))));
-    made.push(...ensureReadme(dir));
-    made.push(...writeIfMissing(join(dir, 'package.json'), PKG(packageName(dir))));
-    made.push(...writeIfMissing(join(dir, 'tsconfig.json'), TSCONFIG));
-    made.push(...writeIfMissing(join(dir, '.gitignore'), GITIGNORE));
-    made.push(...writeIfMissing(join(dir, 'src', 'index.ts'), INDEX_TS));
-    if (made.length) log('INFO', 'scaffold_node', { root: dir, files: String(made.length) });
+    // The one thing greenfield cannot do for a language it does not own the toolchain of.
+    startBootstrapInstall(targetRoot(ctx));
     return made;
   },
 };

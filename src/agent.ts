@@ -44,7 +44,7 @@ import { isLogCoverage, isVerbose } from './modes.js';
 import { pendingCorpus } from './indulge/inject.js';
 import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
-import { prewarmSubagents, resetSubagents } from './subagents.js';
+import { arbiterMode, prewarmSubagents, resetSubagents, withheldRedirect } from './subagents.js';
 import { cancelAllRuns, currentRuns, onRunsChanged, resetRuns, startRun, type RunContext } from './runs.js';
 import { notePostmortemContext } from './postmortem.js';
 import { extractSignals } from './tools/signals.js';
@@ -1955,11 +1955,33 @@ async function runAgentTurn(userInput: string): Promise<void> {
         pushToWindow('user', renderToolResult(`Error: ${msg}`));
         continue;
       }
+      /**
+       * WITHHELD IS NOT UNKNOWN — and the difference is the whole run.
+       *
+       * `loadTools` drops a withheld tool, so it arrives here as "not found". Answering "unknown
+       * tool" is the same lie the `slashOnly` branch above refuses to tell, and the model routes
+       * around it the only way it can: by calling the same tool again. Worse, the shell-command hint
+       * below matches `bash` itself and told it to *use the bash tool* — advice to repeat exactly
+       * what had just been refused. Measured: 28 identical `bash` calls, zero files written.
+       */
+      const redirect = !tool ? withheldRedirect(name) : null;
+      if (redirect) {
+        setAgentStatus('');
+        addMessage('system', `${name}: withheld at this level`);
+        log('INFO', 'withheld_tool_refused', { tool: name, arbiter: String(arbiterMode()) });
+        pushToWindow('assistant', textPrefix ? `${textPrefix}\n[Called ${name}]` : `[Called ${name}]`);
+        noteRanCall(name, JSON.stringify(params).slice(0, 80), false, redirect);
+        pushToWindow('user', renderToolResult(`Error: ${redirect}`));
+        continue;
+      }
       if (!tool) {
         setAgentStatus('');
         const shellLike = /^(git|npm|node|python|bash|sh|curl|grep|find|ls|cat|cd|mv|cp|rm|mkdir|echo|sed|awk|jq)$/.test(name);
         const availableNames = modelTools().map(t => t.name).join(', ');
-        const hint = shellLike
+        // …and never advise the tool that is not there. `bash` matches `shellLike` itself, so on any
+        // run without a bash tool this said "there is no bash tool, use the bash tool".
+        const canSuggestBash = shellLike && name !== 'bash' && name !== 'sh' && !!getTool('bash');
+        const hint = canSuggestBash
           ? ` There is no "${name}" tool. To run shell commands use the bash tool: bash(command="${name} ...")`
           : ` Available tools: ${availableNames}.`;
         const errMsg = `Unknown tool: ${name}.${hint}`;

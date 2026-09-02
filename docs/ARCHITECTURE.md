@@ -1087,6 +1087,41 @@ typical project is exactly what differs:
 | TypeScript (`node`) | `tsc` to `dist/`, ESM, `node --test` | `package.json` · `tsconfig.json` · `src/index.ts` · `test/*.test.ts` · `.gitignore` |
 | Unity (`unity`) | `Assets/Scripts`, editor-owned scenes and `.meta` | `Assets/Scripts/*.cs` · `Packages/manifest.json` · `ProjectSettings/ProjectVersion.txt` · `.gitignore` |
 
+#### The scaffold WRITES those layouts — `greenfield/files.ts`
+
+The table above is what the plan is grounded in; `files.ts` is what lands on disk, deterministically,
+with no model call. One table per branch, and every entry write-if-missing so a directory that was less
+empty than detection thought is never overwritten. Nothing in it needs the network: the TypeScript
+entry point is `node:http`, its test runner is `node:test`, the Python test is `unittest`.
+
+| Branch | Written | Proven by |
+|---|---|---|
+| TypeScript | `package.json` · `tsconfig.json` · `.gitignore` · `README.md` · `src/server.ts` · `src/index.ts` · `public/index.html` · `test/server.test.ts` | `npm install` → `npm test` 4/4 → `npm run typecheck` → `npm run build` → `npm start` serves the page, `/api/health`, and 404s the rest |
+| Python | `pyproject.toml` · `.gitignore` · `README.md` · `src/<mod>/__init__.py` · `src/<mod>/__main__.py` · `tests/test_smoke.py` | `python -m unittest discover -s tests` passes **with nothing installed** |
+| Unity | `Packages/manifest.json` · `ProjectSettings/ProjectVersion.txt` · `.gitignore` · `README.md` · `Assets/Scripts/<Name>Bootstrap.cs` | manifest parses; `ProjectVersion.txt` is what makes the Hub list the folder at all |
+
+Three decisions worth keeping:
+
+- **`createServer()` returns the server without listening.** `src/index.ts` listens; the test binds it
+  to port 0 and asks it real questions over real HTTP. A bootstrap whose entry point calls `.listen()`
+  at module scope cannot be tested without a port collision, and the first thing anyone does to it is
+  take the logic back out — so it starts out already apart.
+- **The Python test is a `unittest.TestCase` that inserts `src/` on `sys.path`.** pytest collects both
+  shapes; `python -m unittest` collects only the class. Writing the class means the suite runs on a
+  machine with no virtualenv and nothing installed — which is the state a fresh scaffold is in.
+- **Unity scenes and `.meta` files are the editor's.** Nothing here writes them: a hand-written `.meta`
+  with an invented GUID is how a project gets broken references that only appear on another machine.
+
+`plan/node` adds the one thing greenfield cannot do for a toolchain it does not own: it starts a
+bounded, fire-and-forget `npm install`. Without it `qa/buildcheck.ts` finds no `node_modules/.bin/tsc`
+and returns *ok, unverified* — which is how QA came to report a green "valid build and test pipeline"
+for a project it had compiled zero files of, and whose `npm test` exited 1 for having no tests at all.
+
+`check-plan.mjs` asserts the two lists against each other: for every branch, each literal required
+deliverable must be a file the scaffold actually wrote. They had already drifted once — the old
+TypeScript table shipped no test while the deliverables demanded `test/*.test.ts`, so a plan for the
+project the scaffold had just built was rejectable.
+
 #### Who is SELECTED for each of those types — one owner, never a tie
 
 `plan/greenfield` is registered for `python` and `unity`. **TypeScript is `plan/node`'s**, and it is
@@ -1286,11 +1321,32 @@ for a sketch with two calls in it. So `runPlan` has two outcomes:
 order" for a file that does not exist. Scaffolding (the README) happens on both paths — a file that must
 exist is a `writeFileSync` either way.
 
-**`AYIN_PLAN=1` / `AYIN_QA=1` force the session toggles ON** — the mirror of the `=0` kill switches.
-They exist because headless (`-p`) has no TUI, so there is no way to type `/plan` or `/qa`, which made
-both gates **untestable in any automated harness** — including the Arduino benchmark, whose entire
-subject is how well ayin plans and reviews. A feature that can only be exercised by a human pressing
-keys cannot be regression-tested. Presenter has no such switch on purpose: it is a TUI-only feature
+### Plan mode is ON by default; QA is not
+
+`/plan` was an opt-in session toggle, and opt-in made it unreachable in the mode where it matters most.
+Headless (`-p`) has no TUI and therefore no way to type `/plan`, so every scripted run — a harness, a
+cron job, an operator demonstrating the agent — silently got **no plan, no phases, and no
+`executor.scaffold()`**. Measured on one greenfield request, the same words both ways: without the
+toggle the agent improvised a project and never entered plan mode at all; with it, the request produced
+a deterministic scaffold, a grounded plan and three validated phases.
+
+So `sessionEnabled` now starts **true**. The cost was already designed for and has not changed: `runPlan`
+still returns before spending anything under `planToggledMinChars`, and triage's veto still refuses to
+plan a single-feature ask. **`AYIN_PLAN=0`** is the way off, `/plan` still toggles it for the session,
+and `AYIN_PLAN=1` is kept as an explicit force that now agrees with the default rather than creating it.
+
+**QA stays opt-in** (`/qa`, `AYIN_QA=1`). The asymmetry is deliberate: planning costs one cheap triage
+call on a request that might not need it, while QA costs a whole pass over finished work.
+
+**A subagent may PLAN; it may not DELEGATE.** The parent used to spawn children with `AYIN_PLAN=0`,
+which enforced the wrong limit — the recursion rule is about the `subagent` tool, and it is already
+enforced where it belongs (`subagentsAllowed()` is false at depth ≥ 1, so the tool is never registered
+for a child). Hard-disabling planning as well took away a child's ability to decompose its own stage,
+while the parent, which is not doing the work, kept it. Now the only case that suppresses a child's
+planning is the one where it is redundant: **a child handed a `plan` file already has one**, and
+re-planning would spend the whole gate rediscovering the phase it was just given.
+
+`AYIN_QA=1` exists for the same headless reason `AYIN_PLAN=1` did. Presenter has no such switch on purpose: it is a TUI-only feature
 (`doPresenter = … && !HEADLESS`), and the artifact regeneration it performs is already done by the QA
 executor's `prepare()`.
 

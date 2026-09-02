@@ -42,6 +42,7 @@ import { prompts, packagePath } from '../../../prompts-service.js';
 import { projectRoot } from '../../../qa/probes.js';
 import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext, ProjectType } from '../../types.js';
 import { basePlanExecutor, ensureReadme } from '../base/index.js';
+import { writeBranchFiles } from './files.js';
 
 const greenfieldPrompts = prompts.register('greenfield', packagePath('prompts', 'greenfield')).bundle;
 
@@ -294,8 +295,21 @@ export const greenfieldPlanExecutor: PlanExecutor = {
     return greenfieldPrompts.get(facts.observabilityPrompt);
   },
 
+  /**
+   * THE DIRECTORY, THE REPOSITORY, THEN THE PROJECT — in that order, for a reason each.
+   *
+   * The directory has to exist before anything is written into it. `git init` comes next so the first
+   * commit can contain the first file. Only then the branch's own files, so a fresh clone of what this
+   * produced already builds, already runs and already has a test that passes.
+   *
+   * ONLY ON GREENFIELD. `branchFor` is null for a type this executor does not serve, and `ctx.greenfield`
+   * is false the moment the directory holds a project — so this cannot write a `pyproject.toml` into
+   * somebody's existing repository. Every writer under it is additionally write-if-missing, because the
+   * cost of being wrong here is editing a stranger's work.
+   */
   scaffold(ctx: ProjectContext): string[] {
-    if (!branchFor(ctx)) return basePlanExecutor.scaffold(ctx);
+    const branch = BRANCH_OF[ctx.type];
+    if (!branch) return basePlanExecutor.scaffold(ctx);
     const dir = targetRoot(ctx);
     const made: string[] = [];
     if (ctx.targetDir && !existsSync(dir)) {
@@ -309,7 +323,12 @@ export const greenfieldPlanExecutor: PlanExecutor = {
         return made;
       }
     }
-    // Git next: the README is then the first file the new repository has ever seen.
-    return [...made, ...ensureGitRepo(dir), ...ensureReadme(dir)];
+    made.push(...ensureGitRepo(dir));
+    // The branch's README is the real one — it names this project's own commands. `ensureReadme` only
+    // fills in when the branch shipped none, and both are write-if-missing, so whichever lands first
+    // stands and the generic stub can never overwrite a specific page.
+    made.push(...(ctx.greenfield ? writeBranchFiles(branch, dir) : []));
+    made.push(...ensureReadme(dir));
+    return made;
   },
 };

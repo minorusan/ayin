@@ -1863,11 +1863,20 @@ ok(act.activityText() === null, 'a turn ending clears every label, so none outli
 // force flag would silently fire on a LATER, unrelated turn, which is the surprise this guards against.
 console.log('\nplan/qa/presenter: toggle + one-shot force');
 const plan = await import(`file://${join(DIST, 'plan/index.js')}`);
-ok(plan.isPlanSessionEnabled() === false, 'plan mode starts OFF for a session');
-ok(plan.togglePlanSession() === true, 'toggling plan mode flips it on and reports the new state');
-ok(plan.isPlanSessionEnabled() === true, 'and the getter agrees');
-ok(plan.togglePlanSession() === false, 'toggling again flips it back off');
-ok(plan.isPlanSessionEnabled() === false, 'and the getter agrees again');
+/**
+ * PLAN MODE STARTS ON — and that is the one of the three that differs.
+ *
+ * It was opt-in, and opt-in made it unreachable exactly where it matters: headless has no TUI, so no
+ * `/plan` can be typed, so every scripted run silently got no plan, no phases and no
+ * `executor.scaffold()`. Measured on a greenfield request — without the toggle the agent improvised a
+ * project and never entered plan mode at all. `AYIN_PLAN=0` is the way off, and `/plan` still toggles.
+ * QA and the presenter stay opt-in: they cost a pass over finished work, not a cheap triage call.
+ */
+ok(plan.isPlanSessionEnabled() === true, 'plan mode starts ON for a session — headless cannot type /plan');
+ok(plan.togglePlanSession() === false, 'toggling plan mode flips it off and reports the new state');
+ok(plan.isPlanSessionEnabled() === false, 'and the getter agrees');
+ok(plan.togglePlanSession() === true, 'toggling again flips it back on');
+ok(plan.isPlanSessionEnabled() === true, 'and the getter agrees again');
 
 const qaToggle = await import(`file://${join(DIST, 'qa/index.js')}`);
 ok(qaToggle.isQaSessionEnabled() === false, 'QA gate starts OFF for a session');
