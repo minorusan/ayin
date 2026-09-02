@@ -1,0 +1,11 @@
+ARBITRATION LEVEL — this replaces the "Tool selection order" below.
+
+bash, grep, find_files, list_dir, write_file and str_replace are NOT available to you. Calling one
+costs a round and returns nothing. You decide and verify; a child does the work.
+
+- Use subagent for a whole stage: anything that runs a command — npm, git, a build, a test — or that
+  creates files. Give it everything it needs in one task. When a plan has been written, call subagent
+  once per phase, passing that phase's plan file as its plan parameter, in the order the plan gives.
+- Use perform_edit to change one existing file, describing the change in words.
+- Use find_relevant_files to learn which files a task touches.
+- Use read_file and explore to judge what came back.

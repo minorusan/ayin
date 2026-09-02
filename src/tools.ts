@@ -7,7 +7,7 @@
  */
 
 import { log } from './log.js';
-import { toolWithheld } from './subagents.js';
+import { arbiterMode, toolWithheld } from './subagents.js';
 import { getConfigString, getPrompt } from './prompts.js';
 import { prompts, packagePath } from './prompts-service.js';
 import type { Tool } from './tools/base.js';
@@ -236,9 +236,23 @@ export function toolsSystemPrompt(): string {
     return `${t.name}: ${t.description}\n  Parameters:\n${params}`;
   }).join('\n\n');
 
+  /**
+   * TELL THE ARBITER IT HAS NO SHELL, BEFORE IT FINDS OUT ONE ROUND AT A TIME.
+   *
+   * The withheld-tool refusal names the replacement, which stops the loop — but it is still discovered
+   * the expensive way. Measured on a four-phase build: SEVEN `bash` attempts before the first phase was
+   * delegated, and again at the top of each phase, every one a full generation the operator waits
+   * through. Withholding a tool without saying so is the same mistake as the "unknown tool" reply, one
+   * layer earlier: the model cannot see the absence of something, only the failure of it.
+   *
+   * First in the tools block, because that is what it is about, and because position is load-bearing —
+   * the middle of a prompt is skimmed.
+   */
+  const arbiterNote = arbiterMode() ? `${getPrompt('arbiter', {})}\n\n` : '';
+
   return getPrompt('system', {
     WORKING_DIR: CWD,
-    TOOLS: toolDefs,
+    TOOLS: `${arbiterNote}${toolDefs}`,
     // The tool-call format is OWNED BY THE ACTIVE DIALECT (gemma/qwen), injected
     // here via the LLM manager. New prompts use {{TOOL_CALL_FORMAT}}; an older
     // persisted prompts.json that hardcodes the format simply ignores this var.
