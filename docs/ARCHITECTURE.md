@@ -1100,6 +1100,21 @@ entry point is `node:http`, its test runner is `node:test`, the Python test is `
 | Python | `pyproject.toml` · `.gitignore` · `README.md` · `src/<mod>/__init__.py` · `src/<mod>/__main__.py` · `tests/test_smoke.py` | `python -m unittest discover -s tests` passes **with nothing installed** |
 | Unity | `Packages/manifest.json` · `ProjectSettings/ProjectVersion.txt` · `.gitignore` · `README.md` · `Assets/Scripts/<Name>Bootstrap.cs` | manifest parses; `ProjectVersion.txt` is what makes the Hub list the folder at all |
 
+**Every branch also gets `.naamah/README.md`.** The design step was described in the system prompt and
+created by the naamah tool on first sketch, which means it existed on the turns that remembered it.
+Shipping the directory with the scaffold makes it part of what a project IS: the folder is there, the
+README states the `declare class` shape, the `naamah build` step that compiles and then ENFORCES it, and
+the three rules a compiler cannot warn about kindly (documents not modules; no `import`/`export` or
+`namespace`; every name copied, because from `build` onward a typo is the contract).
+
+It must never reach the build — a sketch is bodyless declarations in one global scope, which compiled
+alongside the project is a duplicate-symbol error at best. TypeScript's `include` names only the `src`
+and `test` trees, Python packages only `src/<mod>`, and Unity compiles only under `Assets/` (a
+dot-directory being invisible to the editor anyway). `check-plan.mjs` drops a real
+`declare class NoteService { … }` into `.naamah/` and compiles, asserting **no diagnostic names the
+design directory** — rather than asserting a clean build, which would require the gate to `npm install`.
+It is deliberately **not** gitignored: the design is the most reviewable artefact the project has.
+
 Three decisions worth keeping:
 
 - **`createServer()` returns the server without listening.** `src/index.ts` listens; the test binds it
@@ -1352,7 +1367,10 @@ executor's `prepare()`.
 
 **`--full` turns on all three, and that is now asserted rather than described.** It composes
 `--debug` + the QA toggle + the presenter toggle + `--dangerously-skip-permissions`, over a plan mode
-that is already on by default. The presenter was the gap: being the one toggle with no environment
+that is already on by default. **Two of the four are TUI-only**: the presenter by construction, and the
+boot-time debug bundle because it is fired from the TUI's session-init path — measured, `ayin --full -p`
+leaves the bundle count unchanged, and `ayin debug` is the way to one from a script. So headless
+`--full` is the QA toggle plus the skipped permission gate. The presenter was the gap: being the one toggle with no environment
 force, it was the one nothing could switch on from a script, so `--full` meant "everything" while
 silently omitting it. `check-gates.mjs` now spawns a fresh process with `--full` in its argv and reads
 the three getters back — the toggles initialise at module load, so a live process is the only honest

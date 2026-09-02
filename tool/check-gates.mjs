@@ -3250,7 +3250,9 @@ console.log('\n--full: the composite flag turns on what it claims');
       full: full.isFullMode(),
       plan: plan.isPlanSessionEnabled(),
       qa: qa.isQaSessionEnabled(),
+      qaWantsToRun: qa.shouldRunQaThisTurn(),
       presenter: pres.isPresenterSessionEnabled(),
+      presenterWantsToRun: pres.shouldRunPresenterThisTurn(),
     }));
   `;
   let state = {};
@@ -3267,6 +3269,12 @@ console.log('\n--full: the composite flag turns on what it claims');
   ok(state.plan === true, '  → plan mode is on');
   ok(state.qa === true, '  → the QA gate is on');
   ok(state.presenter === true, '  → the presenter is on (it has no env force; --full is the only way in from a script)');
+  // THE TOGGLE IS NOT THE SAME QUESTION AS "did the gate run". `shouldRunQaThisTurn()` is what the
+  // agent loop actually consults, and it is the toggle plus a one-shot force — asserted separately
+  // because a live run cannot settle it: whether the gate then fires also depends on files having
+  // changed and the reply looking like a completion report, neither of which `--full` controls.
+  ok(state.qaWantsToRun === true, '  → and the QA gate WANTS to run — the toggle reaches what the loop asks');
+  ok(state.presenterWantsToRun === true, '  → as does the presenter');
 }
 
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);

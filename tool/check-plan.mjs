@@ -27,9 +27,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
+/** This repo's own tsc, so the gate compiles a scaffolded project without needing one installed in it. */
+const TSC = join(REPO, 'node_modules', 'typescript', 'bin', 'tsc');
 const { inferDependencies, validateSteps, renderPlan, validatePhases, parsePlan, renderPhaseIndex } = await import(`file://${join(DIST, 'plan', 'plan.js')}`);
 const { detectProject } = await import(`file://${join(DIST, 'executors', 'detect.js')}`);
 const { planExecutorFor } = await import(`file://${join(DIST, 'executors', 'registry.js')}`);
@@ -329,8 +332,46 @@ inEmptyDir((dir) => {
       ok(absent.length === 0,
         `${label}: the scaffold writes every literal required deliverable`,
         absent.length ? `missing: ${absent.join(' ')}` : `${literal.length} checked`);
+      // THE DESIGN DIRECTORY SHIPS WITH THE PROJECT. A convention nobody can see is one that gets
+      // skipped — the agent used to have to remember it from the system prompt.
+      ok(existsSync(join(d, '.naamah', 'README.md')), `${label}: .naamah/ exists and says what goes in it`);
     });
   }
+
+  /**
+   * AND A DESIGN FILE CANNOT BREAK THE BUILD.
+   *
+   * A sketch is `declare class X { … }` in one global scope, deliberately not a module. Compiled as
+   * part of the project it is a duplicate-symbol error at best — so `.naamah/` has to sit outside the
+   * TypeScript `include`, and the only honest way to assert that is to drop a real one in and compile.
+   */
+  inEmptyDir((d) => {
+    const c = detectProject(d, 'create a new typescript project, a small library with tests');
+    planExecutorFor(c).scaffold(c);
+    mkdirSync(join(d, '.naamah', 'add-notes'), { recursive: true });
+    writeFileSync(join(d, '.naamah', 'add-notes', 'NoteService.ts'),
+      'declare class NoteService {\n  get(id: string): string;\n}\n');
+    const tsconfig = JSON.parse(readFileSync(join(d, 'tsconfig.json'), 'utf-8'));
+    ok(!JSON.stringify(tsconfig.include).includes('.naamah'),
+      'typescript: the design directory is outside the build\'s include', JSON.stringify(tsconfig.include));
+    /**
+     * THE CLAIM IS "the sketch never reaches tsc", not "the scratch project compiles".
+     *
+     * A gate must not hit the network, so nothing is installed here and tsc rightly complains that
+     * `@types/node` is absent. Asserting a clean compile would therefore be asserting that this gate
+     * ran `npm install`, which it must not. What matters — and what a broken `include` would show
+     * instantly — is whether any diagnostic names the design directory at all.
+     */
+    let diagnostics = '';
+    try {
+      execFileSync(process.execPath, [TSC, '--noEmit', '-p', d], { encoding: 'utf-8', timeout: 120_000 });
+    } catch (err) {
+      diagnostics = String(err.stdout ?? err.message);
+    }
+    ok(!/\.naamah/.test(diagnostics),
+      'typescript: a real sketch in .naamah/ is never seen by tsc',
+      diagnostics ? `${diagnostics.split('\n').filter((l) => /error TS/.test(l)).length} unrelated diagnostic(s), none naming .naamah` : 'compiled clean');
+  });
   ok(ex.scaffold(ctx).length === 0, 'a second pass creates nothing — scaffolding never overwrites');
 });
 

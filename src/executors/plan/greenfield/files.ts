@@ -521,6 +521,65 @@ another machine.
 Bootstrapped deterministically — written without a model, so it is the same every time.
 `;
 
+// ── the design directory, in every branch ─────────────────────────────────────────────────────
+
+/**
+ * `.naamah/` EXISTS FROM THE START, because a convention nobody can see is a convention that gets
+ * skipped.
+ *
+ * The system prompt tells the agent to make `.naamah/<task-slug>/` itself and the naamah tool creates
+ * it on first sketch — so the directory did appear, eventually, on a turn that remembered. Shipping it
+ * with the scaffold makes the design step part of what a project IS rather than something the model has
+ * to recall: the folder is there, the README says what goes in it, and `naamah show` has somewhere to
+ * point before any sketch exists.
+ *
+ * IT MUST NOT REACH THE BUILD. A design file is `declare class X { … }` — signatures with no bodies,
+ * one global scope, deliberately not a module. Compiled as part of the project it is a duplicate-symbol
+ * error at best. The TypeScript scaffold's `include` names only the `src` and `test` trees, so
+ * `.naamah/` is outside it; Python packages only `src/<mod>`; Unity compiles only under `Assets/`, and
+ * a dot-directory is invisible to the editor anyway. Asserted by `check-plan.mjs`, which drops a real
+ * design file in and compiles.
+ *
+ * (The glob is described rather than quoted: a `*` followed by a `/` inside a block comment ends the
+ * comment, and the rest of this file becomes syntax errors. It did.)
+ *
+ * NOT GITIGNORED, ON PURPOSE. The design is the most reviewable artefact the project has — it is the
+ * thing `/naamah` puts on a page and comments on — and a reviewer who cannot see it in the diff cannot
+ * review it.
+ */
+const NAAMAH_README = (kind: 'TypeScript' | 'Python' | 'C#'): string => {
+  const ext = kind === 'C#' ? 'cs' : kind === 'Python' ? 'ts' : 'ts';
+  const decl = kind === 'C#'
+    ? 'public class NoteService { public Note Get(string id); }'
+    : 'declare class NoteService { get(id: string): Note; }';
+  return `# .naamah — the design, before the code
+
+One directory per task: \`.naamah/<task-slug>/\`. Inside it, one file per type, written as
+declarations with no bodies:
+
+\`\`\`${ext === 'cs' ? 'csharp' : 'typescript'}
+${decl}
+\`\`\`
+
+Then \`naamah build .naamah/<task-slug>/\` compiles the whole design with a real compiler and
+**enforces** it: from that point every write is checked against the sketch and you are handed one type
+at a time to implement.
+
+Three rules, because the compiler cannot warn you kindly about any of them:
+
+- **These files are documents, not modules.** Never import from \`.naamah/\` in real source — nothing
+  here exports anything, so the import cannot resolve. Declare the type again where you implement it;
+  the sketch is what you transcribe FROM.
+- **No \`import\`/\`export\`** in a ${kind} design file${kind === 'C#' ? ' and no `namespace`' : ''}. They share one
+  global scope, which is what lets one file refer to a type another file declares.
+- **Every name is copied**, from the request or from code that already exists. From \`build\` onward a
+  mistyped name is not a typo, it is the contract.
+
+Nothing here is compiled into the project — it is outside the build's \`include\` — and it is **not**
+gitignored, because the design is the part most worth reviewing.
+`;
+};
+
 // ── the table ─────────────────────────────────────────────────────────────────────────────────
 
 /** One branch's files, as `relative path → contents`, given the project directory. */
@@ -536,6 +595,7 @@ export function branchFiles(branch: Branch, dir: string): Record<string, string>
       'src/index.ts': TS_INDEX,
       'public/index.html': TS_PAGE(name),
       'test/server.test.ts': TS_TEST,
+      '.naamah/README.md': NAAMAH_README('TypeScript'),
     };
   }
   if (branch === 'python') {
@@ -548,6 +608,7 @@ export function branchFiles(branch: Branch, dir: string): Record<string, string>
       [`src/${mod}/__init__.py`]: PY_INIT(mod),
       [`src/${mod}/__main__.py`]: PY_MAIN(mod),
       'tests/test_smoke.py': PY_TEST(mod),
+      '.naamah/README.md': NAAMAH_README('Python'),
     };
   }
   // unity
@@ -559,6 +620,7 @@ export function branchFiles(branch: Branch, dir: string): Record<string, string>
     '.gitignore': UNITY_GITIGNORE,
     'README.md': UNITY_README(name, cls),
     [`Assets/Scripts/${cls}.cs`]: UNITY_SCRIPT(cls),
+    '.naamah/README.md': NAAMAH_README('C#'),
   };
 }
 
