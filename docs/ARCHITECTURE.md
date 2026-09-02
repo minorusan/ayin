@@ -1208,6 +1208,35 @@ for every Python, Node and Unity project already on disk, and hands all five met
 string there, so triage keeps its veto on an established project. `npm run check:plan` asserts both
 halves.
 
+### Node/TypeScript QA is deterministic — no judge (`executors/qa/node/`)
+
+A finished Node turn used to get criteria derivation and then the generic judge: two LLM calls before
+the operator sees anything, a different answer each run, and — measured twice on freshly scaffolded
+projects — **wrong**. It read an inline SVG's `xmlns="http://www.w3.org/2000/svg"` as an integration
+with w3.org, failed the turn for not handling 429s, and the fix pass wrote an `/api/proxy` route into
+the project.
+
+A judge is the right instrument for a question with no machine answer. A TypeScript service has two
+questions that *do* have machine answers, so `qa/node` asks those and stops:
+
+| | |
+|---|---|
+| **does it compile** | `tsc --noEmit`, whole project, via `buildcheck.ts`. Errors, never style. |
+| **does it still work** | the project's **own** test suite — for anything ayin scaffolds that is real requests against a real server: `/api/health` is 200, `/` is HTML, an unknown route is a 404 not a crash, `..` does not escape `public/`. |
+
+`factsOnly: true` in its config is what turns the judge off; both facts are `hard`, so a failure goes
+straight back to the agent as work instructions. Measured at **~1s** on a scaffolded project, and on a
+deliberately broken one it returns `src/server.ts(69,7): error TS2322` and the name of the failing
+endpoint — and nothing else.
+
+**Running the project's own tests rather than a prober of our own** is the trick. A bespoke endpoint
+prober would guess the port, the routes and the start command, go stale the moment the project grew a
+second endpoint, and test something other than what the project says it is. The test file is already
+there, already names the endpoints, and is already what a developer would run.
+
+Absent is still not failed: no `tsconfig.json`, no `node_modules`, no test script, no test files —
+each is reported unchecked. On the turn that *creates* a project, half of those are normal.
+
 ### Does it compile? (`qa/buildcheck.ts`)
 
 Unity has had this question since `qa/unity/compile.ts`: one measurable answer that outranks every

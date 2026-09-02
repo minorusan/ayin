@@ -1,0 +1,10 @@
+{
+  "id": "node",
+  "kind": "qa",
+  "projectTypes": [
+    "node"
+  ],
+  "priority": 10,
+  "factsOnly": true,
+  "description": "Node/TypeScript QA — two deterministic checks and nothing else: does tsc --noEmit pass, and does the project's own test suite pass (which is what exercises the endpoints the scaffold ships). factsOnly, so no criteria are derived and the judge is never consulted: on this project type the generic judge was slow, non-reproducible, and measurably wrong — it failed a page containing an inline SVG for not handling 429s from w3.org."
+}

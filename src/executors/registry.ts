@@ -35,6 +35,7 @@ import { nodePlanExecutor } from './plan/node/index.js';
 import { baseQaExecutor } from './qa/base/index.js';
 import { arduinoQaExecutor } from './qa/arduino/index.js';
 import { unityQaExecutor } from './qa/unity/index.js';
+import { nodeQaExecutor } from './qa/node/index.js';
 import { basePresentExecutor } from './present/base/index.js';
 import { arduinoPresentExecutor } from './present/arduino/index.js';
 
@@ -52,6 +53,7 @@ const INSTANCES: Record<string, AnyExecutor> = {
   'qa/base': baseQaExecutor,
   'qa/arduino': arduinoQaExecutor,
   'qa/unity': unityQaExecutor,
+  'qa/node': nodeQaExecutor,
   'present/base': basePresentExecutor,
   'present/arduino': arduinoPresentExecutor,
 };

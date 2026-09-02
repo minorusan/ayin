@@ -193,5 +193,50 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     'a credential-shaped env var stands on its own — however the request is made, that is an integration');
 }
 
+// ── node/TS QA is deterministic, and says so in its config ───────────────────
+//
+// The generic gate derived criteria and ran a judge on every finished Node turn: two LLM calls before
+// the operator saw anything, non-reproducible between runs, and measurably wrong on this project type
+// (see the SVG-namespace case above). A TypeScript service has two questions with machine answers —
+// does tsc pass, does its own suite pass — so it gets those and no opinions.
+{
+  const { mkdtempSync, writeFileSync, mkdirSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const reg = await import(join(ROOT, 'dist/executors/registry.js'));
+
+  const dir = mkdtempSync(join(tmpdir(), 'ayin-nodeqa-'));
+  const ctx = { root: dir, type: 'node', evidence: 'package.json' };
+
+  const qa = reg.qaExecutorFor(ctx);
+  ok(qa?.config?.id === 'node', 'a node project gets the node QA executor, not the generic one', qa?.config?.id);
+  ok(qa.config.factsOnly === true,
+    '  → and it is factsOnly, so no criteria are derived and the judge is never consulted');
+  ok(qa.criteria(ctx, [], []).length === 0, '  → it contributes no criteria for a judge to read');
+  ok(qa.config.priority > reg.qaExecutorFor({ ...ctx, type: 'python' }).config.priority,
+    '  → it outranks the generic executor it replaces');
+
+  /**
+   * ABSENT IS NOT FAILED — the rule the whole probe layer turns on, and the one most likely to be
+   * broken by someone adding a check. On the turn that CREATES a project there is no tsconfig, no
+   * node_modules and no test file, and every one of those is a question that could not be asked.
+   * A hard fact nobody can satisfy burns the fix budget that would have fixed something real.
+   */
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '1.0.0' }));
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  const f = join(dir, 'src', 'a.ts');
+  writeFileSync(f, 'export const a: number = "definitely not a number";\n');
+
+  const facts = await qa.probe(ctx, [{ path: f, exists: true, bytes: 40, kind: 'code' }]);
+  const failing = facts.filter((x) => x.hard === true && !x.ok);
+  ok(failing.length === 0,
+    'a bare project with no toolchain fails NOTHING — every check reports itself unchecked instead',
+    failing.map((x) => x.key).join(' '));
+  ok(facts.some((x) => x.key === 'builds'), '  → the compile question is still asked');
+  ok(facts.some((x) => x.key === 'tests'), '  → and so is the test question');
+  const tests = facts.find((x) => x.key === 'tests');
+  ok(/not checked/.test(tests.detail),
+    '  → …and with no test script it says "not checked", which is different from "passed"', tests.detail.slice(0, 60));
+}
+
 console.log(fails === 0 ? '\nbackground check: ok' : `\nbackground check: ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

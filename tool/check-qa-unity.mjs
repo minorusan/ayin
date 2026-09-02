@@ -66,8 +66,12 @@ const chosen = reg.qaExecutorFor(ctx);
 ok(chosen.config.id === 'unity', 'and selects the unity QA executor, not base', chosen.config.id);
 ok(chosen.config.factsOnly === true,
   'which declares factsOnly — no criteria are derived and the judge is never asked');
-ok(reg.qaExecutorFor({ ...ctx, type: 'node' }).config.id === 'base',
-  'a node project still gets base — this replaces nothing else');
+// Node has its own factsOnly executor now (`qa/node`), for the same reason Unity does. What this
+// still asserts is that the UNITY one is scoped to Unity and claims nothing else.
+ok(reg.qaExecutorFor({ ...ctx, type: 'node' }).config.id === 'node',
+  'a node project does NOT get the unity executor — it has its own');
+ok(reg.qaExecutorFor({ ...ctx, type: 'python' }).config.id === 'base',
+  'and a type nobody claims still falls to base');
 ok((await unityQaExecutor.criteria(ctx, [], [])).length === 0, 'the unity executor contributes no criteria');
 ok((await unityQaExecutor.prepare(ctx, [])).produced.length === 0, 'and produces no artifacts');
 

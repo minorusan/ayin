@@ -2122,11 +2122,12 @@ console.log('\nexecutors: detection + registry');
   // Every shipped config parses and cross-checks against an imported instance. loadRegistry THROWS
   // on any mismatch, so simply getting a list back is the assertion.
   const configs = reg.listExecutors();
-  // NINE: base + arduino for plan/qa/present, plus qa/unity, plan/greenfield and plan/node. The count
-  // is asserted rather than the names because `loadRegistry` already THROWS on a config with no
-  // imported instance (or the reverse) — this line is what notices an executor added to neither list.
-  ok(configs.length === 9,
-    'nine executors are declared and wired (base + arduino for plan/qa/present, plus qa/unity, plan/greenfield and plan/node)',
+  // TEN: base + arduino for plan/qa/present, plus qa/unity, qa/node, plan/greenfield and plan/node.
+  // The count is asserted rather than the names because `loadRegistry` already THROWS on a config
+  // with no imported instance (or the reverse) — this line is what notices an executor added to
+  // neither list.
+  ok(configs.length === 10,
+    'ten executors are declared and wired (base + arduino for plan/qa/present, plus qa/unity, qa/node, plan/greenfield and plan/node)',
     String(configs.length));
   // THE TWO THAT BOOTSTRAP, AND THE FACT THAT THEY DO NOT COLLIDE.
   //
@@ -2164,7 +2165,14 @@ console.log('\nexecutors: detection + registry');
   ok(reg.qaExecutorFor(green).config.id === 'arduino', 'the arduino QA executor wins for an arduino project');
   ok(reg.presentExecutorFor(green).config.id === 'arduino', 'the arduino present executor wins for an arduino project');
   ok(reg.planExecutorFor(silent).config.id === 'base', 'an unknown project falls to the base executor, which declares "*"');
-  ok(reg.qaExecutorFor(tsCtx).config.id === 'base', 'a Node project gets base QA — the arduino bars never apply to it');
+  // A NODE PROJECT NOW HAS ITS OWN QA, and it is deterministic. The generic gate derived criteria and
+  // ran a judge on every finished Node turn — slow, non-reproducible, and measurably wrong here: it
+  // read an inline SVG's `xmlns` as an integration with w3.org and failed the turn for not handling
+  // 429s. `qa/node` asks the two questions that have machine answers (tsc, the project's own suite)
+  // and declares factsOnly so nothing is judged.
+  ok(reg.qaExecutorFor(tsCtx).config.id === 'node', 'a Node project gets the node QA executor');
+  ok(reg.qaExecutorFor(tsCtx).config.factsOnly === true, '  → which is factsOnly — measured checks only, no judge');
+  ok(reg.qaExecutorFor(silent).config.id === 'base', 'an unknown project still falls to base QA');
 
   // The deterministic README scaffold: created when missing, never overwritten.
   const bp = await import(`file://${join(DIST, 'executors/plan/base/index.js')}`);
