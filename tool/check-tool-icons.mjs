@@ -135,6 +135,35 @@ const long = 'I will now examine every route handler in src/server.ts, confirm e
   + 'test/server.test.ts, and add the missing cases before running the suite a second time to be sure.';
 ok(subagentProgressLines([long])[0] === long, 'a long line is forwarded WHOLE — the reasoning is the useful part');
 
+// A tool CALL is name + params, and the params are capped: `write_file · content=<the entire file>`
+// is a call worth reporting and a body worth never printing.
+const bigCall = `[tool] ✎ write_file · path=src/server.ts, content=${'x'.repeat(4000)}`;
+const capped = subagentProgressLines([bigCall])[0];
+ok(capped.startsWith('✎ write_file · path=src/server.ts'), 'a tool call keeps its name and params', capped.slice(0, 40));
+ok(capped.length < 200 && capped.endsWith('…'), '  → but the params are capped, so a file body never lands in the card', `${capped.length} chars`);
+
+// THE HANDOFF BLOCK ENDS PROGRESS. Everything after it is the epilogue — and its "Evidence gathered"
+// list quotes TOOL OUTPUT, which is the one thing that must never be replayed into the parent's card.
+const epilogue = subagentProgressLines([
+  'I am about to finish.',
+  '--- HANDOFF (text_output, round 4) ---',
+  'Original prompt: read note.txt and tell me the token',
+  'Tool calls: 2 (explore: 0)',
+  'Evidence gathered (1: 0 explore, 1 direct read/search):',
+  '  1. [read_file path=note.txt] (lines 1-2 of 2, 16 B) 1 token FALCON-42',
+  '--- END HANDOFF ---',
+  '      79s   99%  llm ×5 · slowest 23s',
+]);
+ok(epilogue.length === 1 && epilogue[0] === 'I am about to finish.',
+  'nothing after --- HANDOFF is forwarded — the epilogue is the report, not progress', JSON.stringify(epilogue));
+ok(!epilogue.some((l) => /FALCON-42|Evidence gathered|llm ×5/.test(l)),
+  '  → so the evidence list, which quotes tool OUTPUT, never reaches the parent card');
+// The state is carried across chunks, because stdout does not arrive one tidy block at a time.
+const st = { finished: false };
+subagentProgressLines(['--- HANDOFF (text_output, round 1) ---'], st);
+ok(subagentProgressLines(['Evidence gathered: secret'], st).length === 0,
+  '  → and it stays ended across chunk boundaries');
+
 // ── 6 · the WIDTH PATCH: blessed must agree with the terminal ────────────────
 //
 // This is what makes an emoji icon safe at all. blessed's double-wide table predates emoji and answers

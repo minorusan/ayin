@@ -217,14 +217,50 @@ export const HEADLESS_TOOL_HEADER = /^\[tool\] (?![│╰])\S{1,2} \S/gmu;
  * Pure and exported so `check-gates.mjs` can assert it — the alternative is a five-minute live run per
  * assertion, which is how a behaviour ends up untested.
  */
-export function subagentProgressLines(lines: string[]): string[] {
+export interface ProgressState {
+  /** Set once the child's HANDOFF block starts. Everything after it is the report, not progress. */
+  finished: boolean;
+}
+
+/** A tool call's params, capped — the CALL is the progress; its arguments can be a whole file. */
+const PARAMS_CAP = 100;
+
+export function subagentProgressLines(lines: string[], state: ProgressState = { finished: false }): string[] {
   const out: string[] = [];
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
+
+    /**
+     * THE HANDOFF BLOCK ENDS THE PROGRESS, and everything after it is silence.
+     *
+     * A child's stdout closes with `--- HANDOFF … ---`, then `Original prompt:`, `CTA:`,
+     * `Tool calls: 2`, an `Evidence gathered` list and a timing table. None of that is narration —
+     * it is the epilogue, and the parent already receives the report through `extractReport`. Worse,
+     * the evidence list quotes TOOL OUTPUT (`[read_file path=note.txt] … 1 token FALCON-42`), which
+     * is exactly what must never be replayed into the parent's card. Skipping the `---` delimiters
+     * alone was not enough: the lines between them carry no prefix and read as prose.
+     */
+    if (/^---\s*HANDOFF/i.test(line)) { state.finished = true; continue; }
+    if (state.finished) continue;
+
     if (/^[│╰]/.test(line) || /^\[system\]/.test(line) || /^---/.test(line)) continue;
+
     const header = new RegExp(HEADLESS_TOOL_HEADER.source, 'u').test(line);
-    if (header) { out.push(line.replace(/^\[tool\]\s*/, '')); continue; }
+    if (header) {
+      // NAME AND PARAMS, AND THE PARAMS ARE CAPPED. `write_file · path=src/server.ts, content=<the
+      // entire file>` is a call worth reporting and a body worth never printing; the cap is what keeps
+      // the first without the second. The child's own PROSE stays whole — that is the reasoning, and
+      // it is the useful part.
+      const text = line.replace(/^\[tool\]\s*/, '');
+      const at = text.indexOf(' · ');
+      if (at >= 0 && text.length > at + 3 + PARAMS_CAP) {
+        out.push(`${text.slice(0, at + 3 + PARAMS_CAP)}…`);
+      } else {
+        out.push(text);
+      }
+      continue;
+    }
     if (/^\[tool\]/.test(line)) continue;   // a card body that did not open with a rule character
     out.push(line);
   }
@@ -430,6 +466,8 @@ async function spawnSubagent(task: string, opts: SubagentOpts = {}): Promise<Sub
      * this whole mechanism exists to avoid, one layer down.
      */
     let pending = '';
+    // Carried across chunks: once the child's HANDOFF block starts, nothing after it is progress.
+    const progress: ProgressState = { finished: false };
     const forward = (chunk: string): void => {
       if (!opts.onStatus) return;
       pending += chunk;
@@ -437,7 +475,7 @@ async function spawnSubagent(task: string, opts: SubagentOpts = {}): Promise<Sub
       // A partial line is held back until its newline arrives — otherwise a note is emitted mid-word
       // and the next one opens with its tail.
       pending = lines.pop() ?? '';
-      for (const note of subagentProgressLines(lines)) opts.onStatus(note);
+      for (const note of subagentProgressLines(lines, progress)) opts.onStatus(note);
     };
 
     child.stdout.on('data', (d: Buffer) => { const s = d.toString(); out += s; forward(s); });
