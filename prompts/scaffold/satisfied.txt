@@ -1,0 +1,19 @@
+A new project has just been created from a template. The template ALREADY includes all of this:
+
+  - a package manifest, a working build, and a test suite that passes
+  - a README
+  - an HTTP server that starts and serves static files
+  - a placeholder web page it serves
+  - version control, with a first commit
+
+Does the request below ask for anything BEYOND that list — specific behaviour, a named feature, game
+logic, real endpoints, a particular UI, data, or rules?
+
+Answer with exactly one word: yes or no.
+
+  yes   it names something the template does not already do
+  no    it only asks to set up, scaffold, initialise or bootstrap a project, or asks for things the
+        list above already covers — a server, a served page, a build, tests
+
+THE REQUEST:
+{{REQUEST}}

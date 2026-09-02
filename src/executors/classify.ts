@@ -39,6 +39,46 @@ export const CLASSIFIABLE: ProjectType[] = ['python', 'node', 'unity'];
  * Null is a real answer and is returned rather than guessed past: "fix the typo in the README" is not
  * a new project, and inventing one for it would scaffold a manifest into somebody's turn.
  */
+/**
+ * Does this request ask for anything beyond the empty project the scaffold just made?
+ *
+ * THE BUG THIS EXISTS FOR. Plan mode skips planning when the scaffold has satisfied every REQUIRED
+ * deliverable — which saved 8m51s on "set up an empty typescript web ui project" and was correct
+ * there. It then fired on:
+ *
+ *     Set me up a nodets project here! I want a nodets endpoint that serves a website with ping pong
+ *     game! One player plays with wasd other with arrows!
+ *
+ * Every required deliverable existed — `package.json`, `tsconfig.json`, `src/index.ts`,
+ * `test/*.test.ts`, `.gitignore`, `README.md` — because those are what a PROJECT needs, and none of
+ * them is a ping pong game. So the agent was handed grounding instead of a plan for a request that
+ * badly needed one, and spent 25 minutes without one before the timeout took it.
+ *
+ * "Every deliverable exists" and "the request is done" are different questions, and only the second
+ * one is the one being asked. The deliverables cannot answer it: they describe the shape of a project,
+ * never the behaviour someone wanted. So this asks, in one short call, on the only turn where the
+ * answer could save minutes.
+ *
+ * DEFAULTS TO "YES, THERE IS MORE" on any failure. Planning a request that needed no plan costs a
+ * couple of minutes; skipping the plan for a request that needed one cost twenty-five.
+ */
+export async function requestNeedsMoreThanScaffold(request: string): Promise<boolean> {
+  const text = request.trim();
+  if (!text) return false;
+  try {
+    const raw = (await llmChat(
+      [{ role: 'user', content: scaffoldPrompts.get('satisfied', { REQUEST: text.slice(0, 2000) }) }],
+      { declareTools: false },
+    )).trim().toLowerCase();
+    const more = !/^\W*no\b/.test(raw);
+    log('INFO', 'scaffold_satisfies_request', { answer: raw.slice(0, 30), needsMore: String(more) });
+    return more;
+  } catch (err) {
+    log('WARN', 'scaffold_satisfies_failed', { error: err instanceof Error ? err.message : String(err) });
+    return true;
+  }
+}
+
 export async function classifyProjectType(about: string): Promise<ProjectType | null> {
   const request = about.trim();
   if (!request) return null;

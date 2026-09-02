@@ -84,7 +84,7 @@ import { addMessage, setAgentStatus, formatToolCallForChat, formatToolResultForC
 import { PLAN_CARD, PLAN_GLYPH, columns, phaseBody, shortPath } from './present.js';
 import { repoState } from '../executors/plan/git.js';
 import { checkDeliverables } from '../executors/deliverables.js';
-import { classifyProjectType } from '../executors/classify.js';
+import { classifyProjectType, requestNeedsMoreThanScaffold } from '../executors/classify.js';
 import { detectProject, describeProject, isFreshDirectory } from '../executors/detect.js';
 import { planExecutorFor } from '../executors/registry.js';
 import type { ProjectContext } from '../executors/types.js';
@@ -536,7 +536,13 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       const statuses = checkDeliverables(projectRoot, executor.deliverables(ctx)).filter((s) => s.deliverable.required);
       const required = statuses.map((s) => s.deliverable);
       const outstanding = statuses.filter((s) => !s.satisfied);
-      if (statuses.length > 0 && outstanding.length === 0) {
+      // AND THE REQUEST ITSELF HAS TO BE DONE, which the deliverables cannot tell us. They describe
+      // the shape of a PROJECT; none of them is a ping pong game. Asked only once the cheap check has
+      // already passed, so a request that clearly has work left never spends the call.
+      const needsMore = statuses.length > 0 && outstanding.length === 0
+        ? await requestNeedsMoreThanScaffold(userInput)
+        : true;
+      if (statuses.length > 0 && outstanding.length === 0 && !needsMore) {
         const done = `The project already exists — `
           + `${scaffolded.length} path(s) were scaffolded deterministically before this turn, and every `
           + `required deliverable is on disk:\n`
