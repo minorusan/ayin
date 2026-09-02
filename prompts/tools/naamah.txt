@@ -1,0 +1,18 @@
+Sketch the solution's interface before implementing it, in TypeScript or C#, checked by a real compiler. The only design door — never author a .puml.
+
+ops: sketch (write one file, compile it) · build (the design is finished: compile it, enforce it, and receive the first type to implement) · show.
+
+One file per type, written `declare class X { … }` — ambient is what makes a member legal with no body. Signatures only, plus a comment above each saying what it must do. Relations are decorators (TS) or attributes (C#) and may be declared at either end.
+
+  TypeScript          C#
+  @Domain('Core')     [Domain("Core")]          which domain owns it
+  @Owns<Entry>()      [Owns(typeof(Entry))]     composition — @Has @Uses @Refers likewise
+  @UsedBy<Svc>()      [UsedBy(typeof(Svc))]     the same edge, from the far end
+  @Kind('struct')     [Kind("struct")]          card kind · @Remark('…') a tethered note
+
+A bare field (private led: Ledger) already implies an edge.
+
+Three rules, because design files share one global scope:
+  - TypeScript: no import, no export; name a target in the type position, @Owns<Entry>() not @Owns(Entry).
+  - C#: no namespace; name a target with typeof(...).
+  - A design is a document, not a module. Never import from it in real source.

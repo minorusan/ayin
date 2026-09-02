@@ -56,6 +56,8 @@ import { clearPendingCorpus, corpusForPrompt, setPendingCorpus } from './indulge
 
 // `/embed` for the session, `/embedthis` for one prompt — the same shape as /plan and /qa, because
 // a third convention for the same idea is one more thing to remember.
+/** The running `naamah show` daemon, so a second /naamah replaces it rather than stacking ports. */
+let naamahSession: import('./naamah/index.js').NaamahSession | null = null;
 let embedSession = false;
 let embedNextTurn = false;
 /** The FIRST prompt states the task; later ones are refinements. Only the first is automatic. */
@@ -900,6 +902,46 @@ async function handleInput(text: string): Promise<void> {
           addMessage('system', `${summarise(r)}${r.opened ? '' : '\n(could not open a browser — the path above is the page)'}`);
         } catch (err) {
           addMessage('system', `/diff failed — ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
+      case '/naamah': {
+        // The DESIGN on a page, with comments wired to this session — `/diff` one step earlier, before
+        // the code exists. An argument names a design directory; bare picks the newest `.naamah/<task>/`,
+        // because the agent autocreates one per task and asking which is friction for nothing.
+        const arg = text.slice('/naamah'.length).trim();
+        try {
+          const nm = await import('./naamah/index.js');
+          const dir = nm.findDesignDir(process.cwd(), arg);
+          if (!dir) {
+            addMessage('system',
+              'No design to show. A design is a directory of plain TypeScript or C# sketch files —\n'
+              + 'ayin creates one per task at .naamah/<task-slug>/. Ask for a change and it will, or\n'
+              + 'point at one: /naamah <dir>');
+            return;
+          }
+          if (naamahSession) naamahSession.stop();
+          naamahSession = nm.startNaamah(dir, {
+            // A COMMENT BECOMES A TURN. The thread arrives as a prompt carrying what was commented on,
+            // exactly as a /diff comment does, so the agent edits the design instead of asking which
+            // card was meant.
+            onThreads: (threads) => {
+              for (const t of threads) {
+                const pid = nm.runThreadAgent(dir, t, process.cwd());
+                addMessage('system', pid
+                  ? `naamah [${t.id}] on ${t.target?.id ?? 'the design'} — answering it (pid ${pid})`
+                  : `naamah [${t.id}] arrived but a run could not be started — see ~/.ayin-cli/naamah/`);
+              }
+            },
+          });
+          // The URL arrives on the daemon's stderr a beat after spawn; report once it has.
+          setTimeout(() => {
+            addMessage('system', naamahSession?.url
+              ? `naamah: ${dir}\n${naamahSession.url}  — click a type card to comment; the page rebuilds when the design changes`
+              : `naamah: started on ${dir} (waiting for the daemon to report its URL)`);
+          }, 900);
+        } catch (err) {
+          addMessage('system', `/naamah failed — ${err instanceof Error ? err.message : String(err)}`);
         }
         return;
       }

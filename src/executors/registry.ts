@@ -30,6 +30,7 @@ import { PROJECT_TYPES } from './types.js';
 
 import { basePlanExecutor } from './plan/base/index.js';
 import { arduinoPlanExecutor } from './plan/arduino/index.js';
+import { nodePlanExecutor } from './plan/node/index.js';
 import { baseQaExecutor } from './qa/base/index.js';
 import { arduinoQaExecutor } from './qa/arduino/index.js';
 import { unityQaExecutor } from './qa/unity/index.js';
@@ -40,6 +41,7 @@ import { arduinoPresentExecutor } from './present/arduino/index.js';
 const INSTANCES: Record<string, AnyExecutor> = {
   'plan/base': basePlanExecutor,
   'plan/arduino': arduinoPlanExecutor,
+  'plan/node': nodePlanExecutor,
   'qa/base': baseQaExecutor,
   'qa/arduino': arduinoQaExecutor,
   'qa/unity': unityQaExecutor,

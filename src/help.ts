@@ -62,6 +62,11 @@ export const HELP: HelpEntry[] = [
     tip: 'A build is hours of tokens and the TIER is the whole cost. /indulge-model picks it without touching the agent.',
   },
   {
+    name: '/naamah', kind: 'command', section: 'Code',
+    short: 'The DESIGN as a live page — click a type card to comment, and the agent changes the sketch · /naamah <dir>',
+    tip: '/naamah is /diff one step earlier — review the design before the code exists.',
+  },
+  {
     name: '/diff', kind: 'command', section: 'Code',
     short: 'Working tree — staged, unstaged AND untracked — as a reviewable HTML page · /diff <rev> to compare against one',
     tip: '/diff opens your working tree as a real review page — filters, per-file triage, changed tokens marked.',

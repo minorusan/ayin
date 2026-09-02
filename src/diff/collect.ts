@@ -55,6 +55,36 @@ export interface Hunk {
   lines: DiffLine[];
 }
 
+
+/**
+ * The pseudo-extension naamah's generated output is filed under, so it gets its own chip.
+ *
+ * A naamah design is written PER TASK, so a normal change now carries a design directory, a built
+ * page and an auto-written vocabulary file alongside the actual code. Those are the diagram's
+ * output, not the change under review, and left as `.ts` / `.html` they bury the real diff — the
+ * `.ts` chip is on by default, so a five-file code change arrives looking like twenty.
+ *
+ * Filed under one pseudo-extension rather than hidden outright: it is NOT in DEFAULT_EXTENSIONS, so
+ * the chip starts off and the count line still says how many are hidden. Nothing disappears without
+ * a way back — hiding a file with no chip to reveal it is how a review misses a real edit.
+ */
+export const NAAMAH_EXT = '(naamah)';
+
+/**
+ * Is this path naamah's output rather than the author's code?
+ *
+ * Deliberately narrow. A `.html` anywhere would be far too broad — plenty of projects review real
+ * HTML — so only a page sitting INSIDE a design directory counts, and the vocabulary file is matched
+ * by its exact name because that is the one naamah writes itself.
+ */
+export function isNaamahArtifact(rel: string): boolean {
+  const p = String(rel).replace(/\\/g, '/');
+  const inDesign = /(^|\/)\.naamah\//.test(p);
+  if (inDesign) return true;
+  // The prelude naamah installs beside a design, wherever the operator put that design.
+  return /(^|\/)naamah\.ts$/.test(p);
+}
+
 export interface FileDiff {
   path: string;
   oldPath?: string;
@@ -177,7 +207,7 @@ function parseUnified(raw: string): FileDiff[] {
       const mid = rest.lastIndexOf(' b/');
       const p = mid > 0 ? rest.slice(mid + 3) : rest.replace(/^a\//, '');
       file = {
-        path: p, status: 'modified', ext: extname(p).toLowerCase(),
+        path: p, status: 'modified', ext: isNaamahArtifact(p) ? NAAMAH_EXT : extname(p).toLowerCase(),
         additions: 0, deletions: 0, binary: false, untracked: false, hunks: [], truncated: false, bodyOmitted: false,
         // Stamped by the caller: parseUnified does not know which of the two diffs it was handed.
         staged: false,
@@ -233,7 +263,7 @@ function untrackedFiles(repo: string, budget: { left: number }): FileDiff[] {
   for (const rel of out.split('\n').filter(Boolean)) {
     const abs = join(repo, rel);
     const f: FileDiff = {
-      path: rel, status: 'added', ext: extname(rel).toLowerCase(),
+      path: rel, status: 'added', ext: isNaamahArtifact(rel) ? NAAMAH_EXT : extname(rel).toLowerCase(),
       additions: 0, deletions: 0, binary: false, untracked: true, hunks: [], truncated: false, bodyOmitted: false,
       staged: false,  // untracked is in no index, by definition
     };

@@ -305,7 +305,24 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
   // decision. `planMinChars: 0` remains the operator's absolute off switch for the automatic door.
   const minChars = getConfig('planMinChars', 2000);
   if (!explicit && minChars <= 0) return null;
-  if (!explicit && userInput.length < getConfig('planToggledMinChars', 60)) return null;
+
+  /**
+   * A GREENFIELD REQUEST IS NEVER TOO SHORT TO PLAN — it is the one that needs the SCAFFOLD.
+   *
+   * The floor below exists to keep "hi" and "yes" from spending a triage call, and the comment above
+   * it says a short request is well phrased rather than simple. Then the floor reproduced exactly
+   * that mistake one size down: "give me an empty note ts endpoint" is 33 characters and means
+   * "bootstrap a project", and it returned here before triage, before detection, and therefore before
+   * `executor.scaffold()` ever ran. Measured — that request produced a single Express file importing
+   * a package that was not installed, in a directory with no manifest and no tsconfig.
+   *
+   * Checked BEFORE the floor and costs nothing: `detectProject` is a regex over the request plus a
+   * shallow directory read, with no model call anywhere in it. `greenfield` is true only when the
+   * directory holds no project AND the request named a type — precisely the case where there is
+   * something to bootstrap.
+   */
+  const early = detectProject(process.cwd(), userInput);
+  if (!explicit && !early.greenfield && userInput.length < getConfig('planToggledMinChars', 60)) return null;
 
   // One named phase for the whole planning pass. The wait narrator leads its line with this and the
   // status bar keeps `▣ PLAN` lit, so minutes of triage → research → exploration → writing never look
@@ -321,8 +338,9 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       chars: String(userInput.length), reason: t.reason.slice(0, 160),
     });
 
-    // Detected here rather than after the veto, because the veto has to be able to consult it.
-    const ctx = detectProject(process.cwd(), userInput);
+    // Detected before the floor above (a greenfield request must not be filtered out by length) and
+    // reused here — one regex pass, not two.
+    const ctx = early;
     const executor = planExecutorFor(ctx);
 
     // TRIAGE'S VETO IS ABOUT FEATURE COUNT, AND THAT IS NOT THE ONLY REASON TO PLAN.
@@ -341,16 +359,37 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     // query, so this is the same string either way.
     const grounding = executor.grounding(ctx, userInput);
     const hasDomainGrounding = grounding.trim().length > 0;
-    if (!explicit && !t.complex && !hasDomainGrounding) {
+
+    /**
+     * A GREENFIELD PROJECT HAS SOMETHING TO DO EVEN WHEN IT HAS NOTHING TO GROUND.
+     *
+     * The veto below spares a project type that brings reference material. It did not consider the
+     * other reason this pass is worth running: the SCAFFOLD. A Node project has no domain catalog, so
+     * `hasDomainGrounding` is false, so a greenfield TS request was vetoed and returned before
+     * `executor.scaffold()` — which is the one thing it actually needed. Measured: "give me an empty
+     * note ts endpoint" was vetoed as "single-feature request (33 chars)" and produced one Express
+     * file importing a package that was not installed, with no manifest and no tsconfig beside it.
+     *
+     * Grounding is knowledge the model must not invent; scaffolding is a file operation it should
+     * never have been asked to remember. Either is reason enough not to skip.
+     */
+    const hasWork = hasDomainGrounding || ctx.greenfield;
+    if (!explicit && !t.complex && !hasWork) {
       addMessage('system', `Plan mode: not needed — single-feature request (${userInput.length} chars).`);
       return null;
     }
     // GROUNDING-ONLY: the cheap path. The facts reach the model; no document is generated and none is
     // written. Costs nothing beyond the triage call that already happened — `grounding` is a
     // deterministic string, so this branch adds zero LLM calls.
-    if (!explicit && !t.complex && hasDomainGrounding) {
-      log('INFO', 'plan_grounding_only', { project: ctx.type, chars: String(grounding.length) });
-      addMessage('system', `Plan mode: single-feature — skipping the plan document, but injecting the ${ctx.type} reference material so nothing is answered from recall.`);
+    if (!explicit && !t.complex && hasWork) {
+      log('INFO', 'plan_grounding_only', {
+        project: ctx.type, chars: String(grounding.length), greenfield: String(ctx.greenfield),
+      });
+      // Say which of the two reasons applied, because "injecting reference material" is a lie when
+      // there is none and the real work was the bootstrap.
+      addMessage('system', hasDomainGrounding
+        ? `Plan mode: single-feature — skipping the plan document, but injecting the ${ctx.type} reference material so nothing is answered from recall.`
+        : `Plan mode: single-feature on a greenfield ${ctx.type} project — skipping the plan document, but bootstrapping the project first.`);
       // Scaffolding still happens: a README that must exist is a file operation either way, and it is
       // the thing the QA gate would otherwise spend a whole fix pass creating.
       const scaffoldedNow = executor.scaffold(ctx);

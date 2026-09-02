@@ -96,6 +96,21 @@ const REQUEST_PATTERNS: Array<[ProjectType, RegExp]> = [
   ['arduino', /\b(pin|gpio)\b[\s\S]{0,80}\b(led|servo|buzzer|button|switch|sensor)\b[\s\S]{0,80}\b(resistor|breadboard|circuit|wiring|solder)\b/i],
   ['unity', /\bunity\b[\s\S]{0,40}\b(scene|prefab|monobehaviour|gameobject)\b|\bmonobehaviour\b|\bprefab\b/i],
   ['flutter', /\bflutter\b|\bdart\b[\s\S]{0,40}\bwidget\b|\bpubspec\b/i],
+  /**
+   * NODE / TYPESCRIPT, AND IT GOES LAST ON PURPOSE.
+   *
+   * These words are the most common in the corpus, so anywhere higher they would swallow requests that
+   * genuinely mean something else — a Flutter app has an "api", a Unity project has "typescript"
+   * tooling. Last means: only when nothing more specific claimed the request.
+   *
+   * Without an entry here a greenfield TS request detected as `unknown`, took the base executor, and
+   * was scaffolded with a README and nothing else — so "an empty TS endpoint for notes" produced a
+   * file that could not run in a directory that was not a project.
+   */
+  ['node', /\b(typescript|node(\.?js)?|express|fastify|nest(js)?|npm|pnpm)\b/i],
+  ['node', /\b(rest|http|api|web)\b[\s\S]{0,60}\b(endpoint|route|server|service|handler)\b/i],
+  ['node', /\b(endpoint|route)\b[\s\S]{0,60}\b(ts|typescript|js|javascript)\b/i],
+  ['node', /\b(ts|typescript)\b[\s\S]{0,60}\b(endpoint|route|server|api|service)\b/i],
 ];
 
 function fromRequest(request: string): { type: ProjectType; evidence: string } | null {

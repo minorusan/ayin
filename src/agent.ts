@@ -1046,8 +1046,23 @@ const DIAGRAM_TRIGGER = new RegExp([
 let diagramContext = ''; // pre-prompted into the base call for this turn
 let planContext = '';    // a plan produced before the turn (plan/index.ts), pre-prompted the same way
 
+/**
+ * A GENERATED DIRECTIVE IS NOT A REQUEST FOR A PICTURE.
+ *
+ * `<naamah-comment>` and `<comment-response>` are prompts AYIN ITSELF writes to hand a review comment
+ * to a run, and they necessarily talk about diagrams and designs — so they matched
+ * `DIAGRAM_TRIGGER` and every one of them burned a full model call drawing a .puml of its own
+ * instructions. Observed: a naamah thread whose entire first round went to
+ * `naamah-comment-dir-tmp-claude-1000-….puml` before the agent had read anything.
+ *
+ * Matched on the OPENING TAG, not on a keyword: these prompts have a contract of their own, and
+ * nothing that arrives inside one is a human asking to be shown a picture.
+ */
+const GENERATED_DIRECTIVE = /^\s*<(naamah-comment|comment-response)\b/;
+
 async function runDiagram(userInput: string): Promise<void> {
   diagramContext = '';
+  if (GENERATED_DIRECTIVE.test(userInput)) return;
   if (process.env.AYIN_DIAGRAM === '0' || !DIAGRAM_TRIGGER.test(userInput)) return;
   try {
     setAgentStatus('Drawing a diagram...');

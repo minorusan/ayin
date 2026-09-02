@@ -741,9 +741,18 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
   // the two models found this; the stronger one never tried it.
   const naamaSrc = readFileSync(join(DIST, '..', 'src', 'tools', 'defs', 'naama.ts'), 'utf-8');
   ok(/entangledTo\(\)/.test(naamaSrc) && /Refused: that design is entangled/.test(naamaSrc),
-    'naama refuses to author the design currently being enforced');
-  ok(/op === 'add' \|\| op === 'drop'/.test(naamaSrc),
-    'only the WRITING ops are refused — reading it, and authoring any other design, still work');
+    'the design tool refuses to author the design currently being enforced');
+  /**
+   * THE INVARIANT, NOT THE OP NAMES. This asserted `op === 'add' || op === 'drop'` and went red when the
+   * tool was repointed from the .puml line grammar to TypeScript/C# sketches — where the single writing
+   * op is `sketch`. What must hold is that the guard keys on the WRITING op and that the read paths are
+   * not gated; the spelling of the ops is the tool's business and will change again.
+   */
+  const guardLine = (naamaSrc.match(/if \([^\n]*entangledTo\(\)[^\n]*\)/) ?? [''])[0];
+  ok(/op === '(sketch|add|write|drop)'/.test(guardLine),
+    'the refusal keys on the WRITING op, so reading it and authoring any other design still work');
+  ok(!/op === '(show|build|check|render)'/.test(guardLine),
+    'and no READ op is gated — a design being enforced is still a design you may look at');
 
   // A BLOCKED TYPE IS PARKED, NOT RE-OFFERED. `op=next` returned the first unimplemented type every time,
   // so one un-implementable type became an infinite wall: handed out 65 times in a single run while
@@ -1686,10 +1695,18 @@ console.log('\nexecutors: detection + registry');
   // Every shipped config parses and cross-checks against an imported instance. loadRegistry THROWS
   // on any mismatch, so simply getting a list back is the assertion.
   const configs = reg.listExecutors();
-  // SEVEN since the Unity QA executor: base + arduino for plan/qa/present, plus qa/unity. The count is
-  // asserted rather than the names because `loadRegistry` already THROWS on a config with no imported
-  // instance (or the reverse) — this line is what notices an executor added to neither list.
-  ok(configs.length === 7, 'seven executors are declared and wired (base + arduino for plan/qa/present, plus qa/unity)', String(configs.length));
+  // EIGHT since the Node plan executor: base + arduino for plan/qa/present, plus qa/unity and
+  // plan/node. The count is asserted rather than the names because `loadRegistry` already THROWS on a
+  // config with no imported instance (or the reverse) — this line is what notices an executor added to
+  // neither list.
+  ok(configs.length === 8,
+    'eight executors are declared and wired (base + arduino for plan/qa/present, plus qa/unity and plan/node)',
+    String(configs.length));
+  // The one that BOOTSTRAPS. A greenfield TS request used to fall to the base executor and receive a
+  // README and nothing else — no manifest, no tsconfig, no entry point — so the endpoint it asked for
+  // landed in a directory that was not a project. Asserted by name because that is the whole feature.
+  ok(configs.some((c) => c.kind === 'plan' && c.id === 'node'),
+    'a Node plan executor exists — a greenfield TypeScript request gets a project, not one file');
   ok(configs.some((c) => c.kind === 'qa' && c.id === 'unity' && c.factsOnly === true),
     'qa/unity declares factsOnly — a Unity turn is judged by a compiler, not by a model');
   ok(configs.every((c) => c.projectTypes.length > 0), 'every config declares at least one project type');
@@ -2297,8 +2314,22 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
 // the iteration is discarded. On a metered model that is an iteration the operator paid for.
 {
   const mgrSrc = readFileSync(join(REPO, 'src/llm/manager.ts'), 'utf-8');
-  ok(/if \(!declared && activeDialect\(\)\.parse\(reply\)\.toolCalls\.length > 0\)/.test(mgrSrc),
-    'a reply that IS a tool call, when none were declared, is detected through the dialect');
+  /**
+   * THE CALLER'S FLAG, NEVER `!declared`. This gate used to quote `if (!declared && …)` — and in
+   * doing so it pinned a real bug in place for 16 days.
+   *
+   * `declared` is `toolMode() === 'native' && opts.declareTools !== false`, so it is ALSO false in
+   * prompt mode — where the tools are real and travel in the prompt catalogue instead of the request.
+   * Prompt mode is the default for the resource provider, which made `!declared` true on every call,
+   * and this guard binned every tool call the AGENT LOOP made: session 2026-08-31T01-32-39 ran 89
+   * rounds, emitted 88 tool calls, executed zero, and told the model "there is nothing to call" each
+   * time. The condition below is the whole fix, so it is asserted from both sides.
+   */
+  const guardRe = /if \(opts\.declareTools === false && activeDialect\(\)\.parse\(reply\)\.toolCalls\.length > 0\)/;
+  ok(guardRe.test(mgrSrc),
+    'a reply that IS a tool call, from a caller that asked for none, is detected through the dialect');
+  ok(!/!declared && activeDialect\(\)\.parse\(reply\)/.test(mgrSrc),
+    'and the guard keys on the CALLER, never on `!declared` — that is false in prompt mode too, where the tools are real and the agent is waiting to run them');
   ok(/declared no tools and there is nothing to call/.test(mgrSrc),
     'and the retry tells the model why, rather than repeating the original instruction louder');
   ok(/say what and why instead/.test(mgrSrc),
@@ -2308,7 +2339,10 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
   // Bounded slice from the guard itself — anchoring the end on a symbol name finds the IMPORT.
   // Sliced to the END OF THE GUARD, not a fixed character count: a comment added inside it pushed the
   // last assertion out of a 1400-char window and failed a gate about code that had not changed.
-  const guardAt = mgrSrc.indexOf('if (!declared && activeDialect()');
+  // Anchored on the SHAPE above, not a second copy of the spelling — when the condition last changed,
+  // this `indexOf` silently returned -1, `slice(-1, …)` handed the assertions below one character of
+  // source, and a gate about an untouched invariant went red alongside the one that had really moved.
+  const guardAt = mgrSrc.search(guardRe);
   const guardEnd = mgrSrc.indexOf('emitLlmCall(', guardAt);
   const guard = mgrSrc.slice(guardAt, guardEnd > guardAt ? guardEnd : guardAt + 1400);
   ok(!/while|for \(/.test(guard), 'ONE retry — a guard that can loop is worse than the behaviour it corrects');

@@ -227,6 +227,47 @@ export function resetPromptsToDefaults(): { restored: string[]; backedUp: string
 }
 
 /**
+ * Take the SHIPPED prompt pack — every namespace, not just ayin's.
+ *
+ * `resetPromptsToDefaults` restores one namespace, which is the right thing for `/prompts reset` in
+ * a session. `ayin update --prompts` means something different and larger: the operator is saying
+ * "this install's prompts are whatever the build ships", across explore, plan, qa, presenter, jira
+ * and the rest. A local edit to one of those drifts silently — the code keeps sending variables the
+ * local text no longer asks for — and there was no single door back.
+ *
+ * Every local file that DIFFERS is backed up first by `restoreDefaults` itself, so this is
+ * destructive but never lossy. Namespaces are accumulated rather than reported per call because
+ * `lastBackedUp()` is reset by each restore, and a partial list read at the end would name only the
+ * final namespace's backups.
+ */
+export function restoreAllPromptsToDefaults(): {
+  restored: string[]; backedUp: string[]; namespaces: string[]; failed: Array<{ ns: string; why: string }>;
+} {
+  const root = packagePath('prompts');
+  const restored: string[] = [];
+  const backedUp: string[] = [];
+  const namespaces: string[] = [];
+  const failed: Array<{ ns: string; why: string }> = [];
+  let dirs: string[];
+  try { dirs = readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); }
+  catch (err) { return { restored, backedUp, namespaces, failed: [{ ns: '*', why: String(err) }] }; }
+  for (const ns of dirs) {
+    try {
+      // Registration is what teaches the service where a namespace's shipped text lives; a namespace
+      // no tool has used yet is not registered, and restoring it would throw "no source directory".
+      prompts.register(ns, join(root, ns));
+      for (const id of prompts.restoreDefaults(ns)) restored.push(`${ns}/${id}`);
+      for (const id of prompts.lastBackedUp()) backedUp.push(id);
+      namespaces.push(ns);
+    } catch (err) {
+      // One unreadable namespace must not abandon the rest — and must not be silent either.
+      failed.push({ ns, why: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return { restored, backedUp, namespaces, failed };
+}
+
+/**
  * Register EVERY shipped namespace at boot, not lazily on first use.
  *
  * A tool registers its prompts the first time it runs, which means a prompt fix — or a warning that a

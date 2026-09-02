@@ -1501,7 +1501,12 @@ ${o.interactive ? commitPreview() + clearCommentsFab() + discardFab() + refreshF
    * Read is filtered too, so a hand-edited cookie cannot leave the page in a filter state that matches
    * no chip and shows nothing.
    */
-  function okExt(x){ return /^(\\(none\\)|\\.[A-Za-z0-9_+-]{1,24})$/.test(x); }
+  // The parenthesised names are PSEUDO-extensions: (none) for extensionless files, (naamah) for
+  // generated design output. They must be listed here or the cookie filter drops them on write: the
+  // chip would toggle on, survive until reload, and quietly revert, which reads as the filter being
+  // broken rather than as a validation rule. NO BACKTICKS IN THIS COMMENT — it lives inside the
+  // page's template literal, and one would end it here.
+  function okExt(x){ return /^(\\((?:none|naamah)\\)|\\.[A-Za-z0-9_+-]{1,24})$/.test(x); }
 
   function saveExts(){
     try {

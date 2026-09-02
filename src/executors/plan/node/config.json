@@ -1,0 +1,7 @@
+{
+  "id": "node",
+  "kind": "plan",
+  "projectTypes": ["node"],
+  "priority": 100,
+  "description": "Node/TypeScript planning — a real greenfield bootstrap (package.json, tsconfig, an entry point that runs, .gitignore) so a request for an endpoint yields a project that starts, not one file; npm scripts as the observability story."
+}

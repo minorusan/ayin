@@ -170,7 +170,9 @@ async function globalPrefixWritable(): Promise<{ prefix: string; writable: boole
 /**
  * `ayin update` — install the newest published build.
  *
- * Flags: `--check` (report only) · `--registry <url>` · `--tag <dist-tag>` · `--force` (reinstall
+ * Flags: `--check` (report only) · `--registry <url>` · `--tag <dist-tag>` · `--prompts` (also take
+ * the build's shipped prompt pack, overwriting local edits — backed up first, and applied even
+ * when the version did not move) · `--force` (reinstall
  * even when the versions match).
  *
  * Deliberately NOT clever: it shells out to `npm install -g`, so the install is atomic in npm's
@@ -354,6 +356,43 @@ function getCurrentVersionFrom(root: string): string {
   }
 }
 
+/**
+ * `--prompts`: take the build's own prompt pack, overwriting local edits.
+ *
+ * DELIBERATELY INDEPENDENT OF WHETHER A VERSION MOVED. "Already on the newest build" is exactly when
+ * an operator reaches for this — the code is current and the PROMPTS are the thing that drifted — so
+ * returning early without applying it would refuse the request in the one case it was made for.
+ *
+ * Every file that differs is backed up by `restoreDefaults` before it is overwritten, and the
+ * backups are named here: a destructive command that does not say what it destroyed is how an
+ * evening of prompt tuning disappears.
+ */
+async function applyPromptPack(): Promise<void> {
+  const { restoreAllPromptsToDefaults } = await import('./prompts.js');
+  const r = restoreAllPromptsToDefaults();
+  if (!r.restored.length) {
+    process.stdout.write('--prompts: this build ships no prompts to restore.\n');
+    return;
+  }
+  process.stdout.write(
+    `--prompts: took the shipped pack — ${r.restored.length} prompt(s) across ` +
+    `${r.namespaces.length} namespace(s) (${r.namespaces.join(', ')}).\n`);
+  if (r.backedUp.length) {
+    process.stdout.write(
+      `           ${r.backedUp.length} local edit(s) were backed up beside the originals as ` +
+      `*.txt.bak-<stamp>: ${r.backedUp.join(', ')}\n`);
+  }
+  for (const f of r.failed) {
+    process.stderr.write(`--prompts: could not restore "${f.ns}" — ${f.why}\n`);
+  }
+  log('INFO', 'ayin_prompt_pack_restored', {
+    prompts: String(r.restored.length),
+    namespaces: r.namespaces.join(','),
+    backedUp: String(r.backedUp.length),
+    failed: String(r.failed.length),
+  });
+}
+
 export async function runUpdate(argv: string[]): Promise<void> {
   const flag = (name: string): string | undefined => {
     const i = argv.indexOf(`--${name}`);
@@ -372,6 +411,7 @@ export async function runUpdate(argv: string[]): Promise<void> {
    */
   if (checkout && !has('registry')) {
     await updateFromCheckout(checkout, { check: has('check'), force: has('force') });
+    if (has('prompts') && !has('check')) await applyPromptPack();
     return;
   }
 
@@ -451,6 +491,8 @@ export async function runUpdate(argv: string[]): Promise<void> {
     process.stdout.write(cmp === 0
       ? `Already on the newest build (${latest}).\n`
       : `Local build ${current} is ahead of the registry's ${tag} (${latest}) — nothing to do (--force to install it anyway).\n`);
+    // The prompts are still this build's to give back, and "already newest" is when that is asked for.
+    if (has('prompts')) await applyPromptPack();
     return;
   }
 
@@ -475,6 +517,8 @@ export async function runUpdate(argv: string[]): Promise<void> {
 
   log('INFO', 'ayin_updated', { from: current, to: latest, registry });
   process.stdout.write(`ayin is now ${latest}. Restart any running session to pick it up.\n`);
+  // AFTER the install, so the pack restored is the NEW build's, not the one being replaced.
+  if (has('prompts')) await applyPromptPack();
   await restartWatchDaemon(latest);
 }
 
