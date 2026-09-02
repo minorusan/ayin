@@ -164,6 +164,30 @@ subagentProgressLines(['--- HANDOFF (text_output, round 1) ---'], st);
 ok(subagentProgressLines(['Evidence gathered: secret'], st).length === 0,
   '  → and it stays ended across chunk boundaries');
 
+// ── 5c · the subagent model picker ranks for AGENTIC work, cheap tiers last ──
+//
+// The list itself comes from the API (`/v1/models`), so it cannot rot into offering an id that 404s —
+// which `/indulge-model`'s hardcoded table did, and still leads with `gpt-4.1`. What IS hardcoded is
+// the guidance, matched by substring so a point release inherits it, and that is what this pins.
+const { rankForAgentic } = await import('../dist/model-picker.js');
+{
+  // A realistic listing, deliberately shuffled — the ranking, not the input order, must decide.
+  const ranked = rankForAgentic([
+    'gpt-4.1', 'gpt-5.6-luna', 'gpt-5.5-pro', 'gpt-5.6-sol', 'gpt-5.4-nano', 'gpt-5.3-codex',
+    'gpt-5.6-terra', 'gpt-5.5', 'some-future-model',
+  ]).map((r) => r.id);
+  ok(ranked[0] === 'gpt-5.6-sol', 'the agentic flagship ranks first', ranked[0]);
+  ok(ranked[1] === 'gpt-5.3-codex', '  → then the cheaper coding-specialised line', ranked[1]);
+  ok(ranked.indexOf('gpt-5.6-luna') > ranked.indexOf('gpt-5.6-terra'), '  → cheap tiers sit below balanced ones');
+  ok(ranked[ranked.length - 1] === 'gpt-4.1',
+    '  → and a generation-old model ranks LAST, not first as /indulge-model still offers it', ranked[ranked.length - 1]);
+  ok(ranked.includes('some-future-model'),
+    '  → an id this file does not recognise is still offered — the opinion is not a whitelist');
+  const sol = rankForAgentic(['gpt-5.6-sol'])[0];
+  ok(sol.tag === 'agentic' && /terminal workflows|tool use/.test(sol.why),
+    '  → and each row says what the tier is FOR, which a list of ids cannot', sol.why.slice(0, 40));
+}
+
 // ── 6 · the WIDTH PATCH: blessed must agree with the terminal ────────────────
 //
 // This is what makes an emoji icon safe at all. blessed's double-wide table predates emoji and answers

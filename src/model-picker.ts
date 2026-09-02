@@ -500,3 +500,126 @@ export async function handleModelCommand(arg: string): Promise<void> {
     ? `Adapter: ${now.id}. ayin will speak ${now.id} regardless of what the endpoint serves.`
     : `Adapter: automatic — ${now.id}, matched from the served model id.`);
 }
+
+/**
+ * `/set-subagent-model` with no argument — pick what the CHILDREN run on.
+ *
+ * WHY IT IS A DIALOG. The decision has two axes and neither is guessable from a flag: which provider,
+ * and then which TIER of it. The tier is the whole cost of a build — a five-phase job is five children,
+ * each with its own context and its own budget — and a syntax nobody remembers is how a setting that
+ * matters goes unset. `/indulge-model` made the same argument first; this is that shape.
+ *
+ * THE MODEL LIST IS THE ACCOUNT'S OWN, NOT A TABLE IN THIS FILE. `/indulge-model` hardcodes ids and
+ * says out loud that the list will rot — and it has: it still offers `gpt-4.1` as its top row. Asking
+ * the API which models this key can actually reach cannot rot, cannot offer an id that 404s, and picks
+ * up whatever shipped last week without an ayin release. What IS hardcoded is only the guidance
+ * attached to ids we recognise, matched by substring so a point release inherits it.
+ */
+export async function showSubagentModelPicker(): Promise<void> {
+  const key = openAiKey();
+  const curProvider = (getConfigString('subagentProvider') ?? '').trim();
+  const curModel = (getConfigString('subagentModel') ?? '').trim();
+
+  const top: DialogOption[] = [
+    {
+      label: 'OpenAI — pick a tier',
+      note: curProvider === 'openai' ? 'current' : '',
+      sub: key ? 'the children get a hosted model; this agent keeps arbitrating on your card'
+        : 'needs a key first — /openai sk-…',
+    },
+    {
+      label: 'Follow this agent',
+      note: curProvider ? '' : 'current',
+      sub: 'children run on whatever /model is set to — one choice instead of two, and no bill',
+    },
+  ];
+  const which = await showDialog('What do subagents run on', top, {
+    subtitle: 'children only — the agent that arbitrates is not touched',
+    selected: curProvider === 'openai' ? 0 : 1,
+    footer: '↑↓ select · Enter choose · Esc cancel',
+  });
+  if (which < 0) return;
+
+  if (which === 1) {
+    setConfigValue('subagentProvider', '');
+    setConfigValue('subagentModel', '');
+    addMessage('system', 'Subagents follow the agent\'s provider again.');
+    return;
+  }
+  if (!key) {
+    addMessage('system', noKeyMessage());
+    return;
+  }
+
+  const ids = await openAiChatModels();
+  if (!ids.length) {
+    addMessage('system', 'Could not list models for that key. Set one directly: /set-subagent-model openai <id>.');
+    return;
+  }
+
+  const tiers: DialogOption[] = rankForAgentic(ids).slice(0, 8).map((m) => ({
+    label: m.id,
+    note: m.id === curModel ? 'current' : m.tag,
+    sub: m.why,
+  }));
+  tiers.push({
+    label: "that provider's default",
+    note: curModel ? '' : 'current',
+    sub: 'whatever openai.ts picks — re-read when the lineup moves',
+  });
+
+  const tier = await showDialog('Which OpenAI model for the children', tiers, {
+    subtitle: 'the tier IS the cost — a five-phase build is five children · any other id: /set-subagent-model openai <id>',
+    selected: Math.max(0, tiers.findIndex((t) => t.note === 'current')),
+    footer: '↑↓ select · Enter choose · Esc cancel',
+  });
+  if (tier < 0) return;
+
+  const chosen = tier === tiers.length - 1 ? '' : tiers[tier].label;
+  setConfigValue('subagentProvider', 'openai');
+  setConfigValue('subagentModel', chosen);
+  addMessage('system', `Subagents will run on openai${chosen ? ` · ${chosen}` : " · that provider's default model"}.`
+    + ' This agent is unchanged. Every child now costs money per token.');
+}
+
+/** The chat-capable ids this key can actually reach. Empty when the call fails — never a guess. */
+async function openAiChatModels(): Promise<string[]> {
+  try {
+    const { createOpenAiProvider } = await import('./llm/providers/openai.js');
+    const catalog = await createOpenAiProvider().models?.();
+    return (catalog?.models ?? []).map((m) => m.name).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * What each id is FOR, when we recognise it — the part a list of ids cannot tell you.
+ *
+ * Researched 2026-09-02 and it will age: the GPT-5.6 family (Sol $4/$20, Terra $2/$12, Luna
+ * $0.20/$1.20) went GA in July 2026, Luna's price fell 80% on the 30th, and Sol's coding strength is
+ * specifically AGENTIC — terminal workflows, multi-step tool coordination, long-horizon engineering —
+ * which is exactly what a subagent does. GPT-5.5 ($5/$30, ~88.7% SWE-bench Verified) is the older
+ * flagship and costs MORE than Sol for less agentic focus. Codex is the coding-specialised, cheaper
+ * line. Matched by SUBSTRING so a point release inherits the note rather than falling through.
+ *
+ * An unrecognised id is still offered, unannotated. This file's opinion is not a whitelist.
+ */
+export interface Ranked { id: string; tag: string; why: string; rank: number }
+
+export function rankForAgentic(ids: string[]): Ranked[] {
+  const seen = ids.map((id) => {
+    const l = id.toLowerCase();
+    if (/sol/.test(l)) return { id, tag: 'agentic', why: 'flagship tuned for agentic work — terminal workflows, multi-step tool use · ~$4/$20', rank: 0 };
+    if (/codex/.test(l)) return { id, tag: 'coding', why: 'coding-specialised and cheaper than the flagship — the value pick for long builds', rank: 1 };
+    if (/5\.5/.test(l) && !/pro/.test(l)) return { id, tag: 'costly', why: 'previous flagship — ~$5/$30, more than Sol for less agentic focus', rank: 2 };
+    if (/terra/.test(l)) return { id, tag: 'balanced', why: 'balanced production tier — ~$2/$12', rank: 3 };
+    if (/luna/.test(l)) return { id, tag: 'cheap', why: 'cheap tier — ~$0.20/$1.20, fine for small or repetitive phases', rank: 4 };
+    if (/nano/.test(l)) return { id, tag: 'cheapest', why: 'cheapest tier — expect it to struggle on a real phase', rank: 5 };
+    if (/mini/.test(l)) return { id, tag: 'cheap', why: 'cheap tier — a phase that loops will still cost you', rank: 5 };
+    if (/pro/.test(l)) return { id, tag: 'very costly', why: '~$30/$180 — a runaway phase here is expensive', rank: 7 };
+    if (/gpt-4/.test(l)) return { id, tag: 'old', why: 'a generation behind — not what you want driving tools', rank: 9 };
+    return { id, tag: '', why: '', rank: 6 };
+  });
+  return seen.sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id));
+}

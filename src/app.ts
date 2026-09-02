@@ -41,7 +41,7 @@ import { appendTurn as appendTicketTurn } from './sprint/chat.js';
 import { addNote, markDone, markFailed, reapAbandoned } from './diff/comments.js';
 import { runLogPath } from './diff/runner.js';
 import { llmProvider } from './llm/select.js';
-import { showIndulgePicker, handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
+import { showIndulgePicker, showSubagentModelPicker, handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
 import { showDialog } from './dialog.js';
 import { startLlmStatusPoll, findOwnPlace } from './llm-status.js';
 import { startUpdateWatch, checkForUpdate } from './updater.js';
@@ -584,17 +584,10 @@ async function handleInput(text: string): Promise<void> {
        */
       case '/set-subagent-model': {
         const arg = text.slice('/set-subagent-model'.length).trim();
-        const cur = (getConfigString('subagentProvider') ?? '').trim();
-        if (!arg) {
-          const curModel = (getConfigString('subagentModel') ?? '').trim();
-          addMessage('system', cur
-            ? `Subagents run on ${cur}${curModel ? ` · ${curModel}` : ' · that provider\'s default model'}.`
-              + ' `/set-subagent-model off` to make them follow the agent again.'
-            : 'Subagents follow the agent\'s own provider. Set one with:'
-              + ' `/set-subagent-model openai gpt-5.5` — the arbiter stays on your card, the children'
-              + ' get the hosted model. Providers: openai, ollama, resource, direct.');
-          return;
-        }
+        // No argument = the DIALOG. The decision is two questions deep — which provider, then which
+        // TIER — and the tier is the whole cost of a build. A syntax nobody remembers is how a setting
+        // that matters goes unset. The model list in it comes from the API, not from a table here.
+        if (!arg) { await showSubagentModelPicker(); return; }
         if (arg.toLowerCase() === 'off') {
           setConfigValue('subagentProvider', '');
           setConfigValue('subagentModel', '');
