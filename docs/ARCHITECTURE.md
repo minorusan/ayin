@@ -1748,6 +1748,67 @@ wrote. Two of the five things asked for were gone, and neither the plan nor the 
 because the validator checks the SHAPE of steps and the presence of deliverables, never whether the job
 was understood.
 
+#### What planning LOOKS LIKE while it runs (`plan/present.ts`)
+
+Planning is the longest silent stretch in a turn, and it used to report itself as eight flat lines that
+each opened with the same two words — `Plan mode: …` — carrying absolute paths that shared a long
+identical head, and naming the phases only by filename. Everything was there; none of it was legible.
+
+It renders as **cards** now: a headline message, then one card per stage rolling in as that stage
+finishes, using the same `formatToolCallForChat` / `formatToolResultForChat` pair a tool call uses. Not
+a new widget — plan stages inherit the indent, spacing, ✓ footer, elapsed time and `Ctrl+O` browsing for
+free, and the transcript stops being two visual languages competing.
+
+```
+PLAN — 3 features in 101 chars, planning before executing
+🧭 plan:triage · 3 features in 101 chars
+🧩 plan:survey · node (greenfield) → node
+🏗️ plan:scaffold · 10 files created · committed 6800c7e
+     .git · package.json · tsconfig.json · .gitignore
+     README.md · src/server.ts · src/index.ts · public/index.html
+     test/server.test.ts · .naamah/README.md
+📚 plan:grounding · node reference material, not recall
+🗂️ plan:phases · 1 phase · 1 step · 3 model calls · validated
+     1 ▸ Verify existing project setup and configuration  ·  1 step
+         ✓ done when: the project is correctly initialised with a working build, test and serve
+         · ayin-plan-20260902-114416-1-verify-existing-project-setup.md
+📄 plan:write · ayin-plan-20260902-114416.md
+```
+
+Paths are relative to the project, because the absolute prefix is identical on every one. The phase
+card shows each stage's TITLE and its **done when** — the line that lets someone stop a bad breakdown
+before it runs for ten minutes — with the filename last and least. `PREVIEW_LINES` gives `plan:phases`
+a 20-line budget for exactly that reason; the default of 2 is right for a tool result nobody reads
+unless it failed, and wrong for the thing the operator is being asked to judge.
+
+#### A new project is a repository with a baseline commit (`executors/plan/git.ts`)
+
+`git init` lived in `greenfield`, so only python, node and unity got one; a project of any other type —
+and `base` serves `*` — was scaffolded into a plain directory. It now lives in a module both can reach
+(base cannot import greenfield, which imports base), and the scaffold **commits what it wrote**. Without
+that, the operator's first `git diff` mixes the deterministic scaffold in with the agent's changes and
+there is nothing to revert *to*.
+
+The guards are the part that matters, because this runs unattended and `git` is not undoable by a tool:
+
+| refuses when | because |
+|---|---|
+| `.git` belongs to an **enclosing** repository | scaffolding inside a checkout would commit that checkout's staged work under our message |
+| the repository **has any history** | it is somebody's, and its index may hold work they staged deliberately |
+| the directory is **not empty** and not `greenfield` | a directory with files in it is somebody's; an empty one is not yet anybody's |
+
+`base` keys on **emptiness**, not on `ctx.greenfield` — greenfield additionally requires the request to
+have NAMED a known type, so *"make me a brand new haskell thing here"* in an empty folder detects as
+`unknown`, lands on base, and used to get no repository at all.
+
+**And QA asks whether it worked.** `repoBaselineFact` is a probe in the base QA executor: no repo is
+"nothing to check", an enclosing repo is not this project's to judge, and a repo with **zero commits**
+is a failure — hard on a greenfield turn, because there the scaffold promised one and a `git init` that
+succeeded while the commit silently failed (no identity configured, a read-only `.git`) is
+indistinguishable from success unless something asks. `check-plan.mjs` asserts all four scaffold paths
+land exactly one commit with nothing uncommitted behind them, and both guards: an unversioned directory
+is not turned into a repo, and a repo with history keeps its commit AND its staged file.
+
 #### The planner is told what the scaffold already did — worth 40 minutes
 
 `executor.scaffold()` runs BEFORE the plan is drafted and writes the whole working project in about two

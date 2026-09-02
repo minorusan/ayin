@@ -2144,7 +2144,11 @@ console.log('\nexecutors: detection + registry');
   // The deterministic README scaffold: created when missing, never overwritten.
   const bp = await import(`file://${join(DIST, 'executors/plan/base/index.js')}`);
   const made = bp.basePlanExecutor.scaffold({ root: empty, targetDir: '', type: 'unknown', evidence: 'test', greenfield: true });
-  ok(made.length === 1 && existsSync(join(empty, 'README.md')), 'scaffold creates README.md in a project that has none');
+  ok(existsSync(join(empty, 'README.md')), 'scaffold creates README.md in a project that has none');
+  // The base executor initialises the repository too now — it used to be greenfield's alone, so a
+  // project of an unclaimed type got a bare directory with nothing to diff the agent's work against.
+  ok(existsSync(join(empty, '.git')), 'and the repository, which base did not used to create');
+  ok(made.every((p) => existsSync(p)), 'and every path it reports is one that exists', made.join(' '));
   writeFileSync(join(empty, 'README.md'), '# mine\n');
   const again = bp.basePlanExecutor.scaffold({ root: empty, targetDir: '', type: 'unknown', evidence: 'test', greenfield: false });
   ok(again.length === 0 && readFileSync(join(empty, 'README.md'), 'utf8') === '# mine\n', 'scaffold NEVER overwrites an existing README — it is the operator\'s');

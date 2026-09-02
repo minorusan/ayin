@@ -339,6 +339,60 @@ inEmptyDir((dir) => {
   }
 
   /**
+   * A NEW PROJECT IS A REPOSITORY WITH A BASELINE COMMIT — and, far more importantly, an OLD one is
+   * left alone.
+   *
+   * The happy path is one line to check. The two guards are the whole reason this is gated: `git` is
+   * not undoable by a tool, and this runs unattended. Committing somebody's deliberately-staged work
+   * under our message, or turning their unversioned working directory into a repository they did not
+   * ask for, are the two ways this feature could do real harm.
+   */
+  console.log('\n— a new project gets a repository and a first commit; an old one is untouched —');
+  const gitIn = (dir, args) => {
+    try {
+      return execFileSync('git', args, { cwd: dir, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch { return null; }
+  };
+  for (const [request, label] of [
+    ['set up an empty python project for a CLI', 'python'],
+    ['create a new typescript project, a small library with tests', 'node'],
+    ['start a unity project for a 2d platformer prototype', 'unity'],
+    // The one `base` serves: an empty directory whose type the request never named.
+    ['make me a brand new haskell thing here', 'unknown → base'],
+  ]) {
+    inEmptyDir((d) => {
+      const c = detectProject(d, request);
+      planExecutorFor(c).scaffold(c);
+      const commits = Number(gitIn(d, ['rev-list', '--count', 'HEAD']) ?? 0);
+      const dirty = (gitIn(d, ['status', '--porcelain']) ?? 'x').split('\n').filter(Boolean).length;
+      ok(commits === 1, `${label}: the scaffold leaves exactly one commit`, `got ${commits}`);
+      ok(dirty === 0, `${label}: and nothing uncommitted behind it`, `${dirty} dirty path(s)`);
+    });
+  }
+  inEmptyDir((d) => {
+    // GUARD: an existing, unversioned working directory is somebody's. Not ours to `git init`.
+    writeFileSync(join(d, 'mine.txt'), 'my work, not in git on purpose\n');
+    const c = detectProject(d, 'add a feature to this');
+    planExecutorFor(c).scaffold(c);
+    ok(!existsSync(join(d, '.git')), 'an existing unversioned directory is NOT turned into a repository');
+  });
+  inEmptyDir((d) => {
+    // GUARD: a repository with history keeps it, and keeps whatever the operator staged.
+    gitIn(d, ['init', '-q']);
+    writeFileSync(join(d, 'keep.txt'), 'theirs\n');
+    gitIn(d, ['-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 'their first commit']);
+    writeFileSync(join(d, 'staged.txt'), 'staged deliberately\n');
+    gitIn(d, ['add', 'staged.txt']);
+    const c = detectProject(d, 'set up an empty python project for a CLI');
+    planExecutorFor(c).scaffold(c);
+    ok(Number(gitIn(d, ['rev-list', '--count', 'HEAD']) ?? 0) === 1,
+      'a repository with history gains NO commit from the scaffold');
+    ok(gitIn(d, ['log', '-1', '--pretty=%s']) === 'their first commit', 'and the commit it has is still theirs');
+    ok((gitIn(d, ['diff', '--cached', '--name-only']) ?? '').split('\n').includes('staged.txt'),
+      'and what the operator staged is still staged, not swept into a commit');
+  });
+
+  /**
    * AND A DESIGN FILE CANNOT BREAK THE BUILD.
    *
    * A sketch is `declare class X { … }` in one global scope, deliberately not a module. Compiled as

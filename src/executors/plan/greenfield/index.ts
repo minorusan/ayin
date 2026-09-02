@@ -43,6 +43,7 @@ import { projectRoot } from '../../../qa/probes.js';
 import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext, ProjectType } from '../../types.js';
 import { basePlanExecutor, ensureReadme } from '../base/index.js';
 import { existingBranchFiles, writeBranchFiles } from './files.js';
+import { commitScaffold, ensureGitRepo } from '../git.js';
 
 const greenfieldPrompts = prompts.register('greenfield', packagePath('prompts', 'greenfield')).bundle;
 
@@ -199,37 +200,6 @@ function rootEntries(root: string): string[] {
   }
 }
 
-/**
- * `git init` when `root` is not already inside a repository. Returns the path it created.
- *
- * The guard is `projectRoot()`, not `existsSync('.git')`: a new folder made inside an existing
- * repository has no `.git` of its own, and initialising one there produces a nested repository whose
- * contents the outer repo silently stops tracking. `git rev-parse --show-toplevel` is the only thing
- * that knows the difference, and it already ships here.
- *
- * Never throws: git may not be installed and the directory may be read-only, and neither is a reason to
- * lose the plan. The failure is logged rather than swallowed — a scaffold step that quietly did nothing
- * is the kind of thing nobody notices until the history they wanted is not there.
- */
-export function ensureGitRepo(root: string): string[] {
-  const dotGit = join(root, '.git');
-  if (existsSync(dotGit)) return [];
-  const enclosing = projectRoot(root);
-  if (enclosing !== root) {
-    log('INFO', 'scaffold_git_init_skipped', { root, enclosing });
-    return [];
-  }
-  try {
-    execFileSync('git', ['init'], { cwd: root, timeout: 10_000, stdio: ['ignore', 'ignore', 'ignore'] });
-    log('INFO', 'scaffold_git_init', { root });
-    return [dotGit];
-  } catch (err) {
-    log('WARN', 'scaffold_git_init_failed', { root, error: err instanceof Error ? err.message : String(err) });
-    return [];
-  }
-}
-
-/** The branch for this context, or null when the project already exists and `base` should serve it. */
 function branchFor(ctx: ProjectContext): BranchFacts | null {
   if (!ctx.greenfield) return null;
   const branch = BRANCH_OF[ctx.type];
@@ -350,6 +320,9 @@ export const greenfieldPlanExecutor: PlanExecutor = {
     // stands and the generic stub can never overwrite a specific page.
     made.push(...(ctx.greenfield ? writeBranchFiles(branch, dir) : []));
     made.push(...ensureReadme(dir));
+    // LAST, so the commit contains everything above it. Only ever into a repo we just created with no
+    // history of its own — see `git.ts` for the guards.
+    if (ctx.greenfield) made.push(...commitScaffold(dir, FACTS[branch].label));
     return made;
   },
 };

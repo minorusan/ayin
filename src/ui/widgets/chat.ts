@@ -646,7 +646,21 @@ export function toItalic(text: string): string {
 }
 
 /** How many output lines each tool's chat card shows before truncating. */
-const PREVIEW_LINES: Record<string, number> = { bash: 6, grep: 6, read_file: 4 };
+/**
+ * How many body lines a card may show before it is summarised. Two by default, which is right for a
+ * tool result nobody reads unless it failed.
+ *
+ * THE PLAN STAGES ARE THE EXCEPTION, and they are here rather than defaulted because the whole point
+ * of showing them as cards is that the operator can READ them while the turn runs. `plan:phases` gets
+ * the most: the phase breakdown, with each stage's "done when", is what lets someone stop a bad plan
+ * before it spends ten minutes proving itself — three lines per phase, up to six phases, and the
+ * phase count is capped at six by `planPhases.txt` itself.
+ */
+const PREVIEW_LINES: Record<string, number> = {
+  bash: 6, grep: 6, read_file: 4,
+  'plan:triage': 3, 'plan:survey': 2, 'plan:scaffold': 6, 'plan:research': 4,
+  'plan:grounding': 2, 'plan:phases': 20, 'plan:steps': 20, 'plan:write': 2,
+};
 const DEFAULT_PREVIEW_LINES = 2;
 /** Lines of a write_file diff worth showing before the card starts drowning the transcript. */
 const DIFF_PREVIEW_LINES = 34;

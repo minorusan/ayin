@@ -79,7 +79,9 @@ import { recentPrompts } from '../session-record.js';
 import { exploreExecute } from '../tools/explore/index.js';
 import { webSearch } from '../tools/web-search.js';
 import { pushActivity, setActivityDetail } from '../activity.js';
-import { addMessage, setAgentStatus } from '../ui.js';
+import { addMessage, setAgentStatus, formatToolCallForChat, formatToolResultForChat } from '../ui.js';
+import { PLAN_CARD, PLAN_GLYPH, columns, phaseBody, shortPath } from './present.js';
+import { repoState } from '../executors/plan/git.js';
 import { detectProject, describeProject } from '../executors/detect.js';
 import { planExecutorFor } from '../executors/registry.js';
 import type { ProjectContext } from '../executors/types.js';
@@ -433,10 +435,30 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       return { kind: 'grounding', path: '', body: grounding, features: t.features, deliverables: renderDeliverableList(executor.deliverables(ctx)) };
     }
 
+    // The project the paths below are relative to. Resolved once — every card uses it.
+    const projectRoot = ctx.targetDir ? join(ctx.root, ctx.targetDir) : ctx.root;
+
+    /**
+     * One stage of the pass, as a card that rolls in when the stage finishes.
+     *
+     * The same two-message shape `agent.ts` uses for a tool call — header, then result — so plan
+     * stages sit in the transcript exactly like the tool cards around them instead of being a second
+     * visual language the reader has to learn.
+     */
+    const startedAt = Date.now();
+    let lastCard = startedAt;
+    const card = (id: string, glyph: string, headline: string, body = ''): void => {
+      const now = Date.now();
+      addMessage('tool', formatToolCallForChat(id, headline, glyph));
+      addMessage('tool', formatToolResultForChat(id, body, now - lastCard));
+      lastCard = now;
+    };
+
     const why = explicit
       ? 'you asked for it'
-      : `${t.features.length || 'multiple'} feature(s) detected in ${userInput.length} chars`;
-    addMessage('system', `Plan mode: ${why} — planning before executing.${!explicit && t.reason ? ` ${t.reason}` : ''}`);
+      : `${t.features.length || 'multiple'} feature${t.features.length === 1 ? '' : 's'} in ${userInput.length} chars`;
+    addMessage('system', `PLAN — ${why}, planning before executing`);
+    card(PLAN_CARD.triage, PLAN_GLYPH.triage, why, !explicit && t.reason ? t.reason : '');
 
     setActivityDetail('surveying the project');
     // `ctx` and `executor` were resolved above the triage veto — the veto needs to consult whether
@@ -445,25 +467,36 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     // `isArduinoProject(root)`, which needs an `.ino` to already exist, so the catalog was withheld
     // exactly when it mattered most. See executors/detect.ts.
     log('INFO', 'plan_executor', { project: describeProject(ctx), executor: executor.config.id });
-    addMessage('system', `Plan mode: ${describeProject(ctx)} → "${executor.config.id}" plan executor.`);
+    card(PLAN_CARD.survey, PLAN_GLYPH.survey, `${describeProject(ctx)} → ${executor.config.id}`);
 
     // Deterministic scaffolding, BEFORE the plan is written: a project that must have a README gets
     // one now, as a file operation, instead of being a criterion the agent is asked to remember and
     // the QA gate spends a whole fix pass enforcing.
     const scaffolded = executor.scaffold(ctx);
-    if (scaffolded.length) addMessage('system', `Plan mode: created ${scaffolded.join(', ')}`);
+    if (scaffolded.length) {
+      // The commit is read back from the repository rather than reported by `scaffold()`, whose
+      // contract is PATHS — see `commitScaffold`. Reading it also means the card states what is
+      // actually true on disk, not what a function said it did.
+      const repo = repoState(projectRoot);
+      const committed = repo.own && repo.commits > 0 ? ` · committed ${repo.head}` : '';
+      card(PLAN_CARD.scaffold, PLAN_GLYPH.scaffold,
+        `${scaffolded.length} file${scaffolded.length === 1 ? '' : 's'} created${committed}`,
+        columns(scaffolded.map((f) => shortPath(f, projectRoot))));
+    }
 
     // Mandatory, before exploration: if somebody else's API is involved, get its CURRENT shape from
     // the web. Everything downstream (the plan, then the implementation) is written against this
     // instead of against recall.
     const apiResearch = await researchApis(t.apis);
-    if (t.apis.length) addMessage('system', `Plan mode: third-party API research — ${t.apis.join(', ')}`);
+    if (t.apis.length) card(PLAN_CARD.research, PLAN_GLYPH.research, `${t.apis.length} third-party API(s)`, t.apis.join('\n'));
     const findings = await exploreContext(userInput, t.features, ctx);
 
     // `grounding` was resolved above the triage veto (it decides whether a veto applies at all). The
     // user's own words were the retrieval query — see `PlanExecutor.grounding`; retrieving rather than
     // dumping the corpus is what keeps the Arduino catalog block at ~2.5k characters instead of 10.2k.
-    if (grounding) addMessage('system', `Plan mode: grounding the plan in the ${ctx.type} reference material rather than recall.`);
+    if (grounding) {
+      card(PLAN_CARD.grounding, PLAN_GLYPH.grounding, `${ctx.type} reference material, not recall`);
+    }
 
     const deliverables = executor.deliverables(ctx);
 
@@ -574,19 +607,31 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       contextBody = planBody;
       const steps = phased.phases.reduce((n, p) => n + (p.plan?.steps.length ?? 0), 0);
       const unplanned = phased.phases.filter((p) => !p.plan).length;
-      addMessage('system', `Plan mode: ${phased.phases.length} phase(s), ${steps} step(s) across them, `
-        + `${phased.attempts} model call(s)${phased.unresolved.length ? `, ${phased.unresolved.length} unresolved` : ', validated'}`
-        // A phase with no sub-plan is a hole in the job, and the index says so in writing — but the
-        // operator reads this line, not the file, while the turn is still running.
-        + `${unplanned ? `. ${unplanned} PHASE(S) COULD NOT BE PLANNED — their deliverables are unclaimed` : ''}.`);
-      for (const f of phaseFiles.filter(Boolean)) addMessage('system', `  ${f}`);
+      // THE PHASE BREAKDOWN IS THE CARD WORTH READING. It used to be a count followed by a column of
+      // absolute filenames — the two facts that matter, what each stage IS and how it will be judged,
+      // were in neither. A phase with no sub-plan is a hole in the job and says so here, because the
+      // operator reads this while the turn is still running and the index file only afterwards.
+      const headline = `${phased.phases.length} phase${phased.phases.length === 1 ? '' : 's'} · ${steps} step${steps === 1 ? '' : 's'}`
+        + ` · ${phased.attempts} model call${phased.attempts === 1 ? '' : 's'}`
+        + `${phased.unresolved.length ? ` · ⚠️ ${phased.unresolved.length} unresolved` : ' · validated'}`
+        + `${unplanned ? ` · ⚠️ ${unplanned} unplanned` : ''}`;
+      card(PLAN_CARD.phases, PLAN_GLYPH.phases, headline, phaseBody(
+        phased.phases.map((p, i) => ({
+          id: p.phase.id,
+          title: p.phase.title,
+          goal: p.phase.goal,
+          steps: p.plan ? p.plan.steps.length : null,
+          file: phaseFiles[i] ?? '',
+        })),
+        projectRoot,
+      ));
     }
     writeFileSync(path, `${header}${planBody.trim()}\n`);
 
     // A run killed mid-plan should say WHICH plan it was working, not only that there was one.
     notePostmortemContext({ plan: path });
     log('INFO', 'plan_written', { path, chars: String(planBody.length), phases: String(phased?.phases.length ?? 0), explorations: String(findings.length), trigger: explicit ? 'explicit' : 'size' });
-    addMessage('system', `Plan written: ${path}`);
+    card(PLAN_CARD.write, PLAN_GLYPH.write, shortPath(path, projectRoot));
     return { kind: 'plan', path, body: contextBody.trim(), features: t.features, phaseCount: phased?.phases.length ?? 0 };
   } catch (err) {
     log('WARN', 'plan_failed', { error: err instanceof Error ? err.message : String(err) });

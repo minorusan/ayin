@@ -20,6 +20,7 @@ import { renderSurvey, surveyProject } from '../../../plan/survey.js';
 import { prompts, packagePath } from '../../../prompts-service.js';
 import { README_STUB_BANNER } from '../../deliverables.js';
 import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext } from '../../types.js';
+import { commitScaffold, ensureGitRepo, isEmptyProjectDir } from '../git.js';
 
 /** The `plan` namespace, shared with plan mode itself — same directory, materialized once. */
 const basePlanPrompts = prompts.register('plan', packagePath('prompts', 'plan')).bundle;
@@ -119,7 +120,28 @@ export const basePlanExecutor: PlanExecutor = {
     });
   },
 
+  /**
+   * EVERY new project is a repository whose first commit holds its first files — not only the three
+   * types `greenfield` serves.
+   *
+   * `git init` lived in the greenfield executor, so a project of any other type (and `base` serves
+   * `*`) was scaffolded into a plain directory: no repo, nothing to diff the agent's work against, and
+   * nothing to revert to. Moved to `../git.ts` because base cannot import greenfield — greenfield
+   * imports base.
+   *
+   * ONLY ON GREENFIELD. `base` is also selected for every established project of an unclaimed type,
+   * and running `git init` in somebody's existing tree — or committing their staged work under our
+   * message — is the worst thing in this function's reach. `ctx.greenfield` is false the moment the
+   * directory holds a project, and `git.ts` refuses again on its own terms: an enclosing repository,
+   * or any repository that already has history.
+   */
   scaffold(ctx: ProjectContext): string[] {
-    return ensureReadme(ctx.root);
+    // EMPTY, not merely `greenfield`. `ctx.greenfield` also requires the REQUEST to have named a known
+    // type, so "make me a brand new haskell thing here" in an empty folder detects as `unknown`, lands
+    // on this executor, and used to get no repository at all. Emptiness is the honest question here and
+    // also the safe one — see `isEmptyProjectDir`.
+    if (!ctx.greenfield && !isEmptyProjectDir(ctx.root)) return ensureReadme(ctx.root);
+    const made = [...ensureGitRepo(ctx.root), ...ensureReadme(ctx.root)];
+    return [...made, ...commitScaffold(ctx.root, ctx.type === 'unknown' ? 'new' : ctx.type)];
   },
 };

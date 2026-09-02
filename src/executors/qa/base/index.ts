@@ -14,6 +14,7 @@
 import type { ChangedFile } from '../../../qa/probes.js';
 import { readmeSubstance } from '../../deliverables.js';
 import { buildCheck } from '../buildcheck.js';
+import { repoBaselineFact } from '../../plan/git.js';
 import type { ExecutorConfig, PrepareResult, ProbeFact, ProjectContext, QaExecutor } from '../../types.js';
 
 const config: ExecutorConfig = {
@@ -38,6 +39,11 @@ export const baseQaExecutor: QaExecutor = {
     // `../buildcheck.ts` — absent toolchain is "not checked", never a failure.
     const built = buildCheck(ctx, files);
     if (built) facts.push(built);
+    // IS THERE A BASELINE. The scaffold initialises a repository and commits what it wrote, so that
+    // the operator can diff the agent's work against something. A `git init` that succeeded while the
+    // commit failed — no identity configured, a read-only `.git` — is indistinguishable from success
+    // unless somebody asks. See `../../plan/git.ts` for why this is hard only on a greenfield turn.
+    facts.push(repoBaselineFact(ctx));
     return facts;
   },
 
