@@ -170,6 +170,10 @@ export const KNOWN_CONFIG_KEYS = [
   // Which provider BUILDS a corpus, separately from the one the agent chats through. A build is
   // hours of reading source; a chat turn is seconds. One global choice makes one of them worse.
   'indulgeProvider', 'indulgeModel',
+  // What a SUBAGENT runs on, separately from the agent that arbitrates. Arbitrating reads reports and
+  // picks the next phase; a child writes the code. One global choice means paying flagship rates to
+  // arbitrate, or implementing on whatever happens to be resident. Empty = the child inherits.
+  'subagentProvider', 'subagentModel',
   // Only honoured when the operator sets it — the round budget is otherwise unlimited (agent.ts).
   'maxToolRounds',
   // `ayin launch`: the command that opens a terminal window, with {{SCRIPT}} for the launch script.

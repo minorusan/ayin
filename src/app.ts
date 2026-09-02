@@ -51,7 +51,7 @@ import { HEADLESS } from './ui.js';
 import { armPostmortem, markCleanExit } from './postmortem.js';
 import { loadRules } from './rules.js';
 import { runBang, cancelBang, bangRunning } from './bang.js';
-import { setConfigValue, resetPromptsToDefaults, promptDriftWarnings, KNOWN_CONFIG_KEYS } from './prompts.js';
+import { getConfigString, setConfigValue, resetPromptsToDefaults, promptDriftWarnings, KNOWN_CONFIG_KEYS } from './prompts.js';
 import { isCorpusInjection, isLogCoverage, isVerbose, setCorpusInjection, setLogCoverage, setVerbose } from './modes.js';
 import { clearPendingCorpus, corpusForPrompt, setPendingCorpus } from './indulge/inject.js';
 
@@ -567,6 +567,52 @@ async function handleInput(text: string): Promise<void> {
         setConfigValue('indulgeModel', model);
         addMessage('system', `indulge will build on ${provider.toLowerCase()}${model ? ` · ${model}` : ' · that provider\'s default model'}.`
           + ' The interactive agent is unchanged.');
+        return;
+      }
+      /**
+       * `/set-subagent-model` — what a SUBAGENT runs on, which is a different decision from `/model`.
+       *
+       * The arbiter reads reports and picks the next phase; a child writes the code. Those are not the
+       * same job and they do not want the same model. The card in the room arbitrates perfectly well
+       * and costs nothing per token; the implementation is the part worth paying a hosted model for.
+       * Before this a child inherited `process.env` wholesale, so the two were locked together — pay
+       * flagship rates to arbitrate, or implement on whatever happened to be resident.
+       *
+       * Stored rather than per-session, exactly as `/indulge-model` is: a subagent runs unattended,
+       * often from a headless parent in another terminal, and a setting that died with this session
+       * would silently not apply to the run it was set for.
+       */
+      case '/set-subagent-model': {
+        const arg = text.slice('/set-subagent-model'.length).trim();
+        const cur = (getConfigString('subagentProvider') ?? '').trim();
+        if (!arg) {
+          const curModel = (getConfigString('subagentModel') ?? '').trim();
+          addMessage('system', cur
+            ? `Subagents run on ${cur}${curModel ? ` · ${curModel}` : ' · that provider\'s default model'}.`
+              + ' `/set-subagent-model off` to make them follow the agent again.'
+            : 'Subagents follow the agent\'s own provider. Set one with:'
+              + ' `/set-subagent-model openai gpt-5.5` — the arbiter stays on your card, the children'
+              + ' get the hosted model. Providers: openai, ollama, resource, direct.');
+          return;
+        }
+        if (arg.toLowerCase() === 'off') {
+          setConfigValue('subagentProvider', '');
+          setConfigValue('subagentModel', '');
+          addMessage('system', 'Subagents follow the agent\'s provider again.');
+          return;
+        }
+        const [provider, ...rest] = arg.split(/\s+/);
+        const model = rest.join(' ').trim();
+        const known = ['openai', 'ollama', 'resource', 'direct'];
+        if (!known.includes(provider.toLowerCase())) {
+          addMessage('system', `Unknown provider "${provider}". One of: ${known.join(', ')}, or off.`);
+          return;
+        }
+        setConfigValue('subagentProvider', provider.toLowerCase());
+        setConfigValue('subagentModel', model);
+        addMessage('system', `Subagents will run on ${provider.toLowerCase()}${model ? ` · ${model}` : ' · that provider\'s default model'}.`
+          + ' This agent is unchanged — it keeps arbitrating on what it already uses.'
+          + (provider.toLowerCase() === 'openai' ? ' Every child now costs money per token.' : ''));
         return;
       }
       /**

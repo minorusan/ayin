@@ -62,6 +62,11 @@ export const HELP: HelpEntry[] = [
     tip: 'A build is hours of tokens and the TIER is the whole cost. /indulge-model picks it without touching the agent.',
   },
   {
+    name: '/set-subagent-model', kind: 'command', section: 'Code',
+    short: 'What a SUBAGENT runs on — a separate choice from /model · /set-subagent-model openai gpt-5.5 · off',
+    tip: 'Arbitrating and implementing are different jobs — keep the arbiter on your card, pay only for the children.',
+  },
+  {
     name: '/naamah', kind: 'command', section: 'Code',
     short: 'The DESIGN as a live page — click a type card to comment, and the agent changes the sketch · /naamah <dir>',
     tip: '/naamah is /diff one step earlier — review the design before the code exists.',

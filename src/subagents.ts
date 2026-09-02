@@ -37,6 +37,7 @@ import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { log } from './log.js';
 import { postmortemEnabled } from './postmortem.js';
+import { getConfigString } from './prompts.js';
 
 /** How deep we already are. `0` is the operator's own session; `1` is a subagent it spawned. */
 export function subagentDepth(): number {
@@ -336,6 +337,35 @@ export async function runSubagent(task: string, opts: SubagentOpts = {}): Promis
  * accumulated for `extractReport` and thrown away in the meantime. Forwarding it line by line as it
  * arrives costs nothing and turns the card into a window.
  */
+/**
+ * WHAT A CHILD RUNS ON — `/set-subagent-model`, and why it is a separate decision from `/model`.
+ *
+ * A child inherited `process.env` wholesale, so it ran on whatever the parent ran on. That is one
+ * choice for two different jobs: the arbiter reads reports and picks the next phase, which the local
+ * card does perfectly well and for free; a child writes the code, which is the part that is worth
+ * paying a hosted model for. Tying them together means either paying flagship rates to arbitrate or
+ * implementing on whatever happens to be resident.
+ *
+ * Empty by default: with nothing set, a child inherits exactly as before, and nobody acquires a bill by
+ * upgrading.
+ *
+ * STORED, NOT PER-SESSION, for the same reason `/indulge-model` is: a subagent runs unattended, often
+ * from a headless parent in another terminal, and a setting that died with the session would silently
+ * not apply to the run it was set for.
+ */
+export function subagentModelEnv(): Record<string, string> {
+  const provider = (getConfigString('subagentProvider') ?? '').trim().toLowerCase();
+  if (!provider) return {};
+  const model = (getConfigString('subagentModel') ?? '').trim();
+  const env: Record<string, string> = { AYIN_LLM_PROVIDER: provider };
+  // The model env is PER PROVIDER, because each provider reads its own. `direct` and `resource` have
+  // none — their model is the endpoint's or the preset's to decide, and inventing one here would be
+  // this process telling the resource layer what should be on a card it does not own.
+  if (model && provider === 'openai') env.AYIN_OPENAI_MODEL = model;
+  if (model && provider === 'ollama') env.AYIN_OLLAMA_MODEL = model;
+  return env;
+}
+
 export interface SubagentOpts {
   cwd?: string;
   plan?: string;
@@ -441,6 +471,9 @@ async function spawnSubagent(task: string, opts: SubagentOpts = {}): Promise<Sub
          * re-planning would spend the whole gate again to rediscover the phase it was given.
          */
         ...(opts.plan ? { AYIN_PLAN: '0' } : {}),
+        // What this child runs on, when the operator has said it differs from the parent. Applied last
+        // so it wins over anything inherited — that is the whole point of having said it.
+        ...subagentModelEnv(),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
