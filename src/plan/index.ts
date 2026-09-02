@@ -84,7 +84,8 @@ import { addMessage, setAgentStatus, formatToolCallForChat, formatToolResultForC
 import { PLAN_CARD, PLAN_GLYPH, columns, phaseBody, shortPath } from './present.js';
 import { repoState } from '../executors/plan/git.js';
 import { checkDeliverables } from '../executors/deliverables.js';
-import { detectProject, describeProject } from '../executors/detect.js';
+import { classifyProjectType } from '../executors/classify.js';
+import { detectProject, describeProject, isFreshDirectory } from '../executors/detect.js';
 import { planExecutorFor } from '../executors/registry.js';
 import type { ProjectContext } from '../executors/types.js';
 import { ensureToolRuntime } from '../tool-wiring.js';
@@ -380,7 +381,30 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     // the target is what turns "build a python site in testwebsite-2" into a greenfield context
     // pointed at that folder. Validated inside `detectProject`, which refuses anything that is not an
     // empty or absent single path segment.
-    const ctx = t.projectDir ? detectProject(process.cwd(), userInput, t.projectDir) : early;
+    let ctx = t.projectDir ? detectProject(process.cwd(), userInput, t.projectDir) : early;
+
+    /**
+     * THE REGEXES MISSED, AND THE DIRECTORY IS EMPTY — so ask, rather than fall to `base`.
+     *
+     * Measured on "Set me up a nodets project here!": no pattern matches `nodets` (`\bnode\b` does
+     * not, `\bts\b` does not, and `\bweb\b` does not match `website`), so the type came back
+     * `unknown`. That makes `greenfield` false, which took the base executor instead of node,
+     * scaffolded one README instead of a project, left nothing for the short-circuit to satisfy, and
+     * ran two `explore` calls over an empty directory — because the greenfield skip is keyed on the
+     * same flag. One unmatched word, and the entire turn went sideways silently.
+     *
+     * Patterns stay first because they are free and they catch the common phrasings. This is the last
+     * resort, and only where there is genuinely nothing on disk to read instead: one short call, on
+     * exactly the turn that creates a project, to answer the question the tree cannot.
+     */
+    if (ctx.type === 'unknown' && isFreshDirectory(ctx.root)) {
+      setActivityDetail('working out what kind of project this is');
+      const guessed = await classifyProjectType(userInput);
+      if (guessed) {
+        ctx = { ...ctx, type: guessed, evidence: 'worked out from your request', greenfield: true };
+        log('INFO', 'plan_type_classified', { type: guessed });
+      }
+    }
     const executor = planExecutorFor(ctx);
 
     // TRIAGE'S VETO IS ABOUT FEATURE COUNT, AND THAT IS NOT THE ONLY REASON TO PLAN.
@@ -560,7 +584,27 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     // TWO LEVELS: the stages of the job, then the steps of each stage. See `PlanPhase` — a flat step
     // list is written at one altitude and the model picks files, so "run it on a free port" and "send
     // me the link" got no step at all on a request that asked for both.
-    const phased = isActionablePlanEnabled() ? await buildPhasedPlan(planInput) : null;
+    /**
+     * PROGRESS WHILE THE PLAN IS WRITTEN. Three sub-plans are three long generations, and the operator
+     * used to watch 76 seconds of nothing before a single card appeared with all of it. The breakdown
+     * is announced as soon as it exists — so you know how many documents are coming — and then each
+     * one as it is finished, so you know which it is on.
+     */
+    const phased = isActionablePlanEnabled()
+      ? await buildPhasedPlan(planInput, (p) => {
+        if (p.done === 0) {
+          card(PLAN_CARD.phases, PLAN_GLYPH.phases,
+            `${p.total} phase${p.total === 1 ? '' : 's'} — writing a plan for each`,
+            p.phases.map((ph) => `${ph.id} ▸ ${ph.title}`).join('\n'));
+          return;
+        }
+        const ph = p.latest?.phase;
+        const steps = p.latest?.plan?.steps.length;
+        card(PLAN_CARD.steps, PLAN_GLYPH.steps,
+          `${p.done}/${p.total} · ${ph?.title ?? 'phase'} · ${steps === undefined ? '⚠️ could not be planned' : `${steps} step${steps === 1 ? '' : 's'}`}`,
+          ph?.goal?.trim() ? `✓ done when: ${ph.goal.trim()}` : '');
+      })
+      : null;
     // The phase layer failing must not cost the plan: a flat plan is what ayin produced before it
     // existed, and it is still better than no plan.
     const actionable = phased ? null : (isActionablePlanEnabled() ? await buildActionablePlan(planInput) : null);

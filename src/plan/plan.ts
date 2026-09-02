@@ -648,7 +648,21 @@ export function renderPhaseIndex(phases: PhasePlan[], files: string[], unresolve
  * Returns null when the decomposition itself failed, so the caller falls back to a flat plan rather
  * than to nothing.
  */
-export async function buildPhasedPlan(input: ActionablePlanInput): Promise<PhasedPlan | null> {
+/**
+ * Progress while the phases are written. `done: 0` is the breakdown itself, announced before the first
+ * sub-plan; every call after that is one finished phase.
+ */
+export interface PhaseProgress {
+  done: number;
+  total: number;
+  phases: PlanPhase[];
+  latest?: PhasePlan;
+}
+
+export async function buildPhasedPlan(
+  input: ActionablePlanInput,
+  onPhase?: (p: PhaseProgress) => void,
+): Promise<PhasedPlan | null> {
   const deliverables = input.executor.deliverables(input.ctx);
   const required = deliverables.filter((d) => d.required).map((d) => d.patterns[0]);
   // The project root, so an already-satisfied deliverable is marked as such. Without it the planner is
@@ -694,12 +708,23 @@ export async function buildPhasedPlan(input: ActionablePlanInput): Promise<Phase
     errors = validatePhases(phases, required);
   }
 
+  /**
+   * THE BREAKDOWN IS ANNOUNCED BEFORE THE SUB-PLANS ARE WRITTEN, and each one as it lands.
+   *
+   * Writing three sub-plans is three long generations — the operator watched 76 seconds of nothing and
+   * then one card appeared with everything in it. `setActivityDetail` moved the status line, which is
+   * one line that the next thing overwrites; what was missing was the transcript saying *which
+   * document it is on*. `onPhase` reports the shape first, then each phase as it is finished.
+   */
+  onPhase?.({ done: 0, total: phases.length, phases });
+
   const planned: PhasePlan[] = [];
   for (const phase of phases) {
     setActivityDetail(`planning phase ${phase.id}/${phases.length} — ${phase.title}`);
     const plan = await buildActionablePlan({ ...input, phase });
     if (plan) attempts += plan.attempts;
     planned.push({ phase, plan });
+    onPhase?.({ done: planned.length, total: phases.length, phases, latest: { phase, plan } });
   }
 
   log('INFO', 'plan_phases', {

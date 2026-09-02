@@ -168,6 +168,12 @@ const REQUEST_PATTERNS: Array<[ProjectType, RegExp]> = [
    * was scaffolded with a README and nothing else — so "an empty TS endpoint for notes" produced a
    * file that could not run in a directory that was not a project.
    */
+  // `nodets` IS ONE WORD, and it cost an entire turn. `\bnode\b` does not match it, `\bts\b` does not
+  // match it, and nothing else did either — so "set me up a nodets project" detected as `unknown`,
+  // took the base executor, scaffolded one README, and then explored an empty directory twice because
+  // the greenfield skip is keyed on the same flag. People compress a stack into one token constantly;
+  // these are the compressions, and `classify.ts` is the answer for the ones nobody thought of.
+  ['node', /\b(node[\s._-]?ts|ts[\s._-]?node|node[\s._-]?typescript)\b/i],
   ['node', /\b(typescript|node(\.?js)?|express|fastify|nest(js)?|npm|pnpm)\b/i],
   ['node', /\b(rest|http|api|web)\b[\s\S]{0,60}\b(endpoint|route|server|service|handler)\b/i],
   ['node', /\b(endpoint|route)\b[\s\S]{0,60}\b(ts|typescript|js|javascript)\b/i],

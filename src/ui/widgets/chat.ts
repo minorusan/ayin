@@ -353,6 +353,25 @@ export class ChatLog {
     return label;
   }
 
+  /**
+   * Replace the last TOOL message in place — how a card shows progress while its tool is still running.
+   *
+   * Returns false when the last tool message is a card HEADER rather than a body, so the caller knows
+   * it has to add one first. Without that distinction a live update would overwrite the
+   * `<glyph> subagent · task=…` header line the reader needs to know which card they are looking at.
+   * (Named, not pasted: `check-glyphs.mjs` scans this file and cannot tell a comment from a literal.)
+   */
+  updateLastTool(content: string): boolean {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      if (this.messages[i].role !== 'tool') continue;
+      if (startsToolCard(this.messages[i].content)) return false;
+      this.messages[i].content = content;
+      this.redraw();
+      return true;
+    }
+    return false;
+  }
+
   updateLastAssistant(content: string): void {
     for (let i = this.messages.length - 1; i >= 0; i--) {
       if (this.messages[i].role === 'assistant') {

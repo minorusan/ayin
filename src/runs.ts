@@ -45,6 +45,16 @@ export interface RunSnapshot {
   ms: number;
   /** The tool's most recent narration, or '' before it has said anything. */
   note: string;
+  /**
+   * EVERY note so far, `[+Δs]`-prefixed, newest last — what the tool's card paints while it runs.
+   *
+   * `note` alone is one line that the next one overwrites, and it was being painted into the status
+   * bar at `.slice(0, 60)`. On a subagent that ran 133 seconds the operator saw
+   * `subagent 133s — The previous str_replace failed due to content mismatch. I h…` and nothing else:
+   * the interesting half cut off, the previous four minutes gone. The history is what makes a long run
+   * followable, so the snapshot carries it.
+   */
+  notes: string;
 }
 
 export interface RunOutcome {
@@ -82,7 +92,7 @@ const TICK_MS = 1000;
 
 function snapshots(): RunSnapshot[] {
   const now = Date.now();
-  return [...live.values()].map((r) => ({ ...r.snap, ms: now - r.snap.startedAt }));
+  return [...live.values()].map((r) => ({ ...r.snap, ms: now - r.snap.startedAt, notes: r.notes }));
 }
 
 function publish(): void {
@@ -163,7 +173,7 @@ export function startRun(
 
   const startedAt = Date.now();
   const entry: LiveRun = {
-    snap: { id, tool, params, startedAt, ms: 0, note: '' },
+    snap: { id, tool, params, startedAt, ms: 0, note: '', notes: '' },
     ctl,
     notes: '',
   };

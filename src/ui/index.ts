@@ -150,6 +150,19 @@ export function updateLastAssistant(content: string): void {
   chat.updateLastAssistant(content);
 }
 
+/**
+ * Paint a running tool's progress INTO ITS CARD, replacing the previous progress body.
+ *
+ * Adds a body the first time and replaces it after, so a five-minute tool accumulates a readable
+ * history under its header instead of overwriting one truncated line in the status bar. Headless has
+ * no card to update, and a progress line there would interleave with the output a script is parsing.
+ */
+export function updateToolProgress(content: string): void {
+  if (HEADLESS) return;
+  if (!chat.updateLastTool(content)) chat.add('tool', content);
+  render();
+}
+
 export function clearChat(): void {
   chat.clear();
 }

@@ -25,7 +25,7 @@ import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution, modelTools } from './tools.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
 import { getGoal } from './goal.js';
-import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLESS, formatToolResultForChat, formatToolCallForChat, escapeBlessedTags, toItalic } from './ui.js';
+import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLESS, formatToolResultForChat, formatToolCallForChat, escapeBlessedTags, toItalic, updateToolProgress } from './ui.js';
 import { theme } from './ui/theme.js';
 import { log } from './log.js';
 import { hasFinalMarker, stripFinalMarker } from './final-marker.js';
@@ -78,6 +78,26 @@ const queuedUserInputs: string[] = [];
  * SUBSCRIBED ONCE, not per turn: a subscription taken at the top of `runAgentTurn` would have to be
  * released at every one of its returns, and the one that gets missed leaks a listener per turn.
  */
+/**
+ * A running tool's notes as a card body: the gutter rule the finished card uses, then the elapsed
+ * clock on its own line so the reader can see it is still moving between notes.
+ *
+ * The tail, not the head — the last thing a tool said is the thing worth reading, and a 40-note run
+ * would otherwise push its own present off the top of the card.
+ */
+const PROGRESS_LINES = 8;
+function renderRunProgress(notes: string, secs: number): string {
+  const all = notes.split('\n').filter(Boolean);
+  const shown = all.slice(-PROGRESS_LINES);
+  const hidden = all.length - shown.length;
+  const body = shown.map((l) => `{${theme.faint}-fg}│{/} {${theme.diffCtx}-fg}${escapeBlessedTags(l)}{/}`);
+  if (hidden > 0) {
+    body.unshift(`{${theme.faint}-fg}│{/} {${theme.dim}-fg}… ${hidden} earlier note(s){/}`);
+  }
+  body.push(`{${theme.faint}-fg}╰{/} {${theme.dim}-fg}${secs}s · still running{/}`);
+  return body.join('\n');
+}
+
 let runTickerInstalled = false;
 function installRunTicker(): void {
   if (runTickerInstalled) return;
@@ -88,6 +108,25 @@ function installRunTicker(): void {
       const secs = Math.round(r.ms / 1000);
       return `${r.tool} ${secs}s${r.note ? ` — ${r.note.slice(0, 60)}` : ' — still running'}`;
     }).join(' · '));
+
+    /**
+     * AND INTO THE CARD, WHOLE.
+     *
+     * The status bar is one line that the next tick overwrites, clipped at 60 characters — on a
+     * subagent that ran 133 seconds the operator saw `subagent 133s — The previous str_replace failed
+     * due to content mismatch. I h…` and nothing else: half a sentence, and the four minutes before it
+     * gone. A long tool needs its history somewhere that keeps it, which is its own card.
+     *
+     * ONE RUN ONLY. `updateLastTool` replaces the last tool body, so with several live at once their
+     * progress would overwrite each other under whichever header came last. Parallel subagents are off
+     * by default; when they are on, the status line above still shows all of them and the cards stay
+     * quiet rather than lying about which tool is speaking.
+     */
+    if (runs.length !== 1) return;
+    const only = runs[0];
+    if (!only.notes) return;
+    const secs = Math.round(only.ms / 1000);
+    updateToolProgress(renderRunProgress(only.notes, secs));
   });
 }
 
