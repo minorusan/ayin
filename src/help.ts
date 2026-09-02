@@ -54,6 +54,11 @@ export const HELP: HelpEntry[] = [
     short: 'Every read_file also shows what indulge already answered about that file, and what the attributors know about it.',
     tip: 'When ayin reads a file it also gets what indulge learned about it — build a corpus and it stops guessing.',
   },
+  {
+    name: 'reading files', kind: 'trick', section: 'Tricks',
+    short: 'ayin batch-reads: read_files takes a SET of paths in one call and splits one budget between them by length. The cap is the model\'s context, not a fixed 800 lines.',
+    tip: 'ayin reads files in batches — one call for the module, the type it imports and the test that pins it, sized to the model\'s context.',
+  },
 
   // ── working on code ────────────────────────────────────────────────────────────
   {

@@ -1,5 +1,5 @@
 import type { Tool } from '../base.js';
-import { READ_MAX_LINES, resolveAgainstCwd, suggestSimilarPaths } from '../lib.js';
+import { readCap, resolveAgainstCwd, suggestSimilarPaths } from '../lib.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, extname, join, relative, sep } from 'node:path';
 import { addPendingImage, isImagePath, preprocessImage } from '../../image.js';
@@ -83,7 +83,10 @@ export const tool: Tool = {
       // A read with no limit used to return the WHOLE file, which the window then cut at 16 KB with no
       // notice — the model believing it had read a 5000-line file it had seen a fifth of.
       const askedLimit = parseInt(params.limit || '0', 10);
-      const size = Number.isFinite(askedLimit) && askedLimit > 0 ? Math.min(askedLimit, READ_MAX_LINES) : READ_MAX_LINES;
+      // THE CAP IS THE CONTEXT, asked per call — see `lib.ts#readCap`. A fixed 800 protected a 16k
+      // window and, on a hosted million-token one, turned every real file into three calls.
+      const maxLines = await readCap();
+      const size = Number.isFinite(askedLimit) && askedLimit > 0 ? Math.min(askedLimit, maxLines) : maxLines;
       /**
        * `tail` — the LAST n lines, which is what a log is ever read for.
        *
@@ -93,7 +96,7 @@ export const tool: Tool = {
        * two calls and a subtraction to answer "show me the end".
        */
       const askedTail = parseInt(params.tail || '0', 10);
-      const tailN = Number.isFinite(askedTail) && askedTail > 0 ? Math.min(askedTail, READ_MAX_LINES) : 0;
+      const tailN = Number.isFinite(askedTail) && askedTail > 0 ? Math.min(askedTail, maxLines) : 0;
       const rawAround = parseInt(params.around || '0', 10);
       const askedAround = Number.isFinite(rawAround) && rawAround > 0 ? rawAround : 0;
 
@@ -160,7 +163,7 @@ export const tool: Tool = {
        */
       const covered = [...(seen?.spans ?? []), span] as [number, number][];
       const unread = unreadRanges(covered, total);
-      const capNote = askedLimit && askedLimit > READ_MAX_LINES ? `; limit is capped at ${READ_MAX_LINES} lines/call` : '';
+      const capNote = askedLimit && askedLimit > maxLines ? `; limit is capped at ${maxLines} lines/call by the served model's context` : '';
       const footer = unread.length
         ? `\n(unread: ${describeSpans(unread)} — ${spanLines(unread)} of ${total} lines. Read again with no `
           + `offset to slide there, or around=<line> to centre on one${capNote})`

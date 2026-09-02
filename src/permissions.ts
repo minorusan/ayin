@@ -59,6 +59,7 @@ interface WhitelistEntry {
 // Default safe tools — read-only, no side effects
 const whitelist: WhitelistEntry[] = [
   { tool: 'read_file' },
+  { tool: 'read_files' },
   { tool: 'grep' },
   { tool: 'find_files' },
   { tool: 'web_search' },

@@ -61,9 +61,48 @@ export const NEVER_RECURSE = [
   'Library', 'Temp', 'obj', 'Logs', // Unity: imported artifacts and build scratch
   'dist', 'build', 'out', '.next', 'coverage', '__pycache__', '.venv', 'vendor',
 ];
-/** Lines per read_file call. Without a cap the tool returned the whole file and the 16 KB window cut
- *  it silently — the one failure mode that makes a model confidently wrong about code it 'read'. */
+/**
+ * Lines per read call, when the served model's context is unknown. The FLOOR, not the rule.
+ *
+ * Without a cap the tool returned the whole file and the 16 KB window cut it silently — the one
+ * failure mode that makes a model confidently wrong about code it 'read'. But a fixed 800 is the wrong
+ * cap the other way round the moment the model has room: on a hosted million-token window it turned
+ * every real file into three calls and two rounds of arithmetic, to protect a window that was never
+ * close to full. See `readCap()`.
+ */
 export const READ_MAX_LINES = 800;
+
+/**
+ * THE CONTEXT IS THE CAP. What a read may return, in lines, from what the served model actually has.
+ *
+ * ONE DOOR, ASKED AT CALL TIME. The window changes with `/model`, with an `AYIN_OLLAMA_CTX`, with a
+ * provider swap — so nothing here is cached and no tool keeps its own copy of the number. Every reader
+ * (`read_file`, `read_files`) asks this, which is what makes them agree.
+ *
+ * TOKENS TO LINES AT 8:1, deliberately pessimistic. Real source runs nearer 12–15 tokens per line, so
+ * this over-estimates what a read costs and lands the budget comfortably inside the window rather than
+ * on its edge — the failure being protected against is a prompt that no longer fits, and being wrong
+ * in that direction costs an extra call while being wrong in the other costs the turn.
+ *
+ * A QUARTER OF THE WINDOW, because a read is one message in a conversation that also holds the system
+ * prompt, the plan, the ledger and everything read before it. A tool free to fill the whole context
+ * would leave nothing to think with.
+ *
+ * `activeContextTokens()` returns 0 when the provider does not publish one, and 0 means UNKNOWN — the
+ * floor applies rather than a guess, the same rule `tokens.ts` states about the meter.
+ */
+export async function readCap(): Promise<number> {
+  try {
+    // Lazy for the reason `read_file` states about `llm/select`: the provider runtime reaches the tool
+    // registry back, and a module-scope edge half-initializes whichever side loads first.
+    const { activeContextTokens } = await import('../llm/manager.js');
+    const ctx = activeContextTokens();
+    if (!ctx || ctx <= 0) return READ_MAX_LINES;
+    return Math.max(READ_MAX_LINES, Math.floor(ctx / 4 / 8));
+  } catch {
+    return READ_MAX_LINES;
+  }
+}
 
 /**
  * Tool arguments arrive from the model as STRINGS, so `ignore_case="false"` is a non-empty string and

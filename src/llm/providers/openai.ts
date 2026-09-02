@@ -153,6 +153,36 @@ let defaultIsGuess = true;
  * The cost is real and worth stating: with `reasoning_effort: 'none'` these tiers do no reasoning
  * before answering. `gpt-5.5` is the tier that takes tools WITH reasoning intact on this endpoint.
  */
+/**
+ * THE CONTEXT WINDOW, MEASURED — because the API does not publish one and everything downstream needs it.
+ *
+ * `/v1/models` returns no context length, so this was the one fact about a hosted model that nothing
+ * could answer: `activeContextTokens()` returned 0, the token meter rendered unknown, and every reader
+ * fell back to a cap sized for a 16k self-hosted window. On a lineup this large that is not caution, it
+ * is three calls to read one file.
+ *
+ * MEASURED AGAINST THE LIVE API, 2026-09-02, not taken from documentation: a 4.5 MB prompt (~1.1M
+ * tokens) to `gpt-5.6-luna` was accepted with no error, and `max_completion_tokens: 99999999` was
+ * refused with *"This model supports at most 128000 completion tokens"*. So the input window is at
+ * least ~1M and the output cap is 128k.
+ *
+ * THE NUMBER HERE IS THE MEASURED FLOOR, not a guess at the ceiling. Everything that reads it is
+ * budgeting, and budgeting against a window known to be at least this large is safe in the direction
+ * that matters; claiming a ceiling nobody verified is not.
+ *
+ * ZERO FOR ANYTHING UNRECOGNISED, and zero means UNKNOWN — never a default. `tokens.ts` argues this at
+ * length: a meter that reported a window belonging to no model was consulted and wrong, which is worse
+ * than a meter that says it does not know.
+ */
+const CONTEXT_TOKENS: Array<[RegExp, number]> = [
+  [/^gpt-5\.6(-|$)/i, 1_000_000],
+];
+
+function contextTokensFor(m: string): number {
+  for (const [re, n] of CONTEXT_TOKENS) if (re.test(m)) return n;
+  return 0;
+}
+
 const EFFORT_NONE_SEED = /^gpt-5\.6(-|$)/i;
 const effortNone = new Set<string>();
 
@@ -365,7 +395,8 @@ export function createOpenAiProvider(): LlmProvider {
       try {
         // A status poll must never wait the generate timeout, so the probe overrides it per request.
         await client(key).models.list({ timeout: PROBE_TIMEOUT_MS, maxRetries: 0 });
-        return { ok: true, model: model() };
+        const m = model();
+        return { ok: true, model: m, ...(contextTokensFor(m) ? { contextTokens: contextTokensFor(m) } : {}) };
       } catch {
         return { ok: false, model: null };
       }

@@ -45,7 +45,7 @@ const POLLABLE = new Set(['status']);
  * divergence shows up as a stale cache pointing at line numbers that moved. The explore cache imports it.
  */
 export const TREE_SAFE = new Set([
-  'read_file', 'grep', 'find_files', 'list_dir', 'explore', 'corpus_search', 'docs_search',
+  'read_file', 'read_files', 'grep', 'find_files', 'list_dir', 'explore', 'corpus_search', 'docs_search',
   'prefab_inspect', 'animator_inspect', 'ayin_help', 'status', 'jira', 'jira_ticket', 'sentry',
   'slack', 'web_search', 'load_tools', 'test_connectors',
 ]);
@@ -69,7 +69,7 @@ export const TREE_SAFE = new Set([
  * Repeating those is not free, so they keep the ladder.
  */
 const REPEATABLE_READS = new Set([
-  'read_file', 'grep', 'find_files', 'list_dir', 'explore', 'corpus_search', 'docs_search',
+  'read_file', 'read_files', 'grep', 'find_files', 'list_dir', 'explore', 'corpus_search', 'docs_search',
   'prefab_inspect', 'animator_inspect', 'jira_ticket', 'ayin_help',
 ]);
 

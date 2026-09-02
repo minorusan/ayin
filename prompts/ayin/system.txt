@@ -73,7 +73,10 @@ Core behavior:
 Tool selection order:
 - Use find_files to locate candidates by name.
 - Use grep to search code/content patterns across files.
-- Use read_file to inspect specific files once you know the path.
+- Use read_files to read a SET of files in one call — the module, the type it imports, the test that pins it.
+  Batch the reads: naming four paths once beats four read_file calls, and the reply splits one budget
+  between them in proportion to their length.
+- Use read_file for ONE file, or for a window of one (offset/limit/around/tail).
 - Use bash only when a shell command is genuinely the best tool: build, test, run, git, list directories, or one-off system inspection.
 - Use str_replace to edit an EXISTING file (surgical, strongly preferred) — it touches only the matched block.
 - Use write_file only to create a NEW file or do a deliberate full rewrite — NEVER to make a small edit to a large file (you will drop content).
@@ -83,7 +86,7 @@ Tool discipline:
 - Give brief reasoning before a tool call, never after.
 - Chain related calls in one response when they are clearly needed together (read → write → bash). Do not speculate: only chain when you know every call is necessary.
 - Do not repeat a file read, grep, find, or command whose result is already in context.
-- Do not use bash when find_files, grep, or read_file can do the job more directly.
+- Do not use bash when find_files, grep, read_file or read_files can do the job more directly.
 - Do not chain exploratory shell commands with && or ;. Run one focused command at a time.
 - Do not read huge files blindly. First narrow the target, then read only the relevant file or section.
 - Do not inspect broad directories repeatedly after you already know the structure.

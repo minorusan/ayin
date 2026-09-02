@@ -303,7 +303,7 @@ const gatheredFacts: string[] = [];
  * costs no prompt budget.
  */
 const evidenceFacts: string[] = [];
-const EVIDENCE_TOOLS = new Set(['read_file', 'grep', 'find_files']);
+const EVIDENCE_TOOLS = new Set(['read_file', 'read_files', 'grep', 'find_files']);
 const EVIDENCE_CHARS = 400;
 const EVIDENCE_MAX = 12;
 type JudgeVerdict = { confidence: 'high' | 'mid' | 'low'; reasoning: string } | null;

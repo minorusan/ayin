@@ -5247,6 +5247,57 @@ in a `finally`, TERM then KILL, because nodemon spawns the real server as a gran
 pid alone would orphan a listening process that owns the port for the rest of the session. Measured
 across boot, crash, never-listens and absent-toolchain runs: no leaked processes.
 
+## Reading: the context is the cap, and reads come in batches (`read_files`)
+
+**The 800-line cap was a constant that belonged to one context size.** It exists for a real reason —
+without a cap the tool returned the whole file and the 16 KB window cut it silently, which is the one
+failure mode that makes a model confidently wrong about code it "read". But it was also the wrong cap
+in the other direction the moment the model had room: on a hosted million-token window it turned
+`agent.ts` into four calls and a subtraction. Counted across this repo, 9 of 278 source files were over
+it, and reading just those whole cost **22 `read_file` calls where it now costs 9**.
+
+So `lib.ts#readCap()` is the one door. It asks `activeContextTokens()` per call — never cached, because
+the answer changes with `/model` — and spends **a quarter of the window at eight tokens per line**. The
+ratio is deliberately pessimistic (real source is nearer 12–15 tokens/line) and the quarter is because a
+read is one message beside the system prompt, the plan and the ledger: a tool free to fill the context
+leaves nothing to think with. `READ_MAX_LINES` survives as the FLOOR, applied when the provider
+publishes no window — 0 means unknown, never a guess.
+
+**Which meant the OpenAI provider had to publish one.** `/v1/models` returns no context length, so
+`activeContextTokens()` was 0 for every hosted model and the token meter rendered unknown. Measured
+against the live API rather than taken from documentation: a 4.5 MB prompt (~1.1M tokens) to
+`gpt-5.6-luna` was accepted with no error, and `max_completion_tokens: 99999999` was refused with *"this
+model supports at most 128000 completion tokens"*. The table records 1,000,000 as a **measured floor**,
+not a guess at the ceiling — everything downstream is budgeting, and budgeting against a window known to
+be at least that large is safe in the direction that matters.
+
+    self-hosted 16k, or unknown        800 lines
+    gpt-5.6-luna, 1,000,000         31,250 lines
+
+**`read_files` is the batch door, and the system prompt names it first.** Orientation reads come in
+sets — the module, the type it imports, the test that pins it — and one per call is one LLM round per
+file, by the end of which the first file has been compressed out of the window it was read into. So the
+tool takes up to 12 paths and the *set* shares one `readCap()` budget.
+
+The split is **proportional to length with a floor**: every file is guaranteed 40 lines so nothing comes
+back as a title and three lines, then the remainder is handed out in proportion to what each file still
+NEEDS, repeatedly, so a satisfied file leaves the pool and the long file absorbs what the short ones did
+not use. The first version re-split against total size and *assigned* the result, so round two replaced
+a 333-line share with a 40-line floor and left 240 of 400 budgeted lines unspent — the biggest file came
+back smaller than the smallest. Measured on four files of this repo, and the reason the allocator
+accumulates rather than overwrites.
+
+`snapEnd` may overshoot a share by up to `BOUNDARY_SLACK` to avoid ending mid-construct, so the
+overshoot is **charged to what remains** and a later file gets less; otherwise the header read
+"318 of 300", which is a contradiction the reader has to resolve.
+
+It deliberately does not do three things `read_file` does, each of which would be a second copy to
+drift: no image attachment (an image goes to the NEXT llm call — a bulk read would attach ten to one
+request), no corpus injection (one block per file is the payload again, on a call whose purpose is to
+fit several files in one budget), and no sliding window or `around` (a set read is orientation; the
+window is the follow-up, and the follow-up tool already exists). The read guard is armed **per file with
+the range actually returned** — a clipped file must not license an edit in the part that never came back.
+
 ## `--full`, and why a mistyped flag now fails (`src/full-mode.ts`)
 
 `ayin --full` turns on the three switches an operator most often wants together — the boot debug
