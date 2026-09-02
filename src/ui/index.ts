@@ -23,7 +23,7 @@ import { HEADLESS, THINKING_MODE } from './headless.js';
 import { screen, render } from './screen.js';
 import { registerStack, relayout } from './layout.js';
 import { installKeyRouter, type GlobalKeyHandler } from './keys.js';
-import { ChatLog, formatToolResultForChat, formatToolCallForChat, formatGateCardForChat, formatShellForChat, escapeBlessedTags, stripBlessedTags, toItalic, type MessageRole } from './widgets/chat.js';
+import { ChatLog, formatToolResultForChat, formatToolCallForChat, formatGateCardForChat, formatShellForChat, escapeBlessedTags, stripBlessedTags, toItalic, toggleToolFold, type MessageRole } from './widgets/chat.js';
 import { InputBar } from './widgets/input.js';
 import { CmdHints, registerCommand, type SlashCommand } from './widgets/hints.js';
 import { StatusBar, type StatusState } from './widgets/status.js';
@@ -161,6 +161,19 @@ export function updateToolProgress(content: string): void {
   if (HEADLESS) return;
   if (!chat.updateLastTool(content)) chat.add('tool', content);
   render();
+}
+
+/**
+ * Ctrl+F — fold every tool card to five lines, or let them back out to their own budgets.
+ *
+ * The redraw is the point: folding is computed while painting, so the whole transcript answers the
+ * keypress, not just the next card. `render()` because a key handler is outside the widget's own
+ * redraw path.
+ */
+export function toggleToolOutputFold(): boolean {
+  const on = toggleToolFold();
+  if (!HEADLESS) { chat.redraw(); render(); }
+  return on;
 }
 
 export function clearChat(): void {

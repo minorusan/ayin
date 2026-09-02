@@ -525,7 +525,7 @@ export class ChatLog {
         // card from the tail of the current one — separating on every tool message would split cards
         // down the middle. The ▸ header is the card boundary: blank before it, nothing before a result.
         if (startsToolCard(msg.content)) lines.push('');
-        for (const raw of msg.content.split('\n')) {
+        for (const raw of foldToolCard(msg.content).split('\n')) {
           for (const line of wrapPre(raw, usableCols() - TOOL_INDENT.length)) {
             lines.push(`${TOOL_INDENT}${line}`);
           }
@@ -710,7 +710,71 @@ function omissionNote(hiddenLines: number, hiddenChars: number): string {
   const what = hiddenLines > 0
     ? `… ${hiddenLines} more line${hiddenLines === 1 ? '' : 's'} (${formatBytes(hiddenChars)})`
     : `… ${formatBytes(hiddenChars)} more`;
-  return `{${theme.faint}-fg}│{/} {${theme.dim}-fg}${what} — full output kept, Ctrl+O to browse{/}`;
+  return `{${theme.faint}-fg}│{/} {${theme.dim}-fg}${what} — full output kept, Ctrl+O to browse · Ctrl+B to background{/}`;
+}
+
+/**
+ * FOLDING — the cap every tool card obeys until someone asks otherwise.
+ *
+ * A card's per-tool budget (`PREVIEW_LINES`) answers "how much of THIS tool is worth reading"; the fold
+ * answers a different question the operator asks with one key: "not now". So it is a second, blunter
+ * limit applied on top, and five lines is enough to see what a tool did without a card owning the
+ * screen — a 20-line plan card and a 34-line diff are what the transcript actually drowns in.
+ *
+ * IT FOLDS AT PAINT TIME, NOT AT FORMAT TIME. Cards are stored formatted, so a fold computed when the
+ * card was built could only ever apply to cards built AFTER the keypress — a toggle that leaves the
+ * transcript you are looking at untouched is the one thing it must not do. Folding here re-reads the
+ * card on every redraw, so Ctrl+F changes the whole scrollback at once, including cards from tools
+ * this file knows nothing about.
+ */
+const FOLD_LINES = 5;
+let toolFolded = true;
+
+/** Flip the fold. Returns the new state so the caller can say which way it went. */
+export function toggleToolFold(): boolean {
+  toolFolded = !toolFolded;
+  return toolFolded;
+}
+
+export function toolFoldEnabled(): boolean {
+  return toolFolded;
+}
+
+/**
+ * A card's own furniture, which the fold never counts and never hides: the call header, the ✓/✗
+ * footer, the omission note. Hiding the note would take the Ctrl+O hint with it — the fold would then
+ * be concealing output while removing the way to read it.
+ */
+function isCardFurniture(line: string): boolean {
+  if (startsToolCard(line)) return true;
+  const bare = stripBlessedTags(line).trim();
+  if (bare === '' || bare.startsWith('╰') || /^│?\s*…/.test(bare)) return true;
+  // A `!command` card is the other card shape in the transcript (`formatShellForChat`): its header is
+  // `$ cmd` and its footer a bare ✓/✗ with no `╰`. Folding those away would hide the exit status —
+  // the one line of a shell card nobody can do without.
+  return bare.startsWith('$ ') || bare.startsWith('✓') || bare.startsWith('✗');
+}
+
+function foldMarker(hidden: number): string {
+  const n = `${hidden} line${hidden === 1 ? '' : 's'}`;
+  return `{${theme.faint}-fg}│{/} {${theme.dim}-fg}… ${n} folded — Ctrl+F to unfold{/}`;
+}
+
+/** One card, capped. Returns it unchanged when folding is off or it already fits. */
+function foldToolCard(content: string): string {
+  if (!toolFolded) return content;
+  const out: string[] = [];
+  let shown = 0;
+  let hidden = 0;
+  let markerAt = -1;
+  for (const line of content.split('\n')) {
+    if (isCardFurniture(line)) { out.push(line); continue; }
+    if (shown < FOLD_LINES) { out.push(line); shown++; continue; }
+    if (markerAt < 0) markerAt = out.length;
+    hidden++;
+  }
+  if (hidden > 0) out.splice(markerAt, 0, foldMarker(hidden));
+  return out.join('\n');
 }
 
 /**

@@ -21,7 +21,7 @@ import {
   screen, addMessage, setStatus, setAgentStatus, clearChat, noteCallCost,
   onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
   showAlert, setStickyAlert, clearStickyAlert, registerCommand, formatShellForChat, clearInput,
-  lastAssistantMessage, onAssistantMessage,
+  lastAssistantMessage, onAssistantMessage, toggleToolOutputFold,
 } from './ui.js';
 import { isTranscribing, startTranscript, stopTranscript, transcriptPath, transcriptSize, flush as flushTranscript } from './transcript.js';
 import { executeWipe, humanBytes, planWipe, wipeOverview, type WipeScope } from './wipe.js';
@@ -328,6 +328,19 @@ if (!HEADLESS) {
     if (key === 'C-o') {
       if (!artifactsOverlay && !summaryOverlay) showArtifactsOverlay();
       else if (artifactsOverlay) closeArtifactsOverlay();
+    }
+    /**
+     * Ctrl+F — fold the tool cards to five lines, or let them out again.
+     *
+     * A DISPLAY KEY, and it says so: the fold hides nothing that was not already saved, so the notice
+     * names Ctrl+O rather than implying output was lost. Announced on both edges because the state is
+     * invisible on a transcript with no long card in view.
+     */
+    if (key === 'C-f') {
+      const on = toggleToolOutputFold();
+      addMessage('system', on
+        ? 'Tool cards folded to 5 lines — Ctrl+F to unfold, Ctrl+O for the full output.'
+        : 'Tool cards unfolded — each shows its own preview budget. Ctrl+F to fold.');
     }
     if (key === 'C-s') {
       if (!summaryOverlay && !artifactsOverlay) showSummaryOverlay();

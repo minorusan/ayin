@@ -213,6 +213,11 @@ export const HELP: HelpEntry[] = [
     tip: 'Ctrl+B hands the turn back without cancelling anything — the run finishes alone and reports itself.',
   },
   {
+    name: 'Ctrl+F', kind: 'key', section: 'Keys',
+    short: 'Fold every tool card to 5 lines, or unfold them — on by default; Ctrl+O still has the full output',
+    tip: 'Ctrl+F folds the tool cards to 5 lines. Nothing is lost — Ctrl+O still opens the full output.',
+  },
+  {
     name: 'Ctrl+O', kind: 'key', section: 'Keys',
     short: 'Browse full tool output — every tool run is saved; ←/→ to page through them',
     tip: 'Ctrl+O opens the FULL output of every tool call, not the summary in the chat. ←/→ to page.',

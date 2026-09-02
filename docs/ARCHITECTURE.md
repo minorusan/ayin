@@ -4682,10 +4682,18 @@ tree knows about the internals). Design rules:
   line of 400 KB and passes any `lines.length` check. The `write_file` diff card had no cap at all —
   rewriting a 3000-line file painted a 3000-line card and buried everything above it — and now shows
   head + tail with an honest middle marker, since a diff's end matters as often as its beginning. Every
-  omission states how many lines and bytes were withheld and that the full output is still an artifact
-  (`Ctrl+O`), so truncation never reads as data loss. The display budget is deliberately a *different*
+  omission states how many lines and bytes were withheld, and that the full output is still an artifact
+  (`Ctrl+O`) or can be handed to the background (`Ctrl+B`), so truncation never reads as data loss. The display budget is deliberately a *different*
   number from the model's own clip in `agent.ts`: "how much should a human read" and "how much should
   the model see" are different questions.
+- **Folding, on by default** (`Ctrl+F`, `widgets/chat.ts`). A second, blunter cap on top of the per-tool
+  budget: five body lines per card, whatever the tool. The budget answers "how much of this tool is worth
+  reading"; the fold answers the question an operator asks with one key — "not now" — which is why a
+  20-line plan card and a 34-line diff obey it too. It is computed **while painting, not while formatting**,
+  so one keypress refolds the whole scrollback rather than only the cards built after it; the card's own
+  furniture (the `▸` header, the `╰` footer, the omission note, and a `!command` card's `$`/✓ lines) is
+  never folded, because hiding the note would take the `Ctrl+O` hint away with the output it points at.
+  Unfolding restores each card's budget, not the full output — that is still `Ctrl+O`.
 - **Gate cards** (`formatGateCardForChat`). A QA verdict and plan mode's notices use the same gutter and
   footer as a tool result, coloured by outcome. They were plain `system` lines, which gave a three-pass
   review of the user's work the same visual weight as `[Loop detected]` noise. The gate emits a
