@@ -44,7 +44,7 @@ import { log } from '../log.js';
 import { getConfig } from '../prompts.js';
 import { prompts as promptsService, packagePath } from '../prompts-service.js';
 import { setActivityDetail } from '../activity.js';
-import { patternMatchesPath } from '../executors/deliverables.js';
+import { checkDeliverables, patternMatchesPath } from '../executors/deliverables.js';
 import type { Deliverable, PlanExecutor, ProjectContext } from '../executors/types.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -664,13 +664,30 @@ export async function buildPhasedPlan(
   onPhase?: (p: PhaseProgress) => void,
 ): Promise<PhasedPlan | null> {
   const deliverables = input.executor.deliverables(input.ctx);
-  const required = deliverables.filter((d) => d.required).map((d) => d.patterns[0]);
-  // The project root, so an already-satisfied deliverable is marked as such. Without it the planner is
-  // told every required pattern must be produced by some phase, and dutifully invents a phase to
-  // produce files the scaffold wrote before planning started.
-  const rendered = renderDeliverableList(deliverables, input.ctx.targetDir
-    ? join(input.ctx.root, input.ctx.targetDir)
-    : input.ctx.root);
+  const projectRoot = input.ctx.targetDir ? join(input.ctx.root, input.ctx.targetDir) : input.ctx.root;
+
+  /**
+   * A DELIVERABLE ALREADY ON DISK OWES NO PHASE — not even one that verifies it.
+   *
+   * `validatePhases` refuses a breakdown where a required pattern is assigned to no phase, so every
+   * satisfied deliverable was still forcing a phase into existence to hold it. Measured on
+   * "a nodets endpoint that serves a website with ping pong game": phase 1 of 5 came back as
+   * *"Verify existing project state and structure — 6 steps"*, six steps re-checking a scaffold that is
+   * deterministic and had already been committed. That phase ran first, and the turn hit its limit at
+   * phase 2 with the game unwritten.
+   *
+   * Marking them ALREADY ON DISK in the rendered list was not enough, because the VALIDATOR still
+   * demanded an owner. Dropping them from `required` is what actually removes the obligation: the
+   * planner is asked to account for the work that is left, and the scaffold's own output is simply not
+   * part of that. Anything genuinely missing is still required, still validated, still repaired.
+   */
+  const satisfied = new Set(
+    checkDeliverables(projectRoot, deliverables).filter((s) => s.satisfied).map((s) => s.deliverable.patterns[0]),
+  );
+  const required = deliverables
+    .filter((d) => d.required && !satisfied.has(d.patterns[0]))
+    .map((d) => d.patterns[0]);
+  const rendered = renderDeliverableList(deliverables, projectRoot);
   const started = Date.now();
   let attempts = 0;
 
