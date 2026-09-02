@@ -42,7 +42,7 @@ import { prompts, packagePath } from '../../../prompts-service.js';
 import { projectRoot } from '../../../qa/probes.js';
 import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext, ProjectType } from '../../types.js';
 import { basePlanExecutor, ensureReadme } from '../base/index.js';
-import { writeBranchFiles } from './files.js';
+import { existingBranchFiles, writeBranchFiles } from './files.js';
 
 const greenfieldPrompts = prompts.register('greenfield', packagePath('prompts', 'greenfield')).bundle;
 
@@ -255,10 +255,31 @@ export const greenfieldPlanExecutor: PlanExecutor = {
     if (!facts) return basePlanExecutor.survey(ctx);
     const dir = targetRoot(ctx);
     const entries = rootEntries(dir);
+    /**
+     * THE SURVEY IS TAKEN AFTER `scaffold()`, SO IT MUST NOT SAY THE DISK IS EMPTY.
+     *
+     * It used to open with "NO SOURCE IS ON DISK YET. This plan CREATES a project" and close with "the
+     * earliest steps create the directory layout and the manifest" — measured in `plan/index.ts`, both
+     * are read AFTER the scaffold has written the whole working project. The planner did as it was
+     * told: four phases to initialise, implement, test and document a project that already installed,
+     * tested 4/4, typechecked, built and served a page. Forty minutes of subagents re-doing two
+     * seconds of deterministic work, and the run never finished.
+     */
+    const already = existingBranchFiles(BRANCH_OF[ctx.type]!, dir);
     return greenfieldPrompts.get('survey', {
       ROOT: dir,
       LABEL: facts.label,
       DETECTED_FROM: ctx.evidence,
+      SCAFFOLD_STATE: already.length
+        ? `THE PROJECT ALREADY EXISTS. ayin scaffolded it deterministically before this plan was `
+          + `written, and it is known good: it installs, builds and its test suite passes as it stands. `
+          + `These files are DONE — do not plan to create, rewrite or "initialise" any of them:\n`
+          + `${already.map((f: string) => `  ${f}`).join('\n')}\n\n`
+          + `Plan only what the request asks for BEYOND this. If the request is fully satisfied by what `
+          + `is listed above, say so in a single phase that verifies it rather than inventing work.`
+        : `NO SOURCE IS ON DISK YET. This plan CREATES a ${facts.label} project; detected from `
+          + `${ctx.evidence}. There is no existing code to extend and no survey finding to react to — `
+          + `do not describe any. The earliest steps create the directory layout and the manifest.`,
       // The one instruction the model cannot derive: the agent's cwd is NOT the project directory, so
       // every path it writes has to carry the prefix. Stated as the paths themselves, not as a rule.
       PATH_RULE: ctx.targetDir

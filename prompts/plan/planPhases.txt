@@ -24,6 +24,11 @@ PROJECT SURVEY (measured, not guessed):
 REQUIRED DELIVERABLES — every one MUST be assigned to exactly one phase, by exact pattern:
 {{DELIVERABLES}}
 
+A deliverable marked ALREADY ON DISK is finished. Assign it to the phase that VERIFIES it, and never
+write a phase whose job is to create, initialise or rewrite it. When every deliverable is already on
+disk, the whole job is one verification phase — say that instead of inventing stages for work that has
+been done.
+
 Answer with one JSON object and nothing else:
 
 {"phases":[{"id":1,"title":"","goal":"","deliverables":["pyproject.toml"],"dependsOn":[]}]}

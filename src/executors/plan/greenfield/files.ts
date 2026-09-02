@@ -562,6 +562,16 @@ export function branchFiles(branch: Branch, dir: string): Record<string, string>
   };
 }
 
+/**
+ * Which of a branch's files are already on disk — what the survey must report as DONE.
+ *
+ * Answered from the same table that writes them, so the survey cannot describe a project the scaffold
+ * did not produce, and cannot miss one it did.
+ */
+export function existingBranchFiles(branch: Branch, dir: string): string[] {
+  return Object.keys(branchFiles(branch, dir)).filter((rel) => existsSync(join(dir, rel)));
+}
+
 /** Write a branch's whole file set into `dir`, skipping anything already there. */
 export function writeBranchFiles(branch: Branch, dir: string): string[] {
   const made: string[] = [];

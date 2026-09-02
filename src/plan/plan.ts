@@ -46,6 +46,8 @@ import { prompts as promptsService, packagePath } from '../prompts-service.js';
 import { setActivityDetail } from '../activity.js';
 import { patternMatchesPath } from '../executors/deliverables.js';
 import type { Deliverable, PlanExecutor, ProjectContext } from '../executors/types.js';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 /** Idempotent — `index.ts` registers the same namespace, and registering twice returns one bundle. */
 const planPrompts = promptsService.register('plan', packagePath('prompts', 'plan')).bundle;
@@ -163,9 +165,17 @@ export function isActionablePlanEnabled(): boolean {
  * block and the actionable plan. It lived in `index.ts`, which cannot be imported from here without a
  * cycle, and a second copy is how two of the three would eventually disagree.
  */
-export function renderDeliverableList(deliverables: Deliverable[]): string {
+export function renderDeliverableList(deliverables: Deliverable[], root?: string): string {
   return deliverables
-    .map((d) => `- ${d.label} — \`${d.patterns[0]}\`${d.required ? ' (REQUIRED)' : ' (optional)'}: ${d.why}`)
+    .map((d) => {
+      // ALREADY THERE IS A FACT THE PLANNER NEEDS. Every required pattern must be assigned to exactly
+      // one phase, so a deliverable the scaffold already wrote still forces a phase to exist for it —
+      // and the planner, having no way to know it is done, writes a phase that CREATES it. That is how
+      // "initialise the project structure" became phase 1 of a project that already built and tested.
+      const done = root && !d.patterns[0].includes('*') && existsSync(join(root, d.patterns[0]));
+      const state = d.required ? ' (REQUIRED)' : ' (optional)';
+      return `- ${d.label} — \`${d.patterns[0]}\`${state}${done ? ' — ALREADY ON DISK, done' : ''}: ${d.why}`;
+    })
     .join('\n');
 }
 
@@ -641,7 +651,12 @@ export function renderPhaseIndex(phases: PhasePlan[], files: string[], unresolve
 export async function buildPhasedPlan(input: ActionablePlanInput): Promise<PhasedPlan | null> {
   const deliverables = input.executor.deliverables(input.ctx);
   const required = deliverables.filter((d) => d.required).map((d) => d.patterns[0]);
-  const rendered = renderDeliverableList(deliverables);
+  // The project root, so an already-satisfied deliverable is marked as such. Without it the planner is
+  // told every required pattern must be produced by some phase, and dutifully invents a phase to
+  // produce files the scaffold wrote before planning started.
+  const rendered = renderDeliverableList(deliverables, input.ctx.targetDir
+    ? join(input.ctx.root, input.ctx.targetDir)
+    : input.ctx.root);
   const started = Date.now();
   let attempts = 0;
 

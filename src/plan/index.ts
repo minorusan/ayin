@@ -128,6 +128,16 @@ export interface PlanResult {
    * carry "run arduino_diagram" as a step.
    */
   deliverables?: string;
+  /**
+   * How many phases the plan has — 0 when it was not decomposed.
+   *
+   * Carried because the turn's instructions have to state it. `planContext.txt` told the model "every
+   * phase is part of the job: stopping after the first delivers a project nobody asked for", which is
+   * right for five phases and is an instruction to OVERRUN when there is one. Measured: on a one-phase
+   * plan the arbiter finished phase 1, announced "I will proceed to the second phase of the plan", and
+   * invented both the phase and a plan file path for it.
+   */
+  phaseCount?: number;
 }
 
 /**
@@ -577,7 +587,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     notePostmortemContext({ plan: path });
     log('INFO', 'plan_written', { path, chars: String(planBody.length), phases: String(phased?.phases.length ?? 0), explorations: String(findings.length), trigger: explicit ? 'explicit' : 'size' });
     addMessage('system', `Plan written: ${path}`);
-    return { kind: 'plan', path, body: contextBody.trim(), features: t.features };
+    return { kind: 'plan', path, body: contextBody.trim(), features: t.features, phaseCount: phased?.phases.length ?? 0 };
   } catch (err) {
     log('WARN', 'plan_failed', { error: err instanceof Error ? err.message : String(err) });
     return null;
@@ -599,5 +609,19 @@ export function planContextBlock(plan: PlanResult): string {
       DELIVERABLES: plan.deliverables ?? '(none declared for this project type)',
     });
   }
-  return planPrompts.get('planContext', { PATH: plan.path, BODY: plan.body.slice(0, 12_000) });
+  const n = plan.phaseCount ?? 0;
+  return planPrompts.get('planContext', {
+    PATH: plan.path,
+    BODY: plan.body.slice(0, 12_000),
+    // The count, in words the model cannot round up. "Every phase is part of the job" was the only
+    // thing said about how many there were, and it reads as "there are more".
+    PHASE_RULE: n > 1
+      ? `This plan has EXACTLY ${n} phases, listed above with their plan files. Work all ${n}, in order. `
+        + 'Stopping after the first delivers a project nobody asked for.'
+      : n === 1
+        ? 'This plan has EXACTLY ONE phase, listed above with its plan file. Work it, then you are DONE — '
+          + 'there is no second phase. Do not invent one, and do not pass a `plan` path that is not '
+          + 'printed above.'
+        : 'This plan was not split into phases — work its steps yourself, in order.',
+  });
 }

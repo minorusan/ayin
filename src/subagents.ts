@@ -32,7 +32,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { log } from './log.js';
 import { postmortemEnabled } from './postmortem.js';
@@ -268,10 +269,48 @@ async function spawnSubagent(task: string, opts: { cwd?: string; plan?: string; 
       ms: Date.now() - started,
     };
   }
+  /**
+   * A PLAN PATH IS CHECKED BEFORE A CHILD IS SPAWNED TO DISCOVER IT IS WRONG.
+   *
+   * The path is copied by a model out of a system notice, and models do not copy paths reliably.
+   * Measured: plan mode wrote `/tmp/ayin-demo-fast/ayin-plan-…-1-verify-….md` and the arbiter passed
+   * `/tmp/ayin-demo-annex-fast/…` — a directory that never existed, with the FILENAME perfectly
+   * correct. That cost a full child run: 107 seconds and six tool calls to end at "the specified file
+   * does not exist", after which the parent invented a second phase with another fabricated path.
+   *
+   * So: recover, then refuse. The basename was right, so looking for it in the working directory
+   * fixes the whole class for free. Only a name that matches nothing is refused — and that refusal is
+   * immediate and lists the plan files that DO exist, which is the one thing the model needs and
+   * cannot see.
+   */
+  let planFile = opts.plan;
+  if (planFile && !existsSync(planFile)) {
+    const candidates = existsSync(cwd)
+      ? readdirSync(cwd).filter((f) => /^ayin-plan-.*\.md$/.test(f))
+      : [];
+    const byName = candidates.find((f) => f === basename(planFile as string));
+    if (byName) {
+      log('INFO', 'subagent_plan_recovered', { given: planFile, used: join(cwd, byName) });
+      planFile = join(cwd, byName);
+    } else {
+      log('WARN', 'subagent_bad_plan', { plan: planFile, candidates: String(candidates.length) });
+      return {
+        ok: false,
+        report: `No plan file at ${planFile}. `
+          + (candidates.length
+            ? `The plan files in ${cwd} are:\n${candidates.map((f) => `  ${f}`).join('\n')}\n`
+              + 'Pass one of those exactly as written, or omit `plan` and put the work in `task`.'
+            : `There are no plan files in ${cwd}. Omit \`plan\` and put the work in \`task\`.`),
+        toolCalls: 0,
+        ms: Date.now() - started,
+      };
+    }
+  }
+
   // The plan file is named, never inlined: reading it is the child's first act and costs one tool call,
   // where inlining it would put the whole phase into the PARENT's tool result as well.
-  const prompt = opts.plan
-    ? `${task}\n\nA plan for this task has already been written to ${opts.plan}. Read that file first and follow it.`
+  const prompt = planFile
+    ? `${task}\n\nA plan for this task has already been written to ${planFile}. Read that file first and follow it.`
     : task;
 
   log('INFO', 'subagent_start', { cwd, plan: opts.plan ?? '', chars: String(prompt.length) });

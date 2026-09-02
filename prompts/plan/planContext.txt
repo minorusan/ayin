@@ -10,8 +10,10 @@ When you work:
   order, call `subagent` with a task describing that phase's goal and `plan` set to its plan file — the
   subagent reads the file, does the whole stage, and reports back. Check its report before starting the
   next phase; a report with zero tool calls means nothing was built.
-- A phase is done when its "done when" line is true, not when its files exist. Every phase is part of
-  the job: stopping after the first delivers a project nobody asked for.
+- A phase is done when its "done when" line is true, not when its files exist.
+- {{PHASE_RULE}}
+- Pass a `plan` path exactly as printed above. A path you assembled yourself is a phase that does not
+  exist, and the call is refused.
 - If `subagent` is not among your tools, work the phases yourself, one at a time, reading each phase's
   plan file as you reach it.
 - Work the steps in order. If a step turns out to be wrong, say which one and why, then adapt — do not silently drift.
