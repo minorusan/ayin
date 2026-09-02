@@ -1641,6 +1641,50 @@ It opens with the child's own statistics — `subagent finished — 6 tool call(
 means it changed nothing**: it described the work rather than doing it, and a report of work never done
 reads exactly like a report of work done. The result says so in as many words when that happens.
 
+**That number was itself wrong for a while, in the direction that matters.** `extractReport` counted
+`^[tool] ▸`, and per-tool glyphs replaced `▸` with the tool's own icon — so children that had built an
+entire project reported `0 tool call(s)`, i.e. the one signal the operator is told to distrust, applied
+to work that had actually happened. It now matches the shape (`[tool] <glyph> <name>`, body lines
+excluded), and `check-tool-icons.mjs` asserts that matcher against every real icon: the TUI and the
+headless stdout are two renderers, so they need two matchers and both must be pinned.
+
+### A fabricated plan path costs 0ms, not a child run
+
+The `plan` parameter is a path the MODEL copied out of a system notice, and models do not copy paths
+reliably. Measured: plan mode wrote `/tmp/demo/ayin-plan-…-1-verify-….md` and the arbiter passed
+`/tmp/demo-annex/…` — a directory that never existed, with the **filename perfectly correct**. The child
+spawned, spent 107 seconds and six tool calls, and ended at *"the specified file does not exist"*; the
+parent then invented a second phase with another fabricated path.
+
+`spawnSubagent` now resolves before spawning: if the path is missing it looks for the same **basename**
+among the `ayin-plan-*.md` files in the working directory — which fixes that whole class for free, since
+the filename is the part the model gets right — and otherwise refuses immediately, listing the plan files
+that do exist. Seen working on the next run: `subagent FAILED — 0 tool call(s), 0s`. Same shape as the
+missing-`cwd` guard above it: a wrong path is answered by naming the right ones, never by a child that
+discovers it slowly.
+
+### Withheld is not unknown
+
+A withheld tool is dropped by `loadTools`, so it reaches the agent loop as "no such tool" — and
+answering that way is the same lie the `slashOnly` branch refuses to tell. It cost a whole run: the
+generic not-found hint matched `bash` against its own shell-command regex and replied *"There is no bash
+tool. To run shell commands use the bash tool."* The model complied **28 times** and created no files.
+
+`withheldRedirect()` now names the replacement for each withheld primitive — `subagent` for anything
+needing a shell, `perform_edit` for a write, `find_relevant_files` for a search — and tells a child
+refused `subagent` the real reason (its depth), not a flag nobody set. The shell hint additionally
+refuses to suggest a tool that is not present.
+
+The refusal stops the loop; **`prompts/ayin/arbiter.txt` stops the discovery**. `system.txt` carries a
+"Tool selection order" block that says *use bash*, *use grep*, *use str_replace* — exactly the set
+`--arbiter` removes — so the model was obeying its instructions and the arbiter had simply never said
+otherwise. The block is injected at the head of the tools catalogue in arbiter mode and opens by saying
+it REPLACES that selection order. Written in the same `Use X to …` prose as the block it replaces: the
+first draft used an invented `subagent(task, plan)` call notation and gemma began emitting
+`<function=subagent<task="…">` — arguments fused into the opening tag, unparseable, forever. Measured
+across three builds: 7 wasted `bash` attempts → 0 (with the bad notation, and a hung run) → 1, task
+completed.
+
 ### A plan has two levels: the stages of the job, then the steps of each stage
 
 **A flat step list is written at ONE altitude, and the model picks the lowest one — files.** Measured on
@@ -1651,6 +1695,31 @@ step. "Send me the link" got no step at all — it survived only as a sentence i
 wrote. Two of the five things asked for were gone, and neither the plan nor the validator could see it,
 because the validator checks the SHAPE of steps and the presence of deliverables, never whether the job
 was understood.
+
+#### The planner is told what the scaffold already did — worth 40 minutes
+
+`executor.scaffold()` runs BEFORE the plan is drafted and writes the whole working project in about two
+seconds. Three separate places then told the planner none of it existed, and the planner believed all
+three:
+
+- `greenfield/survey.txt` opened with *"NO SOURCE IS ON DISK YET. This plan CREATES a project"* and
+  closed with *"the earliest steps create the directory layout and the manifest"* — both read **after**
+  the scaffold. `SCAFFOLD_STATE` now reports what is on disk, from `existingBranchFiles()`, i.e. the
+  same table that wrote it, and says those files are done.
+- Every required deliverable had to be assigned to exactly one phase, including the six just written —
+  so the planner had to invent a phase to produce each. `renderDeliverableList` takes the project root
+  and marks what exists; `planPhases.txt` says an **ALREADY ON DISK** deliverable goes to the phase that
+  VERIFIES it, and that a job whose deliverables all exist is one verification phase.
+- `planContext.txt` said *"Every phase is part of the job: stopping after the first delivers a project
+  nobody asked for"* — right for five phases, an instruction to **overrun** at one. On a one-phase plan
+  the arbiter finished phase 1, announced *"I will proceed to the second phase"*, and invented both the
+  phase and its plan file. `PHASE_RULE` (from `PlanResult.phaseCount`) states the exact number and, at
+  one, says there is no second phase and that a `plan` path not printed above will be refused.
+
+Same request, `--arbiter`, an empty directory: **4 phases / 17 steps, 2400s timeout, never finished** →
+**1 phase / 1 step, 720s, exit 0**. And the artifact improved: the long run ended 5/5 green on
+`/api/ssatus`, a typo it had invented, enforced through naamah and then written a passing test for; the
+short one has `/api/health` consistent everywhere, 4/4 tests, clean typecheck and build.
 
 So the two questions are asked separately. **What stages does this job have** is asked once, of the whole
 request (`planPhases.txt` → `PlanPhase[]`). **What files does THIS stage touch** is asked per stage,
