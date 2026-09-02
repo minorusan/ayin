@@ -7,6 +7,7 @@
  */
 
 import { log } from './log.js';
+import { isNaamah } from './modes.js';
 import { arbiterMode, toolWithheld } from './subagents.js';
 import { getConfigString, getPrompt } from './prompts.js';
 import { prompts, packagePath } from './prompts-service.js';
@@ -210,7 +211,12 @@ export function getAllTools(): Tool[] {
  */
 export function modelTools(): Tool[] {
   assertLoaded();
-  return tools.filter((t) => !t.slashOnly);
+  // The design workflow is OFF by default (`modes.ts#isNaamah`), and off means the tool is not in the
+  // catalogue either. Withholding the PROMPT alone would leave a tool in the list with no instructions
+  // for it, which is how a model invents its own workflow for one. `getAllTools()` still has it, so
+  // `/help` and name resolution are unaffected.
+  const withoutDesign = isNaamah() ? tools : tools.filter((t) => t.name !== 'naamah');
+  return withoutDesign.filter((t) => !t.slashOnly);
 }
 
 // ── System prompt XML ───────────────────────────────────────────────

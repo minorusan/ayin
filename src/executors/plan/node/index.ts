@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { log } from '../../../log.js';
 import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext } from '../../types.js';
 import { greenfieldPlanExecutor } from '../greenfield/index.js';
+import { isNaamah } from '../../../modes.js';
 
 const config: ExecutorConfig = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'config.json'), 'utf-8'),
@@ -114,13 +115,19 @@ export const nodePlanExecutor: PlanExecutor = {
       // model followed THIS and skipped the sketch entirely — twice. Recency and specificity beat
       // position. Grounding that says "add routes to the existing server" without naming the step
       // before it is an instruction to skip that step, however clearly the prefix asked for it.
-      'FIRST, THE SKETCH. This is a behaviour change, so the design directory comes before the code:',
-      '  .naamah/<task-slug>/ — one plain .ts file per type, the members it must have, no bodies.',
-      '  Then `naamah build .naamah/<task-slug>/` must exit 0 before you write any implementation.',
-      '  The sketch is a DOCUMENT: never import from .naamah/ in real source — no exports exist there.',
-      'Then implement from it. Skipping this is not a shortcut on a small task; it is the step that',
-      'makes the implementation transcription instead of invention.',
-      '',
+      // AND IT IS GATED WITH THE REST OF IT. The restatement exists because grounding beats prefix;
+      // that cuts both ways, so leaving it here with the workflow off would be the one voice still
+      // ordering a design directory the operator switched off — which is exactly the failure the note
+      // above describes, pointed the other way.
+      ...(isNaamah() ? [
+        'FIRST, THE SKETCH. This is a behaviour change, so the design directory comes before the code:',
+        '  .naamah/<task-slug>/ — one plain .ts file per type, the members it must have, no bodies.',
+        '  Then `naamah build .naamah/<task-slug>/` must exit 0 before you write any implementation.',
+        '  The sketch is a DOCUMENT: never import from .naamah/ in real source — no exports exist there.',
+        'Then implement from it. Skipping this is not a shortcut on a small task; it is the step that',
+        'makes the implementation transcription instead of invention.',
+        '',
+      ] : []),
       'THIS PROJECT WAS JUST BOOTSTRAPPED. It already exists, already serves a page and already has a',
       'passing test — do not recreate any of it.',
       '',

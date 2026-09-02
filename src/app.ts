@@ -135,6 +135,7 @@ import blessed from 'blessed';
 import { startLiveMirror } from './live-mirror.js';
 import { registerShippedPrompts } from './prompts.js';
 import { isFullMode } from './full-mode.js';
+import { setNaamah } from './modes.js';
 
 let summaryOverlay: blessed.Widgets.BoxElement | null = null;
 
@@ -1016,10 +1017,29 @@ async function handleInput(text: string): Promise<void> {
         return;
       }
       case '/naamah': {
-        // The DESIGN on a page, with comments wired to this session — `/diff` one step earlier, before
-        // the code exists. An argument names a design directory; bare picks the newest `.naamah/<task>/`,
-        // because the agent autocreates one per task and asking which is friction for nothing.
+        /**
+         * TWO JOBS, AND THE FLAG COMES FIRST.
+         *
+         * `on` / `off` toggles the design-before-code workflow, which is OFF until asked for: until
+         * then nothing tells the model to design first and the `naamah` tool is not in its catalogue
+         * (see `modes.ts#isNaamah`). Anything else is the page — the DESIGN in a browser with comments
+         * wired to this session, `/diff` one step earlier, before the code exists. An argument names a
+         * design directory; bare picks the newest `.naamah/<task>/`.
+         *
+         * LOOKING IS NOT THE SAME AS BEING TOLD TO DESIGN, so the page works with the flag off: a
+         * design already on disk is worth reading whatever the mode says.
+         */
         const arg = text.slice('/naamah'.length).trim();
+        const flag = arg.toLowerCase();
+        if (flag === 'on' || flag === 'off') {
+          setNaamah(flag === 'on');
+          addMessage('system', flag === 'on'
+            ? 'naamah ON — design before code: ayin sketches the interface, compiles it, then implements '
+              + 'from it, and every write is checked against the sketch. /naamah off to stop.'
+            : 'naamah OFF — the design workflow is not in the prompt and the tool is withheld. '
+              + '/naamah on to enable it; /naamah <dir> still opens a design you already have.');
+          return;
+        }
         try {
           const nm = await import('./naamah/index.js');
           const dir = nm.findDesignDir(process.cwd(), arg);

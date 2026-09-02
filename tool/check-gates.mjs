@@ -2871,7 +2871,11 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
     const reg = readFileSync(join(DIST, '..', 'src', 'tools.ts'), 'utf-8');
     ok(/export function modelTools\(\)/.test(reg),
       'there is ONE list of what the model may call');
-    ok(/tools\.filter\(\(t\) => !t\.slashOnly\)/.test(reg), '…and it excludes the slash-only ones');
+    // THE INVARIANT IS THE FILTER, NOT WHAT IT IS APPLIED TO. This quoted `tools.filter(...)` by name
+    // and broke the moment the catalogue gained a second, legitimate filter in front of it (the
+    // design tool, withheld unless `/naamah on`). Any receiver satisfies the rule being protected:
+    // a slash-only tool is never offered to the model.
+    ok(/\w+\.filter\(\(t\) => !t\.slashOnly\)/.test(reg), '…and it excludes the slash-only ones');
     ok(/function assertSlashOnlyReachable/.test(reg),
       'slashOnly without a slash command is caught at BOOT — otherwise the tool is reachable by nobody');
 

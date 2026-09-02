@@ -40,7 +40,7 @@ import { recordPrompt, recordRaw, recordTool, recordAnswer } from './session-rec
 import { transcribeAnswer, transcribePrompt, transcribeResponse, transcribeTool } from './transcript.js';
 import { getConfig, getConfigIfSet, getPrompt } from './prompts.js';
 import { getRules } from './rules.js';
-import { isLogCoverage, isVerbose } from './modes.js';
+import { isLogCoverage, isNaamah, isVerbose } from './modes.js';
 import { pendingCorpus } from './indulge/inject.js';
 import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
@@ -664,6 +664,11 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
   }
   if (isLogCoverage()) {
     systemContent += `\n\n${getPrompt('logCoverage')}`;
+  }
+  // The design workflow is INSTRUCTION, not preference — see `modes.ts#isNaamah`. Off, it is not in the
+  // prompt at all, and `modelTools()` withholds the tool to match.
+  if (isNaamah()) {
+    systemContent += `\n\n${getPrompt('naamah')}`;
   }
 
   const rules = getRules();

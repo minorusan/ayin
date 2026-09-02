@@ -57,7 +57,7 @@ export const HELP: HelpEntry[] = [
   {
     name: 'reading files', kind: 'trick', section: 'Tricks',
     short: 'ayin batch-reads: read_files takes a SET of paths in one call and splits one budget between them by length. The cap is the model\'s context, not a fixed 800 lines.',
-    tip: 'ayin reads files in batches — one call for the module, the type it imports and the test that pins it, sized to the model\'s context.',
+    tip: 'ayin batch-reads: read_files takes a set of paths in one call, sized to the model\'s context.',
   },
 
   // ── working on code ────────────────────────────────────────────────────────────
@@ -78,8 +78,8 @@ export const HELP: HelpEntry[] = [
   },
   {
     name: '/naamah', kind: 'command', section: 'Code',
-    short: 'The DESIGN as a live page — click a type card to comment, and the agent changes the sketch · /naamah <dir>',
-    tip: '/naamah is /diff one step earlier — review the design before the code exists.',
+    short: 'OFF by default: /naamah on enables design-before-code · bare or /naamah <dir> opens the DESIGN as a live page to comment on',
+    tip: 'Design-before-code is off until /naamah on. /naamah alone opens a design you already have.',
   },
   {
     name: '/diff', kind: 'command', section: 'Code',

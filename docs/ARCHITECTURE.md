@@ -186,6 +186,34 @@ where a package survives only as its label string. That is why the machine-reada
 in `' naamah:` comments — plantuml strips comments before rendering, so naamah never sees them, while the
 label stays whatever a human wants to read.
 
+## The design workflow is OPT-IN (`/naamah on`)
+
+**It was the default, and being the default is what was wrong with it.** *"DESIGN BEFORE CODE — the
+default workflow for any task that adds or changes behaviour, not an option you offer"* sat in the
+system prompt of every turn: 3,377 characters of vocabulary, format rules and a four-step procedure, on
+a repo that may hold no design at all and an operator who never asked for one. That is not a
+preference the prompt expresses, it is an INSTRUCTION — and it was obeyed, so a turn that should have
+been one edit began by making a design directory.
+
+**Two things are gated, and both are necessary.** The text now lives in `prompts/ayin/naamah.txt` and
+is appended only when the mode is on, the same shape `brevity.txt` and `logCoverage.txt` use. And
+`modelTools()` filters the `naamah` tool out of the catalogue when it is off — withholding the prompt
+alone would leave a tool in the list with no instructions for it, which is how a model invents its own
+workflow for one. `getAllTools()` keeps it, so `/help` and name resolution are unaffected.
+
+**The plan grounding is gated with it.** `plan/node` restates the sketch step deliberately — measured,
+the model followed the turn's volatile grounding over a 10k-token prefix and skipped the sketch twice,
+so recency beats position. That cuts both ways: left in place with the mode off, the grounding would be
+the one voice still ordering a design directory the operator had switched off.
+
+**The page is not gated.** `/naamah <dir>` and bare `/naamah` still serve a design that exists —
+looking at one is not the same as being told to make one. `/naamah on` and `/naamah off` are the flag;
+anything else is the page.
+
+Measured with the flag off: `modelTools()` offers 28 tools instead of 29, `naamah` is absent, the
+system prompt drops from 12,127 to 8,718 characters, and a real turn asking for a one-line comment made
+the edit and created no `.naamah/` directory.
+
 ## Entangle — the design is a constraint, not advice (`src/entangle/`)
 
 Two loops. In the **design loop** the operator and the agent draw a diagram together and the agent is at
@@ -5165,7 +5193,8 @@ src/
 │   │                   RE-verifying every citation as it writes and marking stale ones
 │   └── index.ts        `ayin indulge` — argv, the stage pipeline, progress heartbeat, cooperative
 │                       SIGINT, and the llm authority held as a background consumer
-├── modes.ts            /verbose (the DEFAULT — `/verbose off` opts out) and /logcover, persisted
+├── modes.ts            /verbose (the DEFAULT — `/verbose off` opts out), /naamah on|off (OFF by
+│                       default: no design prompt, no design tool) and /logcover, persisted
 │                       in prompts.json and injected as prompt text
 ├── permissions.ts      approval dialogs + allow-lists
 ├── summary.ts          rolling session summary
