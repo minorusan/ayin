@@ -114,7 +114,10 @@ export function qaNoteTouched(path: string): void {
 // Build output, vendor trees, lockfiles — and ayin's own plan documents, which plan mode writes
 // BEFORE the work starts. The plan is an input to the change, not an artifact of it; reviewing it
 // against the acceptance criteria would judge the map instead of the territory.
-const IGNORE_RE = /(^|\/)(node_modules|\.git|dist|build|out|\.next|coverage|__pycache__)(\/|$)|(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$|(^|\/)ayin-plan-[\d-]+\.md$/;
+// `.ayin` is ayin's own working directory for the repo — plan documents and review reports. QA judging
+// the agent's work must not count the plan the agent was handed as one of the files it changed; the
+// root-level `ayin-plan-*.md` clause stays for repos planned in before those moved into `.ayin/plans/`.
+const IGNORE_RE = /(^|\/)(node_modules|\.git|\.ayin|dist|build|out|\.next|coverage|__pycache__)(\/|$)|(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$|(^|\/)ayin-plan-[\d-]+\.md$/;
 
 /**
  * What this turn changed: tool-tracked writes ∪ files that went dirty in git during the turn.

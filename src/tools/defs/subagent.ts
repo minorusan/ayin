@@ -46,13 +46,16 @@ export const tool: Tool = {
     const task = String(params.task ?? '').trim();
     if (!task) return 'Error: task required';
 
-    // NARRATION, because a stage of the work is minutes long and a silent one looks hung. The child's
-    // own progress is its business; what the parent can honestly report is that it is still going.
+    // NARRATION, because a stage of the work is minutes long and a silent one looks hung — and the
+    // child's own progress turned out to be exactly what to narrate. It was already being printed to
+    // stdout and thrown away until the run finished; `onStatus` forwards it line by line instead, so
+    // the card shows what the child is doing while it does it rather than 5m30s of nothing.
     ctx?.onStatus('delegating…');
     const result = await runSubagent(task, {
       cwd: params.cwd ? String(params.cwd) : undefined,
       plan: params.plan ? String(params.plan) : undefined,
       signal: ctx?.signal,
+      onStatus: ctx?.onStatus,
     });
     ctx?.onStatus(result.ok ? `done — ${result.toolCalls} tool call(s)` : 'failed');
 

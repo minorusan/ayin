@@ -197,6 +197,40 @@ function entryPoint(): string {
  */
 export const HEADLESS_TOOL_HEADER = /^\[tool\] (?![│╰])\S{1,2} \S/gmu;
 
+/**
+ * Which of a child's stdout lines are worth showing on the parent's card, as it runs.
+ *
+ * WHAT IS FORWARDED: the child's own prose — *"I will read the plan file to understand the
+ * verification steps"* — and the tool calls it makes, rendered as the action they are (`bash · npm
+ * test`). That is what turns five silent minutes into something a person can follow.
+ *
+ * WHAT IS NOT: the BODY of those tool cards, their footers, the handoff block, and ayin's own
+ * `[system]` chatter. Those are the child's transcript, and the entire point of delegating was that the
+ * parent does not have to hold it — replaying it here would be the 27,138-character inlining this
+ * mechanism exists to avoid, one layer down.
+ *
+ * NOTHING IS TRUNCATED. The reasoning is the useful part: *"I will read the plan file, then check
+ * package.json for the test script"* says what is happening, where the same line cut at 160 characters
+ * says only that something is. The card wraps and `runs.ts` keeps the whole note, so length costs
+ * screen and never meaning.
+ *
+ * Pure and exported so `check-gates.mjs` can assert it — the alternative is a five-minute live run per
+ * assertion, which is how a behaviour ends up untested.
+ */
+export function subagentProgressLines(lines: string[]): string[] {
+  const out: string[] = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^[│╰]/.test(line) || /^\[system\]/.test(line) || /^---/.test(line)) continue;
+    const header = new RegExp(HEADLESS_TOOL_HEADER.source, 'u').test(line);
+    if (header) { out.push(line.replace(/^\[tool\]\s*/, '')); continue; }
+    if (/^\[tool\]/.test(line)) continue;   // a card body that did not open with a rule character
+    out.push(line);
+  }
+  return out;
+}
+
 export function extractReport(stdout: string): { report: string; toolCalls: number } {
   const upToHandoff = stdout.split('--- HANDOFF')[0];
   const toolCalls = (stdout.match(HEADLESS_TOOL_HEADER) ?? []).length;
@@ -249,13 +283,32 @@ export function prewarmSubagents(calls: Array<{ task: string; cwd?: string; plan
  * Run one task to completion in a fresh agent, or collect one already running. Never throws — a
  * subagent that dies is a report the parent has to act on, not an exception that ends the parent's turn.
  */
-export async function runSubagent(task: string, opts: { cwd?: string; plan?: string; signal?: AbortSignal } = {}): Promise<SubagentResult> {
+export async function runSubagent(task: string, opts: SubagentOpts = {}): Promise<SubagentResult> {
   const running = inFlight.get(keyOf(task, opts));
   if (running) return running;
   return spawnSubagent(task, opts);
 }
 
-async function spawnSubagent(task: string, opts: { cwd?: string; plan?: string; signal?: AbortSignal } = {}): Promise<SubagentResult> {
+/**
+ * `onStatus` IS WHAT MAKES A FIVE-MINUTE CHILD VISIBLE.
+ *
+ * A subagent runs for minutes and said nothing until it finished — the parent's card showed
+ * `delegating…` and then, eventually, a result. Measured on a real build: 5m30s of a blank card, which
+ * is indistinguishable from a hang, and the operator's only move on a hang is to kill it.
+ *
+ * The child is a headless ayin printing to stdout, so its narration is already there; it was being
+ * accumulated for `extractReport` and thrown away in the meantime. Forwarding it line by line as it
+ * arrives costs nothing and turns the card into a window.
+ */
+export interface SubagentOpts {
+  cwd?: string;
+  plan?: string;
+  signal?: AbortSignal;
+  /** Called with the child's own narration as it arrives. See `RunContext.onStatus`. */
+  onStatus?: (note: string) => void;
+}
+
+async function spawnSubagent(task: string, opts: SubagentOpts = {}): Promise<SubagentResult> {
   const started = Date.now();
   const cwd = opts.cwd || process.cwd();
 
@@ -290,22 +343,27 @@ async function spawnSubagent(task: string, opts: { cwd?: string; plan?: string; 
    */
   let planFile = opts.plan;
   if (planFile && !existsSync(planFile)) {
-    const candidates = existsSync(cwd)
-      ? readdirSync(cwd).filter((f) => /^ayin-plan-.*\.md$/.test(f))
-      : [];
-    const byName = candidates.find((f) => f === basename(planFile as string));
+    // BOTH PLACES. Plans live in `.ayin/plans/` now; they used to sit at the working-directory root,
+    // and a repo planned in before the move still has them there. Searching both means a path the
+    // model half-remembered resolves either way, and an old plan file does not become unreadable.
+    const searched = [join(cwd, '.ayin', 'plans'), cwd].filter((d) => existsSync(d));
+    const candidates: Array<{ dir: string; file: string }> = [];
+    for (const dir of searched) {
+      for (const f of readdirSync(dir)) if (/^ayin-plan-.*\.md$/.test(f)) candidates.push({ dir, file: f });
+    }
+    const byName = candidates.find((c) => c.file === basename(planFile as string));
     if (byName) {
-      log('INFO', 'subagent_plan_recovered', { given: planFile, used: join(cwd, byName) });
-      planFile = join(cwd, byName);
+      log('INFO', 'subagent_plan_recovered', { given: planFile, used: join(byName.dir, byName.file) });
+      planFile = join(byName.dir, byName.file);
     } else {
       log('WARN', 'subagent_bad_plan', { plan: planFile, candidates: String(candidates.length) });
       return {
         ok: false,
         report: `No plan file at ${planFile}. `
           + (candidates.length
-            ? `The plan files in ${cwd} are:\n${candidates.map((f) => `  ${f}`).join('\n')}\n`
+            ? `The plan files here are:\n${candidates.map((c) => `  ${join(c.dir, c.file)}`).join('\n')}\n`
               + 'Pass one of those exactly as written, or omit `plan` and put the work in `task`.'
-            : `There are no plan files in ${cwd}. Omit \`plan\` and put the work in \`task\`.`),
+            : `There are no plan files under ${cwd}. Omit \`plan\` and put the work in \`task\`.`),
         toolCalls: 0,
         ms: Date.now() - started,
       };
@@ -359,7 +417,30 @@ async function spawnSubagent(task: string, opts: { cwd?: string; plan?: string; 
       resolve({ ok, report: note ? `${note}\n${report}`.trim() : report, toolCalls, ms });
     };
 
-    child.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+    /**
+     * FORWARD WHAT THE CHILD SAYS, AS IT SAYS IT.
+     *
+     * stdout arrives in arbitrary chunks, so a partial line is held back until its newline shows up —
+     * otherwise a note is emitted mid-word and the next one starts with its tail.
+     *
+     * WHAT IS WORTH FORWARDING is the child's own prose and the tool calls it makes; what is not is the
+     * body of those tool cards (`│ …`), their footers (`╰ ✓`), the handoff block, and ayin's own
+     * `[system]` chatter. Those are the child's transcript, and the point of delegating was that the
+     * parent does not hold it — a card that replayed all of it would be the 27,138-character inlining
+     * this whole mechanism exists to avoid, one layer down.
+     */
+    let pending = '';
+    const forward = (chunk: string): void => {
+      if (!opts.onStatus) return;
+      pending += chunk;
+      const lines = pending.split('\n');
+      // A partial line is held back until its newline arrives — otherwise a note is emitted mid-word
+      // and the next one opens with its tail.
+      pending = lines.pop() ?? '';
+      for (const note of subagentProgressLines(lines)) opts.onStatus(note);
+    };
+
+    child.stdout.on('data', (d: Buffer) => { const s = d.toString(); out += s; forward(s); });
     child.stderr.on('data', (d: Buffer) => { out += d.toString(); });
     child.on('error', (err) => finish(false, `subagent failed to start: ${err.message}`));
     child.on('close', (code) => finish(code === 0, code === 0 ? '' : `subagent exited ${code}`));

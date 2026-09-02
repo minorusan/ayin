@@ -105,6 +105,36 @@ ok(headlessCount('[tool] ╰ ✓ 1m1s') === 0, 'and neither is the card footer')
 ok(headlessCount('[tool] ◍ subagent · task=x\n[tool] │ body\n[tool] ❯ bash · command=ls') === 2,
   'two headers among their bodies count as two');
 
+// ── 5b · what a child's narration shows on the parent's card ─────────────────
+//
+// A subagent runs for minutes; before this the card said `delegating…` and nothing else until it
+// finished — 5m30s indistinguishable from a hang, and the only move against a hang is to kill it. The
+// child is a headless ayin printing as it goes, so the narration already existed and was being thrown
+// away. Asserted here rather than by a live run, which would cost five minutes per assertion.
+const { subagentProgressLines } = await import('../dist/subagents.js');
+const child = [
+  '[system] Connected to backend',
+  'I will read the plan file to understand the verification steps, then check package.json.',
+  '[tool] 💻 bash · command=npm test',
+  '[tool] │ # tests 4',
+  '[tool] │ # pass 4',
+  '[tool] ╰ ✓ 3.1s',
+  '',
+  'The suite passes. Reporting back.',
+  '--- HANDOFF (text_output, round 3) ---',
+  '[system] where the session went — 12s wall clock',
+];
+const notes = subagentProgressLines(child);
+ok(notes.length === 3, 'the child\'s prose and its tool calls are forwarded, nothing else', `${notes.length}: ${JSON.stringify(notes)}`);
+ok(notes[0].startsWith('I will read the plan file'), '  → its own words come through');
+ok(notes[1] === '💻 bash · command=npm test', '  → a tool call reads as the action it is', notes[1]);
+ok(notes[2] === 'The suite passes. Reporting back.', '  → and the closing line');
+ok(!notes.some((n) => /^[│╰]/.test(n) || /\[system\]/.test(n) || /HANDOFF/.test(n)),
+  '  → card bodies, footers, system notices and the handoff block are NOT replayed into the parent');
+const long = 'I will now examine every route handler in src/server.ts, confirm each one has a test in '
+  + 'test/server.test.ts, and add the missing cases before running the suite a second time to be sure.';
+ok(subagentProgressLines([long])[0] === long, 'a long line is forwarded WHOLE — the reasoning is the useful part');
+
 // ── 6 · the WIDTH PATCH: blessed must agree with the terminal ────────────────
 //
 // This is what makes an emoji icon safe at all. blessed's double-wide table predates emoji and answers

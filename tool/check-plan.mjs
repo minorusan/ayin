@@ -37,6 +37,7 @@ const { inferDependencies, validateSteps, renderPlan, validatePhases, parsePlan,
 const { detectProject } = await import(`file://${join(DIST, 'executors', 'detect.js')}`);
 const { planExecutorFor } = await import(`file://${join(DIST, 'executors', 'registry.js')}`);
 const { basePlanExecutor } = await import(`file://${join(DIST, 'executors', 'plan', 'base', 'index.js')}`);
+const { ensureAyinDir } = await import(`file://${join(DIST, 'ayin-dir.js')}`);
 
 let fails = 0;
 const ok = (cond, label, extra = '') => {
@@ -337,6 +338,37 @@ inEmptyDir((dir) => {
       ok(existsSync(join(d, '.naamah', 'README.md')), `${label}: .naamah/ exists and says what goes in it`);
     });
   }
+
+  /**
+   * AYIN'S ARTEFACTS LIVE IN `.ayin/`, AND THE DIRECTORY IGNORES ITSELF.
+   *
+   * Plan documents were written to the working directory as `ayin-plan-<ts>.md`, one per planned turn
+   * plus one per phase, so a repo planned in a few times carried a dozen timestamped files at its root
+   * among its own source — and every completed run left the tree dirty with them. The directory
+   * carries its own `.gitignore`, so adopting ayin does not require editing a file the operator owns.
+   */
+  console.log('\n— ayin keeps its artefacts in .ayin/, ignored by git —');
+  inEmptyDir((d) => {
+    const dir = ensureAyinDir(d, 'plans');
+    ok(dir === join(d, '.ayin', 'plans'), 'plans resolve under .ayin/', dir);
+    ok(existsSync(join(d, '.ayin', '.gitignore')), 'and the directory carries its own .gitignore');
+    ok(readFileSync(join(d, '.ayin', '.gitignore'), 'utf-8').trim().endsWith('*'),
+      'which ignores everything under it, so the operator\'s own .gitignore is untouched');
+    ok(ensureAyinDir(d, 'reports') === join(d, '.ayin', 'reports'), 'reports resolve there too');
+    // The proof that matters: a repo with .ayin/ full of artefacts still reads as clean.
+    execFileSync('git', ['init', '-q'], { cwd: d });
+    writeFileSync(join(d, '.ayin', 'plans', 'ayin-plan-20260101-000000.md'), '# plan\n');
+    writeFileSync(join(d, '.ayin', 'reports', 'AYIN-REPORT-SMELLS-x.md'), '# report\n');
+    const dirty = execFileSync('git', ['status', '--porcelain'], { cwd: d, encoding: 'utf-8' }).trim();
+    ok(dirty === '', 'a tree full of ayin artefacts is still clean to git', dirty || '(clean)');
+  });
+  inEmptyDir((d) => {
+    // And an empty directory is still EMPTY once ayin has written into it — otherwise re-planning in a
+    // folder ayin has already touched would stop detecting it as greenfield.
+    ensureAyinDir(d, 'plans');
+    const c = detectProject(d, 'set up an empty python project for a CLI');
+    ok(c.greenfield === true, '.ayin/ does not make a directory look "used" to detection', `greenfield=${c.greenfield}`);
+  });
 
   /**
    * A NEW PROJECT IS A REPOSITORY WITH A BASELINE COMMIT — and, far more importantly, an OLD one is

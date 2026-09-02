@@ -193,7 +193,10 @@ function isEmptyOfProjects(root: string): boolean {
  * Entries that do not make a directory USED: what ayin itself writes at project start, plus OS noise.
  * Listed so that re-running plan mode in a folder it already scaffolded still sees an empty project.
  */
-const SCAFFOLD_ENTRY_RE = /^(\.git|\.DS_Store|README\.md|ayin-plan-.*\.md)$/;
+// `.ayin` is ayin's own working directory for this repo (plans, review reports) and `.naamah` is the
+// design the scaffold ships — neither is the project's own content, so neither makes a directory
+// "used". `ayin-plan-*.md` stays for a repo planned in before the plans moved into `.ayin/plans/`.
+const SCAFFOLD_ENTRY_RE = /^(\.git|\.DS_Store|\.ayin|\.naamah|README\.md|ayin-plan-.*\.md)$/;
 
 /** Nothing in it but what ayin put there. */
 export function isFreshDirectory(dir: string): boolean {

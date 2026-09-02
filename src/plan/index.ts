@@ -55,7 +55,7 @@
  *   9. OBSERVABILITY — how work in THIS kind of project is watched working: a logger module and an
  *      env switch in a service, Serial Monitor and `arduino-cli compile` in firmware.
  *
- * The document is written to `ayin-plan-<timestamp>.md` (cwd, or `AYIN_PLAN_DIR`) — on disk BEFORE
+ * The document is written to `.ayin/plans/ayin-plan-<timestamp>.md` (or `AYIN_PLAN_DIR`) — on disk BEFORE
  * the agent starts, so a machine that dies mid-implementation leaves the thinking behind rather than
  * only half a feature. Then the user's prompt goes to the model with the plan already in context.
  *
@@ -72,6 +72,7 @@ import { join } from 'node:path';
 import { llmChat } from '../llm/manager.js';
 import { llmCall } from '../llm.js';
 import { log } from '../log.js';
+import { ensureAyinDir } from '../ayin-dir.js';
 import { notePostmortemContext } from '../postmortem.js';
 import { getConfig, getPrompt } from '../prompts.js';
 import { prompts as promptsService, packagePath } from '../prompts-service.js';
@@ -542,8 +543,10 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       }),
     }], { declareTools: false });
 
-    const dir = process.env.AYIN_PLAN_DIR || process.cwd();
-    mkdirSync(dir, { recursive: true });
+    // `.ayin/plans/`, not the working directory. A plan is ayin's working note, not the project's
+    // file, and one per planned turn plus one per phase used to accumulate at the repo root among the
+    // actual source. `AYIN_PLAN_DIR` still wins where a harness has set it. See `ayin-dir.ts`.
+    const dir = ensureAyinDir(process.cwd(), 'plans');
     const path = join(dir, planFilename());
     const header = [
       '<!-- Written by ayin plan mode before implementation started. -->',

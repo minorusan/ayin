@@ -40,6 +40,7 @@ import { connect, llmBaseUrl } from './connection.js';
 import { initLlmProvider } from './llm/select.js';
 import { prompts, packagePath, writeAtomic } from './prompts-service.js';
 import { log } from './log.js';
+import { ensureAyinDir } from './ayin-dir.js';
 import { HOUND_MARKERS, HOUND_SCRIPT_NAME, LEGACY_HOUND_SCRIPT, houndOffPath, isHoundOff } from './hound-off.js';
 import { ensureAccelerator } from './unity-accelerator.js';
 import {
@@ -426,11 +427,16 @@ function isAyinReviewPath(path: string): boolean {
  *  smell report still sitting at the repo root, newest first. */
 function listRepoReports(repo: string): string[] {
   const found: Array<{ f: string; m: number }> = [];
-  try {
-    for (const f of readdirSync(repo)) {
-      if (AYIN_REPORT_RE.test(f)) found.push({ f, m: statSync(join(repo, f)).mtimeMs });
-    }
-  } catch { /* repo unreadable — the root scan just contributes nothing */ }
+  // TWO PLACES, newest-first across both. Reports live in `.ayin/reports/` now; a repo watched before
+  // that move still has them at its root, and those are exactly the ones an agent most needs pointing
+  // at — the pending findings nobody has read yet. Dropping the root scan would hide them.
+  for (const [dir, prefix] of [[join(repo, '.ayin', 'reports'), '.ayin/reports/'], [repo, '']] as const) {
+    try {
+      for (const f of readdirSync(dir)) {
+        if (AYIN_REPORT_RE.test(f)) found.push({ f: `${prefix}${f}`, m: statSync(join(dir, f)).mtimeMs });
+      }
+    } catch { /* absent or unreadable — that scan just contributes nothing */ }
+  }
   try {
     const reviewsDir = join(repo, 'reviews');
     for (const hash of readdirSync(reviewsDir)) {
@@ -1077,7 +1083,10 @@ async function reviewWorktree(repo: string, ledger: string[]): Promise<string[]>
   }
 
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const reportPath = join(repo, `AYIN-REPORT-SMELLS-${ts}.md`);
+  // `.ayin/reports/`, not the repo root. This is ayin's working output for the repo, not the repo's
+  // own file, and one lands per worktree pass — ayin's own checkout had accumulated twelve of them at
+  // its root, listed in its CLAUDE.md. See `ayin-dir.ts`; the directory ignores itself.
+  const reportPath = join(ensureAyinDir(repo, 'reports'), `AYIN-REPORT-SMELLS-${ts}.md`);
   writeFileSync(reportPath, buildSmellReport(plan, raw, applied));
   out(`  → ${reportPath} (staged ${applied.staged.length}, unstaged ${applied.unstaged.length}) — NO commit`);
   log('INFO', 'worktree_reviewed', { repo, staged: String(applied.staged.length), unstaged: String(applied.unstaged.length), parsed: String(!!plan) });
