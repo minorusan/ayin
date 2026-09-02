@@ -1395,15 +1395,14 @@ re-planning would spend the whole gate rediscovering the phase it was just given
 executor's `prepare()`.
 
 **`--full` turns on all three, and that is now asserted rather than described.** It composes
-`--debug` + the QA toggle + the presenter toggle + `--dangerously-skip-permissions`, over a plan mode
-that is already on by default. **Two of the four are TUI-only**: the presenter by construction, and the
-boot-time debug bundle because it is fired from the TUI's session-init path — measured, `ayin --full -p`
-leaves the bundle count unchanged, and `ayin debug` is the way to one from a script. So headless
-`--full` is the QA toggle plus the skipped permission gate. The presenter was the gap: being the one toggle with no environment
-force, it was the one nothing could switch on from a script, so `--full` meant "everything" while
-silently omitting it. `check-gates.mjs` now spawns a fresh process with `--full` in its argv and reads
-the three getters back — the toggles initialise at module load, so a live process is the only honest
-way to test the composite. `git push` / `pull` / `checkout` still refuse under it.
+`--debug` + the QA toggle + `--dangerously-skip-permissions`, over a plan mode that is already on by
+default. **The presenter is not one of them** — it is TUI-only by construction and `/present` is the
+only way in, and the gate asserts it stays OFF under the flag. One of the three is TUI-only: the
+boot-time debug bundle, fired from the TUI's session-init path — measured, `ayin --full -p` leaves the
+bundle count unchanged, and `ayin debug` is the way to one from a script. So headless `--full` is the
+QA toggle plus the skipped permission gate. `check-gates.mjs` spawns a fresh process with `--full` in
+its argv and reads the getters back — the toggles initialise at module load, so a live process is the
+only honest way to test the composite. `git push` / `pull` / `checkout` still refuse under it.
 
 **The explicit door used to be a natural-language regex** (`plan it`, `make a plan`, `deep investigate`,
 `deep dive`, …), anchored to verb phrases so it wouldn't fire on ordinary uses of a common word ("what's

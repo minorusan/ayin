@@ -3275,10 +3275,10 @@ console.log('\nglimmer dialect (ATEM)');
 
 // ── `--full` means everything, and "everything" is asserted, not described ──────────────────
 //
-// The three session toggles are initialised at MODULE LOAD from argv, so the only honest way to test
-// the composite flag is a fresh process that actually has it. Checked because `--full` drifted once
-// already: it was documented as "everything" while the presenter — the one toggle with no environment
-// force, and therefore the one nobody could turn on from a script — was quietly left off.
+// The session toggles are initialised at MODULE LOAD from argv, so the only honest way to test the
+// composite flag is a fresh process that actually has it. The presenter is asserted OFF: it is not one
+// of the switches `--full` buys, and a composite flag that quietly starts presenting is the drift
+// worth catching in the other direction.
 console.log('\n--full: the composite flag turns on what it claims');
 {
   // THE ANSWER GOES TO A FILE, NOT STDOUT. Importing the UI graph writes terminal escapes
@@ -3315,13 +3315,13 @@ console.log('\n--full: the composite flag turns on what it claims');
   ok(state.full === true, '--full is seen by full-mode.ts');
   ok(state.plan === true, '  → plan mode is on');
   ok(state.qa === true, '  → the QA gate is on');
-  ok(state.presenter === true, '  → the presenter is on (it has no env force; --full is the only way in from a script)');
+  ok(state.presenter === false, '  → the presenter is OFF (--full does not buy it; /present is the only way in)');
   // THE TOGGLE IS NOT THE SAME QUESTION AS "did the gate run". `shouldRunQaThisTurn()` is what the
   // agent loop actually consults, and it is the toggle plus a one-shot force — asserted separately
   // because a live run cannot settle it: whether the gate then fires also depends on files having
   // changed and the reply looking like a completion report, neither of which `--full` controls.
   ok(state.qaWantsToRun === true, '  → and the QA gate WANTS to run — the toggle reaches what the loop asks');
-  ok(state.presenterWantsToRun === true, '  → as does the presenter');
+  ok(state.presenterWantsToRun === false, '  → and the presenter does NOT want to run');
 }
 
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);

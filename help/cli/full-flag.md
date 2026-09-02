@@ -4,7 +4,6 @@ Turn on everything this launch supports, for this launch only.
 
     --debug                          writes a debug bundle at boot, so the path exists before anything goes wrong (TUI only)
     /qa                              the QA gate on for the session, as if you had typed it
-    /present                         the presenter on for the session, as if you had typed it (TUI only)
     --dangerously-skip-permissions   the permission gate stepped around for this session
 
 Plan mode is **already on by default** — `--full` does not need to turn it on and does not turn it
@@ -15,11 +14,12 @@ That is deliberate for the permission gate: one that silently stayed off after a
 nobody remembers turning off, and the first you learn of it is the thing it would have stopped. With
 `--full` you re-state the intent every launch.
 
-**Two of the four are TUI-only.** The presenter is `&& !HEADLESS` — there is no terminal to present
-into — and the boot-time debug bundle is written from the TUI's session-init path, so it does not fire
-under `-p` either. Measured: `ayin --full -p "…"` left the bundle count unchanged. So headless `--full`
-is **the QA toggle plus the skipped permission gate**; for a bundle from a script use `ayin debug`,
-which writes the same one.
+**One of the three is TUI-only.** The boot-time debug bundle is written from the TUI's session-init
+path, so it does not fire under `-p`. Measured: `ayin --full -p "…"` left the bundle count unchanged.
+So headless `--full` is **the QA toggle plus the skipped permission gate**; for a bundle from a script
+use `ayin debug`, which writes the same one.
+
+**It does not turn on the presenter.** `/present` is the only way in, per session.
 
 **`git push`, `git pull` and `git checkout` still refuse.** That guard runs above every permission
 rule and denies under any skip flag rather than allowing, because those actions are unrecoverable and
