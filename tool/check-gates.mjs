@@ -1901,6 +1901,31 @@ presenter.togglePresenterSession();
 ok(presenter.isPresenterSessionEnabled() === false, 'toggling Presenter back off is reflected by the getter');
 presenter.forcePresenterNextTurn();
 ok(presenter.shouldRunPresenterThisTurn() === true, '/presentthis forces exactly one turn even with the session toggle off');
+
+/**
+ * THE COMPARISON COPY IS MARKDOWN, NOT TRANSLITERATED LETTERS.
+ *
+ * While Presenter is new the raw reply is shown under the presentation so the two can be compared.
+ * That block used to run through `toItalic`, which swaps a Unicode mathematical-italic codepoint in
+ * for every ASCII letter — the only way to slant text in blessed, and it destroyed exactly the
+ * content it was showing: a reply is the message most likely to be a numbered list of bold headings
+ * with `code` spans, and all of it arrived as unstyled pseudo-italic glyphs, unselectable and
+ * ungreppable as the words they represent.
+ *
+ * De-emphasis belongs in the COLOUR. `interim` already renders markdown and then bleaches every
+ * foreground toward the panel background, so structure survives and emphasis does not.
+ */
+{
+  const agentSrc = readFileSync(join(REPO, 'src/agent.ts'), 'utf-8');
+  const at = agentSrc.indexOf('original reply, shown for testing');
+  ok(at > 0, 'the comparison copy of the raw reply is still shown while Presenter is new');
+  // The call that renders it, found from the caption rather than by line number.
+  const block = agentSrc.slice(Math.max(0, at - 400), at + 400);
+  ok(/interim: true/.test(block),
+    '…as an interim assistant message, so its markdown is RENDERED and then bleached');
+  ok(!/toItalic/.test(block),
+    '…and never through toItalic, which substitutes glyphs for letters and throws the structure away');
+}
 ok(presenter.shouldRunPresenterThisTurn() === false, 'and the force is consumed — the very next call sees it gone');
 
 // ── truncation: nothing silent, and the diff card is finally capped ──
@@ -2788,10 +2813,15 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
    * The condition is the whole fix, so it is asserted from BOTH sides — the shape that must be there
    * and the shape that must not.
    */
-  const guardRe = /if \(!offersTools && activeDialect\(\)\.parse\(reply\)\.toolCalls\.length > 0\)/;
+  // THE SHAPE, NOT THE SPELLING — which is what the note further down asks of every assertion here
+  // when it is next touched. The dialect is read from a local now (`effDialect`): a run moved into
+  // the background lane answers on a DIFFERENT model, and parsing its reply with the foreground
+  // model's dialect is the bug that rename prevents. What this gate is for is unchanged — the guard
+  // consults `offersTools` and reaches the reply through a dialect, however that expression is spelled.
+  const guardRe = /if \(!offersTools && \w+(?:\(\))?\.parse\(reply\)\.toolCalls\.length > 0\)/;
   ok(guardRe.test(mgrSrc),
     'a reply that IS a tool call, when the CALLER offered none, is detected through the dialect');
-  ok(!/!declared && activeDialect\(\)\.parse\(reply\)/.test(mgrSrc),
+  ok(!/!declared && \w+(?:\(\))?\.parse\(reply\)/.test(mgrSrc),
     'and the guard keys on the CALLER, never on `!declared` — that is false in prompt mode too, where the tools are real and the agent is waiting to run them');
   ok(/declared no tools and there is nothing to call/.test(mgrSrc),
     'and the retry tells the model why, rather than repeating the original instruction louder');
@@ -2961,8 +2991,13 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
   // this call have tools", and it is the only thing the guard may consult; `declared` is transport.
   ok(/const offersTools = opts\.declareTools !== false;/.test(mgrSrc),
     'whether a call HAS tools is the caller\'s answer, independent of how they are transported');
-  ok(/const declared = toolMode\(\) === 'native' && offersTools;/.test(mgrSrc),
+  // `effToolMode` is `toolMode()` unless this call is in the background lane, where it is the LANE's
+  // — the same question, asked of the model that is actually going to answer it.
+  ok(/const declared = \w+(?:\(\))? === 'native' && offersTools;/.test(mgrSrc),
     'and declaring schemas to the runtime is the transport question, derived from it');
+  // …and the rename above must not become a way to smuggle the foreground's answer in.
+  ok(/const effToolMode = lane\?\.toolMode \?\? toolMode\(\);/.test(mgrSrc),
+    '…and a backgrounded call asks the LANE first, falling back to the foreground when there is none');
   {
     const guardLine = mgrSrc.slice(mgrSrc.indexOf('if (!offersTools && activeDialect()'), mgrSrc.indexOf('if (!offersTools && activeDialect()') + 90);
     ok(!/toolMode|declared\b/.test(guardLine),

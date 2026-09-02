@@ -440,6 +440,39 @@ export interface ApiProbe {
 const LOCAL_HOST = /^(localhost|127\.|0\.0\.0\.0|::1|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|.*\.local)$/i;
 
 /**
+ * URLs THAT ARE IDENTIFIERS, NOT ADDRESSES — stripped before anything is called a host.
+ *
+ * An XML namespace, a doctype, a JSON-Schema `$schema`, a JSON-LD `@context`, an SPDX or licence
+ * link: every one of these is a URL that nothing ever fetches. `xmlns="http://www.w3.org/2000/svg"`
+ * is the one that actually bit — an inline SVG icon in a generated page, which is a thing almost any
+ * web scaffold emits.
+ */
+const URL_AS_IDENTIFIER = /\b(?:xmlns(?::\w+)?|\$schema|@context|schemaLocation|targetNamespace|licenseUrl|spdx\w*)\s*[=:]\s*['"][^'"]*['"]/gi;
+const DOCTYPE_LINE = /<!DOCTYPE[^>]*>/gi;
+
+/**
+ * Evidence that this code actually CALLS something over the network.
+ *
+ * A URL is not an integration; a call is. Without this the probe fired on the mere presence of a
+ * URL-shaped string, which is how a freshly scaffolded project serving one local page was failed for
+ * *"the integration with the third-party API (w3.org) lacks handling for non-2xx, 401/403, 429, or
+ * timeout errors"* — there was no third-party API, and the fix pass it triggered then EDITED the
+ * project to add an `/api/proxy` route nobody asked for. Measured twice, in separate runs.
+ */
+const OUTBOUND_CALL = new RegExp([
+  String.raw`\bfetch\s*\(`,
+  String.raw`\b(?:axios|got|ky|superagent|needle|undici)\s*[(.]`,
+  String.raw`\bhttps?\.(?:get|request)\s*\(`,
+  String.raw`\bnew\s+(?:XMLHttpRequest|WebSocket|EventSource)\s*\(`,
+  String.raw`\bfrom\s+['"](?:node-fetch|axios|got|ky|undici|superagent)['"]`,
+  String.raw`\brequire\(\s*['"](?:node-fetch|axios|got|ky|undici|superagent)['"]`,
+  String.raw`\bcurl\s+-`,
+  String.raw`\brequests\.(?:get|post|put|delete)\s*\(`,   // python
+  String.raw`\bHttpClient\b`,                              // C#/Java
+  String.raw`\bUnityWebRequest\b`,
+].join('|'), 'i');
+
+/**
  * Does this change integrate somebody else's API?
  *
  * Detected from the code, not from a model's opinion: external hosts in URLs, credential-shaped env
@@ -453,12 +486,18 @@ export function probeThirdPartyApi(files: ChangedFile[]): ApiProbe {
   const keys = new Set<string>();
   const signals = new Set<string>();
 
+  let calls = false;
+
   for (const f of files) {
     if (!f.exists || f.bytes > 512 * 1024) continue;
     let text = '';
     try { text = readFileSync(f.path, 'utf-8'); } catch { continue; }
 
-    for (const m of text.matchAll(/https?:\/\/([A-Za-z0-9._-]+)/g)) {
+    if (OUTBOUND_CALL.test(text)) calls = true;
+
+    // Identifier URLs first, or the namespace of every inline SVG becomes a third-party integration.
+    const scannable = text.replace(URL_AS_IDENTIFIER, ' ').replace(DOCTYPE_LINE, ' ');
+    for (const m of scannable.matchAll(/https?:\/\/([A-Za-z0-9._-]+)/g)) {
       const host = m[1];
       if (!LOCAL_HOST.test(host) && host.includes('.')) hosts.add(host);
     }
@@ -472,7 +511,21 @@ export function probeThirdPartyApi(files: ChangedFile[]): ApiProbe {
     if (/\b(rate.?limit|429)\b/i.test(text)) signals.add('rate-limit handling present');
   }
 
-  const applies = hosts.size > 0 || keys.size > 0;
+  /**
+   * A HOST *AND* A CALL, or a credential on its own.
+   *
+   * A credential-shaped env var (`STRIPE_API_KEY`) is a real integration however the request is made,
+   * so it still stands alone. A host without any outbound call is a link, a namespace, or a comment.
+   *
+   * The trade is deliberate and it is the right way round: this can MISS a case where the URL is added
+   * in one changed file and the `fetch` lives in a file this turn did not touch. A miss costs a
+   * criterion that was not applied. The old behaviour cost invented work that the fix pass then wrote
+   * into the project — which is worse, and was measured happening twice.
+   */
+  const applies = (hosts.size > 0 && calls) || keys.size > 0;
+  if (hosts.size > 0 && !calls) {
+    signals.add('external URLs present but no outbound call in the changed files — treated as links, not an integration');
+  }
   const note = applies
     ? `third-party integration detected — hosts: ${[...hosts].slice(0, 6).join(', ') || 'none'}`
       + `${keys.size ? `; credentials: ${[...keys].slice(0, 6).join(', ')}` : ''}`

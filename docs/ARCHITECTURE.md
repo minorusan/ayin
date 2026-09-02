@@ -1521,8 +1521,10 @@ what `--allow-parallel-subagents` produces, stopping the turn used to stop one a
 
 ### What was removed
 
-- **The backgrounding race is gone.** Every tool call is awaited. Nothing is taken away from the model
-  and turned into a task it has to poll.
+- **The backgrounding RACE is gone.** No clock ever detaches a run. Every tool call is awaited unless
+  the *operator* presses `Ctrl+B`, and nothing is ever turned into a task the model has to poll — see
+  [the background lane](#the-background-lane-ctrlb-backgroundts) below, which is the same decision
+  moved from a timer to a person.
 - **`execAsync` has no default timeout** — `timeoutMs` is honoured when a caller passes one explicitly,
   and `AYIN_EXEC_TIMEOUT_MS` is an operator backstop that is off unless set. `bash` passes the run's
   signal, so a cancelled call kills its child rather than leaving it running with nobody waiting.
@@ -1535,6 +1537,74 @@ cancelled:false, ms:45031` — where before it would have been backgrounded at 2
 `tools/` still imports nothing outside `tools/`, so `RunContext` is declared in `tools/base.ts` and
 `runs.ts` imports it; the contract belongs to the contract's file. `check:gates` learned that a
 **type-only** import creates no runtime edge, so it no longer demands `ensureToolRuntime()` for one.
+
+## The background lane (`Ctrl+B`, `background.ts`)
+
+`Ctrl+B` moves every run currently holding the turn into the background. The runs keep going exactly
+as they were, the turn continues without them, and the operator gets their prompt back. Nothing is
+cancelled. `Ctrl+O` remains the tool-output browser, which is also where a finished background run
+leaves its result.
+
+**This is not the backgrounding that was removed above, and the difference is the whole design.** The
+old one was a *clock* detaching work and handing the model a task id to poll; the poll cap then ended a
+turn while a correct report sat unread. Here the operator decides, and the result is **pushed** — there
+is nothing to poll, and the notice handed to the model says so in as many words and forbids re-running
+the work. `check:background` asserts that the word never comes back.
+
+### Backgrounding on one GPU is a UI trick — the lane is a PROVIDER
+
+A self-hosted model is one **queue**, not a lock: two callers do not run in parallel, they take turns.
+So detaching a task returns the prompt and not the card. The moment the operator types, their round is
+behind the background task's next generation, and every round after it — the wait was moved, not
+removed.
+
+A lane is therefore a *provider*, not a thread. `/set-background-model` points backgrounded runs at an
+endpoint with its own capacity, and only then is the foreground genuinely free.
+
+**Unset is a working state.** With no lane configured `Ctrl+B` still detaches and says the run stayed
+on this model. A key pressed to unblock yourself must never be what starts a bill, so the lane is never
+inferred. `direct` and `resource` are refused as lane providers: both are the endpoint the foreground
+already uses, so a lane on either would queue behind the very turn it exists to unblock.
+
+### Mid-flight, and what that can reach
+
+A lane is an `AsyncLocalStorage` box holding a **mutable** flag, entered when a run starts. Flipping it
+redirects the *next* model call made inside that run, so an in-process tool already ten seconds into
+its work — explore, a plan phase, QA, a connector — changes lane without being restarted.
+
+A `subagent` is a child **process**: its provider was fixed by the environment it was spawned with, so
+backgrounding one detaches it but cannot move the calls it has left. Arm the lane before it spawns and
+the child is born in it (`backgroundEnv()` is applied last in the child's env, so a deliberate
+background run beats the standing `/set-subagent-model` preference). The detach notice says which of
+the two actually happened rather than implying the stronger one.
+
+### The lane brings its own three globals
+
+`manager.ts` caches one model id, one dialect and one tool mode — all true of the *foreground* endpoint
+and wrong for a lane pointing elsewhere. `llmChatInner` therefore reads `effToolMode` / `effDialect` /
+`effModelId`, which are the lane's when there is one and the module's otherwise. Without this a
+background reply from a native-tool API would be parsed with whatever dialect the local card happens to
+be running — the same class of bug as the `declared` / `offersTools` split.
+
+The refresh probe is also skipped in a lane: it asks the foreground endpoint what is resident there, an
+answer a background call does not use, and waiting on a busy local endpoint is the opposite of getting
+out of the way.
+
+### Delivery
+
+`adoptBackgroundRun` owns a detached run. When it settles the output is saved as an **artifact** (so
+`Ctrl+O` reads it) and enqueued as a message (so the model reads it). A run the operator *cancelled*
+announces nothing — they stopped it, they know.
+
+Mid-turn the message drains on the next round. If the turn has already ended it waits for the next one:
+ayin does **not** start a turn by itself, because a background result arriving while the operator is
+away must not begin spending on its own.
+
+| | |
+|---|---|
+| `Ctrl+B` | detach every live run · works while the agent has the terminal |
+| `/set-background-model` | dialog: provider, then tier · `openai`/`ollama`, or `off` |
+| `backgroundRuns()` | detached runs still going |
 
 ## The arbitration tier (`--arbiter`) — what each level is allowed to hold
 
@@ -1641,10 +1711,12 @@ interleaving it would be a rewrite. So the loop **pre-warms**: every subagent ca
 at once before the loop begins, and the loop then consumes the already-running promises in its normal
 sequential way. The bookkeeping stays ordered; only the waiting overlaps.
 
-### A delegated task is waited for, never backgrounded
+### A delegated task is waited for, never backgrounded BY A CLOCK
 
 Backgrounding exists so a slow shell command does not freeze a turn. A subagent is slow *by design* and
-the parent has nothing to do until it reports — so `BACKGROUND_TIMEOUT` does not apply to it. Measured on
+the parent has nothing to do until it reports — so `BACKGROUND_TIMEOUT` does not apply to it. The
+operator may still detach one with `Ctrl+B`; what is forbidden is a *timer* deciding it, and a model
+being told to poll for the result. See [the background lane](#the-background-lane-ctrlb-backgroundts). Measured on
 the first live delegation, backgrounded: the parent polled `status` six times, hit `pollMaxPerTurn`, was
 told `blocked (poll cap 6)` and ended the turn **never having seen the report**, while the child had
 finished the job correctly. Waiting instead: one tool call, no polling, and an accurate report.

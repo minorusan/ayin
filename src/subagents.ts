@@ -38,6 +38,7 @@ import { fileURLToPath } from 'node:url';
 import { log } from './log.js';
 import { postmortemEnabled } from './postmortem.js';
 import { getConfigString } from './prompts.js';
+import { backgroundEnv, inBackground, providerUsable } from './background.js';
 
 /** How deep we already are. `0` is the operator's own session; `1` is a subagent it spawned. */
 export function subagentDepth(): number {
@@ -356,6 +357,7 @@ export async function runSubagent(task: string, opts: SubagentOpts = {}): Promis
 export function subagentModelEnv(): Record<string, string> {
   const provider = (getConfigString('subagentProvider') ?? '').trim().toLowerCase();
   if (!provider) return {};
+  if (!providerUsable(provider, 'subagentProvider')) return {};
   const model = (getConfigString('subagentModel') ?? '').trim();
   const env: Record<string, string> = { AYIN_LLM_PROVIDER: provider };
   // The model env is PER PROVIDER, because each provider reads its own. `direct` and `resource` have
@@ -474,6 +476,16 @@ async function spawnSubagent(task: string, opts: SubagentOpts = {}): Promise<Sub
         // What this child runs on, when the operator has said it differs from the parent. Applied last
         // so it wins over anything inherited — that is the whole point of having said it.
         ...subagentModelEnv(),
+        /**
+         * BORN IN THE LANE. A child is a separate process, so its provider is decided once, here, by
+         * the environment it is handed. Backgrounding it AFTERWARDS detaches it from the turn but
+         * cannot re-point the calls it has left — `background.ts` explains why, and the detach notice
+         * says which of the two actually happened rather than implying the stronger one.
+         *
+         * Last, so it beats `subagentModelEnv` when both are set: a run the operator deliberately put
+         * in the background is a more specific instruction than a standing preference about children.
+         */
+        ...(inBackground() ? backgroundEnv() : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

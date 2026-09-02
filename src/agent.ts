@@ -25,7 +25,7 @@ import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution, modelTools } from './tools.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
 import { getGoal } from './goal.js';
-import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLESS, formatToolResultForChat, formatToolCallForChat, escapeBlessedTags, toItalic, updateToolProgress } from './ui.js';
+import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLESS, formatToolResultForChat, formatToolCallForChat, escapeBlessedTags, updateToolProgress } from './ui.js';
 import { theme } from './ui/theme.js';
 import { log } from './log.js';
 import { hasFinalMarker, stripFinalMarker } from './final-marker.js';
@@ -46,6 +46,7 @@ import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
 import { arbiterMode, prewarmSubagents, resetSubagents, withheldRedirect } from './subagents.js';
 import { cancelAllRuns, currentRuns, onRunsChanged, resetRuns, startRun, type RunContext } from './runs.js';
+import { adoptBackgroundRun, backgroundHandoffLine, detachNotice, laneConfigured } from './background.js';
 import { notePostmortemContext } from './postmortem.js';
 import { extractSignals } from './tools/signals.js';
 import { qaBeginTurn, qaChangedFiles, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn, qaPreparedUnits } from './qa/index.js';
@@ -1853,16 +1854,29 @@ async function runAgentTurn(userInput: string): Promise<void> {
             const presenterOutcome = await presenterPass(getGoal() || currentGoal, response, gate.files, qaPreparedUnits());
             if (presenterOutcome.presented && presenterOutcome.text) {
               addMessage('assistant', presenterOutcome.text);
-              // TESTING-ERA ONLY, per the operator: still show the raw reply too, de-emphasized in
-              // (fake, Unicode-math-italic — blessed has no real italic attribute) cursive BELOW the
-              // presentation, so the two can be compared while Presenter is new. Once trusted, this
-              // block goes away and the presentation stands alone — that's the only change needed here.
+              /**
+               * TESTING-ERA ONLY, per the operator: the raw reply is shown BELOW the presentation so
+               * the two can be compared while Presenter is new. Once trusted, this block goes away and
+               * the presentation stands alone — that is the only change needed here.
+               *
+               * RENDERED AS MARKDOWN, NOT TRANSLITERATED. It used to run through `toItalic`, which
+               * substitutes a Unicode mathematical-italic codepoint for every ASCII letter — blessed
+               * has no italic attribute, so that was the only way to slant it. The cost was the whole
+               * content: a reply is the one message most likely to be a numbered list of bold headings
+               * with `code` spans and paths in it, and every one of those became unstyled 𝑖𝑡𝑎𝑙𝑖𝑐
+               * 𝑙𝑜𝑜𝑘𝑖𝑛𝑔 text — no headings, no fences, no bullets, and not selectable or greppable as
+               * the words it is supposed to be.
+               *
+               * `interim` is the mechanism that already exists for exactly this: markdown IS rendered,
+               * and then every foreground colour is bleached toward the panel background, so structure
+               * survives while emphasis does not. De-emphasis belongs in the COLOUR, not in the
+               * characters.
+               */
               if (parsed.text) {
                 const preview = parsed.text.length > 2000 ? `${parsed.text.slice(0, 2000)}\n… (truncated, ${parsed.text.length} chars total)` : parsed.text;
-                addMessage('system', [
-                  `{${theme.faint}-fg}${escapeBlessedTags(toItalic('(original reply, shown for testing while Presenter is new)'))}{/}`,
-                  `{${theme.muted}-fg}${escapeBlessedTags(toItalic(preview))}{/}`,
-                ].join('\n'));
+                addMessage('assistant',
+                  `(original reply, shown for testing while Presenter is new)\n\n${preview}`,
+                  { interim: true });
               }
               textForQa = presenterOutcome.text;
 
@@ -2253,16 +2267,42 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * child had done the job. A tool that narrates does not need to be taken away from the model to
        * stop looking hung.
        */
-      const started = timed('tool', name, () => startRun(
+      const run = startRun(
         name,
         paramPreview,
         (ctx: RunContext) => tool.execute(params, ctx),
         { signal: turnAbort.signal },
-      ).done, (line) => { addMessage('system', line); }).finally(() => liveTool(null));
+      );
+      const started = timed('tool', name, () => run.done, (line) => { addMessage('system', line); });
 
-      const outcome = await started;
-      let result: string | null = outcome.output;
-      if (outcome.cancelled) log('INFO', 'tool_cancelled', { tool: name, ms: String(outcome.ms) });
+      /**
+       * THE TURN WAITS FOR THE WORK, OR FOR THE OPERATOR TO SAY IT NEED NOT.
+       *
+       * `Ctrl+O` on a live run resolves `detached`, and the turn stops waiting — the run itself is
+       * untouched and keeps going. This is NOT the backgrounding this loop threw out: there is no
+       * timer deciding on the model's behalf, nothing to poll, and no cap to hit. The operator
+       * decides, and the result is PUSHED into the session when it lands (see `background.ts`),
+       * which is precisely the half the old mechanism was missing when it lost a finished report to
+       * `blocked (poll cap 6)`.
+       */
+      const settled = await Promise.race([
+        started.then((o) => ({ detached: false as const, o })),
+        run.detached.then(() => ({ detached: true as const, o: null })),
+      ]);
+      liveTool(null);
+
+      const detached = settled.detached;
+      let result: string | null;
+      if (detached) {
+        // `started` is still pending; whoever adopts the run owns it from here.
+        adoptBackgroundRun(run.id, name, paramPreview, started);
+        result = detachNotice(run.id, name, laneConfigured());
+        addMessage('system', backgroundHandoffLine(run.id, name, laneConfigured()));
+      } else {
+        const outcome = settled.o;
+        result = outcome.output;
+        if (outcome.cancelled) log('INFO', 'tool_cancelled', { tool: name, ms: String(outcome.ms) });
+      }
 
       if (interrupted && immediateCancel) {
         setAgentStatus('');
@@ -2311,7 +2351,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * the fix. The epoch is what lifts that block; the tools are named here rather than in the guard
        * because this loop is the one place that knows a call actually succeeded.
        */
-      if (!TREE_SAFE.has(name) && !/^(Error|Refused)\b/.test(result)) {
+      if (!detached && !TREE_SAFE.has(name) && !/^(Error|Refused)\b/.test(result)) {
         // Keyed by the CALL, not the tool: a bump lifts blocks on other calls and never on itself, which
         // is what lets `npm test` after an edit run while `npm test` twice in a row still does not.
         guardNoteMutation(name, [params.path, params.file, params.to].filter((p): p is string => Boolean(p)),
@@ -2325,7 +2365,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * same call again". That retry is byte-identical to the refused attempt, and a read is TREE_SAFE so
        * it bumps no epoch — so the repeat guard skipped it and then blocked it, and the edit never landed.
        */
-      if (TREE_SAFE.has(name) && !/^(Error|Refused)\b/.test(result)) {
+      if (!detached && TREE_SAFE.has(name) && !/^(Error|Refused)\b/.test(result)) {
         guardNoteRead([params.path, params.file].filter((p): p is string => Boolean(p)));
       }
       saveArtifact(name, paramPreview, result);
@@ -2347,7 +2387,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // gate and the exact signal the fabrication guard reads. The ledger keeps the failures instead,
       // where they are evidence rather than a phantom write. See edit-truth.ts.
       let editMissNote = '';
-      if ((name === 'write_file' || name === 'str_replace') && params.path) {
+      if (!detached && (name === 'write_file' || name === 'str_replace') && params.path) {
         if (noteEditAttempt(name, params.path, result)) qaNoteTouched(params.path);
         else if (consecutiveMissesOn(params.path) >= 2) {
           // Two misses on ONE file means the model is editing text it has not read, and a third guess
@@ -2359,7 +2399,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
           log('WARN', 'edit_repeated_miss', { tool: name, path: params.path, misses: String(consecutiveMissesOn(params.path)) });
         }
       }
-      if (name === 'write_file') {
+      if (!detached && name === 'write_file') {
         // Track CTA delivery — if the write target matches the CTA, mark as delivered
         if (ctaTarget && !ctaDelivered && (params.path || '').includes(ctaTarget) && (params.content || '').length > 200) {
           ctaDelivered = true;
@@ -2370,7 +2410,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
 
       // Fallback CTA detection: model may write the target via bash/edit_file/etc.
       // After ANY tool call, stat the target — if it exists with substantial content, mark delivered.
-      if (ctaTarget && !ctaDelivered) {
+      if (!detached && ctaTarget && !ctaDelivered) {
         try {
           const st = statSync(ctaTarget);
           if (st.isFile() && st.size > 50) {

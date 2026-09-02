@@ -35,6 +35,7 @@ import { NativeToolDialect } from './dialects/native.js';
 import { QwenDialect } from './dialects/qwen.js';
 import { narrateWait } from '../wait-narrator.js';
 import { llmProvider } from './select.js';
+import { laneTarget } from '../background.js';
 
 // Registered dialects, in match-priority order. The first whose matches() returns
 // true for the active model wins; DEFAULT is used until the model id is known.
@@ -676,11 +677,30 @@ export async function llmChat(messages: LlmMessage[], opts: LlmChatOptions = {})
 }
 
 async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}, purpose = 'sub-call'): Promise<string> {
-  ensureRefreshed();
+  /**
+   * A BACKGROUNDED RUN ANSWERS ELSEWHERE, AND BRINGS ITS OWN THREE GLOBALS.
+   *
+   * `cachedModelId`, `cachedDialect` and `cachedToolMode` describe the model resident on the
+   * FOREGROUND endpoint. A lane pointing at a hosted API is a different model with a different
+   * tool-call format, and reading the module's answer for it would hand a native-tool reply to
+   * whatever dialect the local card happens to be running — the exact class of bug the
+   * `declared`/`offersTools` split above was written to end. So the lane carries its own, and every
+   * use below reads the effective value rather than the global.
+   *
+   * Null on every ordinary call: one AsyncLocalStorage lookup, then the foreground path unchanged.
+   */
+  const lane = await laneTarget();
+  // The refresh probes the foreground endpoint to learn what is resident there. A background call
+  // does not use that answer, and making it wait on a busy or unreachable local endpoint would be
+  // the opposite of getting out of the way.
+  if (!lane) ensureRefreshed();
   // Declare the tools. A provider that can pass them to the runtime (providers/ollama.ts) gets native
   // tool-calling — the model emits the syntax it was trained on and the runtime parses it — while the
   // text-contract providers ignore the field and nothing changes for them.
-  const provider = await llmProvider();
+  const provider = lane?.provider ?? await llmProvider();
+  const effToolMode = lane?.toolMode ?? toolMode();
+  const effDialect = lane?.dialect ?? activeDialect();
+  const effModelId = lane?.modelId ?? cachedModelId;
   // Schemas go out ONLY to a provider that declares them AND to a caller that wants them; a text
   // contract provider would ignore the field, and sending it anyway invites exactly the
   // double-declaration this mode exists to prevent.
@@ -706,7 +726,7 @@ async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}, p
   // it away, and told the model it had no tools. Measured on gemma4:26b — three valid calls in three
   // rounds, all discarded, and the turn ended with "I cannot answer because no task was provided".
   const offersTools = opts.declareTools !== false;
-  const declared = toolMode() === 'native' && offersTools;
+  const declared = effToolMode === 'native' && offersTools;
   const tools = declared
     ? await (async () => {
         // Reached from any generate path, not only a turn, so it insists on discovery rather than
@@ -748,12 +768,12 @@ async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}, p
     // ONE retry, then whatever comes back is returned. A guard that can loop is worse than the
     // behaviour it corrects, and a model that insists twice is telling you something the loop should
     // surface rather than hide.
-    if (!offersTools && activeDialect().parse(reply).toolCalls.length > 0) {
-      log('INFO', 'tool_call_without_tools', { model: cachedModelId, dialect: activeDialect().id });
+    if (!offersTools && effDialect.parse(reply).toolCalls.length > 0) {
+      log('INFO', 'tool_call_without_tools', { model: effModelId, dialect: effDialect.id });
       // The raw text, on disk. This is the reply that settles "did the model emit that, or did ayin
       // mangle it" — and it was previously kept nowhere unless /transcribe had been switched on
       // beforehand, which nobody does before the bug they did not expect.
-      void import('../session-record.js').then((r) => r.recordRaw(0, `tool call with no tools declared · dialect ${activeDialect().id} · model ${cachedModelId || 'unknown'}`, reply));
+      void import('../session-record.js').then((r) => r.recordRaw(0, `tool call with no tools declared · dialect ${effDialect.id} · model ${effModelId || 'unknown'}`, reply));
       // THE RETRY IS SHORT. It used to re-send the ENTIRE conversation — measured on the gateway at
       // 16,818 prompt tokens and 91 seconds, for a correction whose whole content is "you cannot call
       // tools here". The instruction that was already given is in the system message; the only new
@@ -775,14 +795,14 @@ async function llmChatInner(messages: LlmMessage[], opts: LlmChatOptions = {}, p
       if (cleaned.trim()) reply = cleaned;
     }
     emitLlmCall({
-      model: cachedModelId, promptChars, replyChars: reply.length,
+      model: effModelId, promptChars, replyChars: reply.length,
       ms: Date.now() - started, toolMode: declared ? 'native' : 'prompt',
     });
     return reply;
   } catch (err) {
     // A failed call is the one an observer most wants; reported, then rethrown unchanged.
     emitLlmCall({
-      model: cachedModelId, promptChars, replyChars: 0,
+      model: effModelId, promptChars, replyChars: 0,
       ms: Date.now() - started, toolMode: declared ? 'native' : 'prompt',
       error: err instanceof Error ? err.message : String(err),
     });

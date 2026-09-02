@@ -30,6 +30,7 @@
  */
 
 import { log } from './log.js';
+import { type Lane, runInLane } from './background.js';
 import type { RunContext } from './tools/base.js';
 
 // The tool contract owns its own types — `tools/` may not import from outside itself, so the
@@ -55,6 +56,12 @@ export interface RunSnapshot {
    * followable, so the snapshot carries it.
    */
   notes: string;
+  /**
+   * True once this run has been detached from the turn — it is still running, but nothing is waiting
+   * on it. Painted differently because "23s — still running" means two different things depending on
+   * whether anyone is blocked on the answer.
+   */
+  background: boolean;
 }
 
 export interface RunOutcome {
@@ -71,6 +78,14 @@ export interface RunOutcome {
 export interface StartedRun {
   id: number;
   done: Promise<RunOutcome>;
+  /**
+   * Resolves if and when this run is detached from the turn. The caller races it against `done` and
+   * stops waiting — `done` still resolves later, with the real outcome, for whoever adopts it.
+   *
+   * A promise rather than a callback because the awaiting side is an `await` in the agent loop, and
+   * a callback there would mean a flag plus a poll.
+   */
+  detached: Promise<void>;
   /** Everything the tool has said so far, newest last, each line stamped `[+Δs]`. */
   notes(): string;
   cancel(why?: string): void;
@@ -80,6 +95,10 @@ interface LiveRun {
   snap: RunSnapshot;
   ctl: AbortController;
   notes: string;
+  /** The box `background.ts` reads to decide where this run's model calls go. Mutated in place. */
+  lane: Lane;
+  /** Resolves `StartedRun.detached`. Called at most once. */
+  detach: () => void;
 }
 
 let nextId = 1;
@@ -160,7 +179,7 @@ export function startRun(
   tool: string,
   params: string,
   exec: (ctx: RunContext) => Promise<string>,
-  opts: { signal?: AbortSignal } = {},
+  opts: { signal?: AbortSignal; background?: boolean } = {},
 ): StartedRun {
   const id = nextId++;
   const ctl = new AbortController();
@@ -172,13 +191,21 @@ export function startRun(
   }
 
   const startedAt = Date.now();
+  const background = opts.background === true;
+  const lane: Lane = { runId: id, tool, background };
+  let fireDetach: () => void = () => { /* replaced below, before anything can call it */ };
+  const detached = new Promise<void>((resolve) => { fireDetach = resolve; });
   const entry: LiveRun = {
-    snap: { id, tool, params, startedAt, ms: 0, note: '', notes: '' },
+    snap: { id, tool, params, startedAt, ms: 0, note: '', notes: '', background },
     ctl,
     notes: '',
+    lane,
+    detach: fireDetach,
   };
   live.set(id, entry);
   arm();
+  // Started already detached: resolve now so the caller never waits on the first await.
+  if (background) fireDetach();
 
   let lastNoteAt = startedAt;
   const onStatus = (note: string): void => {
@@ -199,7 +226,10 @@ export function startRun(
     let output: string;
     let ok: boolean;
     try {
-      output = await exec({ signal: ctl.signal, onStatus });
+      // INSIDE THE LANE. Everything this tool awaits inherits the box, so `background.ts` can answer
+      // "where does this model call go?" without the question being threaded through every tool's
+      // signature — and flipping the box later moves a run that is already in flight.
+      output = await runInLane(lane, () => exec({ signal: ctl.signal, onStatus }));
       ok = true;
     } catch (err) {
       output = `Error: ${err instanceof Error ? err.message : String(err)}`;
@@ -220,5 +250,38 @@ export function startRun(
     return { id, tool, params, ok, cancelled, output, ms };
   })();
 
-  return { id, done, notes: () => entry.notes, cancel: (why) => { cancelRun(id, why); } };
+  return { id, done, detached, notes: () => entry.notes, cancel: (why) => { cancelRun(id, why); } };
+}
+
+/**
+ * Detach one run from the turn and move its remaining model calls into the background lane.
+ *
+ * Returns false for an id that is not running — including one that finished a moment ago, which is
+ * the ordinary race when the operator presses the key just as a tool returns. Not an error: the
+ * result they were waiting for arrived, which is what they wanted.
+ *
+ * THIS DOES NOT CANCEL ANYTHING. The run continues exactly as it was; only the question of who is
+ * waiting for it changes.
+ */
+export function backgroundRun(id: number): boolean {
+  const entry = live.get(id);
+  if (!entry || entry.snap.background) return false;
+  entry.lane.background = true;
+  entry.snap.background = true;
+  entry.detach();
+  log('INFO', 'run_backgrounded', { id: String(id), tool: entry.snap.tool, ms: String(Date.now() - entry.snap.startedAt) });
+  publish();
+  return true;
+}
+
+/**
+ * Detach every run currently holding the turn up, newest first. Returns the ids moved.
+ *
+ * ALL OF THEM, not the one that happens to be longest — parallel subagents are one stage of work, and
+ * unblocking the operator means unblocking them from the stage, not from one branch of it.
+ */
+export function backgroundAllRuns(): number[] {
+  const moved: number[] = [];
+  for (const id of [...live.keys()]) if (backgroundRun(id)) moved.push(id);
+  return moved;
 }

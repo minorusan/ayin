@@ -1,7 +1,10 @@
 /**
  * Key router — the ONE screen keypress listener. Order preserved from the original:
- *   1. C-o / C-s / escape → the app's global handler (works while the agent is busy);
+ *   1. C-b / C-o / C-s / escape → the app's global handler (works while the agent is busy);
  *      if the input is inactive that's all they do.
+ *      C-b is in that set for the same reason Escape is: it exists ONLY for the moment the agent has
+ *      the terminal and you want it back. A background key that needed an idle prompt would be
+ *      unreachable exactly when it is the thing you are reaching for.
  *   2. C-c → shutdown.
  *   3. Input inactive → nothing else.
  *   4. PgUp/PgDn → chat scroll.
@@ -26,7 +29,7 @@ export function installKeyRouter(opts: {
   if (HEADLESS) return;
 
   screen.on('keypress', (ch: string | undefined, key: blessed.Widgets.Events.IKeyEventArg) => {
-    if (key.full === 'C-o' || key.full === 'C-s' || key.full === 'escape') {
+    if (key.full === 'C-b' || key.full === 'C-o' || key.full === 'C-s' || key.full === 'escape') {
       const handler = opts.getGlobalHandler();
       if (handler) handler(key.full);
       if (!opts.input.isActive()) return;

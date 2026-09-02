@@ -174,6 +174,10 @@ export const KNOWN_CONFIG_KEYS = [
   // picks the next phase; a child writes the code. One global choice means paying flagship rates to
   // arbitrate, or implementing on whatever happens to be resident. Empty = the child inherits.
   'subagentProvider', 'subagentModel',
+  // The background lane (background.ts) — where a Ctrl+O'd run's model calls go. Separate from the
+  // subagent pair above on purpose: delegation is a standing preference, a lane is about getting ONE
+  // run out of the way, and an operator may want either without the other.
+  'backgroundProvider', 'backgroundModel',
   // Only honoured when the operator sets it — the round budget is otherwise unlimited (agent.ts).
   'maxToolRounds',
   // `ayin launch`: the command that opens a terminal window, with {{SCRIPT}} for the launch script.

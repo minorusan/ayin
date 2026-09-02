@@ -41,7 +41,8 @@ import { appendTurn as appendTicketTurn } from './sprint/chat.js';
 import { addNote, markDone, markFailed, reapAbandoned } from './diff/comments.js';
 import { runLogPath } from './diff/runner.js';
 import { llmProvider } from './llm/select.js';
-import { showIndulgePicker, showSubagentModelPicker, handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
+import { showIndulgePicker, showSubagentModelPicker, showBackgroundModelPicker, handleModelCommand, releaseModelHold, isModelBooked } from './model-picker.js';
+import { backgroundAllRuns } from './runs.js';
 import { showDialog } from './dialog.js';
 import { startLlmStatusPoll, findOwnPlace } from './llm-status.js';
 import { startUpdateWatch, checkForUpdate } from './updater.js';
@@ -306,6 +307,22 @@ if (!HEADLESS) {
       } else {
         lastIdleEscapeAt = now;
       }
+      return;
+    }
+    /**
+     * Ctrl+B — move whatever is running to the background and take the turn back.
+     *
+     * ITS OWN KEY, NOT AN OVERLOAD OF Ctrl+O. This was first built onto Ctrl+O on the theory that the
+     * two never collide — a browser is what you want when nothing is running, and there is nothing to
+     * detach then either. That reasoning holds and it is still the wrong call: Ctrl+O is a key people
+     * already press by habit, and a key whose meaning depends on what the agent happens to be doing
+     * is one that eventually does the other thing. Backgrounding is not undoable by pressing it again.
+     *
+     * Silent when nothing is running. A key that reports "there was nothing to background" is noise
+     * on the one press that was a mistyped Ctrl+C.
+     */
+    if (key === 'C-b') {
+      backgroundAllRuns(); // the handoff line is printed by the agent loop, per run
       return;
     }
     if (key === 'C-o') {
@@ -606,6 +623,46 @@ async function handleInput(text: string): Promise<void> {
         addMessage('system', `Subagents will run on ${provider.toLowerCase()}${model ? ` · ${model}` : ' · that provider\'s default model'}.`
           + ' This agent is unchanged — it keeps arbitrating on what it already uses.'
           + (provider.toLowerCase() === 'openai' ? ' Every child now costs money per token.' : ''));
+        return;
+      }
+      /**
+       * `/set-background-model` — where a run sent away with `Ctrl+B` does its thinking.
+       *
+       * The setting that makes backgrounding mean something. One card is one QUEUE, so detaching a
+       * task from the turn returns the prompt and not the GPU: the operator's next round still waits
+       * behind the task they just got out of the way. A lane pointing at an endpoint with its own
+       * capacity is the difference between "not blocking the UI" and actually running alongside.
+       *
+       * Unset is a working state, not a broken one — `Ctrl+B` still detaches and says the run stayed
+       * put. Pressing a key to unblock yourself must never be what starts a bill.
+       */
+      case '/set-background-model': {
+        const arg = text.slice('/set-background-model'.length).trim();
+        if (!arg) { await showBackgroundModelPicker(); return; }
+        const { resetLaneProvider } = await import('./background.js');
+        if (arg.toLowerCase() === 'off') {
+          setConfigValue('backgroundProvider', '');
+          setConfigValue('backgroundModel', '');
+          resetLaneProvider();
+          addMessage('system', 'Background runs stay on this model. They still detach from the turn.');
+          return;
+        }
+        const [provider, ...rest] = arg.split(/\s+/);
+        const model = rest.join(' ').trim();
+        // `direct` and `resource` are refused rather than stored: both point at the endpoint the
+        // foreground already uses, so a lane on either would queue behind the very turn it exists to
+        // unblock. Accepting it would store a setting that silently does nothing.
+        const known = ['openai', 'ollama'];
+        if (!known.includes(provider.toLowerCase())) {
+          addMessage('system', `A background lane needs its own capacity — ${known.join(' or ')}, or off. `
+            + `"${provider}" is the same endpoint this turn already queues on.`);
+          return;
+        }
+        setConfigValue('backgroundProvider', provider.toLowerCase());
+        setConfigValue('backgroundModel', model);
+        resetLaneProvider();
+        addMessage('system', `Ctrl+B now moves a run onto ${provider.toLowerCase()}${model ? ` · ${model}` : ' · that provider\'s default model'}.`
+          + (provider.toLowerCase() === 'openai' ? ' A backgrounded run bills per token while it runs.' : ''));
         return;
       }
       /**

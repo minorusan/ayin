@@ -176,16 +176,32 @@ const { rankForAgentic } = await import('../dist/model-picker.js');
     'gpt-4.1', 'gpt-5.6-luna', 'gpt-5.5-pro', 'gpt-5.6-sol', 'gpt-5.4-nano', 'gpt-5.3-codex',
     'gpt-5.6-terra', 'gpt-5.5', 'some-future-model',
   ]).map((r) => r.id);
-  ok(ranked[0] === 'gpt-5.6-sol', 'the agentic flagship ranks first', ranked[0]);
-  ok(ranked[1] === 'gpt-5.3-codex', '  → then the cheaper coding-specialised line', ranked[1]);
+  /**
+   * THE ORDER IS MEASURED, NOT PRICED. Probed against the live API on 2026-09-02, and it inverted what
+   * the price list implied:
+   *
+   *   gpt-5.5        tools + reasoning        ok
+   *   gpt-5.6-*      tools ONLY with reasoning_effort:'none'   (400 otherwise — every agent round)
+   *   gpt-5.3-codex  refuses /v1/chat/completions entirely, which is the endpoint this client speaks
+   *
+   * So the tier that can actually drive tools with its head on ranks first, and Codex — which a
+   * price-based reading put second — ranks near the bottom because here it cannot run at all.
+   */
+  ok(ranked[0] === 'gpt-5.5', 'the tier that takes tools WITH reasoning ranks first', ranked[0]);
+  ok(ranked.indexOf('gpt-5.6-sol') < ranked.indexOf('gpt-5.6-terra'),
+    '  → then the 5.6 tiers, which work but with reasoning off');
+  ok(ranked.indexOf('gpt-5.3-codex') > ranked.indexOf('gpt-5.6-luna'),
+    '  → and Codex ranks BELOW them: it cannot use this endpoint at all, whatever it costs');
+  ok(/responses/.test(rankForAgentic(['gpt-5.3-codex'])[0].why),
+    '  → …and the row says why, so nobody picks it and watches every call 400');
   ok(ranked.indexOf('gpt-5.6-luna') > ranked.indexOf('gpt-5.6-terra'), '  → cheap tiers sit below balanced ones');
   ok(ranked[ranked.length - 1] === 'gpt-4.1',
     '  → and a generation-old model ranks LAST, not first as /indulge-model still offers it', ranked[ranked.length - 1]);
   ok(ranked.includes('some-future-model'),
     '  → an id this file does not recognise is still offered — the opinion is not a whitelist');
-  const sol = rankForAgentic(['gpt-5.6-sol'])[0];
-  ok(sol.tag === 'agentic' && /terminal workflows|tool use/.test(sol.why),
-    '  → and each row says what the tier is FOR, which a list of ids cannot', sol.why.slice(0, 40));
+  const top = rankForAgentic(['gpt-5.5'])[0];
+  ok(top.tag === 'agentic' && /reasoning/.test(top.why),
+    '  → and each row says what the tier is FOR, which a list of ids cannot', top.why.slice(0, 40));
 }
 
 // ── 6 · the WIDTH PATCH: blessed must agree with the terminal ────────────────

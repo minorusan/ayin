@@ -582,6 +582,87 @@ export async function showSubagentModelPicker(): Promise<void> {
     + ' This agent is unchanged. Every child now costs money per token.');
 }
 
+/**
+ * `/set-background-model` — where a run sent to the background with `Ctrl+B` does its thinking.
+ *
+ * THIS IS THE SETTING THAT MAKES BACKGROUNDING REAL. On a self-hosted card the model is one queue:
+ * detaching a task from the turn hands back the prompt but not the GPU, so the operator's next round
+ * still waits behind the task they just got out of the way. Pointing the lane at a hosted endpoint
+ * with its own capacity is what turns "not blocking the UI" into "actually running alongside".
+ *
+ * Left unset, `Ctrl+B` still detaches — it just says the run stayed on this model. A key press to
+ * unblock yourself must never be the thing that starts spending money.
+ */
+export async function showBackgroundModelPicker(): Promise<void> {
+  const key = openAiKey();
+  const curProvider = (getConfigString('backgroundProvider') ?? '').trim();
+  const curModel = (getConfigString('backgroundModel') ?? '').trim();
+
+  const top: DialogOption[] = [
+    {
+      label: 'OpenAI — pick a tier',
+      note: curProvider === 'openai' ? 'current' : '',
+      sub: key ? 'a backgrounded run gets its own capacity — genuinely parallel with your next turn'
+        : 'needs a key first — /openai sk-…',
+    },
+    {
+      label: 'Stay on this model',
+      note: curProvider ? '' : 'current',
+      sub: 'Ctrl+B still detaches, but the run keeps queueing on the same card — no bill, no parallelism',
+    },
+  ];
+  const which = await showDialog('Where background runs think', top, {
+    subtitle: 'only runs you send away with Ctrl+B · this agent and its subagents are not touched',
+    selected: curProvider === 'openai' ? 0 : 1,
+    footer: '↑↓ select · Enter choose · Esc cancel',
+  });
+  if (which < 0) return;
+
+  const { resetLaneProvider } = await import('./background.js');
+  if (which === 1) {
+    setConfigValue('backgroundProvider', '');
+    setConfigValue('backgroundModel', '');
+    resetLaneProvider();
+    addMessage('system', 'Background runs stay on this model. They still detach from the turn.');
+    return;
+  }
+  if (!key) {
+    addMessage('system', noKeyMessage());
+    return;
+  }
+
+  const ids = await openAiChatModels();
+  if (!ids.length) {
+    addMessage('system', 'Could not list models for that key. Set one directly: /set-background-model openai <id>.');
+    return;
+  }
+
+  const tiers: DialogOption[] = rankForAgentic(ids).slice(0, 8).map((m) => ({
+    label: m.id,
+    note: m.id === curModel ? 'current' : m.tag,
+    sub: m.why,
+  }));
+  tiers.push({
+    label: "that provider's default",
+    note: curModel ? '' : 'current',
+    sub: 'whatever openai.ts picks — re-read when the lineup moves',
+  });
+
+  const tier = await showDialog('Which OpenAI model for background runs', tiers, {
+    subtitle: 'a backgrounded task runs unattended — the tier is what it costs while you are not watching',
+    selected: Math.max(0, tiers.findIndex((t) => t.note === 'current')),
+    footer: '↑↓ select · Enter choose · Esc cancel',
+  });
+  if (tier < 0) return;
+
+  const chosen = tier === tiers.length - 1 ? '' : tiers[tier].label;
+  setConfigValue('backgroundProvider', 'openai');
+  setConfigValue('backgroundModel', chosen);
+  resetLaneProvider();
+  addMessage('system', `Ctrl+B now moves a run onto openai${chosen ? ` · ${chosen}` : " · that provider's default model"}.`
+    + ' Nothing else changes provider; a backgrounded run bills per token while it runs.');
+}
+
 /** The chat-capable ids this key can actually reach. Empty when the call fails — never a guess. */
 async function openAiChatModels(): Promise<string[]> {
   try {
@@ -610,11 +691,15 @@ export interface Ranked { id: string; tag: string; why: string; rank: number }
 export function rankForAgentic(ids: string[]): Ranked[] {
   const seen = ids.map((id) => {
     const l = id.toLowerCase();
-    if (/sol/.test(l)) return { id, tag: 'agentic', why: 'flagship tuned for agentic work — terminal workflows, multi-step tool use · ~$4/$20', rank: 0 };
-    if (/codex/.test(l)) return { id, tag: 'coding', why: 'coding-specialised and cheaper than the flagship — the value pick for long builds', rank: 1 };
-    if (/5\.5/.test(l) && !/pro/.test(l)) return { id, tag: 'costly', why: 'previous flagship — ~$5/$30, more than Sol for less agentic focus', rank: 2 };
-    if (/terra/.test(l)) return { id, tag: 'balanced', why: 'balanced production tier — ~$2/$12', rank: 3 };
-    if (/luna/.test(l)) return { id, tag: 'cheap', why: 'cheap tier — ~$0.20/$1.20, fine for small or repetitive phases', rank: 4 };
+    // MEASURED AGAINST THE LIVE API, 2026-09-02, not inferred from prices — and it reorders the list.
+    // gpt-5.5 is the only tier here that takes function tools WITH reasoning; the whole 5.6 family
+    // requires reasoning_effort:'none' (openai.ts sends it), and Codex refuses /v1/chat/completions
+    // outright, which is the endpoint this client speaks.
+    if (/codex/.test(l)) return { id, tag: 'unsupported', why: 'needs the /v1/responses endpoint — this client speaks chat/completions, so it cannot drive tools here', rank: 8 };
+    if (/5\.5/.test(l) && !/pro/.test(l)) return { id, tag: 'agentic', why: 'the only tier that takes tools WITH reasoning on this endpoint — ~$5/$30', rank: 0 };
+    if (/sol/.test(l)) return { id, tag: 'agentic', why: 'agentic flagship, ~$4/$20 — tools work, but with reasoning off (API restriction)', rank: 1 };
+    if (/terra/.test(l)) return { id, tag: 'balanced', why: 'balanced production tier, ~$2/$12 — tools with reasoning off', rank: 3 };
+    if (/luna/.test(l)) return { id, tag: 'cheap', why: 'cheap + fast, ~$0.20/$1.20 — tools with reasoning off; fine for small or repetitive phases', rank: 4 };
     if (/nano/.test(l)) return { id, tag: 'cheapest', why: 'cheapest tier — expect it to struggle on a real phase', rank: 5 };
     if (/mini/.test(l)) return { id, tag: 'cheap', why: 'cheap tier — a phase that loops will still cost you', rank: 5 };
     if (/pro/.test(l)) return { id, tag: 'very costly', why: '~$30/$180 — a runaway phase here is expensive', rank: 7 };

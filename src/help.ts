@@ -67,6 +67,11 @@ export const HELP: HelpEntry[] = [
     tip: 'Arbitrating and implementing are different jobs — keep the arbiter on your card, pay only for the children.',
   },
   {
+    name: '/set-background-model', kind: 'command', section: 'Code',
+    short: 'Where a Ctrl+B\'d run thinks — the setting that makes backgrounding parallel · openai gpt-5.6-sol · off',
+    tip: 'One card is one queue: a detached run only stops blocking you once it answers somewhere else.',
+  },
+  {
     name: '/naamah', kind: 'command', section: 'Code',
     short: 'The DESIGN as a live page — click a type card to comment, and the agent changes the sketch · /naamah <dir>',
     tip: '/naamah is /diff one step earlier — review the design before the code exists.',
@@ -202,6 +207,11 @@ export const HELP: HelpEntry[] = [
   { name: '/openai', kind: 'command', section: 'Connectors', short: 'Store and verify an OpenAI key · switching to it is /model openai — two decisions, two commands' },
 
   // ── keys ───────────────────────────────────────────────────────────────────────
+  {
+    name: 'Ctrl+B', kind: 'key', section: 'Keys',
+    short: 'Move whatever is running to the background — it finishes on its own and the turn is yours again',
+    tip: 'Ctrl+B hands the turn back without cancelling anything — the run finishes alone and reports itself.',
+  },
   {
     name: 'Ctrl+O', kind: 'key', section: 'Keys',
     short: 'Browse full tool output — every tool run is saved; ←/→ to page through them',

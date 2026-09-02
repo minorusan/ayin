@@ -110,23 +110,113 @@ function describe(err: unknown): string {
 /**
  * Default model, and it is a JUDGEMENT not a constant: this file will rot the moment the lineup moves.
  *
- * As of 2026-08: the flagships are GPT-5.6 (Sol $5/$30, Terra $2/$12, Luna $0.20/$1.20) and GPT-5.5
- * ($5/$30, 1M context); GPT-5.4 ($2.50/$15) is the general-work tier with Mini/Nano/Pro variants, and
- * GPT-5.3 Codex is the coding-specialised one. `gpt-5.5` is the default because this provider exists
- * for the hard cases — paying for the cheap tier on a task the local model already failed is the worst
- * of both. Override per session with `/openai <model>` or `AYIN_OPENAI_MODEL`.
+ * As of 2026-09 the lineup is GPT-5.6 — Sol $4/$20 (the agentic flagship: terminal workflows,
+ * multi-step tool use), Terra $2/$12 balanced, Luna $0.20/$1.20 after an 80% cut on 30 July — beside
+ * GPT-5.5 ($5/$30, the previous flagship) and GPT-5.3 Codex, the cheaper coding-specialised line.
  *
- * Check the lineup before trusting this comment. A stale model default is how a coding agent ends up
- * calling a two-generation-old model at full price.
+ * LUNA, NOT THE FLAGSHIP, and that is a reversal of what this comment said before. The old argument
+ * was that a hosted provider is for the hard cases, so it should default to the expensive tier. What
+ * actually happens is that the default is what runs when nobody chose — a background lane, a
+ * subagent, a one-line question — and twenty-five times the price for those is a bill nobody decided
+ * to accept. The hard case is the one an operator is present for, and they can name a tier: `/model`,
+ * `/set-subagent-model` and `/set-background-model` all open a picker that says what each costs.
+ *
+ * THE ID IS UNCONFIRMED. The tier names and prices are from research; the literal API id string was
+ * not verifiable, so `resolveUnknownDefault` below repairs it from the account's own listing the
+ * first time the API says this model does not exist. A guessed constant that self-corrects beats
+ * both a guessed constant that 404s forever and a stale one nobody notices.
+ *
+ * Override per session with `/openai <model>` or `AYIN_OPENAI_MODEL`; a stored credential model wins
+ * over this. Check the lineup before trusting this comment.
  */
-const DEFAULT_MODEL = 'gpt-5.5';
+const DEFAULT_MODEL = 'gpt-5.6-luna';
+
+/** True while `model()` is returning the guessed default rather than something anyone chose. */
+let defaultIsGuess = true;
+
+/**
+ * MODELS THAT REFUSE FUNCTION TOOLS UNLESS REASONING IS OFF — measured against the live API, 2026-09-02.
+ *
+ * Every GPT-5.6 model answers a plain question happily and returns
+ *
+ *   400 · Function tools with reasoning_effort are not supported for gpt-5.6-luna in
+ *         /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.
+ *
+ * the moment a tool schema is attached. For a coding agent that is EVERY round of the loop, so the
+ * model would pass a smoke test and fail all real work — which is exactly what would have happened
+ * when the default moved to Luna.
+ *
+ * Seeded with the family rather than only learned, so the first call of a demo is right instead of
+ * costing a failed round-trip; `noteEffortRefusal` still adds anything else the API objects to, so a
+ * model released next month is handled without a release here.
+ *
+ * The cost is real and worth stating: with `reasoning_effort: 'none'` these tiers do no reasoning
+ * before answering. `gpt-5.5` is the tier that takes tools WITH reasoning intact on this endpoint.
+ */
+const EFFORT_NONE_SEED = /^gpt-5\.6(-|$)/i;
+const effortNone = new Set<string>();
+
+function needsEffortNone(m: string): boolean {
+  return effortNone.has(m) || EFFORT_NONE_SEED.test(m);
+}
+
+/** Did this failure say "tools need reasoning off"? Records it so the retry — and every later call — carries the flag. */
+function noteEffortRefusal(m: string, err: unknown): boolean {
+  if (!(err instanceof OpenAI.APIError)) return false;
+  if (!/function tools/i.test(err.message) || !/reasoning_effort/i.test(err.message)) return false;
+  if (effortNone.has(m)) return false; // already flagged and it still failed — not this problem
+  effortNone.add(m);
+  providerLog().warn('openai_effort_none', { model: m, why: 'the API refuses function tools with reasoning on' });
+  return true;
+}
+
+/**
+ * The default id was wrong — find the real one in the account's own listing, once.
+ *
+ * Returns the id to retry with, or null to let the original error stand. Null for everything that is
+ * not a missing model (a 401 must never look like a model problem), for a model somebody actually
+ * chose, and after one attempt: a repair that can run on every call is a retry loop wearing a
+ * helpful face, and this provider is metered.
+ *
+ * Picks the CHEAPEST tier it recognises, matching the intent of the default rather than its spelling
+ * — `luna` first, then the small variants, and only then whatever the listing leads with. A fallback
+ * that quietly lands on the flagship would be the one outcome nobody asked for.
+ */
+async function resolveUnknownDefault(key: string, err: unknown): Promise<string | null> {
+  if (!defaultIsGuess) return null;
+  const missing = err instanceof OpenAI.APIError
+    && (err.status === 404 || /model/i.test(err.message) && /not (exist|found)|does not have access/i.test(err.message));
+  if (!missing) return null;
+  defaultIsGuess = false; // once, whatever happens below
+  try {
+    const list = await client(key).models.list({ timeout: PROBE_TIMEOUT_MS, maxRetries: 0 });
+    const ids = list.data.map((m) => m.id).filter(Boolean);
+    const pick = ids.find((i) => /luna/i.test(i))
+      ?? ids.find((i) => /mini/i.test(i))
+      ?? ids.find((i) => /nano/i.test(i))
+      ?? ids.find((i) => /^gpt-/i.test(i));
+    if (!pick) return null;
+    currentModel = pick;
+    providerLog().warn('openai_default_repaired', { guessed: DEFAULT_MODEL, using: pick });
+    return pick;
+  } catch {
+    return null; // the listing failed too — the caller's original error is the honest one
+  }
+}
 
 // Env ONLY at module scope — see the same note in `ollama.ts`. `model()` resolves config on first use.
+// An env-named model is a decision too — never repaired underneath the operator.
 let currentModel = process.env.AYIN_OPENAI_MODEL || '';
+if (currentModel) defaultIsGuess = false;
 
 /** The model this session pays for, resolving stored state the first time anyone asks. */
 function model(): string {
-  if (!currentModel) currentModel = providerCredential('openai').model || DEFAULT_MODEL;
+  if (!currentModel) {
+    const chosen = providerCredential('openai').model;
+    currentModel = chosen || DEFAULT_MODEL;
+    // A stored model is a decision; the constant is a guess. Only the guess may be repaired.
+    defaultIsGuess = !chosen;
+  }
   return currentModel;
 }
 
@@ -212,19 +302,41 @@ export function createOpenAiProvider(): LlmProvider {
         throw new Error(openAiSetupHint());
       }
       const tools = toOpenAiTools(opts?.tools);
+      const req = (m: string): OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming => ({
+        model: m,
+        messages: messages.map((mm) => ({
+          role: mm.role as 'system' | 'user' | 'assistant',
+          content: mm.content,
+        })),
+        ...(opts?.temperature !== undefined ? { temperature: opts.temperature } : {}),
+        ...(tools ? { tools } : {}),
+        // See NEEDS_EFFORT_NONE. Only ever sent alongside tools, because that is the only combination
+        // the API refuses; a plain question keeps whatever reasoning the model does by default.
+        ...(tools && needsEffortNone(m) ? { reasoning_effort: 'none' as const } : {}),
+      });
       let completion: OpenAI.Chat.Completions.ChatCompletion;
       try {
-        completion = await client(key).chat.completions.create({
-          model: model(),
-          messages: messages.map((m) => ({
-            role: m.role as 'system' | 'user' | 'assistant',
-            content: m.content,
-          })),
-          ...(opts?.temperature !== undefined ? { temperature: opts.temperature } : {}),
-          ...(tools ? { tools } : {}),
-        });
+        completion = await client(key).chat.completions.create(req(model()));
       } catch (err) {
-        throw new Error(describe(err));
+        /**
+         * TWO SELF-REPAIRS, TRIED IN ORDER, EACH ONCE.
+         *
+         * 1. The model id was a guess and does not exist → find the real one in the account's listing.
+         * 2. The model exists but refuses function tools with reasoning on → resend with it off.
+         *
+         * Both exist because the alternative is a agent that looks broken for a reason the operator
+         * cannot see. The second was measured, not imagined: every GPT-5.6 model answers a plain
+         * question fine and 400s the moment ayin declares a tool, which is every round of the agent
+         * loop — so the default model would have worked in a smoke test and failed in real use.
+         */
+        const effortFixed = noteEffortRefusal(model(), err);
+        const repaired = effortFixed ? null : await resolveUnknownDefault(key, err);
+        if (!effortFixed && !repaired) throw new Error(describe(err));
+        try {
+          completion = await client(key).chat.completions.create(req(repaired ?? model()));
+        } catch (err2) {
+          throw new Error(describe(err2));
+        }
       }
 
       const msg = completion.choices?.[0]?.message;
