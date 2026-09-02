@@ -37,6 +37,15 @@ export interface NaamahSession {
   dir: string;
   url: string;
   port: number;
+  /**
+   * Why the daemon is not serving, in ITS OWN WORDS, or '' while it is fine.
+   *
+   * A daemon that dies on the first line — a design directory that is not there, a port it cannot
+   * bind — said something precise, and that sentence went only to the log. The caller was left
+   * waiting out a timeout and then reporting something vague, which is the slowest possible way to
+   * learn a fact that was available in 200ms.
+   */
+  error: string;
   stop(): void;
 }
 
@@ -150,6 +159,9 @@ export function startNaamah(
   let child: ChildProcess | null = null;
   let url = '';
   let port = opts.port ?? 0;
+  let error = '';
+  /** Everything the daemon said, kept only until it serves — it is the evidence when it does not. */
+  let said = '';
 
   child = spawn('naamah', args, { stdio: ['ignore', 'pipe', 'pipe'] });
   child.stderr?.setEncoding('utf-8');
@@ -158,11 +170,24 @@ export function startNaamah(
     // when the requested one was taken and it moved up.
     const m = chunk.match(/https?:\/\/[\d.]+:(\d+)\//);
     if (m && !url) { url = m[0]; port = Number(m[1]); }
+    if (!url) said += chunk;
     for (const line of chunk.split('\n')) {
       if (line.trim()) log('INFO', 'naamah_daemon', { line: line.trim().slice(0, 300) });
     }
   });
-  child.on('exit', (code) => log('INFO', 'naamah_daemon_exit', { code: String(code ?? '') }));
+  /**
+   * SPAWN ITSELF CAN FAIL, and an unhandled `error` event on a ChildProcess THROWS. No naamah on PATH
+   * is an ordinary state — the submodule is optional — so it is reported like any other reason the
+   * page is not there.
+   */
+  child.on('error', (err) => { error = `naamah could not be started — ${err.message}`; });
+  child.on('exit', (code) => {
+    log('INFO', 'naamah_daemon_exit', { code: String(code ?? '') });
+    // An exit AFTER the URL is the operator stopping the review; only an exit before it is a failure.
+    if (!url && !error) {
+      error = `the daemon exited (code ${code ?? '?'})${said.trim() ? `\n${said.trim()}` : ''}`;
+    }
+  });
 
   /**
    * ONE THREAD IS OFFERED ONCE. Without this the poll re-offers the same comment every tick until the
@@ -186,6 +211,7 @@ export function startNaamah(
     dir,
     get url() { return url; },
     get port() { return port; },
+    get error() { return error; },
     stop() {
       clearInterval(timer);
       try { child?.kill('SIGTERM'); } catch { /* already gone */ }

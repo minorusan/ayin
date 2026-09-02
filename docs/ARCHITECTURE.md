@@ -146,6 +146,15 @@ and the message names the fix (`git submodule update --init`, or install plantum
 generic failure to go and diagnose. An agent that refused to work because a diagram could not be drawn
 would be absurd.
 
+**`/naamah` waits for the daemon and reports what it says.** The handler used to fire one `setTimeout`
+at 900ms, print whatever `url` held at that instant, and never look again — so on a design where the
+daemon takes ~2.1s (measured; a one-type design takes ~1.1s) the operator got *"waiting for the daemon
+to report its URL"*, a line with no sequel, in front of a page that was already serving. It polls now.
+And a daemon that dies before serving — no design directory, a port it cannot bind, no naamah on PATH —
+reports **its own sentence** within ~200ms instead of the operator waiting out a timeout for something
+vaguer: `NaamahSession.error` carries what it said, and `spawn`'s `error` event is handled rather than
+left to throw, because a missing optional submodule is an ordinary state.
+
 **The submodule pin is a version dependency, and a stale one cost a whole turn.** The `naamah` tool
 resolves the binary from ayin's own build, not from `PATH` — one door, deliberately. So when the pin sat
 two commits behind the `build` subcommand while the machine's global install had it, ayin ran a naamah

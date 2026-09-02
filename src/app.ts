@@ -1062,6 +1062,10 @@ async function handleInput(text: string): Promise<void> {
             if (naamahSession?.url) {
               clearInterval(poll);
               addMessage('system', `naamah: ${dir}\n${naamahSession.url}  — click a type card to comment; the page rebuilds when the design changes`);
+            } else if (naamahSession?.error) {
+              // The daemon died and said why. Its sentence, not ours — it names the actual fault.
+              clearInterval(poll);
+              addMessage('system', `naamah: ${naamahSession.error}`);
             } else if (Date.now() - started > 20_000) {
               clearInterval(poll);
               addMessage('system', `naamah: started on ${dir} but the daemon reported no URL in 20s — it may have failed to start. See ~/.ayin-cli/logs for its output.`);
