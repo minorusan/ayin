@@ -4,9 +4,13 @@
  * Two of them, both persisted in `~/.ayin-cli/prompts.json` so they survive a restart: a mode the
  * operator has to re-enable every session is a mode they stop using.
  *
- *   - **brevity (default ON, `/verbose` turns it off)** — answers are as short as the question
- *     allows. The default used to be whatever the model felt like, which on a coding model is
- *     several paragraphs restating the task before the one line that matters.
+ *   - **verbose (default ON, `/verbose off` turns it off)** — say what was done, what was not, and
+ *     what to do next. It was the other way round, and the terse default was answering a question
+ *     nobody had asked twice: the original problem was a coding model restating the task in several
+ *     paragraphs before the one line that mattered, and `brevity.txt` fixed that by forbidding
+ *     preamble — but it also forbade the RECAP and the NEXT STEP, so a finished turn ended on "Done."
+ *     and the operator had to ask what changed and what to do about it. Short is a property of
+ *     preamble, not of a report. Terse is still one command away for anyone who wants it.
  *   - **log coverage (default OFF, `/logcover` turns it on)** — while building a feature, instrument
  *     it heavily. Off by default because logging every branch is the right call while a thing is
  *     being brought up and the wrong one for a small edit to code that already works.
@@ -18,9 +22,14 @@
 
 import { getConfigIfSet, setConfigValue } from './prompts.js';
 
-/** Off by default: the shortest answer the question allows is the DEFAULT, so `/verbose` opts out. */
+/**
+ * ON by default: a turn ends with what changed and what to do next, so `/verbose off` opts out.
+ *
+ * `!== 0` rather than `=== 1`, which is what makes an install that never touched the setting verbose
+ * rather than silent — the same shape `isCorpusInjection` uses for the same reason.
+ */
 export function isVerbose(): boolean {
-  return getConfigIfSet('verbose') === 1;
+  return getConfigIfSet('verbose') !== 0;
 }
 
 export function setVerbose(on: boolean): void {

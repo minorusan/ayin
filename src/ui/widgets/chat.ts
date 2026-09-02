@@ -853,14 +853,25 @@ function formatToolMs(ms: number): string {
   return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`;
 }
 
-/** Card footer: `╰ ✓ 0.4s` (green) or `╰ ✗ 12.0s` (red) when the result smells like an error. */
-function toolFooter(content: string, elapsedMs?: number): string {
+/**
+ * Card footer: `╰ ✓ 0.4s` (green) or `╰ ✗ 12.0s` (red) when the result smells like an error.
+ *
+ * THE UNANCHORED MARKERS ARE A SHELL'S, AND ONLY A SHELL'S. `(exit code `, `(timeout after` and
+ * `(command failed` are appended by the run wrapper, which is why they were matched ANYWHERE in the
+ * output rather than at the start. Applied to every tool that means a read of a file CONTAINING one of
+ * those strings paints a red ✗ on a read that worked — measured: `read_files` on `src/tools/lib.ts`,
+ * whose own error text has `(exit code ` in it, reported ✗ against a `run_done ok:true, ms:2`. The
+ * anchored two are safe for anyone, because a reply that BEGINS "Error:" is one.
+ */
+const SHELL_TOOLS = new Set(['bash', 'testrun', 'chore']);
+
+function toolFooter(tool: string, content: string, elapsedMs?: number): string {
   if (elapsedMs === undefined) return '';
   const failed = /^error[:\s]/i.test(content.trim())
     || /^command exited with code/i.test(content.trim())
-    || content.includes('(exit code ')
-    || content.includes('(timeout after')
-    || content.includes('(command failed');
+    || (SHELL_TOOLS.has(tool) && (content.includes('(exit code ')
+      || content.includes('(timeout after')
+      || content.includes('(command failed')));
   const mark = failed ? `{${theme.err}-fg}✗{/}` : `{${theme.ok}-fg}✓{/}`;
   return `\n{${theme.faint}-fg}╰{/} ${mark} {${theme.dim}-fg}${formatToolMs(elapsedMs)}{/}`;
 }
@@ -886,7 +897,7 @@ export function formatToolResultForChat(tool: string, content: string, elapsedMs
       return `{${theme.faint}-fg}│{/} {${theme.diffCtx}-fg}${escapeBlessedTags(cut)}{/}`;
     });
     const more = hiddenLines > 0 || hiddenChars > 0 ? `\n${omissionNote(hiddenLines, hiddenChars)}` : '';
-    return rendered.join('\n') + more + toolFooter(content, elapsedMs);
+    return rendered.join('\n') + more + toolFooter(tool, content, elapsedMs);
   }
 
   // A write_file diff had NO cap at all: rewriting a 3000-line file painted a 3000-line card and
@@ -915,7 +926,7 @@ export function formatToolResultForChat(tool: string, content: string, elapsedMs
     ...(omitted > 0 || omittedChars > 0 ? [omissionNote(omitted, omittedChars)] : []),
     ...tailLines.map(styleDiffLine).filter((l): l is string => l !== null),
   ];
-  return rendered.join('\n') + toolFooter(content, elapsedMs);
+  return rendered.join('\n') + toolFooter(tool, content, elapsedMs);
 }
 
 /**

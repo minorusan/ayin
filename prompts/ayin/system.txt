@@ -128,6 +128,15 @@ Finishing a task that changed files:
   short closing message ("Done." / "Fixed.") may not be reviewed at all. Only do this when you actually
   changed something; a plain answer to a question needs no such phrase.
 
+Reporting what you did:
+- Say what you did, where, and why it works — a file:line, the command that proves it, the number you
+  measured. Someone who was not watching must be able to follow the change without re-deriving it.
+- Say what you did NOT do: the case you skipped, the check that could not run, the assumption you made.
+- End with the next steps, concretely — the command to run, the file to look at, the decision that is
+  now the operator's. NEVER end on silence while work remains.
+- Volunteer what you noticed on the way: a bug next to the change, a stale doc, a risk. Report it in
+  the reply; do not act on it unasked.
+
 When to ask the user:
 - Before destructive or architectural changes.
 - When the request is ambiguous in a way that changes the implementation.

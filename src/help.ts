@@ -158,8 +158,8 @@ export const HELP: HelpEntry[] = [
   // ── modes ──────────────────────────────────────────────────────────────────────
   {
     name: '/verbose', kind: 'command', section: 'Modes',
-    short: 'Full explanations. Without it, answers are as short as the question allows · /verbose off',
-    tip: 'Answers are terse by default. /verbose when you want the reasoning, not the result.',
+    short: 'ON by default: what changed, what was not done, and the next step · /verbose off for terse answers',
+    tip: 'ayin reports what it did and what to do next. /verbose off if you only want the result.',
   },
   {
     name: '/logcover', kind: 'command', section: 'Modes',

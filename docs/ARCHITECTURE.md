@@ -5165,7 +5165,7 @@ src/
 │   │                   RE-verifying every citation as it writes and marking stale ones
 │   └── index.ts        `ayin indulge` — argv, the stage pipeline, progress heartbeat, cooperative
 │                       SIGINT, and the llm authority held as a background consumer
-├── modes.ts            /verbose (brevity is the DEFAULT, this opts out) and /logcover, persisted
+├── modes.ts            /verbose (the DEFAULT — `/verbose off` opts out) and /logcover, persisted
 │                       in prompts.json and injected as prompt text
 ├── permissions.ts      approval dialogs + allow-lists
 ├── summary.ts          rolling session summary
