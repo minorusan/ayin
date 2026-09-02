@@ -1044,12 +1044,29 @@ async function handleInput(text: string): Promise<void> {
               }
             },
           });
-          // The URL arrives on the daemon's stderr a beat after spawn; report once it has.
-          setTimeout(() => {
-            addMessage('system', naamahSession?.url
-              ? `naamah: ${dir}\n${naamahSession.url}  — click a type card to comment; the page rebuilds when the design changes`
-              : `naamah: started on ${dir} (waiting for the daemon to report its URL)`);
-          }, 900);
+          /**
+           * WAIT FOR THE URL, DO NOT GUESS HOW LONG IT TAKES.
+           *
+           * This was one 900ms timeout that reported whatever `url` held at that instant and never
+           * looked again. Measured on this machine: the daemon prints its URL after ~2.1s, every time
+           * — so the operator ALWAYS got "waiting for the daemon to report its URL", a line that is a
+           * dead end. The URL arrived a second later and nobody was told, which reads as a hung
+           * command with a page that is in fact already serving.
+           *
+           * So it polls, and the ceiling is generous because a cold daemon on a big design is slow,
+           * not broken. The message on giving up names where to look rather than repeating that we
+           * are still waiting.
+           */
+          const started = Date.now();
+          const poll = setInterval(() => {
+            if (naamahSession?.url) {
+              clearInterval(poll);
+              addMessage('system', `naamah: ${dir}\n${naamahSession.url}  — click a type card to comment; the page rebuilds when the design changes`);
+            } else if (Date.now() - started > 20_000) {
+              clearInterval(poll);
+              addMessage('system', `naamah: started on ${dir} but the daemon reported no URL in 20s — it may have failed to start. See ~/.ayin-cli/logs for its output.`);
+            }
+          }, 200);
         } catch (err) {
           addMessage('system', `/naamah failed — ${err instanceof Error ? err.message : String(err)}`);
         }
