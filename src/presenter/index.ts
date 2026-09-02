@@ -40,6 +40,7 @@ import { prompts, packagePath } from '../prompts-service.js';
 import { detectProject, describeProject } from '../executors/detect.js';
 import { presentExecutorFor } from '../executors/registry.js';
 import type { ChangedFile } from '../qa/probes.js';
+import { isFullMode } from '../full-mode.js';
 
 const presenterPrompts = prompts.register('presenter', packagePath('prompts', 'presenter')).bundle;
 
@@ -47,7 +48,15 @@ export function presenterEnabled(): boolean {
   return process.env.AYIN_PRESENTER !== '0';
 }
 
-let sessionEnabled = false;
+/**
+ * OFF, unless `--full` asked for everything.
+ *
+ * The presenter is the third of the three session toggles and the only one with no environment
+ * force, because it is TUI-only by construction (`doPresenter` is `&& !HEADLESS`) — there is nothing
+ * for a headless harness to turn on. That left `--full` meaning "everything" while quietly omitting
+ * it: an operator who typed the one word that exists to avoid typing three still got no presenter.
+ */
+let sessionEnabled = isFullMode();
 let forceNextTurn = false;
 
 export function togglePresenterSession(): boolean {

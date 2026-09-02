@@ -28,6 +28,7 @@ if (!process.argv.includes('-p')) process.argv.push('-p');
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -3223,6 +3224,49 @@ console.log('\nglimmer dialect (ATEM)');
   const agentSrc = readFileSync(join(REPO, 'src/agent.ts'), 'utf-8');
   ok(/replyTruncated\(response\)/.test(agentSrc),
     'glm: and the agent CHECKS it — a truncated call is otherwise indistinguishable from a final answer');
+}
+
+// ── `--full` means everything, and "everything" is asserted, not described ──────────────────
+//
+// The three session toggles are initialised at MODULE LOAD from argv, so the only honest way to test
+// the composite flag is a fresh process that actually has it. Checked because `--full` drifted once
+// already: it was documented as "everything" while the presenter — the one toggle with no environment
+// force, and therefore the one nobody could turn on from a script — was quietly left off.
+console.log('\n--full: the composite flag turns on what it claims');
+{
+  // THE ANSWER GOES TO A FILE, NOT STDOUT. Importing the UI graph writes terminal escapes
+  // (`\x1b[?2004h`, bracketed paste) to stdout on load, so a JSON answer printed there arrives
+  // prefixed with control bytes and fails to parse — which reads as "the flag is broken" rather than
+  // "the probe is".
+  const out = join(tmpdir(), `ayin-full-probe-${process.pid}.json`);
+  const probe = `
+    process.argv.push('--full');
+    const { writeFileSync } = await import('node:fs');
+    const plan = await import('${pathToFileURL(join(DIST, 'plan/index.js')).href}');
+    const qa = await import('${pathToFileURL(join(DIST, 'qa/index.js')).href}');
+    const pres = await import('${pathToFileURL(join(DIST, 'presenter/index.js')).href}');
+    const full = await import('${pathToFileURL(join(DIST, 'full-mode.js')).href}');
+    writeFileSync(${JSON.stringify(out)}, JSON.stringify({
+      full: full.isFullMode(),
+      plan: plan.isPlanSessionEnabled(),
+      qa: qa.isQaSessionEnabled(),
+      presenter: pres.isPresenterSessionEnabled(),
+    }));
+  `;
+  let state = {};
+  try {
+    execFileSync(process.execPath, ['--input-type=module', '-e', probe], {
+      encoding: 'utf-8', timeout: 30_000, stdio: 'ignore',
+    });
+    state = JSON.parse(readFileSync(out, 'utf-8'));
+    rmSync(out, { force: true });
+  } catch (err) {
+    ok(false, '--full probe ran', String(err).slice(0, 160));
+  }
+  ok(state.full === true, '--full is seen by full-mode.ts');
+  ok(state.plan === true, '  → plan mode is on');
+  ok(state.qa === true, '  → the QA gate is on');
+  ok(state.presenter === true, '  → the presenter is on (it has no env force; --full is the only way in from a script)');
 }
 
 console.log(fails === 0 ? '\ngate check: ok' : `\ngate check: ${fails} FAILED`);
