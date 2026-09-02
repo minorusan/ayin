@@ -1096,7 +1096,7 @@ entry point is `node:http`, its test runner is `node:test`, the Python test is `
 
 | Branch | Written | Proven by |
 |---|---|---|
-| TypeScript | `package.json` · `tsconfig.json` · `.gitignore` · `README.md` · `src/server.ts` · `src/index.ts` · `public/index.html` · `test/server.test.ts` | `npm install` → `npm test` 4/4 → `npm run typecheck` → `npm run build` → `npm start` serves the page, `/api/health`, and 404s the rest |
+| TypeScript | `package.json` · `tsconfig.json` · `.gitignore` · `README.md` · `src/server.ts` · `src/index.ts` · `public/index.html` · `test/server.test.ts` | `npm install` → `npm test` 4/4 → `npm run typecheck` → `npm run build` → `npm start` serves the page, `/api/health`, and 404s the rest; `npm run dev` restarts on an edit under `src/` (measured: a route added mid-run answered 200 where it had 404'd) |
 | Python | `pyproject.toml` · `.gitignore` · `README.md` · `src/<mod>/__init__.py` · `src/<mod>/__main__.py` · `tests/test_smoke.py` | `python -m unittest discover -s tests` passes **with nothing installed** |
 | Unity | `Packages/manifest.json` · `ProjectSettings/ProjectVersion.txt` · `.gitignore` · `README.md` · `Assets/Scripts/<Name>Bootstrap.cs` | manifest parses; `ProjectVersion.txt` is what makes the Hub list the folder at all |
 
@@ -1121,6 +1121,13 @@ Three decisions worth keeping:
   to port 0 and asks it real questions over real HTTP. A bootstrap whose entry point calls `.listen()`
   at module scope cannot be tested without a port collision, and the first thing anyone does to it is
   take the logic back out — so it starts out already apart.
+- **`npm run dev` is nodemon, not `node --watch`.** Both restart on an edit; only one of them survives
+  the crash an edit introduces — `node --watch` exits on a syntax error and stops watching, so the next
+  save fixes nothing and the operator restarts by hand. It is also the supervisor the QA boot check
+  starts, waits on and kills as a group (`bootcheck.ts`). Scoped `--watch src --ext ts,json`, because a
+  restart on every touched file in the tree is a server that never finishes starting. It is the one
+  dependency the scaffold adds beyond `typescript` and `@types/node`; `npm test` and `npm run build`
+  still need nothing from a registry.
 - **The Python test is a `unittest.TestCase` that inserts `src/` on `sys.path`.** pytest collects both
   shapes; `python -m unittest` collects only the class. Writing the class means the suite runs on a
   machine with no virtualenv and nothing installed — which is the state a fresh scaffold is in.
@@ -5170,6 +5177,39 @@ tool/
                         rendered-page fallback — and the autostage allowlist. No model, no network.
                         Run it whenever you touch watch.ts or assets/ayin-hound.mjs.
 ```
+
+## Does it come up? (`src/executors/qa/bootcheck.ts`)
+
+The Node QA gate asks three deterministic questions, not two. `tsc --noEmit` proves the code
+type-checks and `npm test` proves the suite passes, and **a project can do both while being unable to
+start** — a dependency only the entry point imports, a server that is constructed and never listened
+on, a crash in the first line of config reading. The scaffold's own suite cannot catch it: it binds
+port 0 *inside* the test process and never runs the command the operator runs. So the third fact
+starts the project: `npm run dev` (then `start`, then `serve`), a `PORT` the gate chose, and a real
+TCP connect. Hard, like the other two.
+
+**The port is ours, not the project's default.** Taking 3000 would collide with the dev server the
+operator already has open — and would then report *their* app as proof that the turn's project boots,
+which is worse than failing. A free port is reserved by binding 0 and reading it back; `AYIN_QA_PORT`
+pins one for anyone who needs it.
+
+**A library is not a broken server.** Most Node projects are libraries, CLIs and build tools, and
+plenty have a `dev` script that is a compiler — ayin's own is `tsc --watch`. So `serverEntry()` reads
+the file the boot script actually executes and looks for `.listen(` or `process.env.PORT` in *that*
+file; a search across `src/` would say yes for this repo, which serves a review page and a Jira board
+from two subcommands. No proof, no check: reported unchecked in a millisecond, never failed. The cost
+is a real boundary — an entry point that loses both its `listen` and its `PORT` reads as a library and
+the check goes quiet — and quiet is the cheaper of the two mistakes.
+
+**Under a supervisor, a crash is not an exit.** nodemon catches the failure, prints `app crashed —
+waiting for file changes` and stays alive holding the watch, so waiting for the process to exit costs
+the full timeout: measured at 32s per failed boot, on every round of a fix loop. The marker is read
+instead — the same failure now reports in under three seconds.
+
+**Nothing survives the probe.** The child is started in its own process GROUP and the group is killed
+in a `finally`, TERM then KILL, because nodemon spawns the real server as a grandchild and killing the
+pid alone would orphan a listening process that owns the port for the rest of the session. Measured
+across boot, crash, never-listens and absent-toolchain runs: no leaked processes.
 
 ## `--full`, and why a mistyped flag now fails (`src/full-mode.ts`)
 

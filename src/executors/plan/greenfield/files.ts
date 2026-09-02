@@ -62,7 +62,12 @@ const TS_PKG = (name: string): string => `${JSON.stringify({
   private: true,
   type: 'module',
   scripts: {
-    dev: 'node --watch --experimental-strip-types src/index.ts',
+    // NODEMON, NOT `node --watch`. Both restart on an edit; only one of them is a supervisor the QA
+    // boot check can start, wait for and kill as a group, and only one survives the crash an edit
+    // introduces — `node --watch` exits on a syntax error and stops watching, so the next save fixes
+    // nothing and the operator restarts by hand. `--watch src --ext ts,json` because a restart on
+    // every touched file in the tree (dist/, node_modules/) is a server that never finishes starting.
+    dev: 'nodemon --watch src --ext ts,json --exec "node --experimental-strip-types src/index.ts"',
     build: 'tsc',
     // `dist/src/index.js`, not `dist/index.js`. `rootDir` is the project root so that `tsc --noEmit`
     // covers the tests too, which means the emitted tree keeps the `src/` segment. A `start` script
@@ -77,7 +82,7 @@ const TS_PKG = (name: string): string => `${JSON.stringify({
     // it first, which npm does not do the same way on Windows. Node's own glob is the portable form.
     test: 'node --test --experimental-strip-types "test/**/*.test.ts"',
   },
-  devDependencies: { typescript: '^5.9.0', '@types/node': '^22.0.0' },
+  devDependencies: { typescript: '^5.9.0', '@types/node': '^22.0.0', nodemon: '^3.1.0' },
 }, null, 2)}\n`;
 
 /**
@@ -306,7 +311,7 @@ const TS_README = (name: string): string => `# ${name}
 
 \`\`\`bash
 npm install        # required first — the type definitions come from here
-npm run dev        # watch mode on http://localhost:3000
+npm run dev        # nodemon on http://localhost:3000 — restarts on every edit under src/
 npm test           # node:test, no framework to install
 npm run build      # tsc → dist/
 npm run typecheck  # fails until npm install has run
@@ -316,7 +321,7 @@ npm run typecheck  # fails until npm install has run
 
 - \`src/server.ts\` — the routes. \`createServer()\` returns the server **without** listening, which is
   what lets the test bind it to port 0.
-- \`src/index.ts\` — the entry point. Reads \`PORT\`, listens.
+- \`src/index.ts\` — the entry point. Reads \`PORT\`, listens. \`PORT=4000 npm run dev\` to move it.
 - \`public/index.html\` — the page. Anything in \`public/\` is served as-is.
 - \`test/server.test.ts\` — real HTTP against a real server.
 

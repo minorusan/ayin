@@ -1,5 +1,5 @@
 /**
- * Node/TypeScript QA — two questions with machine answers, and no opinions at all.
+ * Node/TypeScript QA — three questions with machine answers, and no opinions at all.
  *
  * WHY THIS EXISTS. The generic gate ran criteria derivation and then the judge on every finished
  * Node turn: two LLM calls before the operator sees anything, non-reproducible between runs, and
@@ -9,12 +9,17 @@
  * project. Twice, in separately measured runs.
  *
  * A judge is the right instrument for a question with no machine answer. A TypeScript service has
- * two questions that DO have machine answers, so it gets those and stops:
+ * three questions that DO have machine answers, so it gets those and stops:
  *
  *   1. DOES IT COMPILE — `tsc --noEmit`, whole project. Errors, never style.
  *   2. DOES IT STILL WORK — the project's own test suite, which for anything ayin scaffolds is a set
  *      of real requests against a real server on a real port: `/api/health` returns 200 and `ok`,
  *      `/` serves HTML, an unknown route is a 404 not a crash, and `..` does not escape `public/`.
+ *   3. DOES IT COME UP — `npm run dev` with a `PORT` we chose, and something accepting a connection on
+ *      it. The suite cannot answer this: it binds port 0 INSIDE the test process and never runs the
+ *      command the operator runs, so a project whose entry point imports a missing package, or builds
+ *      a server and forgets to listen, passes every other check and starts for nobody. See
+ *      `bootcheck.ts`.
  *
  * RUNNING THE PROJECT'S OWN TESTS, NOT A PROBE OF OUR OWN, is the whole trick for question 2. A
  * bespoke endpoint prober would have to guess the port, the routes and the start command, would go
@@ -22,12 +27,12 @@
  * project says it is. The test file is already there, already names the endpoints, and is already the
  * thing a developer would run.
  *
- * `factsOnly: true` in the config is what turns the judge off. Both facts are `hard`, so a failure
+ * `factsOnly: true` in the config is what turns the judge off. All three are `hard`, so a failure
  * goes straight back to the agent as work instructions and the gate never asks a model what it thinks.
  *
  * ABSENT IS NOT FAILED — the rule this file inherits from `buildcheck.ts` and must not break. No
- * `tsconfig.json`, no installed typescript, no test script, no test files: each is a question that
- * could not be asked, reported as unchecked. A hard fact nobody can satisfy burns the fix budget that
+ * `tsconfig.json`, no installed typescript, no test script, no test files, no boot script: each is a
+ * question that could not be asked, reported as unchecked. A hard fact nobody can satisfy burns the fix budget that
  * would have fixed something real, and on the turn that CREATES a project half of these are normal.
  */
 
@@ -37,12 +42,13 @@ import { join } from 'node:path';
 
 import type { ChangedFile } from '../../../qa/probes.js';
 import { buildCheck } from '../buildcheck.js';
+import { bootCheck } from '../bootcheck.js';
 import { repoBaselineFact } from '../../plan/git.js';
 import type { ExecutorConfig, PrepareResult, ProbeFact, ProjectContext, QaExecutor } from '../../types.js';
 
 const config: ExecutorConfig = {
   id: 'node', kind: 'qa', projectTypes: ['node'], priority: 10, factsOnly: true,
-  description: 'Node/TS QA — tsc --noEmit plus the project\'s own test suite. Deterministic, no judge.',
+  description: 'Node/TS QA — tsc --noEmit, the project\'s own test suite, and a real boot on a real port. Deterministic, no judge.',
 };
 
 /**
@@ -182,7 +188,10 @@ export const nodeQaExecutor: QaExecutor = {
     if (built) facts.push(built);
     // 2 · does it still work — the project's own suite, which is the endpoint check.
     facts.push(testFact(ctx));
-    // 3 · the scaffold's promise that there is something to diff against. Instant, and hard only on a
+    // 3 · does it come up. Last because it is the only fact that COSTS seconds, and a project that
+    //     does not compile has already failed for a reason the agent can act on.
+    facts.push(await bootCheck(ctx));
+    // 4 · the scaffold's promise that there is something to diff against. Instant, and hard only on a
     //     greenfield turn — see `plan/git.ts`.
     facts.push(repoBaselineFact(ctx));
     return facts;
