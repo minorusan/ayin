@@ -30,6 +30,7 @@ import { PROJECT_TYPES } from './types.js';
 
 import { basePlanExecutor } from './plan/base/index.js';
 import { arduinoPlanExecutor } from './plan/arduino/index.js';
+import { greenfieldPlanExecutor } from './plan/greenfield/index.js';
 import { nodePlanExecutor } from './plan/node/index.js';
 import { baseQaExecutor } from './qa/base/index.js';
 import { arduinoQaExecutor } from './qa/arduino/index.js';
@@ -41,6 +42,12 @@ import { arduinoPresentExecutor } from './present/arduino/index.js';
 const INSTANCES: Record<string, AnyExecutor> = {
   'plan/base': basePlanExecutor,
   'plan/arduino': arduinoPlanExecutor,
+  // TWO GREENFIELD HANDLERS, AND THEY DO NOT OVERLAP — see the config files, which is where the
+  // answer has to be readable. `plan/greenfield` owns python and unity; `plan/node` owns node. Both
+  // were written for the same complaint (an empty directory gets a README and nothing else) on two
+  // machines that could not see each other, and merging them by leaving both claiming `node` would
+  // have produced a priority tie broken by id — a coin flip deciding which one bootstraps a project.
+  'plan/greenfield': greenfieldPlanExecutor,
   'plan/node': nodePlanExecutor,
   'qa/base': baseQaExecutor,
   'qa/arduino': arduinoQaExecutor,

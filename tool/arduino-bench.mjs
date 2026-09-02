@@ -90,7 +90,9 @@ function readmeIsFilledIn(root) {
   const path = join(root, 'README.md');
   if (!existsSync(path)) return { ok: false, why: 'no README.md' };
   const text = readFileSync(path, 'utf8');
-  if (/Created by ayin at project start/.test(text)) return { ok: false, why: 'still the untouched scaffold stub' };
+  // The shared sentinel, from `executors/deliverables.js` — the banner's wording is decided in one
+  // place, and a literal copied here would go quietly dead the next time it is reworded (it did).
+  if (text.includes(deliverables.README_STUB_BANNER)) return { ok: false, why: 'still the untouched scaffold stub' };
   const todos = (text.match(/\bTODO\b/g) ?? []).length;
   if (todos > 0) return { ok: false, why: `${todos} TODO marker(s) left from the scaffold stub` };
 

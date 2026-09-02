@@ -13,6 +13,7 @@
 
 import type { ChangedFile } from '../../../qa/probes.js';
 import { readmeSubstance } from '../../deliverables.js';
+import { buildCheck } from '../buildcheck.js';
 import type { ExecutorConfig, PrepareResult, ProbeFact, ProjectContext, QaExecutor } from '../../types.js';
 
 const config: ExecutorConfig = {
@@ -27,11 +28,17 @@ export const baseQaExecutor: QaExecutor = {
     return { produced: [], handled: new Set(), notes: [] };
   },
 
-  async probe(ctx: ProjectContext): Promise<ProbeFact[]> {
+  async probe(ctx: ProjectContext, files: ChangedFile[]): Promise<ProbeFact[]> {
     // Substance, not mere existence — `scaffold()` guarantees the file, so "is it there" is a question
     // that can no longer fail. See `readmeSubstance`.
     const rm = readmeSubstance(ctx.root);
-    return [{ key: 'readme-substance', ok: rm.ok, detail: rm.detail, hard: true }];
+    const facts: ProbeFact[] = [{ key: 'readme-substance', ok: rm.ok, detail: rm.detail, hard: true }];
+    // DOES IT COMPILE. Unity has had this question since `qa/unity`; every other language had nobody
+    // asking it, and a Python entry point shipped with a mismatched quote through a green gate. See
+    // `../buildcheck.ts` — absent toolchain is "not checked", never a failure.
+    const built = buildCheck(ctx, files);
+    if (built) facts.push(built);
+    return facts;
   },
 
   criteria(): string[] {

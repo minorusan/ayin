@@ -1,0 +1,6 @@
+Observed through the standard library `logging`, configured once at the entry point: a module-level
+`logger = logging.getLogger(__name__)`, level read from an env var defaulting to INFO, and `print` used
+nowhere except the CLI's own output.
+
+For each feature: what it logs, at what level, and the exact command that shows it working —
+`python -m <package> …` or `.venv/bin/pytest -q`.

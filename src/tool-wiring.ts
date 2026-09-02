@@ -95,6 +95,16 @@ export function ensureToolRuntime(): void {
     // the operator's editable copy. This is the import a tool package must not have.
     prompts: (namespace) => prompts.register(namespace, packagePath('prompts', namespace)).bundle,
     backendUrl: () => llmBaseUrl(),
+    // A tool that needs an AGENT rather than an answer. Imported lazily for the same reason `llm` is:
+    // `subagents.ts` pulls in the process spawner and the postmortem handlers, and a top-level import
+    // from the wiring would drag them into every entry point that touches a tool.
+    subagent: async (task: string, opts?: { cwd?: string; plan?: string }) => {
+      const { runSubagent, subagentsAllowed } = await import('./subagents.js');
+      if (!subagentsAllowed()) {
+        throw new Error('subagents are not available here — a subagent may not spawn subagents, and this session may have --disallow-subagents');
+      }
+      return runSubagent(task, opts ?? {});
+    },
   });
 }
 

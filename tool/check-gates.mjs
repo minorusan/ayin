@@ -109,15 +109,30 @@ const polled = g.guardCheck('task_status', pollArgs);
 ok(!polled.serveCached, 'a poll is never served from cache — it exists to ask whether the world moved');
 ok(!/read_file/.test(g.guardDirective()), 'a read is never written into the blocked list');
 
-// A tool with side effects keeps the ladder: `bash` twice in a row is the loop this guard exists to close.
+/**
+ * A REPEAT IS ANNOTATED, NEVER REFUSED — and this gate used to assert the opposite.
+ *
+ * The ladder (skip the second identical call, block the third for the turn) was closing a real loop, but
+ * it was treating a symptom. A model repeats a call when it cannot see what the call returned: the result
+ * went into the history, the history was compressed to fit the window, and what survived in the ledger
+ * was the first line of the output clipped to a hundred characters. Refused the repeat, it had no way to
+ * remember the answer AND no way to fetch it.
+ *
+ * The fix is upstream — the ledger now carries the first ten lines of EVERY call's output for the whole
+ * turn (`agent.ts#renderCallLedger`) — so the note here can say "you already have this, and here is where
+ * the rest of it lives" and let the call run. Some repeats are also genuinely the point: "has the server
+ * come up", "does the test pass now", "did that write land" are the same call twice on purpose, and only
+ * the second answer is useful.
+ */
 const buildCmd = { command: 'npm run build' };
 ok(g.guardCheck('bash', buildCmd).allow === true, 'first bash runs');
 const bashSecond = g.guardCheck('bash', buildCmd);
-ok(bashSecond.allow === false && /identical repeat/.test(bashSecond.label ?? ''), 'the second identical command is skipped');
+ok(bashSecond.allow === true && /repeat 2/.test(bashSecond.label ?? ''), 'the second identical command RUNS, labelled a repeat', bashSecond.label ?? '');
 const bashThird = g.guardCheck('bash', buildCmd);
-ok(bashThird.allow === false && /blocked/.test(bashThird.label ?? ''), 'the third is BLOCKED for the turn');
-ok(/BLOCKED/.test(g.guardCheck('bash', buildCmd).note ?? ''), 'the block persists after it is set');
-ok(/bash/.test(g.guardDirective()), 'and is stated in the system-prompt directive');
+ok(bashThird.allow === true && /repeat 3/.test(bashThird.label ?? ''), 'so does the third — the guard never bans an identical call');
+ok(/REPEAT 3/.test(bashThird.note ?? ''), 'and it is told it is a repeat rather than being silently re-run');
+ok(/call ledger/.test(bashThird.note ?? ''), 'the note points at where the earlier answer already is');
+ok(!/bash/.test(g.guardDirective()), 'a repeat is NEVER written into the blocked list — only a denial is');
 
 // A DRIVER'S REPEAT IS ITS PURPOSE. `entangle op=next` returns a different type every time — the answer is
 // a function of what has landed. The repeat guard read it as a loop and blocked it, and the run died: the
@@ -128,7 +143,8 @@ ok(drive.every((d) => !/POLLING/.test(d.note ?? '')), 'nor rate-limited: a poll 
 const statusFirst = g.guardCheck('entangle', { op: 'status' });
 g.guardCheck('entangle', { op: 'status' });
 const statusThird = g.guardCheck('entangle', { op: 'status' });
-ok(statusFirst.allow && !statusThird.allow, 'other entangle ops are still guarded normally');
+ok(statusFirst.allow && statusThird.allow && /repeat/.test(statusThird.label ?? ''),
+  'other entangle ops run too, and are merely labelled', statusThird.label ?? '');
 
 /**
  * A REPEAT IS NOT A LOOP WHEN THE WORLD MOVED.
@@ -144,7 +160,8 @@ const fresh = { path: freshFile, content: 'x' };
 g.guardCheck('write_file', fresh);
 g.guardCheck('write_file', fresh);
 const blockedWrite = g.guardCheck('write_file', fresh);
-ok(blockedWrite.allow === false, 'an unchanged file still blocks the third identical WRITE');
+ok(blockedWrite.allow === true && /repeat/.test(blockedWrite.label ?? ''),
+  'a third identical WRITE to an unchanged file runs, and says it is a repeat', blockedWrite.label ?? '');
 writeFileSync(freshFile, 'export const a = 2;\nexport const b = 3;\n');   // mtime AND size move
 const afterEdit = g.guardCheck('write_file', fresh);
 ok(afterEdit.allow === true && /target changed/.test(afterEdit.label ?? ''),
@@ -152,15 +169,15 @@ ok(afterEdit.allow === true && /target changed/.test(afterEdit.label ?? ''),
   `${afterEdit.allow} ${afterEdit.label ?? ''}`);
 ok(!/guard-fresh/.test(g.guardDirective()), 'and it is no longer named as blocked in the system prompt');
 const againUnchanged = g.guardCheck('write_file', fresh);
-ok(againUnchanged.allow === false,
-  'the ladder restarts rather than resetting the policy: unchanged repeats are refused again');
+ok(againUnchanged.allow === true && /repeat/.test(againUnchanged.label ?? ''),
+  'and once the file stops changing the label goes back to naming the repeat', againUnchanged.label ?? '');
 
 // A directory-scoped call has no single file to witness, so any write is the signal. Shown on a tool that
 // HAS a ladder, since a grep no longer has one to lift.
 const dirCall = { path: TMP, content: 'y' };
 g.guardCheck('write_file', dirCall);
 g.guardCheck('write_file', dirCall);
-ok(g.guardCheck('write_file', dirCall).allow === false, 'a repeat with nothing written since is blocked');
+ok(/repeat/.test(g.guardCheck('write_file', dirCall).label ?? ''), 'a repeat with nothing written since is named as one');
 g.guardNoteMutation('str_replace', [join(TMP, 'other.ts')], 'str_replace|path=other.ts');
 const afterWrite = g.guardCheck('write_file', dirCall);
 ok(afterWrite.allow === true && /files written since/.test(afterWrite.label ?? ''),
@@ -178,8 +195,43 @@ g.guardCheck('bash', build);
 g.guardNoteMutation('bash', [], buildKey);          // as the loop does after every non-read tool
 g.guardCheck('bash', build);
 g.guardNoteMutation('bash', [], buildKey);
-ok(g.guardCheck('bash', build).allow === false, 'a repeated identical command is blocked, its own writes notwithstanding');
-ok(g.guardCheck('bash', build).allow === false, 'and stays blocked no matter how many times it ran');
+// The self-exclusion still matters: without it a bash call's own epoch bump would make every repeat look
+// like a fresh question ("files written since"), and the model would never be told it was repeating.
+ok(/repeat/.test(g.guardCheck('bash', build).label ?? ''),
+  'a repeated identical command is still NAMED a repeat, its own writes notwithstanding', g.guardCheck('bash', build).label ?? '');
+
+/**
+ * A WRITE MUST NOT LIFT ITS OWN REPEAT BY CHANGING THE FILE IT WRITES.
+ *
+ * `filesWritten` already excluded the call's own bump; `fileChanged` did not, and `write_file` mutates
+ * its own target by definition — so after every write the witness differed, the guard read it as "the
+ * world moved", reset the counter to 1, and the ladder could never advance for exactly the calls it
+ * exists for. MEASURED: a subagent wrote the same `index.html` twelve times running, byte-identical
+ * (md5 unchanged throughout), with 21 `guard_repeat_allowed_stale` events all reasoning "the file it
+ * reads has changed since". It reached 89 rounds and was not going to stop.
+ */
+{
+  const wf = join(TMP, 'loop-target.html');
+  writeFileSync(wf, 'v0');
+  g.guardBeginTurn();
+  const call = { path: wf, content: '<html>same</html>' };
+  const k = g.callKey('write_file', call);
+  const labels = [];
+  for (let i = 0; i < 5; i++) {
+    labels.push(g.guardCheck('write_file', call).label ?? '');
+    writeFileSync(wf, '<html>same</html>');        // the tool's own effect
+    g.guardNoteMutation('write_file', [wf], k);    // what the agent loop does after a write
+  }
+  ok(/repeat 5/.test(labels[4]),
+    'a write repeating itself ESCALATES — its own effect no longer resets the ladder', labels.join(' | '));
+  ok(!labels.some((l) => /target changed/.test(l)),
+    '  → and none of them is excused as "the world moved", because it was the call that moved it');
+
+  // An outside change is still the world moving, and must still lift it.
+  writeFileSync(wf, 'somebody else edited this');
+  ok(/target changed/.test(g.guardCheck('write_file', call).label ?? ''),
+    'while a change made by ANYTHING ELSE still resets it — that is what staleness is for');
+}
 g.guardNoteMutation('write_file', [join(TMP, 'fix.ts')], 'write_file|path=fix.ts');
 ok(g.guardCheck('bash', build).allow === true, 're-running it AFTER an edit is a different question, and runs');
 
@@ -203,8 +255,337 @@ ok(/DENIED/.test(g.guardCheck('bash', denied).note ?? ''), 'a denied call is ref
 g.guardBeginTurn();
 const cmd = { command: 'curl -s http://127.0.0.1:1/' };
 g.guardCheck('bash', cmd); g.guardCheck('bash', cmd);
-ok(/sleep/.test(g.guardCheck('bash', cmd).note ?? ''), 'a blocked bash call is told its wait-escape-hatch');
+ok(/REPEAT/.test(g.guardCheck('bash', cmd).note ?? ''), 'a repeated bash call carries the repeat notice');
 ok(!/read_file/.test(g.guardDirective()), 'a new turn starts with a clean slate');
+
+// ── every shipped def actually registers ─────────────────────────────
+//
+// A def that fails to export `tool` is not a failure discovery reports: the module imports cleanly, it
+// simply has nothing on it, so `report.failed` is empty and the tool silently does not exist. Measured
+// the hard way — one dropped `*/` swallowed a whole tool object into a doc comment, `ayin_help`
+// vanished from the catalogue, and the model answered "I cannot call ayin_help as it is not a tool
+// available to me". Nothing anywhere said why.
+{
+  const { readdirSync: rd } = await import('node:fs');
+  const defsDir = join(REPO, 'src/tools/defs');
+  const shipped = rd(defsDir).filter((f) => f.endsWith('.ts')).map((f) => f.replace(/\.ts$/, '')).sort();
+  const tl = await import(`file://${join(DIST, 'tools.js')}`);
+  await tl.loadTools();
+  const missing = shipped.filter((name) => {
+    // A file may export several tools under other names, so ask the module rather than assuming the
+    // filename is the tool name.
+    return !tl.getTool(name);
+  });
+  ok(shipped.length > 20, `the scan found the def directory — ${shipped.length} files`);
+  ok(missing.length === 0,
+    'every shipped tool definition actually registers — a def that exports nothing fails SILENTLY',
+    missing.join(', '));
+}
+
+// ── does it compile? asked deterministically, for the ordinary languages ──
+console.log('\nbuild check');
+{
+  const { mkdtempSync: mkt, writeFileSync: wf, mkdirSync: md } = await import('node:fs');
+  const bc = await import(`file://${join(DIST, 'executors/qa/buildcheck.js')}`);
+  const ctxOf = (root, type) => ({ root, targetDir: '', type, evidence: 'gate', greenfield: false });
+  const filesOf = (...p) => p.map((path) => ({ path, kind: 'code', exists: true, bytes: 1, lines: 1, mtimeMs: Date.now() }));
+
+  // THE BUG THIS EXISTS FOR. A greenfield Python project ayin built shipped `__main__.py` with a
+  // mismatched quote: tests passed (they import the other module), QA passed (nothing asked a
+  // compiler), and the step's own verification was `ls -R` — the file existed, so it was "proved".
+  const py = mkt(join(tmpdir(), 'ayin-bc-py-'));
+  md(join(py, 'src'), { recursive: true });
+  wf(join(py, 'src/core.py'), 'def add(a, b):\n    return a + b\n');
+  wf(join(py, 'src/__main__.py'), 'if __name__ == "__main__\':\n    pass\n');
+  const broken = bc.buildCheck(ctxOf(py, 'python'), filesOf('src/core.py', 'src/__main__.py'));
+  ok(broken && !broken.ok && broken.hard === true, 'a Python syntax error FAILS the gate, hard');
+  ok(/SyntaxError|unterminated/i.test(broken.detail), '  → in the compiler\'s own words', broken.detail.split('\n')[1]?.trim().slice(0, 50));
+
+  wf(join(py, 'src/__main__.py'), 'if __name__ == "__main__":\n    pass\n');
+  const fixed = bc.buildCheck(ctxOf(py, 'python'), filesOf('src/core.py', 'src/__main__.py'));
+  ok(fixed.ok && fixed.hard === true, 'and clean Python passes it, also hard — a green compile is a fact too');
+  rmSync(py, { recursive: true, force: true });
+
+  // AN ABSENT TOOLCHAIN IS NOT A FAILURE. This is the arduino-README lesson applied before it can
+  // happen again: a hard fact nobody can satisfy does not enforce anything, it burns the fix budget
+  // that would have fixed something real.
+  const ts = mkt(join(tmpdir(), 'ayin-bc-ts-'));
+  wf(join(ts, 'tsconfig.json'), '{}');
+  wf(join(ts, 'a.ts'), 'export const x = 1;\n');
+  const noTsc = bc.buildCheck(ctxOf(ts, 'node'), filesOf('a.ts'));
+  ok(noTsc.ok && !noTsc.hard, 'a project with no compiler installed is NOT failed');
+  ok(/not checked/.test(noTsc.detail), '  → it is reported as not checked, which is a different thing', noTsc.detail.slice(0, 50));
+  rmSync(ts, { recursive: true, force: true });
+
+  // The types that already have a real compile probe must not be second-guessed by a generic one.
+  ok(bc.buildCheck(ctxOf('/tmp', 'unity'), filesOf('A.cs')) === null, 'unity is left to qa/unity');
+  ok(bc.buildCheck(ctxOf('/tmp', 'arduino'), filesOf('S.ino')) === null, 'arduino is left to qa/arduino');
+  ok(bc.buildCheck(ctxOf('/tmp', 'python'), []) === null, 'and a turn that changed nothing is not compiled at all');
+
+  const baseSrc = readFileSync(join(REPO, 'src/executors/qa/base/index.ts'), 'utf-8');
+  ok(/buildCheck\(ctx, files\)/.test(baseSrc), 'base QA — which serves every project type — asks the question');
+}
+
+// ── the arbitration tier: what each level is allowed to hold ─────────
+console.log('\narbiter tier');
+{
+  const sa = await import(`file://${join(DIST, 'subagents.js')}`);
+  const keep = { d: process.env.AYIN_SUBAGENT_DEPTH, a: process.env.AYIN_ARBITER };
+  const set = (depth, arbiter) => {
+    if (depth) process.env.AYIN_SUBAGENT_DEPTH = depth; else delete process.env.AYIN_SUBAGENT_DEPTH;
+    if (arbiter) process.env.AYIN_ARBITER = arbiter; else delete process.env.AYIN_ARBITER;
+  };
+
+  // OFF BY DEFAULT. ayin is not only a builder — "read this file and tell me what it does" is an
+  // ordinary turn, and an arbiter that must spawn a child to run one shell command has made the common
+  // case worse to improve the rare one.
+  set(null, null);
+  ok(!sa.arbiterMode(), 'arbiter mode is OFF by default');
+  ok(!sa.toolWithheld('bash') && !sa.toolWithheld('str_replace'), 'so the primitives are all present');
+
+  // THE ARBITRATOR GIVES UP THE PRIMITIVES THAT INVITE IT TO DO THE WORK ITSELF, and keeps what it
+  // needs to decide and to VERIFY a child's report.
+  set(null, '1');
+  ok(sa.arbiterMode(), 'and on when asked for');
+  for (const t of ['bash', 'str_replace', 'write_file', 'grep', 'find_files', 'list_dir']) {
+    ok(sa.toolWithheld(t), `  → ${t} is withheld from the arbitrator`);
+  }
+  for (const t of ['read_file', 'explore', 'perform_edit', 'find_relevant_files', 'subagent']) {
+    ok(!sa.toolWithheld(t), `  → ${t} is kept — deciding and verifying still need it`);
+  }
+
+  // A SUBAGENT IS WHERE THE WORK HAPPENS, so it keeps its hands — and loses the arbitration tools, or
+  // it would delegate instead of working, which is the recursion rule wearing a different hat.
+  set('1', '1');
+  ok(!sa.arbiterMode(), 'a subagent is never in arbiter mode, whatever the parent was');
+  for (const t of ['bash', 'str_replace', 'grep']) ok(!sa.toolWithheld(t), `  → a subagent keeps ${t}`);
+  for (const t of ['perform_edit', 'find_relevant_files', 'subagent']) {
+    ok(sa.toolWithheld(t), `  → and is denied ${t}`);
+  }
+  set(keep.d, keep.a);
+}
+
+// ── perform_edit / find_relevant_files: the deterministic halves ─────
+console.log('\nperform_edit + find_relevant_files');
+{
+  const pe = await import(`file://${join(DIST, 'tools/defs/perform_edit.js')}`);
+
+  // A FENCE WRITTEN TO DISK IS A SYNTAX ERROR in every language ayin edits, and it is the one thing a
+  // model reliably adds.
+  ok(pe.stripFence('```python\nx = 1\n```') === 'x = 1', 'a fence around the whole answer is stripped');
+  ok(pe.stripFence('x = 1') === 'x = 1', 'and an unfenced answer is untouched');
+  ok(pe.stripFence('a\n```\nb\n```\nc') === 'a\n```\nb\n```\nc', 'a fence INSIDE the file is left alone');
+
+  // THE DIFF IS EVIDENCE, NOT A CLAIM. "I made the change" reads exactly like "I did not"; a diff does
+  // not. This is the failure ayin has measured repeatedly.
+  const d = pe.lineDiff('a\nb\nc\n', 'a\nB2\nc\n');
+  ok(/@@ line 2 @@/.test(d) && /^- b$/m.test(d) && /^\+ B2$/m.test(d), 'the diff names the line and both sides', d.split('\n')[0]);
+  ok(pe.lineDiff('x\n', 'x\n').includes('-0 +0'), 'an unchanged file diffs to nothing');
+
+  const fr = await import(`file://${join(DIST, 'tools/defs/find_relevant_files.js')}`);
+  // EVERY PATH IS VERIFIED. A confident list of files that do not exist is worse than no list: the
+  // caller acts on it and the first failure looks like an unrelated bug three tools later.
+  const parsed = fr.parseFileReport('FILE: src/log.ts | writes the log\nFILE: nope/ghost.ts | invented\nchatty prose\n', REPO);
+  ok(parsed.files.length === 1 && parsed.files[0].path === 'src/log.ts', 'a real path survives with its reason');
+  ok(parsed.invented.length === 1, 'and an invented one is DROPPED and reported, never passed on');
+  ok(fr.parseFileReport('NONE', REPO).none, '"NONE" is an answer, not an empty result');
+  ok(fr.parseFileReport('I think you should look at the uploader.', REPO).files.length === 0,
+    'prose instead of the format yields nothing — the caller asked for files');
+}
+
+// ── postmortem: a run that dies unexpectedly says where it got to ────
+console.log('\npostmortem');
+{
+  const pm = await import(`file://${join(DIST, 'postmortem.js')}`);
+
+  // ENABLED BY ASKING. Off by default, because a note nobody asked for in every working directory is
+  // litter, and the operator who wants them wants them everywhere.
+  const flagWas = process.env.AYIN_POSTMORTEM;
+  delete process.env.AYIN_POSTMORTEM;
+  ok(!pm.postmortemEnabled(), 'postmortems are off unless asked for');
+  process.env.AYIN_POSTMORTEM = '1';
+  ok(pm.postmortemEnabled(), 'and on via the environment, for a harness that cannot pass flags');
+
+  // THE NOTE NAMES WHAT WAS RUNNING. This is the part no log reconstructs — "killed during npm run
+  // build, 43 seconds in" rather than "killed" — and it is why `runs.ts` is the thing it reads.
+  const R = await import(`file://${join(DIST, 'runs.js')}`);
+  R.resetRuns();
+  const live = R.startRun('bash', 'command=sleep 120', async (ctx) => {
+    ctx.onStatus('sleep 120');
+    await new Promise((res) => { ctx.signal.addEventListener('abort', res, { once: true }); setTimeout(res, 3000); });
+    return '';
+  });
+  await new Promise((res) => setTimeout(res, 30));
+  const note = pm.renderPostmortem('killed by SIGTERM');
+  ok(/reason: \*\*killed by SIGTERM\*\*/.test(note), 'the note leads with WHY it died');
+  ok(/\*\*bash\*\*\(command=sleep 120\)/.test(note), 'and names the call that was in flight');
+  ok(/last said: sleep 120/.test(note), '  → with the last thing that call narrated');
+  ok(/## Where to resume/.test(note) && /## The tail/.test(note), 'and carries where to resume, and the tail');
+  R.cancelRun(live.id);
+  await live.done;
+
+  // Between calls, it says so rather than leaving the section blank — a blank section reads as lost data.
+  R.resetRuns();
+  ok(/Nothing — it was between tool calls/.test(pm.renderPostmortem('x')), 'an idle death says it was idle');
+
+  // THE EXPECTED EXIT SEQUENCE is the ONLY thing that suppresses a note — see `postmortem.ts` on why
+  // the definition is inverted. A clean headless run must leave nothing.
+  const appSrc = readFileSync(join(REPO, 'src/app.ts'), 'utf-8');
+  ok(/markCleanExit\(\);\n  process\.exit\(0\);/.test(appSrc),
+    'headless marks the clean exit where it ACTUALLY exits — marking it in the caller never ran, and every clean run wrote a note');
+  ok(/armPostmortem\(\)/.test(appSrc), 'and arms the handlers before the work starts');
+
+  const subSrc = readFileSync(join(REPO, 'src/subagents.ts'), 'utf-8');
+  ok(/postmortemEnabled\(\) \? \{ AYIN_POSTMORTEM: '1' \}/.test(subSrc),
+    'a subagent inherits postmortems — cancelling one kills a process nobody was watching');
+
+  if (flagWas !== undefined) process.env.AYIN_POSTMORTEM = flagWas; else delete process.env.AYIN_POSTMORTEM;
+}
+
+// ── ayin_help answers a QUESTION, not only a topic name ──────────────
+console.log('\nayin_help: semantic capability search');
+{
+  const t = await import(`file://${join(DIST, 'tools.js')}`);
+  await t.loadTools();
+  const ah = await import(`file://${join(DIST, 'tools/defs/ayin_help.js')}`);
+
+  ok(/\/jira/.test(ah.answerCapability('can you talk to jira')), 'a question finds the command that answers it');
+  ok(/\/diff/.test(ah.answerCapability('how do I review a diff')), 'and phrasing it as a task still finds it');
+  // TOOLS ARE CAPABILITIES TOO. Nothing in HELP mentions web_search, so a catalogue of commands alone
+  // answers "can you search the web" with silence.
+  // The tool half is passed IN — the def cannot import `tools.js` at module scope without closing a
+  // cycle through discovery, so `execute` hands it over at call time.
+  const toolList = t.modelTools().map((x) => ({ name: x.name, description: x.description }));
+  ok(/web_search/.test(ah.answerCapability('can ayin search the web', toolList)),
+    'and the TOOL catalogue is searched, not only the commands');
+
+  // THE MOST USEFUL ANSWER THIS TOOL HAS. A capability that does not exist must be said out loud, or
+  // the model fills the silence with a command it invented.
+  const no = ah.answerCapability('can you send me a fax');
+  ok(/NOTHING IN AYIN MATCHES/.test(no), 'a capability ayin does not have is refused in as many words');
+  ok(/it cannot/.test(no), '  → and the model is told to say so rather than suggest something that does not exist');
+}
+
+// ── runs: management instead of timeouts ─────────────────────────────
+console.log('\nruns');
+{
+  const R = await import(`file://${join(DIST, 'runs.js')}`);
+  R.resetRuns();
+
+  // A LONG TOOL IS NOT A HUNG TOOL, and no clock decides which. It narrates, and the notes carry the
+  // delta since the previous one so two tools' timings are comparable.
+  const seen = [];
+  const off = R.onRunsChanged((runs) => { if (runs.length) seen.push(runs[0]); });
+  const slow = R.startRun('slowtool', 'x=1', async (ctx) => {
+    ctx.onStatus('step one');
+    await new Promise((res) => setTimeout(res, 60));
+    ctx.onStatus('step two');
+    return 'finished normally';
+  });
+  ok(R.currentRuns().some((r) => r.tool === 'slowtool'), 'a running tool is visible from OUTSIDE the await');
+  const a = await slow.done;
+  ok(a.ok && !a.cancelled && a.output === 'finished normally', 'and is never killed for taking time');
+  ok(/^\[\+[\d.]+s\] step one\n\[\+[\d.]+s\] step two$/.test(slow.notes()),
+    'its narration is stamped with the delta since the previous note', JSON.stringify(slow.notes()));
+  ok(R.currentRuns().length === 0, 'and it leaves the registry when it finishes');
+  off();
+
+  // CANCELLED IS NOT FAILED, AND THE SIGNAL DECIDES. A killed child returns its partial output through
+  // the normal path rather than throwing, so a cancelled run looks exactly like a successful one unless
+  // `aborted` is consulted — a green tick over a truncated result handed to the model as the answer.
+  const sneaky = R.startRun('bashlike', 'cmd=sleep', async (ctx) => {
+    await new Promise((res) => { ctx.signal.addEventListener('abort', res, { once: true }); setTimeout(res, 3000); });
+    return 'partial output that looks fine';          // note: does NOT throw
+  });
+  R.cancelRun(sneaky.id, 'test');
+  const b = await sneaky.done;
+  ok(b.cancelled, 'a cancelled run is marked cancelled even though the tool returned normally');
+  ok(!b.ok, '  → and is NOT reported as a success');
+  ok(/Cancelled before it finished/.test(b.output), '  → and says so where the model will read it');
+
+  // PER-CALL. Stopping one tool must leave the rest of the turn alone — the half ayin never had.
+  const one = R.startRun('t1', '', async (ctx) => {
+    await new Promise((res) => { ctx.signal.addEventListener('abort', res, { once: true }); setTimeout(res, 3000); });
+    return 'one';
+  });
+  const two = R.startRun('t2', '', async () => { await new Promise((res) => setTimeout(res, 30)); return 'two'; });
+  R.cancelRun(one.id);
+  const [o, t] = await Promise.all([one.done, two.done]);
+  ok(o.cancelled && !t.cancelled && t.output === 'two', 'cancelling one run leaves the others running');
+
+  // A tool that throws is a RESULT, never an exception that ends the turn.
+  const boom = await R.startRun('boom', '', async () => { throw new Error('nope'); }).done;
+  ok(!boom.ok && /Error: nope/.test(boom.output), 'a throwing tool comes back as a result the model can read');
+
+  ok(R.cancelAllRuns() === 0, 'and nothing is left running afterwards');
+  R.resetRuns();
+}
+
+// ── subagents: the arbitration level, and the two rules that keep it one level ────
+console.log('\nsubagents');
+{
+  const sa = await import(`file://${join(DIST, 'subagents.js')}`);
+
+  // RULE 1: a subagent may not spawn subagents. Enforced by WITHHOLDING the tool, not by refusing the
+  // call — a tool the model can see and cannot use costs a round to discover that.
+  const depthWas = process.env.AYIN_SUBAGENT_DEPTH;
+  const flagWas = process.env.AYIN_SUBAGENTS;
+  delete process.env.AYIN_SUBAGENT_DEPTH; delete process.env.AYIN_SUBAGENTS;
+  ok(sa.subagentsAllowed(), 'the top level may delegate');
+  ok(!sa.isSubagent() && sa.subagentDepth() === 0, 'and knows it is the top level');
+  process.env.AYIN_SUBAGENT_DEPTH = '1';
+  ok(!sa.subagentsAllowed(), 'a SUBAGENT may not delegate — the level stays one deep');
+  ok(sa.isSubagent() && sa.subagentDepth() === 1, 'and knows it is one');
+  process.env.AYIN_SUBAGENT_DEPTH = '3';
+  ok(!sa.subagentsAllowed(), 'nor at any greater depth');
+  delete process.env.AYIN_SUBAGENT_DEPTH;
+  process.env.AYIN_SUBAGENTS = '0';
+  ok(!sa.subagentsAllowed(), 'and an operator can switch delegation off entirely');
+  delete process.env.AYIN_SUBAGENTS;
+  if (depthWas !== undefined) process.env.AYIN_SUBAGENT_DEPTH = depthWas;
+  if (flagWas !== undefined) process.env.AYIN_SUBAGENTS = flagWas;
+
+  // A CWD THAT DOES NOT EXIST must not come back blaming node. `spawn` raises ENOENT for a missing
+  // working directory exactly as it does for a missing executable, so the message named the
+  // interpreter and sent the reader after a broken install — measured, on a model that mistyped its
+  // own cwd by one character.
+  const badCwd = await sa.runSubagent('anything', { cwd: '/tmp/ayin-no-such-dir-for-a-gate' });
+  ok(!badCwd.ok && badCwd.toolCalls === 0, 'a subagent with a missing cwd fails cleanly');
+  ok(/does not exist/.test(badCwd.report) && /ayin-no-such-dir-for-a-gate/.test(badCwd.report) && !/ENOENT/.test(badCwd.report),
+    '  → naming the directory, and never as a spawn ENOENT that reads like a broken install',
+    badCwd.report.slice(0, 60));
+
+  // RULE 2: parallel is off until asked for. Two agents editing one tree lose each other's writes, and
+  // nothing in any output says so.
+  const parWas = process.env.AYIN_PARALLEL_SUBAGENTS;
+  delete process.env.AYIN_PARALLEL_SUBAGENTS;
+  ok(!sa.parallelSubagentsAllowed(), 'parallel subagents are OFF by default');
+  ok(sa.prewarmSubagents([{ task: 'a' }, { task: 'b' }]) === 0, 'so nothing is pre-warmed, however many were asked for');
+  process.env.AYIN_PARALLEL_SUBAGENTS = '1';
+  ok(sa.parallelSubagentsAllowed(), 'and on when the operator asks');
+  ok(sa.prewarmSubagents([{ task: 'only-one' }]) === 0, 'a single call is never "parallel" — nothing to overlap');
+  if (parWas !== undefined) process.env.AYIN_PARALLEL_SUBAGENTS = parWas; else delete process.env.AYIN_PARALLEL_SUBAGENTS;
+  sa.resetSubagents();
+
+  // The report is the child's ANSWER, not its transcript: the parent delegated precisely so it would
+  // not have to hold that.
+  const r = sa.extractReport('[system] Connected\n[tool] ▸ bash · command=ls\n│ out\n╰ ✓ 0.1s\nI built it.\n\n--- HANDOFF (x) ---\nnoise\n');
+  ok(r.report === 'I built it.', 'the report is the prose, with the tool cards and the handoff stripped', JSON.stringify(r.report));
+  ok(r.toolCalls === 1, 'and the child\'s tool calls are counted — a report with zero of them is a description, not work');
+
+  // A DELEGATED TASK IS WAITED FOR, NOT POLLED. Backgrounded, the first live delegation polled `status`
+  // six times, hit pollMaxPerTurn, and ended the turn never having seen the report — while the child
+  // had done the job correctly.
+  // NOTHING is backgrounded by a clock any more — `runs.ts` replaced the race entirely, so the
+  // subagent-specific exemption that used to live here has no race left to be exempt from.
+  const agentSrc2 = readFileSync(join(REPO, 'src/agent.ts'), 'utf-8');
+  ok(!/BACKGROUND_TIMEOUT/.test(agentSrc2), 'the loop has no background timeout at all');
+  ok(/startRun\(/.test(agentSrc2), 'every tool call goes through the run registry — the one door');
+
+  const toolsSrc = readFileSync(join(REPO, 'src/tools.ts'), 'utf-8');
+  ok(/report\.tools\.filter\(\(t\) => !toolWithheld\(t\.name\)\)/.test(toolsSrc),
+    'discovery withholds a tool rather than registering one that would refuse — one predicate for every tier');
+}
 
 // ── search tools: the model's patterns must actually be honoured ─────
 console.log('\nsearch tools');
@@ -739,7 +1120,7 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
   // from inside. Measured in a live run: stopped for naming an undeclared type, the model added that type
   // to the design, which would have made the gate certify the drift it exists to prevent. The weaker of
   // the two models found this; the stronger one never tried it.
-  const naamaSrc = readFileSync(join(DIST, '..', 'src', 'tools', 'defs', 'naama.ts'), 'utf-8');
+  const naamaSrc = readFileSync(join(DIST, '..', 'src', 'tools', 'defs', 'naamah.ts'), 'utf-8');
   ok(/entangledTo\(\)/.test(naamaSrc) && /Refused: that design is entangled/.test(naamaSrc),
     'the design tool refuses to author the design currently being enforced');
   /**
@@ -1142,6 +1523,14 @@ const directConsumers = execFileSync(
 ).split('\n').filter(Boolean);
 const unwired = directConsumers.filter((f) => {
   const body = readFileSync(f, 'utf-8');
+  // A TYPE-ONLY import is erased at compile time, so there is no module to initialise and no order to
+  // trust — `runs.ts` importing the `RunContext` interface from `tools/base.ts` creates no runtime
+  // edge at all. Only a value import can be initialisation-by-import-order.
+  const valueImports = body
+    .split('\n')
+    .filter((l) => /from '\.{1,2}(\/\.\.)*\/tools\/[a-z-]+\.js'/.test(l))
+    .filter((l) => !/^\s*(import|export)\s+type\s/.test(l));   // `export type … from` is erased too
+  if (valueImports.length === 0) return false;
   // Either it wires the runtime, or it pulls in the registry (which does).
   return !/ensureToolRuntime\(\)/.test(body) && !/from '\.{1,2}\/tools\.js'/.test(body);
 });
@@ -1331,7 +1720,10 @@ ok(
 const baseQa = await import(`file://${join(DIST, 'executors/qa/base/index.js')}`);
 const stubRoot = mkdtempSync(join(tmpdir(), 'ayin-qa-'));
 writeFileSync(join(stubRoot, 'README.md'), '# project\n\nTODO: describe this\n');
-const baseFacts = await baseQa.baseQaExecutor.probe({ root: stubRoot, files: [], goal: '', answer: '' });
+// TWO ARGUMENTS. `probe(ctx, files)` — the changed-file list became a parameter when the base
+// executor started asking whether the project compiles, and this call still passed one, so the gate
+// died on `files.filter` of undefined instead of testing anything.
+const baseFacts = await baseQa.baseQaExecutor.probe({ root: stubRoot, files: [], goal: '', answer: '' }, []);
 ok(
   baseFacts.every((f) => f.key !== 'readme-substance' || f.hard === true),
   'the base executor marks readme-substance hard — a scaffold stub is not a judgement call',
@@ -1695,18 +2087,27 @@ console.log('\nexecutors: detection + registry');
   // Every shipped config parses and cross-checks against an imported instance. loadRegistry THROWS
   // on any mismatch, so simply getting a list back is the assertion.
   const configs = reg.listExecutors();
-  // EIGHT since the Node plan executor: base + arduino for plan/qa/present, plus qa/unity and
-  // plan/node. The count is asserted rather than the names because `loadRegistry` already THROWS on a
-  // config with no imported instance (or the reverse) — this line is what notices an executor added to
-  // neither list.
-  ok(configs.length === 8,
-    'eight executors are declared and wired (base + arduino for plan/qa/present, plus qa/unity and plan/node)',
+  // NINE: base + arduino for plan/qa/present, plus qa/unity, plan/greenfield and plan/node. The count
+  // is asserted rather than the names because `loadRegistry` already THROWS on a config with no
+  // imported instance (or the reverse) — this line is what notices an executor added to neither list.
+  ok(configs.length === 9,
+    'nine executors are declared and wired (base + arduino for plan/qa/present, plus qa/unity, plan/greenfield and plan/node)',
     String(configs.length));
-  // The one that BOOTSTRAPS. A greenfield TS request used to fall to the base executor and receive a
-  // README and nothing else — no manifest, no tsconfig, no entry point — so the endpoint it asked for
-  // landed in a directory that was not a project. Asserted by name because that is the whole feature.
-  ok(configs.some((c) => c.kind === 'plan' && c.id === 'node'),
-    'a Node plan executor exists — a greenfield TypeScript request gets a project, not one file');
+  // THE TWO THAT BOOTSTRAP, AND THE FACT THAT THEY DO NOT COLLIDE.
+  //
+  // Both were written for the same complaint — an empty directory gets a README and nothing else —
+  // independently, on two machines. Selection is "highest priority, ties broken by id", so leaving
+  // both claiming `node` at priority 100 would make a coin flip decide which one bootstraps a
+  // TypeScript project. The split is the invariant, so it is asserted rather than the ids alone.
+  const gf = configs.find((c) => c.kind === 'plan' && c.id === 'greenfield');
+  const nd = configs.find((c) => c.kind === 'plan' && c.id === 'node');
+  ok(!!gf && !!nd, 'both greenfield bootstrappers are declared and wired');
+  ok(!!nd && nd.projectTypes.includes('node'),
+    'plan/node owns node — a greenfield TypeScript request gets a manifest, a tsconfig and an entry point that runs');
+  ok(!!gf && !gf.projectTypes.includes('node'),
+    'and plan/greenfield does NOT also claim node — one owner per type, never a tie broken by id');
+  ok(!!gf && gf.projectTypes.includes('python') && gf.projectTypes.includes('unity'),
+    'plan/greenfield keeps python and unity');
   ok(configs.some((c) => c.kind === 'qa' && c.id === 'unity' && c.factsOnly === true),
     'qa/unity declares factsOnly — a Unity turn is judged by a compiler, not by a model');
   ok(configs.every((c) => c.projectTypes.length > 0), 'every config declares at least one project type');
@@ -1732,12 +2133,59 @@ console.log('\nexecutors: detection + registry');
 
   // The deterministic README scaffold: created when missing, never overwritten.
   const bp = await import(`file://${join(DIST, 'executors/plan/base/index.js')}`);
-  const made = bp.basePlanExecutor.scaffold({ root: empty, type: 'unknown', evidence: 'test', greenfield: true });
+  const made = bp.basePlanExecutor.scaffold({ root: empty, targetDir: '', type: 'unknown', evidence: 'test', greenfield: true });
   ok(made.length === 1 && existsSync(join(empty, 'README.md')), 'scaffold creates README.md in a project that has none');
   writeFileSync(join(empty, 'README.md'), '# mine\n');
-  const again = bp.basePlanExecutor.scaffold({ root: empty, type: 'unknown', evidence: 'test', greenfield: false });
+  const again = bp.basePlanExecutor.scaffold({ root: empty, targetDir: '', type: 'unknown', evidence: 'test', greenfield: false });
   ok(again.length === 0 && readFileSync(join(empty, 'README.md'), 'utf8') === '# mine\n', 'scaffold NEVER overwrites an existing README — it is the operator\'s');
   rmSync(empty, { recursive: true, force: true });
+
+  // ── the README check must be answerable by the project it is asked about ──
+  //
+  // It was not. `readmeSubstance` is `qa/base`'s, and `qa/base` serves `"*"` — but it ended with two
+  // ARDUINO demands, so a Python project created by plan mode failed a HARD fact on "no `arduino-cli
+  // compile`/`upload` command and no mention of the Arduino IDE". Measured: the gate spent all three
+  // fix passes on it and the model refused each time, correctly calling it a misconfiguration. A hard
+  // fact nobody can satisfy does not enforce anything; it burns the budget that would have fixed
+  // something real.
+  const dl = await import(`file://${join(DIST, 'executors/deliverables.js')}`);
+  const bpx = await import(`file://${join(DIST, 'executors/plan/base/index.js')}`);
+  const mkReadme = (body) => {
+    const d = mkdtempSync(join(tmpdir(), 'ayin-readme-'));
+    writeFileSync(join(d, 'README.md'), body);
+    return d;
+  };
+  const filled = '# demo\n\n## What this is\nA CLI that converts CSV to JSON.\n\n## How to run it\n'
+    + 'pip install -e . then `csv2json in.csv --pretty`\n\n## How to verify it works\n'
+    + '`pytest -q` shows three passing tests covering the flag and the error path.\n';
+
+  const stubDir = mkReadme(bpx.readmeStub('demo'));
+  ok(!dl.readmeSubstance(stubDir).ok, 'an untouched stub still fails — that is the whole point of writing one');
+
+  // THE BANNER IS AN INSTRUCTION TO THE AGENT, NOT PART OF THE DOCUMENT. It used to open with the word
+  // TODO, so a model that filled in every section and left the instruction alone — doing exactly what
+  // it was told — shipped 570 characters of real documentation that failed on that one word.
+  ok(!/\bTODO\b/.test(bpx.readmeStub('demo').split('## What this is')[0]),
+    'the stub BANNER carries no TODO of its own — only the section bodies do');
+  const bannerLeft = mkReadme(bpx.readmeStub('demo').split('## What this is')[0] + filled);
+  const bl = dl.readmeSubstance(bannerLeft);
+  ok(!bl.ok && /stub banner/.test(bl.detail), 'a filled-in README that KEPT the banner is still refused, and told which block to delete', bl.detail.slice(0, 60));
+
+  const cleanDir = mkReadme(filled);
+  const cl = dl.readmeSubstance(cleanDir);
+  ok(cl.ok, 'and the same content with the banner deleted PASSES — no board, no pins, no arduino-cli', cl.detail);
+  ok(!/arduino/i.test(cl.detail) && !/pin map/i.test(cl.detail),
+    'the generic verdict never mentions arduino or a pin map — it is asked of every project type');
+
+  // The arduino demands did not go away; they moved to the executor that can satisfy them.
+  const ar = dl.arduinoReadmeSubstance(cleanDir);
+  ok(!ar.ok && /arduino-cli/.test(ar.detail), 'arduinoReadmeSubstance still demands build/upload instructions', ar.detail.slice(0, 50));
+  const qaArd = readFileSync(join(REPO, 'src/executors/qa/arduino/index.ts'), 'utf-8');
+  ok(/arduinoReadmeSubstance\(ctx\.root\)/.test(qaArd), 'and the arduino QA executor is the one asking for it');
+  const qaBase = readFileSync(join(REPO, 'src/executors/qa/base/index.ts'), 'utf-8');
+  ok(!/arduinoReadmeSubstance/.test(qaBase), 'while base QA — which serves every other project type — does not');
+
+  for (const d of [stubDir, bannerLeft, cleanDir]) rmSync(d, { recursive: true, force: true });
 }
 
 // ── arduino_diagram: the pure PUML renderer, esp. the free-form-leg-name fuzzy matcher ──
@@ -2318,16 +2766,17 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
    * THE CALLER'S FLAG, NEVER `!declared`. This gate used to quote `if (!declared && …)` — and in
    * doing so it pinned a real bug in place for 16 days.
    *
-   * `declared` is `toolMode() === 'native' && opts.declareTools !== false`, so it is ALSO false in
-   * prompt mode — where the tools are real and travel in the prompt catalogue instead of the request.
-   * Prompt mode is the default for the resource provider, which made `!declared` true on every call,
-   * and this guard binned every tool call the AGENT LOOP made: session 2026-08-31T01-32-39 ran 89
-   * rounds, emitted 88 tool calls, executed zero, and told the model "there is nothing to call" each
-   * time. The condition below is the whole fix, so it is asserted from both sides.
+   * `declared` is `toolMode() === 'native' && offersTools`, so it is ALSO false in prompt mode —
+   * where the tools are real and travel in the prompt catalogue instead of the request. Prompt mode
+   * is the default for the resource provider, which made `!declared` true on every call, and this
+   * guard binned every tool call the AGENT LOOP made: session 2026-08-31T01-32-39 ran 89 rounds,
+   * emitted 88 tool calls, executed zero, and told the model "there is nothing to call" each time.
+   * The condition is the whole fix, so it is asserted from BOTH sides — the shape that must be there
+   * and the shape that must not.
    */
-  const guardRe = /if \(opts\.declareTools === false && activeDialect\(\)\.parse\(reply\)\.toolCalls\.length > 0\)/;
+  const guardRe = /if \(!offersTools && activeDialect\(\)\.parse\(reply\)\.toolCalls\.length > 0\)/;
   ok(guardRe.test(mgrSrc),
-    'a reply that IS a tool call, from a caller that asked for none, is detected through the dialect');
+    'a reply that IS a tool call, when the CALLER offered none, is detected through the dialect');
   ok(!/!declared && activeDialect\(\)\.parse\(reply\)/.test(mgrSrc),
     'and the guard keys on the CALLER, never on `!declared` — that is false in prompt mode too, where the tools are real and the agent is waiting to run them');
   ok(/declared no tools and there is nothing to call/.test(mgrSrc),
@@ -2488,9 +2937,25 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
       'and it is reset when the provider OR the model changes — a different tokenizer is a different number');
   }
 
-  // The agent loop must be untouched: there, a tool call is the point.
-  ok(/const declared = toolMode\(\) === 'native' && opts\.declareTools !== false;/.test(mgrSrc),
-    'the guard is gated on `declared`, so the agent loop — which is genuinely calling tools — never sees it');
+  // THE AGENT LOOP MUST BE UNTOUCHED: there, a tool call is the point. This gate asserted that and was
+  // WRONG, because it asserted the wrong variable. `declared` also means "schemas went to the runtime",
+  // which in prompt mode is never true — so against every text-contract endpoint the guard fired on
+  // every round of the loop, parsed the model's `<function=read_file>`, discarded it, and replied "you
+  // have no tools". Measured on gemma4:26b: three valid calls in three rounds, all destroyed.
+  //
+  // Two variables now, because they are two questions. `offersTools` is the CALLER's answer to "does
+  // this call have tools", and it is the only thing the guard may consult; `declared` is transport.
+  ok(/const offersTools = opts\.declareTools !== false;/.test(mgrSrc),
+    'whether a call HAS tools is the caller\'s answer, independent of how they are transported');
+  ok(/const declared = toolMode\(\) === 'native' && offersTools;/.test(mgrSrc),
+    'and declaring schemas to the runtime is the transport question, derived from it');
+  {
+    const guardLine = mgrSrc.slice(mgrSrc.indexOf('if (!offersTools && activeDialect()'), mgrSrc.indexOf('if (!offersTools && activeDialect()') + 90);
+    ok(!/toolMode|declared\b/.test(guardLine),
+      'the guard reads NEITHER toolMode nor declared — prompt mode is how most installs run, and there the loop calls tools');
+  }
+  ok(/llmChat\(\[\{ role: 'user', content: prompt \}\], \{ declareTools: false \}\)/.test(mgrSrc),
+    'llmCall offers no tools by construction — one user message, no system prompt, so no catalogue and no schemas');
 
   // ONE SOURCE OF TRUTH for who declares tools.
   //

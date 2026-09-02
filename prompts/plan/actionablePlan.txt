@@ -1,6 +1,8 @@
 Turn the request below into an ACTIONABLE plan: ordered steps a coding agent executes without asking a
 question.
 
+{{PHASE}}
+
 SESSION GOAL:
 {{GOAL}}
 
@@ -35,7 +37,9 @@ Answer with one JSON object and nothing else:
 id          1-based, ascending, no gaps.
 title       one imperative line.
 files       exact paths this step creates or edits. Empty only for a step that just runs a command.
-action      what to do, concretely enough to execute: names, signatures, values, commands.
+action      what to do, concretely enough to execute: names, signatures, values, commands. NAME what a
+            file must contain; never paste the file itself. A step carrying a whole heredoc makes this
+            reply run past its length and come back truncated, and a truncated plan is no plan.
 verify      the command to run or the file to read that proves this step worked, and what it must show.
 dependsOn   ids of steps that must land first. Lower ids only.
 gaps        what is unknown or undecided, and which command or file settles it.

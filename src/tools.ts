@@ -7,6 +7,7 @@
  */
 
 import { log } from './log.js';
+import { toolWithheld } from './subagents.js';
 import { getConfigString, getPrompt } from './prompts.js';
 import { prompts, packagePath } from './prompts-service.js';
 import type { Tool } from './tools/base.js';
@@ -131,7 +132,10 @@ export async function loadTools(): Promise<void> {
       throw new Error(`duplicate tool name(s): ${report.duplicates.join('; ')}`);
     }
     assertSlashOnlyReachable(report.tools);
-    tools = report.tools;
+    // WITHHELD, NOT REFUSED. A subagent must not delegate further, and neither must a session the
+    // operator started with `--disallow-subagents`. Dropping the tool here means the model never sees
+    // it — where letting it exist and refuse would cost a round to discover that. See `subagents.ts`.
+    tools = report.tools.filter((t) => !toolWithheld(t.name));
     toolMap.clear();
     for (const t of tools) toolMap.set(t.name, t);
     applyDescriptionOverrides(tools);

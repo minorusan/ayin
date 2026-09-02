@@ -24,7 +24,8 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { log } from '../../../log.js';
 import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext } from '../../types.js';
-import { basePlanExecutor, ensureReadme } from '../base/index.js';
+import { ensureReadme } from '../base/index.js';
+import { greenfieldPlanExecutor } from '../greenfield/index.js';
 
 const config: ExecutorConfig = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'config.json'), 'utf-8'),
@@ -156,12 +157,30 @@ dist/
 .env
 `;
 
+/** Where the files actually go — `root`, or the folder the request named inside it. Mirrors greenfield. */
+function targetRoot(ctx: ProjectContext): string {
+  return ctx.targetDir ? join(ctx.root, ctx.targetDir) : ctx.root;
+}
+
+/**
+ * THIS EXECUTOR IS `greenfield` PLUS A BOOTSTRAP — it does not replace it.
+ *
+ * Both were written for the same complaint on two machines that could not see each other, and the
+ * merge that brought them together had to pick one owner for `node` (selection is highest priority,
+ * ties broken by id, so two claimants at 100 is a coin flip). Picking either one alone threw away
+ * real work: `greenfield` has the layout, test convention and observability story for TypeScript in
+ * tunable prompt files and a survey that does not lie about an empty directory; this one WRITES the
+ * package.json, the tsconfig and an entry point that starts.
+ *
+ * So `node` owns the type and delegates every planning surface to `greenfield` — whose `typescript`
+ * branch is still keyed on `ctx.type === 'node'` — and adds the deterministic file bootstrap on top.
+ * Nothing is duplicated: the deliverables (manifest, tsconfig, entry point, test, .gitignore) are
+ * greenfield's list, which already names everything this scaffold writes.
+ */
 export const nodePlanExecutor: PlanExecutor = {
   config,
 
-  // Everything not about bootstrapping is the base behaviour — the survey, the grounding and the
-  // observability story for a Node project are what the generic executor was already written for.
-  survey(ctx: ProjectContext): string { return basePlanExecutor.survey(ctx); },
+  survey(ctx: ProjectContext): string { return greenfieldPlanExecutor.survey(ctx); },
   /**
    * WHAT THE BOOTSTRAP ALREADY DECIDED — because the model does not know, and guesses Express.
    *
@@ -173,9 +192,12 @@ export const nodePlanExecutor: PlanExecutor = {
    *
    * Empty for a project that already exists — a real repo's conventions are read from the tree by the
    * base survey, and stating them from here would be inventing facts about somebody else's code.
+   *
+   * The base is greenfield's `layoutTypescript` prompt: what the project's shape SHOULD be, which an
+   * operator can edit. What follows is what this scaffold has already DONE, which they cannot.
    */
   grounding(ctx: ProjectContext, request?: string): string {
-    const base = basePlanExecutor.grounding(ctx, request);
+    const base = greenfieldPlanExecutor.grounding(ctx, request);
     if (!ctx.greenfield || ctx.type !== 'node') return base;
     const lines = [
       // THE SKETCH STEP IS RESTATED HERE, and that is not redundancy.
@@ -213,51 +235,40 @@ export const nodePlanExecutor: PlanExecutor = {
     ];
     return [base, lines.join('\n')].filter((x) => x.trim()).join('\n\n');
   },
-  observability(ctx: ProjectContext): string { return basePlanExecutor.observability(ctx); },
+  observability(ctx: ProjectContext): string { return greenfieldPlanExecutor.observability(ctx); },
 
-  deliverables(ctx: ProjectContext): Deliverable[] {
-    const base = basePlanExecutor.deliverables(ctx);
-    if (!ctx.greenfield) return base;
-    // On a bootstrap the runnable project IS part of what must exist at the end, so it is stated
-    // rather than hoped for — the QA gate reads these.
-    return [
-      ...base,
-      {
-        label: 'the project manifest',
-        // Both depths, for the same reason the Arduino sketch declares two: the operator may be
-        // standing in the project or one directory above it, and both are the same correct project.
-        patterns: ['package.json', '*/package.json'],
-        why: 'without it there is no project — nothing can be installed, run or started.',
-        required: true,
-      },
-      {
-        label: 'the TypeScript configuration',
-        patterns: ['tsconfig.json', '*/tsconfig.json'],
-        why: 'a .ts file with no tsconfig is a file, not a build.',
-        required: true,
-      },
-      {
-        label: 'an entry point that runs',
-        patterns: ['src/*.ts', 'src/**/*.ts', '*.ts', '*/src/*.ts'],
-        why: 'the request asked for behaviour; behaviour has to live in a file the project starts.',
-        required: true,
-      },
-    ];
-  },
+  /**
+   * GREENFIELD'S LIST, NOT A SECOND ONE. Its `typescript` branch already declares the manifest, the
+   * compiler configuration, the entry point, a test and the ignore file — everything the scaffold
+   * below writes, plus the test it deliberately does not. A parallel list here would be the same
+   * facts in two places, prefixed for `targetDir` in only one of them, drifting from the first edit.
+   */
+  deliverables(ctx: ProjectContext): Deliverable[] { return greenfieldPlanExecutor.deliverables(ctx); },
 
+  /**
+   * GREENFIELD FIRST, THEN THE FILES. Its scaffold makes the target directory when the request named
+   * one and runs `git init` — so the manifest this writes is inside the repository rather than beside
+   * it, and the first commit can contain the first file.
+   *
+   * Everything is written into `targetRoot`, never `ctx.root`: people set a project up from one level
+   * above it, and a package.json in the folder-of-projects is worse than none.
+   */
   scaffold(ctx: ProjectContext): string[] {
     // THE GUARD, FIRST. Only a directory that asked to become a Node project and holds none yet.
-    // Anywhere else this falls through to exactly what the base executor did before.
-    if (!ctx.greenfield || ctx.type !== 'node') return ensureReadme(ctx.root);
-    const made: string[] = [];
+    // Anywhere else this is exactly what greenfield does, which for a non-greenfield ctx is the base.
+    const made = greenfieldPlanExecutor.scaffold(ctx);
+    if (!ctx.greenfield || ctx.type !== 'node') return made;
+    const dir = targetRoot(ctx);
     // Ours before the generic stub, so the README that survives is the one naming `npm install`.
-    made.push(...writeIfMissing(join(ctx.root, 'README.md'), README(packageName(ctx.root))));
-    made.push(...ensureReadme(ctx.root));
-    made.push(...writeIfMissing(join(ctx.root, 'package.json'), PKG(packageName(ctx.root))));
-    made.push(...writeIfMissing(join(ctx.root, 'tsconfig.json'), TSCONFIG));
-    made.push(...writeIfMissing(join(ctx.root, '.gitignore'), GITIGNORE));
-    made.push(...writeIfMissing(join(ctx.root, 'src', 'index.ts'), INDEX_TS));
-    if (made.length) log('INFO', 'scaffold_node', { root: ctx.root, files: String(made.length) });
+    // `ensureReadme` is idempotent, and greenfield already called it — this is the overwrite-nothing
+    // path either way, so the file that exists is whichever landed first.
+    made.push(...writeIfMissing(join(dir, 'README.md'), README(packageName(dir))));
+    made.push(...ensureReadme(dir));
+    made.push(...writeIfMissing(join(dir, 'package.json'), PKG(packageName(dir))));
+    made.push(...writeIfMissing(join(dir, 'tsconfig.json'), TSCONFIG));
+    made.push(...writeIfMissing(join(dir, '.gitignore'), GITIGNORE));
+    made.push(...writeIfMissing(join(dir, 'src', 'index.ts'), INDEX_TS));
+    if (made.length) log('INFO', 'scaffold_node', { root: dir, files: String(made.length) });
     return made;
   },
 };

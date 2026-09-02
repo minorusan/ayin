@@ -13,8 +13,11 @@ export const tool: Tool = {
       { name: 'timeout_seconds', type: 'number', description: 'Kill the command after N seconds (default 120, max 900)', required: false },
       { name: 'cwd', type: 'string', description: 'Run in this directory instead of the session root — use this rather than prefixing `cd X && …`', required: false },
     ],
-    async execute(params) {
+    async execute(params, ctx) {
       if (!params.command) return 'Error: command required';
+      // The command itself is the narration: a card reading `bash 40s — npm run build` is a tool
+      // working, where `bash 40s` alone is a tool that might have hung. See `runs.ts`.
+      ctx?.onStatus(params.command.replace(/\s+/g, ' ').slice(0, 80));
       // A model-settable budget with a ceiling: 120s kills a Unity compile or a cold npm install, and no
       // budget at all hangs the turn forever on the first foreground server.
       const secs = Number(params.timeout_seconds);
@@ -33,8 +36,8 @@ export const tool: Tool = {
       if (dir) {
         const resolved = resolveAgainstCwd(dir);
         if (!existsSync(resolved)) return `Error: cwd not found: ${dir}.${suggestSimilarPaths(dir)}`;
-        return execAsync(params.command, { cwd: resolved, timeoutMs });
+        return execAsync(params.command, { cwd: resolved, timeoutMs, signal: ctx?.signal });
       }
-      return execAsync(params.command, { cwd: CWD, timeoutMs });
+      return execAsync(params.command, { cwd: CWD, timeoutMs, signal: ctx?.signal });
     },
   };

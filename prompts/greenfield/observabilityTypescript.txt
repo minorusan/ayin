@@ -1,0 +1,5 @@
+Observed through one logging module under `src/`, not `console.log` scattered across files: a level read
+from an env var defaulting to info, and a single write path a later feature can redirect.
+
+For each feature: what it logs, at what level, and the exact command that shows it working —
+`npm run build`, `npm test`, or `node dist/index.js …`.

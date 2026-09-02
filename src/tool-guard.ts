@@ -167,7 +167,40 @@ export function guardNoteMutation(tool: string, paths: string[], key = ''): void
   mutationEpoch++;
   bumps.push({ epoch: mutationEpoch, key });
   if (bumps.length > BUMPS_KEPT) bumps.splice(0, bumps.length - BUMPS_KEPT);
+
+  /**
+   * A WRITE MUST NOT LIFT ITS OWN REPEAT BY CHANGING THE FILE IT WRITES.
+   *
+   * `filesWritten` below already excludes the call's own bump — `b.key !== key` — but `fileChanged`
+   * did not, and `write_file` mutates its own target by definition. So after every write the witness
+   * differed from the one recorded before it, the guard read that as "the world moved", reset the
+   * counter to 1, and the ladder could never advance. The escalation was unreachable for exactly the
+   * calls it exists for.
+   *
+   * MEASURED, and it is why this is here: a subagent wrote the same `index.html` twelve times running —
+   * byte-identical, `md5` unchanged across the whole stretch — with 21 `guard_repeat_allowed_stale`
+   * events all giving the reason "the file it reads has changed since". It had reached 89 rounds and
+   * was not going to stop on its own.
+   *
+   * So the stored witness is refreshed to what the call itself just produced. A LATER change by anything
+   * else still differs from it and still counts as the world moving; the call's own effect no longer
+   * does.
+   */
+  if (key) {
+    const prior = calls.get(key);
+    if (prior) prior.witness = witnessOfKeyTargets(paths);
+  }
   log('INFO', 'guard_mutation_noted', { tool, epoch: String(mutationEpoch), paths: paths.slice(0, 3).join(',') });
+}
+
+/** The witness of the first real path this call touched — the same shape `witnessOf` produces. */
+function witnessOfKeyTargets(paths: string[]): string {
+  for (const p of paths) {
+    if (!p?.trim()) continue;
+    const w = witnessOf({ path: p });
+    if (w) return w;
+  }
+  return '';
 }
 
 /**
@@ -414,34 +447,33 @@ export function guardCheck(name: string, params: Record<string, string>): GuardD
     return { allow: true, label: `poll ${state.count}`, note: `\n\n[POLLING NOTICE: poll ${state.count} of ${maxPolls}.]` };
   }
 
-  // ── everything else: warn once, then block for the turn ─────────────
-  if (state.count === 2) {
-    log('WARN', 'guard_repeat_warned', { tool: name });
-    return {
-      allow: false,
-      label: 'skipped (identical repeat)',
-      note: `You already ran ${name}(${preview(params)}) with these exact parameters in this turn, nothing it reads has `
-        + `changed since, and the result is already in your context. Use it. If it was not what you needed, change the `
-        + `parameters or the approach — an identical third call will be BLOCKED for the rest of the turn. Editing the `
-        + `file and reading it again is not a repeat, and is allowed.`,
-    };
-  }
+  // ── everything else: ANNOTATED, NEVER REFUSED ───────────────────────
+  //
+  // A REPEAT IS A SYMPTOM, AND REFUSING IT TREATS THE SYMPTOM. The reason a model runs the same call
+  // twice is almost always that it cannot see what the call returned the first time: the result went
+  // into the history, the history was compressed to fit the window, and what survived in the ledger was
+  // the first line of the output clipped to a hundred characters. Refusing the repeat left it with no
+  // way to remember the answer AND no way to fetch it — so it guessed, or gave up, or said it had done
+  // something it had not.
+  //
+  // The ledger now carries the first ten lines of every call's output for the whole turn
+  // (`agent.ts#renderCallLedger`), which is the actual fix: a model that can see the answer has no
+  // reason to ask again. What is left here is a NOTE — the answer it already has, and where the rest of
+  // it lives — attached to a call that runs anyway.
+  //
+  // AND SOMETIMES IT GENUINELY NEEDS THE REPEAT. "Has the server come up yet", "does the test pass now",
+  // "did that write land" are the same call twice on purpose, and only the second answer is the useful
+  // one. A guard cannot tell those from a loop without knowing what changed, and it does not.
+  log('WARN', 'guard_repeat_warned', { tool: name, count: String(state.count) });
 
-  blocked.set(key, `You called ${name} with identical parameters ${state.count} times in this turn.`);
-  log('WARN', 'guard_repeat_blocked', { tool: name, count: String(state.count) });
-  // The escape hatch matters: "check whether the server came up yet" is a legitimate reason to run
-  // the same command twice, and a block with no alternative is how a model ends up stuck instead of
-  // waiting. A command with a wait in front of it is a DIFFERENT call, and it is allowed.
-  const waitHint = name === 'bash'
-    ? ` If you were waiting for something to become ready, do not repeat the identical command — put a wait in front of it `
-      + `(e.g. \`sleep 5; <command>\`), which is a different call and will run.`
-    : '';
   return {
-    allow: false,
-    label: `blocked (${state.count} identical calls)`,
-    note: `BLOCKED. You called ${name}(${preview(params)}) ${state.count} times with identical parameters. `
-      + `This call is now disabled for the rest of this turn. The answer will not change by asking again: `
-      + `use the result already in your context, try a genuinely different approach, or report what you have.${waitHint}`,
+    allow: true,
+    label: `repeat ${state.count}`,
+    note: `\n\n[REPEAT ${state.count}: you have already run ${name}(${preview(params)}) with these exact parameters `
+      + `this turn, and nothing it reads has changed since. Its answer, and the file holding its full output, are in `
+      + `the call ledger below. `
+      + `Running it again is allowed and has just been done — but if the answer was not what you needed, the same `
+      + `parameters will not produce a different one; change them, or change the approach.]`,
   };
 }
 

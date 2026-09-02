@@ -1,0 +1,11 @@
+TARGET LAYOUT — a typical Unity project. Create these paths; do not invent a second convention.
+
+  Assets/Scripts/<Name>.cs             the code. One MonoBehaviour per file, filename == class name.
+  Packages/manifest.json               "dependencies": {} plus the registry packages the request needs.
+  ProjectSettings/ProjectVersion.txt   `m_EditorVersion:` naming the Unity version being targeted.
+  .gitignore                           Library/, Temp/, Obj/, Build/, Logs/, UserSettings/, *.csproj, *.sln
+  README.md                            already created as a stub at the root — fill THAT file in.
+
+SCENES AND .meta FILES ARE THE EDITOR'S, NOT THE AGENT'S. Unity writes Library/, the .csproj files and
+every .meta on first open, and a scene is authored in the editor — a hand-written .unity or .meta file
+corrupts the project. The plan states which scene a person must create and what to put in it.

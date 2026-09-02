@@ -92,6 +92,22 @@ export interface ProjectContext {
    * recall. Greenfield detection closes that hole.
    */
   greenfield: boolean;
+  /**
+   * The subdirectory of `root` this project is being CREATED in, or `''` — which is the usual case,
+   * where the operator is already standing in the project directory.
+   *
+   * It exists because a person setting up a new project is very often standing one level ABOVE it:
+   * *"build a Python website in testwebsite-2"*, typed in a folder that holds ten other projects.
+   * Measured, and it went wrong in every way at once — the directory walk found a sibling's
+   * `Arduino/2/Janitor/Janitor.ino` three levels down, declared the whole container an Arduino
+   * project, and handed the request the component catalog.
+   *
+   * `root` stays where the AGENT IS, because every path a plan states is relative to that, so an
+   * executor honouring this **prefixes its deliverable patterns** with it rather than resolving
+   * against it. Only ever one path segment, and only ever a directory that does not exist yet or has
+   * nothing in it — see `detect.ts`.
+   */
+  targetDir: string;
 }
 
 /**

@@ -1,0 +1,15 @@
+PROJECT SURVEY — {{ROOT}}
+
+NO SOURCE IS ON DISK YET. This plan CREATES a {{LABEL}} project; detected from {{DETECTED_FROM}}. There
+is no existing code to extend and no survey finding to react to — do not describe any.
+
+Root currently holds: {{ROOT_ENTRIES}}
+Version control: {{GIT_STATE}}
+README: {{README_STATE}}
+
+Toolchain the plan must use: {{TOOLCHAIN}}
+
+{{PATH_RULE}}
+
+The earliest steps create the directory layout and the manifest below, in that order. A step that
+writes a source file into a directory no earlier step created is a step that fails.

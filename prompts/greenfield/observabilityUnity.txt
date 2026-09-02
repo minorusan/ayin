@@ -1,0 +1,5 @@
+Observed in the Editor Console through `Debug.Log` / `LogWarning` / `LogError`, and in Play Mode — a
+running scene is the proof, never a compile.
+
+For each feature: what it logs, from which MonoBehaviour, and what a person must do in Play Mode to see
+it. Compilation is the floor: the C# compiles with no errors before any Play Mode claim is made.

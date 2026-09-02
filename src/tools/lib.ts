@@ -85,7 +85,17 @@ export function boolParam(v: unknown): boolean {
 export const EXEC_TIMEOUT_MS = 120_000;
 export const EXEC_MAX_BYTES = 256 * 1024;
 
-export function execAsync(command: string, opts: { cwd?: string; timeoutMs?: number } = {}): Promise<string> {
+/**
+ * NO EXECUTION TIMEOUT BY DEFAULT. A command runs as long as it needs; `signal` is how it stops.
+ *
+ * `timeoutMs` used to default to two minutes, which is a guess about how long work should take made by
+ * something that cannot see the work — and it lied about the result: a killed command came back through
+ * the normal path with `(TIMED OUT …)` appended to PARTIAL output, which the model then reasoned about
+ * as though it were the answer. Cancellation is the honest stop, and `runs.ts` reports it as a
+ * cancellation rather than as a result. Pass `timeoutMs` explicitly where a bound is genuinely part of
+ * the tool's contract; `AYIN_EXEC_TIMEOUT_MS` is the operator's backstop and is off unless set.
+ */
+export function execAsync(command: string, opts: { cwd?: string; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = toolShell().spawn(command, { cwd: opts.cwd });
 
@@ -99,7 +109,7 @@ export function execAsync(command: string, opts: { cwd?: string; timeoutMs?: num
     const finish = (fn: () => void): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       if (activeToolCancel === cancel) activeToolCancel = null;
       fn();
     };
@@ -111,11 +121,22 @@ export function execAsync(command: string, opts: { cwd?: string; timeoutMs?: num
     };
     activeToolCancel = cancel;
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      toolShell().kill(child, 'SIGTERM');
-      setTimeout(() => toolShell().kill(child, 'SIGKILL'), 1500);
-    }, opts.timeoutMs ?? EXEC_TIMEOUT_MS);
+    // Only when someone asked for one — see the note above.
+    const limit = opts.timeoutMs ?? Number(process.env.AYIN_EXEC_TIMEOUT_MS ?? '0');
+    const timer = limit > 0
+      ? setTimeout(() => {
+        timedOut = true;
+        toolShell().kill(child, 'SIGTERM');
+        setTimeout(() => toolShell().kill(child, 'SIGKILL'), 1500);
+      }, limit)
+      : null;
+
+    // The run's signal is the real stop. Chained here so a cancelled call kills its child rather than
+    // leaving it running with nobody waiting for it.
+    if (opts.signal) {
+      if (opts.signal.aborted) queueMicrotask(cancel);
+      else opts.signal.addEventListener('abort', cancel, { once: true });
+    }
 
     // Stop ACCUMULATING at the cap but let the process run to its own end: killing a build half way
     // through would leave the tree in a state the model then reasons about wrongly.
@@ -144,7 +165,7 @@ export function execAsync(command: string, opts: { cwd?: string; timeoutMs?: num
         const notes = [
           truncated ? `(output truncated at ${Math.round(EXEC_MAX_BYTES / 1024)} KB — redirect to a file and grep it if you need the rest)` : '',
           timedOut
-            ? `(TIMED OUT after ${Math.round((opts.timeoutMs ?? EXEC_TIMEOUT_MS) / 1000)}s and was killed — the command did not finish, so this output is PARTIAL. ` +
+            ? `(TIMED OUT after ${Math.round(limit / 1000)}s and was killed — the command did not finish, so this output is PARTIAL. ` +
               `If it is long-running or interactive, start it in the background instead: \`cmd >/tmp/out.log 2>&1 &\` then read the log.)`
             : '',
         ].filter(Boolean).join('\n');

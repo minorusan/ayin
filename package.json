@@ -39,6 +39,7 @@
     "check:readwindow": "node tool/check-readwindow.mjs",
     "check:help": "node tool/check-help.mjs",
     "check:testrun": "node tool/check-testrun.mjs",
+    "check:plan": "node tool/check-plan.mjs",
     "prebuild": "node tool/check-glyphs.mjs && node tool/check-hygiene.mjs",
     "check:prompts": "node tool/check-prompts.mjs",
     "audit:prompts": "node tool/dump-prompts.mjs",

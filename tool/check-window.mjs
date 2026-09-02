@@ -108,9 +108,60 @@ noteRanCall('grep', 'pattern=ScoringId', true, 'Assets/Scripts/Fact.cs:12: Scori
 noteRanCall('read_file', 'path=Fact.cs', false, 'ENOENT: no such file');
 const led = renderCallLedger();
 if (!led.includes('grep(pattern=ScoringId)')) fail('the ledger does not name the call it recorded');
-if (!led.includes('Assets/Scripts/Fact.cs:12')) fail('the ledger dropped the outcome gist');
-if (led.includes('more lines')) fail('the ledger kept a second line — it is a ledger, not a transcript');
+if (!led.includes('Assets/Scripts/Fact.cs:12')) fail('the ledger dropped what the call returned');
+// IT KEEPS WHAT THE CALL RETURNED, not merely that it ran. This used to assert the opposite — one line
+// only, "it is a ledger, not a transcript" — and one line is the entire memory of a call once the
+// window's compression has eaten the result. `bash(pytest …)` was remembered as its banner.
+if (!led.includes('more lines')) fail('the ledger kept only one line — that is not enough to use the answer');
 if (!/FAILED/.test(led)) fail('a failed call is not marked failed — the model cannot tell it may retry');
+
+/**
+ * HEAD, THE ERRORS FROM THE MIDDLE, AND THE TAIL.
+ *
+ * Head and tail alone miss the case that matters most: a long run whose failure is neither at the start
+ * nor at the very end. A 200-line pytest puts its banner in the head and its summary in the tail and
+ * leaves the assertion — the line naming what was expected and what arrived — in the 180 nobody sees.
+ * The filter is deterministic: no model, no judgement, generous rather than precise, because this reads
+ * tool output where a line containing "error" almost always is one.
+ */
+resetCallLedger();
+const buildLog = [
+  '> ayin@1.0.0 build', '> tsc',
+  ...Array.from({ length: 40 }, (_, i) => `[info] compiling src/module_${i}.ts`),
+  "src/plan/plan.ts(412,17): error TS2304: Cannot find name 'artifactHint'.",
+  ...Array.from({ length: 40 }, (_, i) => `[info] compiling src/other_${i}.ts`),
+  'Build step finished.', 'npm ERR! code 2',
+].join('\n');
+noteRanCall('bash', 'command=npm run build', false, buildLog);
+const excerpt = renderCallLedger();
+if (!/> tsc/.test(excerpt)) fail('the head of the output is missing');
+if (!/npm ERR! code 2/.test(excerpt)) fail('the TAIL is missing — a failing command puts its summary at the end');
+if (!/error TS2304/.test(excerpt)) fail('the error buried in the middle was not lifted out — the whole point of the filter');
+if (!/line\(s\) omitted/.test(excerpt)) fail('the elision is not stated, so the model reads a sample as the whole');
+if (/module_2[0-9]\.ts/.test(excerpt)) fail('the uninteresting middle was kept — the excerpt is not an excerpt');
+
+// SHORT OUTPUT IS SHOWN WHOLE. Splitting fifteen lines into three sections invents structure to
+// describe a thing that fits.
+resetCallLedger();
+noteRanCall('bash', 'command=ls', true, 'calc.py\ntest_calc.py\nvenv');
+const short = renderCallLedger();
+if (/omitted|last lines/.test(short)) fail('a short output was chopped into sections it does not need');
+if (!/venv/.test(short)) fail('a short output lost its last line');
+
+// THE BUDGET IS BOUNDED, AND EVERY CALL IS STILL LISTED.
+resetCallLedger();
+const long = [...Array.from({ length: 60 }, (_, i) => `line ${i} of a fairly long tool output here`), 'ERROR: broke', 'done'].join('\n');
+for (let i = 0; i < 30; i++) noteRanCall('bash', `command=step-${i}`, false, long);
+const budgeted = renderCallLedger();
+if ((budgeted.match(/^\d+\. /gm) || []).length !== 30) fail('a call went unlisted — every call this turn must appear');
+if (budgeted.length > 20000) fail(`the ledger blew its budget at ${budgeted.length} chars — bookkeeping must not crowd out the work`);
+// A failure that could not afford its excerpt still has to say WHY it failed: degrading to the first
+// line of a failed command shows its banner, which is the least informative line it has.
+if ((budgeted.match(/ERROR: broke/g) || []).length < 20) {
+  fail('out-of-budget failures lost their error line');
+}
+resetSessionLedger();
+resetCallLedger();
 
 /**
  * THE LEDGER MUST SAY WHERE THE ANSWER IS, not only that a call happened.
@@ -119,7 +170,6 @@ if (!/FAILED/.test(led)) fail('a failed call is not marked failed — the model 
  * — indistinguishable from a call it never made. Every result is also a file in the session's cache, and
  * naming it is what makes the ledger usable rather than merely informative: one line instead of 200 KB.
  */
-resetCallLedger();
 const { saveArtifact, startArtifactSession, artifactSessionDir } = await import('../dist/artifacts.js');
 startArtifactSession(`check-window-${process.pid}`);
 saveArtifact('grep', 'pattern=Widget', 'x'.repeat(4096));
@@ -152,13 +202,32 @@ if (renderCallLedger() !== '') fail('a session with no calls at all still render
 // A gate that leaves a session folder behind every run is a gate that fills the cache it is testing.
 (await import('node:fs')).rmSync(artifactSessionDir(), { recursive: true, force: true });
 
-// Bounded render: a long turn must not put its own bookkeeping in front of the model.
+/**
+ * EVERY CALL IS LISTED; the CHARACTERS are what is bounded.
+ *
+ * This used to render only the last 60 calls, so on a long turn the model was told about its own recent
+ * work and nothing about the rest — which is the same hole the ledger exists to close, moved further
+ * down the turn. What must stay bounded is the cost: the detail budget is spent newest-first and
+ * DEGRADES (full excerpt, then the errors alone, then the call line by itself) rather than stopping, so
+ * a 300-call turn still names all 300 without putting a quarter of the window in front of the work.
+ */
 resetCallLedger();
 for (let i = 0; i < 300; i++) noteRanCall('bash', `cmd=echo ${i}`, true, `line ${i}`);
 const big = renderCallLedger();
 const lines = big.split('\n').filter((l) => /^\d+\. /.test(l));
-if (lines.length > 60) fail(`${lines.length} ledger lines rendered — the render must be bounded`);
-if (!/earlier call\(s\) not listed/.test(big)) fail('calls were dropped from the render with no seam saying so');
+if (lines.length !== 300) fail(`${lines.length} of 300 calls listed — every call this turn must appear`);
+if (big.length > 14000) fail(`300 short calls rendered ${big.length} chars — the render must stay bounded`);
+
+resetCallLedger();
+const longOut = Array.from({ length: 60 }, (_, i) => `output line ${i} which is reasonably long for a tool result`).join('\n');
+for (let i = 0; i < 300; i++) noteRanCall('bash', `cmd=step ${i}`, false, longOut);
+const huge = renderCallLedger();
+if ((huge.split('\n').filter((l) => /^\d+\. /.test(l))).length !== 300) fail('a call went unlisted on a long turn');
+if (huge.length > 30000) fail(`300 LONG failing calls rendered ${huge.length} chars — the degradation ladder is not holding`);
+// The old render dropped calls past 60 and printed a "[N earlier call(s) not listed]" seam to admit it.
+// Nothing is dropped now, so the seam must NOT appear — it would be describing an elision that no
+// longer happens, which is worse than no seam at all.
+if (/earlier call\(s\) not listed/.test(big)) fail('the render still prints a drop seam, but nothing is dropped any more');
 if (!big.includes('cmd=echo 299')) fail('the render kept the oldest calls instead of the most recent');
 resetCallLedger();
 

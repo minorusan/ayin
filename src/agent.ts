@@ -44,6 +44,9 @@ import { isLogCoverage, isVerbose } from './modes.js';
 import { pendingCorpus } from './indulge/inject.js';
 import { syncSession, getSessionId } from './session-store.js';
 import { registerTask, completeTask, failTask } from './tools/status.js';
+import { prewarmSubagents, resetSubagents } from './subagents.js';
+import { cancelAllRuns, currentRuns, onRunsChanged, resetRuns, startRun, type RunContext } from './runs.js';
+import { notePostmortemContext } from './postmortem.js';
 import { extractSignals } from './tools/signals.js';
 import { qaBeginTurn, qaChangedFiles, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn, qaPreparedUnits } from './qa/index.js';
 import { regenerateTouchedDiagrams } from './arduino-diagram-regen.js';
@@ -64,9 +67,43 @@ let immediateCancel = false;
 let nudgeForQueuedMessage = false;
 const queuedUserInputs: string[] = [];
 
+/**
+ * The status line, painted from what is actually running.
+ *
+ * A tool that prints nothing is indistinguishable from one that has hung, and the operator's only move
+ * then is to kill it. `runs.ts` re-publishes every live run once a second with its elapsed time and the
+ * last thing it said, so "nothing is happening" becomes "bash 23s — still running" at worst and the
+ * real work at best.
+ *
+ * SUBSCRIBED ONCE, not per turn: a subscription taken at the top of `runAgentTurn` would have to be
+ * released at every one of its returns, and the one that gets missed leaks a listener per turn.
+ */
+let runTickerInstalled = false;
+function installRunTicker(): void {
+  if (runTickerInstalled) return;
+  runTickerInstalled = true;
+  onRunsChanged((runs) => {
+    if (runs.length === 0) return;
+    setAgentStatus(runs.map((r) => {
+      const secs = Math.round(r.ms / 1000);
+      return `${r.tool} ${secs}s${r.note ? ` — ${r.note.slice(0, 60)}` : ' — still running'}`;
+    }).join(' · '));
+  });
+}
+
 export function interruptAgent(): void {
   interrupted = true;
-  immediateCancel = cancelActiveThinking() || cancelActiveToolExecution() || immediateCancel;
+  // EVERY LIVE RUN, NOT JUST THE ONE `activeToolCancel` HAPPENS TO POINT AT. That single handle was set
+  // by the last `execAsync` to start, so with several runs live — which is what parallel subagents are
+  // for — stopping the turn stopped one of them and orphaned the rest. `runs.ts` knows all of them.
+  const stopped = cancelAllRuns('the operator interrupted the turn');
+  turnAbort.abort('the operator interrupted the turn');
+  immediateCancel = cancelActiveThinking() || cancelActiveToolExecution() || stopped > 0 || immediateCancel;
+}
+
+/** What is running right now — for `/status`, and for anything that wants to look in mid-turn. */
+export function runningTools(): ReturnType<typeof currentRuns> {
+  return currentRuns();
 }
 
 export function enqueueAgentMessage(message: string): void {
@@ -1044,6 +1081,7 @@ const DIAGRAM_TRIGGER = new RegExp([
 ].join('|'), 'i');
 
 let diagramContext = ''; // pre-prompted into the base call for this turn
+let turnAbort = new AbortController();  // aborted on interrupt; every run is chained to it
 let planContext = '';    // a plan produced before the turn (plan/index.ts), pre-prompted the same way
 
 /**
@@ -1132,7 +1170,17 @@ const LOOP_NUDGE_EVERY = 12;
  * it is rebuilt into the volatile block each round rather than living in the history at all, which is
  * the whole point: the cheapest thing in this file, and the only one that cannot be thrown away.
  */
-interface RanCall { tool: string; params: string; ok: boolean; gist: string; file: string; bytes: number }
+interface RanCall {
+  tool: string; params: string; ok: boolean; file: string; bytes: number;
+  /** First lines of the output. */
+  head: string[];
+  /** Lines from the MIDDLE that name an error, an assertion or an exception. Empty when none matched. */
+  signal: string[];
+  /** Last lines of the output — where a failing command puts its summary. */
+  tail: string[];
+  /** How many lines the excerpt does not show, so the model knows it is reading a sample. */
+  omitted: number;
+}
 const callLedger: RanCall[] = [];
 
 /**
@@ -1170,24 +1218,77 @@ export function resetSessionLedger(): void {
 }
 
 /**
- * Lines rendered. The full ledger is kept — only the RENDER is bounded, and by the tail, because "what
- * did I just try" is asked far more often than "what did I try first". A 300-call turn would otherwise
- * put 13k tokens of its own bookkeeping in front of the model, which is the failure this fixes in
- * reverse.
+ * EVERY call this turn is listed. Only how much of each OUTCOME is shown is bounded.
+ *
+ * It used to keep one line — the first non-empty line of the output, clipped to 100 characters — and
+ * that is the whole memory of a tool call once the window's compression has eaten the result it is
+ * summarising. So the ledger said `bash(pytest …) → ============ test session starts ===========`,
+ * which tells the model that pytest ran and nothing whatever about what it found. A model that cannot
+ * see what a call returned has one way to find out, and it is to run the call again — which the guard
+ * then refused, so it could neither remember the answer nor fetch it.
  */
-const LEDGER_LINES = 60;
-/** Enough of an outcome to decide whether a repeat could help. Not enough to be a second copy of it. */
-const LEDGER_GIST_CHARS = 100;
+const LEDGER_HEAD_LINES = 10;
+/** The END is where a failing command puts its summary — pytest, tsc, a stack trace, a shell exit. */
+const LEDGER_TAIL_LINES = 10;
+/** How many matched middle lines may be lifted out. */
+const LEDGER_SIGNAL_LINES = 20;
+/** Per line, so one enormous line cannot eat the whole budget. */
+const LEDGER_HEAD_CHARS = 160;
+
+/**
+ * THE LINES WORTH LIFTING OUT OF THE MIDDLE — deterministic, no model, no judgement.
+ *
+ * The head and the tail between them miss the one case that matters most: a long run whose failure is
+ * neither at the start nor at the very end. A 200-line pytest puts its banner in the head and its short
+ * summary in the tail, and leaves the actual assertion — the line naming what was expected and what
+ * arrived — in the 180 lines nobody sees.
+ *
+ * Deliberately generous rather than precise. This reads TOOL OUTPUT, not prose, so a line containing the
+ * word "error" almost always is one; a false positive costs one line of prompt, a false negative costs
+ * the model the reason its build failed. Covers the shapes that recur across languages: log levels
+ * (`ERROR`, `FATAL`, `CRITICAL`, `E/`), Python (`Traceback`, `E   assert`, `File "x.py", line 3`),
+ * Node/TS (`TypeError`, `at fn (file:1:2)`, `error TS2304`), test runners (`FAILED`, `✗`, `not ok`),
+ * shells (`command not found`, `exit code 1`, `No such file`), and bare assertions.
+ */
+const LEDGER_SIGNAL_RE = new RegExp([
+  '\\b(error|errors|fatal|panic|critical|severe|exception|traceback|assert|assertion|failed|failure|refused|denied)\\b',
+  '\\b(SyntaxError|TypeError|ReferenceError|ValueError|KeyError|IndexError|RuntimeError|OSError|IOError)\\b',
+  '^\\s*(E|ERR|FAIL)\\s',              // pytest's `E   assert 4 == 5`, tap's `not ok`
+  '^\\s+at\\s+\\S+.*:\\d+',              // a JS/Java stack frame
+  '^\\s*File\\s+".*",\\s*line\\s*\\d+',   // a Python stack frame
+  '\\b(command not found|No such file or directory|permission denied|exit code|exited with)\\b',
+  '\\bnot ok\\b',
+].join('|'), 'i');
+/**
+ * The TOTAL the heads may spend, newest first. A 30-call turn at ten lines each is ~10k tokens of
+ * bookkeeping, which is the opposite failure — so the newest calls carry their heads, and once the
+ * budget is gone the older ones degrade to their first line. Every call still appears either way.
+ */
+const LEDGER_DETAIL_BUDGET_CHARS = 14_000;
 
 export function noteRanCall(tool: string, params: string, ok: boolean, outcome: string): void {
-  const gist = outcome.split('\n').map((l) => l.trim()).find((l) => l.length > 0) ?? '';
+  const clip = (l: string) => (l.length > LEDGER_HEAD_CHARS ? `${l.slice(0, LEDGER_HEAD_CHARS - 1)}\u2026` : l);
+  const all = outcome.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim().length > 0);
+
+  // Short output is shown WHOLE. Splitting fifteen lines into a head, a middle and a tail invents three
+  // sections and an elision marker to describe a thing that fits.
+  const head = all.slice(0, LEDGER_HEAD_LINES).map(clip);
+  const tail = all.length > LEDGER_HEAD_LINES + LEDGER_TAIL_LINES
+    ? all.slice(-LEDGER_TAIL_LINES).map(clip)
+    : [];
+  const middle = all.length > LEDGER_HEAD_LINES + LEDGER_TAIL_LINES
+    ? all.slice(LEDGER_HEAD_LINES, all.length - LEDGER_TAIL_LINES)
+    : all.slice(LEDGER_HEAD_LINES);
+  // FIRST matches, not last: the first error is usually the cause and the rest are its cascade, and the
+  // end of the output is already covered by the tail.
+  const signal = middle.filter((l) => LEDGER_SIGNAL_RE.test(l)).slice(0, LEDGER_SIGNAL_LINES).map(clip);
+  const omitted = Math.max(0, middle.length - signal.length);
   // The FULL result is on disk. Naming the file here is what turns the ledger from "this ran" into "this
   // ran and here is the answer" — the difference between the model knowing a call happened and being
   // able to use what it returned after the history carrying it was compressed away.
   const cached = artifactFor(tool, params);
   callLedger.push({
-    tool, params, ok,
-    gist: gist.length > LEDGER_GIST_CHARS ? `${gist.slice(0, LEDGER_GIST_CHARS - 1)}\u2026` : gist,
+    tool, params, ok, head, signal, tail, omitted,
     file: cached ? `${cached.id}-${cached.tool}.txt` : '',
     bytes: cached?.bytes ?? 0,
   });
@@ -1196,16 +1297,71 @@ export function noteRanCall(tool: string, params: string, ok: boolean, outcome: 
 /** The ledger as prompt text, or '' when nothing has run yet. Exported for `check:window`. */
 export function renderCallLedger(): string {
   if (callLedger.length === 0 && earlierCalls.length === 0) return '';
-  const shown = callLedger.slice(-LEDGER_LINES);
-  const omitted = callLedger.length - shown.length;
-  const lines = shown.map((c, i) => {
-    const n = omitted + i + 1;
-    // The file, when there is one, goes at the END of the line: the outcome is what decides whether to
-    // read it at all, and a reader who has decided needs the name last, not first.
+  // EVERY call this turn, and the newest ones carry what they returned. The head budget is spent from
+  // the newest backwards because "what did the thing I just ran say" is the question being answered;
+  // a call whose head no longer fits still gets its line, its first line and its file.
+  const excerptOf = (c: RanCall): string[] => {
+    const out = [...c.head];
+    if (c.signal.length) {
+      out.push(`... ${c.omitted} line(s) omitted, ${c.signal.length} naming an error/assert/exception:`);
+      out.push(...c.signal);
+    } else if (c.omitted > 0) {
+      out.push(`... ${c.omitted} line(s) omitted, none naming an error`);
+    }
+    if (c.tail.length) {
+      out.push('... last lines:');
+      out.push(...c.tail);
+    }
+    return out;
+  };
+
+  /**
+   * OUT OF BUDGET, AND A FAILURE STILL HAS TO SAY WHY. The first line of a failed command is its banner
+   * — `> tsc`, `=== test session starts ===` — the least informative line it has. So a failure degrades
+   * to its matched error lines, or failing that to the END of its output, where a command that failed
+   * puts the reason. Only a SUCCESS degrades to its first line.
+   */
+  const briefOf = (c: RanCall): string[] => (c.ok
+    ? [c.head[0] ?? 'ok']
+    : c.signal.length ? c.signal.slice(0, 3)
+      : c.tail.length ? c.tail.slice(-2)
+        : [c.head[0] ?? 'no detail']);
+
+  /**
+   * ONE BUDGET, SPENT NEWEST FIRST, DEGRADING RATHER THAN STOPPING. The newest calls get their full
+   * excerpt; when that no longer fits, older ones still get their brief; when even that does not fit,
+   * the call line stands alone — it still names the call and the file holding its output.
+   *
+   * A budget on the excerpts alone is not a budget. Measured: 300 long failing calls spent 12k on
+   * excerpts and then a further 44k on unbounded briefs — 16k tokens of bookkeeping, a quarter of the
+   * window, which is the failure this whole block exists to prevent, in reverse.
+   */
+  const cost = (ls: string[]) => ls.reduce((n, l) => n + l.length + 4, 0);
+  const detail = new Map<number, string[]>();
+  let spent = 0;
+  for (let i = callLedger.length - 1; i >= 0; i--) {
+    const c = callLedger[i];
+    if (!c.head.length) continue;
+    const full = excerptOf(c);
+    if (spent + cost(full) <= LEDGER_DETAIL_BUDGET_CHARS) { detail.set(i, full); spent += cost(full); continue; }
+    const brief = briefOf(c);
+    if (spent + cost(brief) <= LEDGER_DETAIL_BUDGET_CHARS) { detail.set(i, brief); spent += cost(brief); }
+  }
+
+  const lines = callLedger.map((c, i) => {
     const where = c.file ? `  [${humanBytes(c.bytes)} → ${c.file}]` : '';
-    return `${n}. ${c.tool}(${c.params}) \u2192 ${c.ok ? '' : 'FAILED: '}${c.gist || (c.ok ? 'ok' : 'no detail')}${where}`;
+    const status = c.ok ? '' : 'FAILED: ';
+    const call = `${i + 1}. ${c.tool}(${c.params})${where}`;
+    const shown = detail.get(i);
+    // No detail left in the budget: the call line ALONE. It already names the call and the file holding
+    // the output, and a "(not shown)" line repeated two hundred times says that same nothing two hundred
+    // times — 15k characters of it, measured.
+    if (!shown) return `${call}${c.ok ? '' : '  FAILED'}`;
+    // Indented under the call, so a reader — and a model — can tell the output from the next call.
+    const more = c.bytes && c.file && shown.length > 3 ? `\n     ... full output in ${c.file}` : '';
+    return `${call}\n   ${status}${shown.join('\n   ')}${more}`;
   });
-  const head = omitted > 0 ? [`[${omitted} earlier call(s) not listed]`, ...lines] : lines;
+  const head = lines;
   const earlier = earlierCalls.length
     ? `\nFrom earlier turns this session — the answers are still on disk, read the file rather than re-running:\n`
       + earlierCalls.map((c) => `  ${c.file}  ${c.tool}(${c.params})  ${humanBytes(c.bytes)}`).join('\n')
@@ -1227,9 +1383,19 @@ async function runAgentTurn(userInput: string): Promise<void> {
   // Per TURN, not per session: a second question legitimately searches again from scratch.
   const toolUseCounts = new Map<string, number>();
   resetCallLedger();
+  resetSubagents();
+  /**
+   * THE TURN'S SIGNAL. Every run is chained to it, so cancelling the turn cancels its tools — and
+   * cancelling ONE tool leaves the turn alone, which is the half ayin never had.
+   */
+  turnAbort = new AbortController();
+  resetRuns();
+  installRunTicker();
   // Discovery, once. Idempotent, so every entry point can insist rather than assume.
   await loadTools();
   currentGoal = userInput;
+  // So a note left by a kill says what this run was for, not only where it stopped.
+  notePostmortemContext({ goal: userInput.replace(/\s+/g, ' ').slice(0, 300) });
   recordPrompt(userInput); // consolidated per-session record (prompts + tools + answers)
   transcribePrompt(userInput); // full transcript (no-op unless /transcribe)
   pushToWindow('user', userInput);
@@ -1744,6 +1910,16 @@ async function runAgentTurn(userInput: string): Promise<void> {
     /** Same clipping the transcript uses — a preview, not the params. */
     const paramPreviewOf = (p: Record<string, string>): string =>
       Object.entries(p).map(([k, v]) => `${k}=${v.length > 60 ? `${v.substring(0, 57)}...` : v}`).join(', ');
+    // PARALLEL SUBAGENTS, when the operator has asked for them. Off by default, because two agents
+    // editing one tree race on every file they share and the loser's write is lost with nothing in any
+    // output to say so. The loop below is untouched either way — this only starts the children early,
+    // and the loop collects them in its normal order. See `subagents.ts#prewarmSubagents`.
+    const subagentCalls = parsed.toolCalls
+      .filter((c) => c.name === 'subagent' && (c.params.task ?? '').trim())
+      .map((c) => ({ task: c.params.task, cwd: c.params.cwd, plan: c.params.plan }));
+    const prewarmed = prewarmSubagents(subagentCalls);
+    if (prewarmed > 1) addMessage('system', `Running ${prewarmed} subagents in parallel.`);
+
     for (let tcIdx = 0; tcIdx < parsed.toolCalls.length; tcIdx++) {
       const { name, params } = parsed.toolCalls[tcIdx];
       const firstInBatch = tcIdx === 0;
@@ -1961,7 +2137,15 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // explore is a sub-investigation that may take 1-3 minutes — never background it.
       // Other tools may go background after 20s.
       // explore and web_search need long timeouts — they do real work
-      const BACKGROUND_TIMEOUT = (name === 'explore' || name === 'web_search') ? 600_000 : 20_000;
+      /**
+       * A DELEGATED TASK IS WAITED FOR, NOT POLLED. Backgrounding exists so a slow shell command does
+       * not freeze a turn; a `subagent` is slow BY DESIGN — it is a whole stage of the work — and the
+       * parent has nothing else to do until it reports. Backgrounded, it went the other way: the parent
+       * polled `status` six times, hit `pollMaxPerTurn`, was told "blocked (poll cap 6)" and ended the
+       * turn having never seen the report, while the child had in fact finished the job correctly.
+       * Measured on the first live delegation; the files were right and the parent did not know.
+       */
+
       const toolStarted = Date.now();
       // Tools are timed too: a ten-minute turn is as often one shell command that never returned as
       // it is a slow model, and the status line cannot tell them apart.
@@ -1997,16 +2181,27 @@ async function runAgentTurn(userInput: string): Promise<void> {
           + `If the thing you are looking for may not exist under that name, say so and work from what you have.`));
         log('INFO', 'tool_loop_nudge', { tool: name, uses: String(used) });
       }
-      const toolPromise = timed('tool', name, () => tool.execute(params),
-        (line) => { addMessage('system', line); }).catch(
-        (err: unknown) => `Error: ${err instanceof Error ? err.message : String(err)}`,
-      ).finally(() => liveTool(null));
+      /**
+       * THROUGH THE ONE DOOR. `runs.ts` owns what is running, its narration, and how it stops — see
+       * that file for why a clock was the wrong instrument for all three.
+       *
+       * The call is AWAITED. It used to race a 20-second timer and, on losing, be "backgrounded" into
+       * a task the model was told to poll with `status` — which is a timeout wearing a helpful face,
+       * and it cost a turn its whole result an hour before this was written: a subagent backgrounded
+       * at 20s, polled six times, `blocked (poll cap 6)`, turn over, report never read, while the
+       * child had done the job. A tool that narrates does not need to be taken away from the model to
+       * stop looking hung.
+       */
+      const started = timed('tool', name, () => startRun(
+        name,
+        paramPreview,
+        (ctx: RunContext) => tool.execute(params, ctx),
+        { signal: turnAbort.signal },
+      ).done, (line) => { addMessage('system', line); }).finally(() => liveTool(null));
 
-      let result: string | null = null;
-      const timeoutResult = await Promise.race([
-        toolPromise.then(r => { result = r; return 'done' as const; }),
-        new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), BACKGROUND_TIMEOUT)),
-      ]);
+      const outcome = await started;
+      let result: string | null = outcome.output;
+      if (outcome.cancelled) log('INFO', 'tool_cancelled', { tool: name, ms: String(outcome.ms) });
 
       if (interrupted && immediateCancel) {
         setAgentStatus('');
@@ -2040,34 +2235,11 @@ async function runAgentTurn(userInput: string): Promise<void> {
         pushToWindow('assistant', textPrefix ? `${textPrefix}\n\n${callXml}` : callXml);
       }
 
-      if (timeoutResult === 'timeout') {
-        const taskId = registerTask(name, paramPreview);
-        addMessage('system', `${name} still running (>${BACKGROUND_TIMEOUT / 1000}s), continuing... [task ${taskId}]`);
-        log('INFO', 'tool_backgrounded', { tool: name, taskId });
-
-        pushToWindow('user', renderToolResult(`${name} is still running in the background (task ${taskId}). It started ${BACKGROUND_TIMEOUT / 1000}s ago. You can call the \`status\` tool to check progress, or continue with other work — the result will also arrive automatically.`));
-        noteRanCall(name, paramPreview, true, `still running in the background as task ${taskId}`);
-        pushMessage('assistant', `[tool: ${name}(${paramPreview}) → backgrounded, task ${taskId}]`);
-
-        toolPromise.then(r => {
-          completeTask(taskId, r);
-          saveArtifact(name, paramPreview, r);
-          recordTool(name, paramPreview, r, true);
-          transcribeTool({ round, tool: name, params, result: r, ms: Date.now() - toolStarted, backgrounded: true });
-          addMessage('tool', `${formatToolCallForChat(name, `task ${taskId} completed`, getTool(name)?.icon)}\n${formatToolResultForChat(name, r, Date.now() - toolStarted)}`);
-          pushToWindow('user', renderToolResult(`Background ${name} (task ${taskId}) completed:\n${clipForWindow(r)}`));
-          pushMessage('assistant', `[tool: ${name}(${paramPreview}) → ${r.substring(0, 150)}]`);
-          log('INFO', 'tool_background_complete', { tool: name, taskId, resultLength: String(r.length) });
-        }).catch((err: unknown) => {
-          const errMsg = err instanceof Error ? err.message : String(err);
-          failTask(taskId, errMsg);
-          log('ERROR', 'tool_background_error', { tool: name, taskId, error: errMsg });
-        });
-
-        // If a tool went background, subsequent batch calls may depend on its
-        // result — bail and let the next LLM round see the bg-task message.
-        continue roundLoop;
-      }
+      // (a tool is never backgrounded any more — see the note above)
+      //
+      // Ours only differed by passing `getTool(name)?.icon` into the card header of the completion
+      // message, and that whole branch is gone: `runs` replaced backgrounding. The glyph change from
+      // e8376ad survives everywhere the cards are still rendered.
 
       result = result!;
       /**

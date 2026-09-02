@@ -50,7 +50,15 @@ const ACRONYMS = new Set([
 const names = [];
 for (const f of readdirSync(DEFS).filter((x) => x.endsWith('.ts'))) {
   const src = readFileSync(join(DEFS, f), 'utf-8');
-  const m = src.match(/name:\s*'([a-z][a-z0-9_]*)'/);
+  // TWO DEF SHAPES, AND THE CLASS ONE MUST BE READ FIRST.
+  //
+  // An object literal says `name: 'grep'`; a `BaseTool` subclass says `readonly name = 'grep'`. This
+  // gate only knew the literal, so for a class def the first `name: '…'` it found was a PARAMETER —
+  // `perform_edit` was reported as a missing doc for a tool called "file", and `find_relevant_files`
+  // as one called "task". Two tools named after their own arguments, and the real gap (`subagent`)
+  // sitting underneath, unexplained.
+  const m = src.match(/readonly\s+name\s*=\s*'([a-z][a-z0-9_]*)'/)
+    ?? src.match(/^\s*name:\s*'([a-z][a-z0-9_]*)'/m);
   if (!m) { fail(`${f} declares no tool name this gate can read`); continue; }
   names.push(m[1]);
 }

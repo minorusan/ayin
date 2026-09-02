@@ -31,7 +31,7 @@ import { validatePumlFile, isGeneratedPuml, wiringPumlPath, diagramGrounding } f
 import { regenerateTouchedDiagrams } from '../../../arduino-diagram-regen.js';
 import { boardFromFqbn, compileSketch, projectFqbn, isPwmPin, pwmPins } from '../../../tools/arduino-toolchain.js';
 import type { ChangedFile } from '../../../qa/probes.js';
-import { checkDeliverables, renderDeliverables, readmeSubstance } from '../../deliverables.js';
+import { checkDeliverables, renderDeliverables, arduinoReadmeSubstance } from '../../deliverables.js';
 import type { ExecutorConfig, PrepareResult, ProbeFact, ProjectContext, QaExecutor } from '../../types.js';
 import { arduinoPlanExecutor } from '../../plan/arduino/index.js';
 import { ensureToolRuntime } from '../../../tool-wiring.js';
@@ -106,7 +106,7 @@ export const arduinoQaExecutor: QaExecutor = {
     facts.push({ key: 'deliverables', ok: d.ok, detail: d.detail, hard: true });
     // Existence is not substance. `scaffold()` guarantees a README file; this asks whether it says
     // anything — an untouched stub passes every existence check while documenting nothing.
-    const rm = readmeSubstance(ctx.root);
+    const rm = arduinoReadmeSubstance(ctx.root);
     // HARD: "the README has no pin map" and "the TODO markers are still in it" are not opinions.
     facts.push({ key: 'readme-substance', ok: rm.ok, detail: rm.detail, hard: true });
 

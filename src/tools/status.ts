@@ -1,7 +1,9 @@
 /**
  * Background task registry.
  *
- * Tracks every tool call that went background (took > BACKGROUND_TIMEOUT).
+ * Tracks background work. Nothing is backgrounded by a CLOCK any more (`runs.ts` replaced that), so
+ * this now answers the question that is still worth asking: what is running right now. It is non-empty
+ * whenever several runs are genuinely concurrent — which is what `--allow-parallel-subagents` produces.
  * The agent can call the `status` tool to inspect running/completed tasks.
  */
 

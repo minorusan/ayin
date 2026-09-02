@@ -659,6 +659,37 @@ the decision was read from two places:
 `check:gates` now pins both halves: the expression must read `toolMode()`, and `provider.tools` must
 not appear near it.
 
+### "Does this call have tools" and "did the schemas go to the runtime" are different questions
+
+`llmChatInner` keeps them in separate variables, and the third failure of that decision was conflating
+them:
+
+| | Who answers | Meaning |
+|---|---|---|
+| `offersTools` | the **caller** — `opts.declareTools !== false` | this call has tools. The agent loop does; a sub-loop asking for JSON says `false` |
+| `declared` | the **transport** — `toolMode() === 'native' && offersTools` | the schemas were handed to the runtime. In prompt mode always false, because the catalogue rides in the system prompt instead |
+
+The guard that catches *"a tool-trained model answers with a tool call even when it has none"* read
+`declared`. So against **any text-contract endpoint — the default, and how most installs run** — it
+fired on every round of the agent loop: the model emitted a perfectly good `<function=read_file>`, the
+dialect parsed it, ayin discarded it and replied *"this request declared no tools and there is nothing
+to call"*. The model then apologised for having no task, and the turn ended with zero tool calls and a
+confident summary of work it had not done.
+
+Measured on `gemma4:26b` over the resource provider — three valid calls in three rounds, all destroyed,
+including the fused-tag form (`<parameter=path</parameter>`) the parser handles on purpose:
+
+```
+tool_call_without_tools · model gemma4:26b · dialect gemma     ×3
+Tool calls: 0 (explore: 0)
+```
+
+Nothing was wrong with the model, the dialect, or the parser — the guard only fires *after* a
+successful parse, so every discarded call was one ayin had already understood. The guard now reads
+`offersTools` and nothing else, and `llmCall` (one user message, no system prompt, therefore no
+catalogue and no schemas) passes `declareTools: false` by construction so its five callers cannot
+forget.
+
 **The fix belongs here and nowhere else.** The first attempt put a `<function=…>` recovery inside
 `explore.ts`, which would have left every other consumer — the agent loop, indulge, plan, QA — to
 discover the same failure separately. One dialect serves all of them; that is what the abstraction is
@@ -958,6 +989,7 @@ src/executors/
   deliverables.ts     glob-ish pattern → "is this file actually on disk"
   plan/base/          index.ts + config.json     ← exactly the old behaviour
   plan/arduino/       index.ts + config.json
+  plan/greenfield/    index.ts + config.json     ← an EMPTY directory: python / typescript / unity
   qa/base/            index.ts + config.json
   qa/arduino/         index.ts + config.json
   present/base/       index.ts + config.json
@@ -1006,6 +1038,23 @@ handed `(not an Arduino project — omit the Arduino reference section)` and wro
 The request said "arduino" in its first sentence. The request is never allowed to *override* the tree,
 only to speak when the tree has nothing to say.
 
+**A directory that HOLDS projects is not a project**, and the tree's answer about one is not merely
+useless but confidently wrong. Measured, from a real session: `~/…/Projects` holds ten unrelated
+things, the four-level `.ino` search found a sibling's `Arduino/2/Janitor/Janitor.ino`, and *"build a
+Python website in testwebsite-2"* was planned with the Arduino executor and the component catalog. So
+`fromTree` returns null when the root carries no marker of its own and **two or more immediate children
+each do** (`isProjectContainer`) — a test about the children, never about depth, so a monorepo whose
+root has its own `package.json` answers before it is consulted. A container is also never treated as
+greenfield on its own: without a folder to create the project in, `git init` there would run over
+somebody's whole projects directory.
+
+The request patterns are ordered most-specific first and cover `arduino`, `unity`, `flutter`, `python`
+and `node` — the last two sit at the end because their vocabulary is the broadest, so *"a Python script
+that flashes the Arduino"* is claimed by the arduino patterns above them. `python`, `node` and `unity`
+are there so an empty directory plus *"set up a Python CLI"* reaches the **greenfield plan executor**
+below. Without a match the type is `unknown`, `greenfield` stays false, and plan mode then spends two
+full `explore` loops discovering that an empty directory is empty.
+
 ### What each contract does
 
 | Contract | Methods | What the Arduino implementation adds |
@@ -1020,6 +1069,111 @@ notices the missing file, a whole fix pass is spent creating four lines of markd
 must exist is a `writeFileSync`, not a criterion for a model to remember.** It never overwrites: an
 existing README is the operator's, exactly as a materialized prompt is.
 
+### An EMPTY directory is its own plan executor (`plan/greenfield/`)
+
+Pointed at a directory with nothing in it, the base survey does not go quiet either — it reports *"no
+HTTP server or dev server present"*, *"no bundler and no existing HTML"*, *"NO logging facility found"*,
+and a planner writes steps for a project that does not exist yet. Meanwhile the one thing the turn
+actually has to decide, **the layout**, is never stated, and the base deliverable list is a single
+README — so the validator in `plan/plan.ts` accepts a plan for a new Python project that never mentions
+`pyproject.toml`.
+
+So `plan/greenfield` serves `python`, `node` and `unity` at priority 100, with **three branches**, one
+per type, because the folder structure of a typical project is exactly what differs:
+
+| Branch | Layout the plan is grounded in | Required deliverables beyond the README |
+|---|---|---|
+| Python (`python`) | src layout, venv, editable install, pytest | `pyproject.toml` · `src/*/__init__.py` · `tests/test_*.py` · `.gitignore` |
+| TypeScript (`node`) | `tsc` to `dist/`, ESM, `node --test` | `package.json` · `tsconfig.json` · `src/index.ts` · `test/*.test.ts` · `.gitignore` |
+| Unity (`unity`) | `Assets/Scripts`, editor-owned scenes and `.meta` | `Assets/Scripts/*.cs` · `Packages/manifest.json` · `ProjectSettings/ProjectVersion.txt` · `.gitignore` |
+
+Those deliverables are what makes the difference reach the plan: they are handed to the validator as
+`requiredPatterns`, so a plan that does not name the manifest **by exact path** in some step's `files`
+is rejected and repaired before a single file is written. The layouts and the observability text are
+`prompts/greenfield/*.txt` — content an operator will want bent to a house style, which is what a
+prompt file is for. Stating a layout as `grounding()` also means `hasDomainGrounding` is true, so
+triage's single-feature veto cannot make a new project skip its plan.
+
+**`scaffold()` runs `git init`.** A project's first commit should be able to contain its first file,
+and after *"create a Python CLI"* nobody remembers until something is already lost. Guarded on `.git`
+being absent from the resolved root — which is also what stops it creating a nested repository inside
+one that already exists, since `projectRoot()` returns the enclosing repo's top level when there is
+one. It never throws: git may be missing and the directory may be read-only, and neither is a reason
+to lose the plan.
+
+**The request can name the folder to create.** People set a project up from one level above it —
+*"build a Python website in testwebsite-2"*, typed in a container — so plan mode's triage call, which
+already had to read the request, also returns `projectDir`. Nothing trusts that answer:
+`resolveTargetDir` refuses anything that is not a single safe path segment (`..`, an absolute path and
+a nested path are rejected rather than sanitised) naming a directory that is absent or empty, and a
+name that resolves reaches `ProjectContext.targetDir`. When it is set, `scaffold()` creates the
+directory, `git init`s **inside** it and puts the README there, and the deliverable patterns are
+**prefixed** with it rather than resolved against it — `root` stays where the agent is standing,
+because every path a plan states is relative to that. The plan then reads
+`testwebsite-2/pyproject.toml`, which is what the agent has to write.
+
+It rides on triage rather than a regex over the prose because the thing being extracted is a name in a
+sentence, and plan mode has retired one natural-language regex already. It costs no extra call.
+
+**A hard fact nobody can satisfy is worse than no fact.** `readmeSubstance()` is `qa/base`'s check and
+`qa/base` serves `"*"` — yet it used to end with two ARDUINO demands. So a Python project plan mode had
+just created failed a **hard** QA fact on *"no `arduino-cli compile`/`upload` command and no mention of
+the Arduino IDE"*. Measured on a real run: the gate spent **all three** fix passes on it and the model
+refused every time, correctly calling it a misconfiguration, so the turn ended `out of QA passes — the
+issues above are NOT fixed` with nothing else looked at. The board-specific half now lives in
+`arduinoReadmeSubstance()`, which `qa/arduino` calls; the shared check asks only what every project type
+can answer — the file exists, it is not the stub, it is not trivially short.
+
+**And the stub no longer fails its own check.** The banner `scaffold()` writes is an instruction *to the
+agent*, not part of the document, so a model that filled in every section and left it alone was doing
+what it was told — and shipped 570 characters of real documentation whose first line said it documented
+nothing, because that line contained the word `TODO`. The banner now carries no marker word of its own
+(only the section bodies do, so an untouched stub still fails), says to delete itself, and is caught by
+the shared `README_STUB_BANNER` sentinel — one string, written by the stub and refused by the check, so
+the two can never drift.
+
+**It delegates wholesale once the project exists.** The registry selects on project *type* and has no
+way to express "only when greenfield" — priority is the only lever — so this executor is also chosen
+for every Python, Node and Unity project already on disk, and hands all five methods straight back to
+`plan/base` unless `ctx.greenfield` is true. `grounding()` in particular returns the base's empty
+string there, so triage keeps its veto on an established project. `npm run check:plan` asserts both
+halves.
+
+### Does it compile? (`qa/buildcheck.ts`)
+
+Unity has had this question since `qa/unity/compile.ts`: one measurable answer that outranks every
+opinion, because code that does not compile is not worth reviewing. **Every other language had nobody
+asking it.** Measured on a greenfield Python project ayin built end to end, `__main__.py` shipped as:
+
+```python
+if __name__ == "__main__':      # mismatched quote
+```
+
+The declared entry point was dead. The tests passed — they import the package's other module and never
+touch `__main__`. QA passed — nothing asked a compiler. The plan's own verification for that step was
+`ls -R src/csv2json`: the file existed, so the step was "proved". A syntax error survived every check
+ayin had.
+
+`buildCheck(ctx, files)` runs in `qa/base`, which serves `"*"`, and dispatches on the detected type:
+
+| type | check | why this one |
+|---|---|---|
+| `python` | `py_compile` on the changed `.py` | syntax only — needs no venv, no install, no deps, so it works on the turn that CREATED the project, which is the turn that shipped the quote |
+| `node` | `tsc --noEmit` | whole-project by nature: a file's types are a function of everything it imports |
+| `go` | `go build ./...` | |
+| `rust` | `cargo check` | |
+| `unity`, `arduino` | **null** | they have real compile probes; a generic one must not second-guess them |
+
+**An absent toolchain is not a failure.** `tsc` with no `node_modules`, no `python3` on PATH, no
+`tsconfig.json` — all come back `ok: true` and **not hard**, reported as *"build not checked: …"*. Only
+a compiler that RAN and said no fails the gate. This is the arduino-README lesson applied before it can
+happen again: a hard fact nobody can satisfy does not enforce anything, it burns the fix budget that
+would have fixed something real.
+
+**Only what changed.** A whole-project build every turn is a minute the operator waits for an answer
+they already have. TypeScript is the exception, because there is no per-file equivalent that means
+anything.
+
 ### Hard facts are not submitted to the judge
 
 A `ProbeFact` may be marked **`hard`**, and a hard fact that fails **fails the gate outright** —
@@ -1033,7 +1187,7 @@ something else → `QA PASS 2/3`. Handing a deterministic fact to a model and le
 is not enforcement — it is a request addressed to a different reader.
 
 Reserved for facts that are **binary and unarguable**: a compiler's exit code, a required file's
-existence, a README still carrying the scaffold's TODO markers. Never for anything with a defensible
+existence, a README still carrying the scaffold's stub markers. Never for anything with a defensible
 exception — a hard gate over a judgement call is how a QA loop becomes unfalsifiable. The distinction
 the design turns on: a compile that **could not run** (no `arduino-cli` on the machine) is `hard: false`,
 because an unknown is not a defect; only a compiler that *ran and rejected* the sketch hard-fails.
@@ -1154,6 +1308,15 @@ job, greppable, no regression suite needed to keep tracking how people phrase th
 5. The plan is pre-prompted into the turn as a `<plan>` block, the same mechanism as auto-research and
    auto-diagram, with instructions not to re-plan or re-explore what it already establishes.
 
+**An empty directory takes a different route through the same steps.** Detection reads the request when
+the tree is silent, so *"set up a Python CLI"* in an empty folder is a greenfield `python` project and
+`plan/greenfield` is the executor (see "An EMPTY directory is its own plan executor"): the survey says
+what is being created rather than what a Node/web project is missing, the grounding is that type's
+folder layout, the required deliverables are its manifest and entry point, and `scaffold()` runs
+`git init` before the plan is written. Step 3 is **skipped entirely** — two `explore` loops over an
+empty directory are two agentic loops that can only report "nothing found", and skipping them is most
+of why a "create a new project" plan no longer takes minutes.
+
 Two sections earn their place. **Dependencies** must state, for a new webview specifically, what serves
 it, what builds it, *what interface it binds* and how it is reached from another machine — the survey
 supplies those gaps, so "add a settings page" in a project with no HTTP server and no bundler is
@@ -1173,6 +1336,296 @@ specific components are known.
 
 The document is on disk **before** implementation starts, so a machine that dies mid-feature leaves the
 thinking behind rather than only half the work.
+
+## Postmortems (`postmortem.ts`) — a run that dies says where it got to
+
+A headless run that is killed leaves nothing: an exit code and a scrollback that stops mid-sentence.
+That matters more now that ayin spawns ayin — a parent cancelling a subagent kills a process nobody was
+watching, and everything it had learned dies with it. `--postmortem` (or `AYIN_POSTMORTEM=1`) makes it
+write down where it got to; a subagent **inherits** the flag from its parent.
+
+**"Unexpected" is defined by its complement.** A clean run calls `markCleanExit()` on the way out, and
+anything reaching an exit without having done so is unexpected — a signal, an uncaught throw, a bare
+`process.exit`. The inversion is deliberate: a list of "bad" exits is a list you have to keep complete,
+and the one you forget is the one that loses the work. `markCleanExit()` lives where `runHeadless`
+*actually* exits, not in its caller — put in the caller it never ran, and every clean run wrote a note.
+
+The section that earns the feature is **what was running**, read from `runs.ts`:
+
+```
+- **bash**(command=sleep 120) — 20s in, last said: sleep 120
+```
+
+No log reconstructs that. Plus why it died, the goal, the plan file, and the last 40 session events.
+
+**Two copies**: `./ayin-postmortem-<stamp>-<pid>.md` and `~/.ayin-cli/postmortems/` (with an
+`index.jsonl`). A note only in the cache is a note nobody finds; a note only in the work tree dies with
+the tree. Every write is synchronous — this runs inside signal handlers, where a promise never settles.
+
+## `ayin_help` answers a question, not only a topic name
+
+`topic` required already knowing the name of the thing — exactly what someone asking *"can you talk to
+Jira?"* does not have. `question` scores every command, flag, key **and tool** against the words asked.
+Tools are half the answer (nothing in `HELP` mentions `web_search`) and the operator's slash commands
+are the other half, which the model cannot see at all.
+
+**It answers "no" out loud.** A search that matches nothing returns `NOTHING IN AYIN MATCHES "…"` and
+tells the model to say so rather than invent a command. That is the most useful answer this tool has.
+
+No model call: it is term overlap over ~90 short entries, and the agent that called it is already the
+one composing the answer.
+
+**Two traps, both paid for.** The def may not `import … from '../../tools.js'` at module scope — that is
+a cycle through discovery, so the import is lazy, inside `execute`. And one dropped `*/` swallowed the
+whole `export const tool` into a doc comment: discovery reported **no failure** (the module imported
+cleanly, it simply had nothing on it), the tool silently ceased to exist, and the model answered *"I
+cannot call ayin_help as it is not a tool available to me"*. `check:gates` now asserts that **every
+shipped def actually registers**.
+
+## Runs (`runs.ts`) — management instead of timeouts
+
+A tool that prints nothing is indistinguishable from a tool that has hung, and ayin's only answer to
+that used to be a clock. There were four of them: `BACKGROUND_TIMEOUT` at 20 seconds,
+`EXEC_TIMEOUT_MS` at two minutes, `subagentTimeoutMs` at fifteen, `pollMaxPerTurn` at six. **A timeout
+is a guess about how long work should take, made by something that cannot see the work**, and every one
+of those guesses was wrong here in a measured way — the subagent one cost a whole turn its result:
+backgrounded at 20s, polled six times, `blocked (poll cap 6)`, turn over, report never read, while the
+child had finished the job correctly.
+
+The alternative is not a longer clock. It is knowing what is running. `runs.ts` is the **one door**
+every tool call goes through:
+
+| | |
+|---|---|
+| `currentRuns()` | what is running, for how long, and the last thing it said |
+| `cancelRun(id)` | stop **one** call and let the turn continue |
+| `cancelAllRuns()` | the operator pressed stop |
+| `onRunsChanged(cb)` | a subscription the status line paints from, ticked once a second |
+
+**A tool that narrates cannot look hung.** The contract widened to `execute(params, ctx?)` where
+`ctx = { signal, onStatus }` — optional, so every existing tool compiles unchanged. Each `onStatus`
+note is stamped with the seconds since the *previous* note, so two tools' timings are comparable and
+the slow step of a long run is visible. The ticker re-publishes every live run once a second whether or
+not it has spoken, turning "nothing is happening" into `bash 23s — npm run build`.
+
+**Cancelled is not failed, and the signal decides.** A killed child usually returns its partial output
+through the normal path rather than throwing, so a cancelled command comes back looking exactly like a
+successful one — a green tick over a truncated result handed to the model as the answer. `aborted` is
+consulted after the call returns, whatever the call chose to do. Taken from Maradel's
+`tasks/service.ts`, which had it first and records that it was verified live before the fix.
+
+**Per-call cancellation** is the half ayin never had. `interruptAgent()` now cancels *every* live run
+rather than the one `activeToolCancel` happened to point at — with several runs live, which is exactly
+what `--allow-parallel-subagents` produces, stopping the turn used to stop one and orphan the rest.
+
+### What was removed
+
+- **The backgrounding race is gone.** Every tool call is awaited. Nothing is taken away from the model
+  and turned into a task it has to poll.
+- **`execAsync` has no default timeout** — `timeoutMs` is honoured when a caller passes one explicitly,
+  and `AYIN_EXEC_TIMEOUT_MS` is an operator backstop that is off unless set. `bash` passes the run's
+  signal, so a cancelled call kills its child rather than leaving it running with nobody waiting.
+- **The subagent kill-timer is gone.** A stage of the work takes as long as it takes; the signal stops
+  it.
+
+Verified live: `sleep 45 && echo awake` ran to completion in one call — `run_done … ok:true,
+cancelled:false, ms:45031` — where before it would have been backgrounded at 20 seconds.
+
+`tools/` still imports nothing outside `tools/`, so `RunContext` is declared in `tools/base.ts` and
+`runs.ts` imports it; the contract belongs to the contract's file. `check:gates` learned that a
+**type-only** import creates no runtime edge, so it no longer demands `ensureToolRuntime()` for one.
+
+## The arbitration tier (`--arbiter`) — what each level is allowed to hold
+
+Measured on the first full five-phase build that worked end to end: the arbitrator delegated all five
+phases correctly, and the children then made **103 tool calls of which zero were `explore`**. They
+groped file by file — because `read_file` and `grep` were right there, and composing an exact
+`str_replace` anchor is what an agent does when it has one.
+
+The primitives are not wrong. Holding them at the ARBITRATION level is, because an agent carrying
+twenty files' exact bytes has no room left to arbitrate. So `--arbiter` splits the tool surface by
+level:
+
+| level | withheld | given |
+|---|---|---|
+| arbitrator (depth 0, `--arbiter`) | `bash` `grep` `find_files` `list_dir` `write_file` `str_replace` | `read_file` `explore` **`perform_edit`** **`find_relevant_files`** `subagent` |
+| subagent (depth ≥ 1) | `perform_edit` `find_relevant_files` `subagent` | everything else — this is where the work happens |
+
+A subagent is denied the arbitration tools for the same reason it is denied `subagent`: a child that
+could delegate would delegate rather than work. One predicate, `toolWithheld(name)`, decides both, and
+`loadTools` filters on it — **withheld, never registered-and-refusing**, because a tool the model can
+see and cannot use costs a round to discover that.
+
+**Off by default.** Ayin is not only a builder: *"read src/log.ts and tell me what it does"* is an
+ordinary turn, and an arbiter that must spawn a child to run one shell command has made the common case
+worse to improve the rare one.
+
+### `perform_edit` — say what to change, not where
+
+`str_replace` is exact and unforgiving: the caller must already know the file's precise bytes, so it
+reads the file, holds it in context, composes an anchor, and burns a round when the anchor is off by a
+space. That is the right primitive for an agent inside the file's context and the wrong one for an
+arbitrator that is not.
+
+`perform_edit(file, edit)` takes the change in words. One model call — `toolLlm().ask`, which declares
+no tools, so it cannot wander off reading other files — sees the whole file and returns the whole file.
+Then the deterministic half: snapshot before, compare after, and return **the real line diff**:
+
+```
+Edit was made to calc.py with changes:
+
+@@ line 10 @@  -0 +3
++
++ def mul(a, b):
++     return a * b
+```
+
+or `NO CHANGE`, which is a fact the caller must act on rather than a claim it must trust. **A model
+saying "I made the change" reads exactly like a model that did not; a diff does not** — the failure ayin
+has measured repeatedly. The answer's outer ``` fence is stripped (an unstripped one written to disk is
+a syntax error in every language ayin edits); a fence *inside* the file is left alone.
+
+### `find_relevant_files` — a search agent with a parsed contract
+
+`explore` is deterministic localization and stays that way — it answers *"where is `ScoringId`
+mentioned"* in ~400 ms. It is blind to *"which files would I change to add a retry to the uploader"*,
+which needs someone to read what it finds and judge. So this delegates to a **subagent** (through the
+runtime's `subagent` seam, since `tools/` imports nothing outside `tools/`) with a strict output shape:
+
+```
+FILE: <path> | <why this file matters>
+```
+
+Parsed here, and **every path verified against the filesystem**. A file the agent invented is dropped
+and named as dropped — a confident list of paths that do not exist is worse than no list, because the
+caller acts on it and the first failure looks like an unrelated bug three tools later. Prose instead of
+the format yields nothing: the caller asked for files.
+
+## Subagents (`subagents.ts`) — the arbitration level
+
+A plan whose steps are *create file a*, *create file b*, *edit d in c* is written at the wrong altitude,
+and the agent following it spends its context remembering the plan instead of doing the work. Measured
+on a real request: a five-phase plan totalling **27,138 characters** was inlined into every round's
+prompt against a **12,000-character cap**, so phases 4 and 5 were cut off — and phase 5 was *"run the
+server and give the user the link"*, which is what the request was for. The agent read its own plan file
+repeatedly and produced a `pyproject.toml`. At round 20 the prompt was 2,222 tokens of system, **5,120 of
+conversation and 13,972 of bookkeeping**.
+
+The shape that works is one level up. A plan says what STAGES exist; each stage goes to a subagent with
+its own context, its own tools and its own plan file, and comes back with a report. The `<plan>` block
+now carries the **phase index only**, and the top-level agent calls `subagent` once per phase.
+
+**A child process, not an in-process loop.** The agent's state — conversation window, call ledger, tool
+guard counters, edit ledger — is module-level and per-turn. A second loop inside the first would share
+every one of them: the child's reads would age the parent's repeat counters and the child's window would
+evict the parent's question. A child process is the isolation the design already has — it is exactly
+what `ayin -p` is.
+
+### Two rules, both enforced in `subagents.ts`
+
+**A subagent may not spawn subagents.** Depth travels in `AYIN_SUBAGENT_DEPTH`, and at depth ≥ 1
+`loadTools` **withholds** the tool — it cannot be called because it does not exist. Withheld rather than
+refused: a tool the model can see and cannot use costs a round to discover that. Without this the
+arbitration level is not a level, only recursion. `--disallow-subagents` (or `AYIN_SUBAGENTS=0`) sets the
+same state for an operator who wants a plain agent.
+
+**Parallel is off until asked for.** Two agents editing one tree race on every file they share and the
+loser's write vanishes with nothing in any output to say so. `--allow-parallel-subagents` (or
+`AYIN_PARALLEL_SUBAGENTS=1`) turns it on. It is *prepared, not proven* — nothing here has yet measured
+two agents on one tree, and the flag exists so that measurement needs no code change.
+
+**How parallel works without touching the agent loop.** That loop does a great deal per call — the
+guard, the ledger, the artifact cache, the on-screen card, the window pair — all in order, and
+interleaving it would be a rewrite. So the loop **pre-warms**: every subagent call in a batch is started
+at once before the loop begins, and the loop then consumes the already-running promises in its normal
+sequential way. The bookkeeping stays ordered; only the waiting overlaps.
+
+### A delegated task is waited for, never backgrounded
+
+Backgrounding exists so a slow shell command does not freeze a turn. A subagent is slow *by design* and
+the parent has nothing to do until it reports — so `BACKGROUND_TIMEOUT` does not apply to it. Measured on
+the first live delegation, backgrounded: the parent polled `status` six times, hit `pollMaxPerTurn`, was
+told `blocked (poll cap 6)` and ended the turn **never having seen the report**, while the child had
+finished the job correctly. Waiting instead: one tool call, no polling, and an accurate report.
+
+The mechanism is a `WAIT_FOR_IT` branch that **skips the race** rather than passing it a large number —
+`setTimeout(fn, Infinity)` fires on the next tick, because Node clamps a non-finite delay to 1 ms, which
+would have backgrounded it instantly.
+
+### Reading a subagent's result
+
+It opens with the child's own statistics — `subagent finished — 6 tool call(s), 56s`. **Zero tool calls
+means it changed nothing**: it described the work rather than doing it, and a report of work never done
+reads exactly like a report of work done. The result says so in as many words when that happens.
+
+### A plan has two levels: the stages of the job, then the steps of each stage
+
+**A flat step list is written at ONE altitude, and the model picks the lowest one — files.** Measured on
+a real request: *"create directory testsite, build a beautiful python website that fetches the weather,
+run it on whatever empty port, send me the link as host:port, and research the Ukraine missile-alarm API
+for Poltava"* produced **four steps, every one of them file creation**. "Run it on a free port" got no
+step. "Send me the link" got no step at all — it survived only as a sentence inside a README that step 4
+wrote. Two of the five things asked for were gone, and neither the plan nor the validator could see it,
+because the validator checks the SHAPE of steps and the presence of deliverables, never whether the job
+was understood.
+
+So the two questions are asked separately. **What stages does this job have** is asked once, of the whole
+request (`planPhases.txt` → `PlanPhase[]`). **What files does THIS stage touch** is asked per stage,
+where a file-shaped answer is the right one. The same request now produces **5 phases, 18 steps**, and
+the last phase is *"Deploy and notify user of access details — done when the application is running on an
+available port and the user has received the connection string in host:port format"*.
+
+| | Flat | Phased |
+|---|---|---|
+| "run it on an empty port" | no step | phase 5, step 1 — find a free port, save it, launch |
+| "send me the link" | a string inside a README | phase 5, step 2 — construct and print `host:port` |
+| "beautiful looking" | one clause inside a step | phase 3, its own stage |
+
+**Deliverables are assigned, never broadcast.** Each phase owns the required patterns it produces, so the
+existing per-plan validator runs unchanged against that phase's own list — and `validatePhases` refuses a
+required deliverable owned by *no* phase (a file the job never plans to produce) or by *two* (two phases
+racing to write it, which is how a later one silently overwrites an earlier one's work).
+
+**One file per phase, plus an index.** `ayin-plan-<ts>.md` is the phase index; each phase gets
+`ayin-plan-<ts>-<n>-<slug>.md` with its own steps. That is what makes a stage readable on its own and
+re-readable after a crash. The model is sent the index **and** every phase inline — telling it to go and
+open four files first would spend four tool calls to learn what the prompt could carry.
+
+**Eager, not lazy.** Every sub-plan is drafted and written before any work starts, because that is the
+invariant plan mode already promises: the thinking is on disk before the machine can die holding it.
+Expanding a phase only when the previous one finishes would be cheaper and would adapt to what actually
+happened — and would lose everything not yet expanded to a power cut. A single-phase answer is the
+ordinary small request, and costs exactly one call more than a flat plan.
+
+**A phase whose sub-plan fails says so.** The index writes `NOT PLANNED` and the session line names the
+count, because a phase that quietly vanishes takes its deliverables with it — which is exactly what
+happened the first time this ran, and is what the next two paragraphs are about.
+
+### A truncated draft is salvaged, not thrown away
+
+Phases made a pre-existing hole visible. An unparsable draft used to route straight to `render`, return
+null, and drop the plan — harmless when there was one plan and a prose fallback behind it, and not
+harmless once a plan is one phase of a job: phase 1 of four came back unparsable **three runs running**
+and vanished carrying all of its required deliverables while the other phases planned cleanly around the
+hole.
+
+Two causes, both fixed. The model was **inlining whole file bodies** into `action` — entire heredocs of
+`pyproject.toml` — so the reply ran past its length and was cut off mid-object; `actionablePlan.txt` now
+says to name what a file must contain and never paste it. And the parser could not use what did arrive:
+it sliced from the first `{` to the last `}`, which on a truncated reply is not valid JSON. It now falls
+back to a **string-aware, brace-balancing scanner** that recovers every complete step object — borrowed
+from Maradel's `llm/salvage.ts`, which learned the same lesson: a regex cannot do this, because a brace
+inside a quoted value is not structure.
+
+The scanner keeps a **stack** of open positions rather than a depth counter with one start index. The
+first version used the counter, emitted only objects that closed back to depth 0, and found nothing —
+because on the reply this exists for, the outer `{"steps":[…]}` is precisely the object that never
+closes. `check:plan` pins both halves: a truncated reply yields its complete steps, and a whole reply
+still parses exactly as before.
+
+Finally, an unparsable draft is now **re-drafted** rather than sent to the repair prompt. Zero steps is
+not a plan with problems; it is no plan, and `actionablePlanRepair` would be handed an empty list and
+asked to correct it.
 
 ### The actionable plan (`plan/plan.ts`) — a LangGraph draft -> validate -> repair cycle
 
@@ -1350,8 +1803,42 @@ than some of each session's files, so a surviving session keeps everything it ha
 legitimately searches again — but it now folds each call's FILE into a session tail (12 entries, newest per
 call) rendered under the current turn's list. Dropping it at the boundary meant "read the controller I
 inspected two questions ago" had nowhere to point, and a 6-second inspect was re-run for a file already on
-disk. Only what is needed to fetch the result is carried: the call and its file, never the gist, which
+disk. Only what is needed to fetch the result is carried: the call and its file, never the output, which
 belonged to the turn that asked.
+
+### The ledger carries what each call RETURNED, not that it ran
+
+It used to keep one line per call: the first non-empty line of the output, clipped to 100 characters. That
+is the entire memory of a tool call once the window's compression has eaten the result it is summarising,
+and it is nearly useless — the first ten lines of a failing `pytest` are its banner.
+
+Now every call this turn is listed with an **excerpt**: the first 10 lines, then up to 20 lines lifted out
+of the middle that name an error, and then the last 10 lines. Short output (under head+tail) is shown
+whole, with no sections and no elision marker — splitting fifteen lines into three parts invents structure
+to describe a thing that fits.
+
+**The middle filter is the part that earns its keep.** Head and tail alone miss the case that matters
+most: a long run whose failure is neither at the start nor at the very end. A 90-line `npm run build` puts
+`> tsc` in the head and `Build step finished` in the tail, and leaves `error TS2304: Cannot find name` in
+the 65 lines nobody sees. `LEDGER_SIGNAL_RE` is deterministic — no model, no judgement — and deliberately
+**generous rather than precise**, because this reads tool output, where a line containing the word "error"
+almost always is one: a false positive costs one line of prompt, a false negative costs the model the
+reason its build failed. It covers log levels (`ERROR`, `FATAL`, `CRITICAL`), Python (`Traceback`,
+`E   assert`, `File "x.py", line 3`), Node/TS (`TypeError`, `at fn (file:1:2)`, `error TS2304`), test
+runners (`FAILED`, `not ok`), and shells (`command not found`, `exit code`). It takes the **first** 20
+matches, not the last: the first error is usually the cause and the rest are its cascade, and the end of
+the output is already covered by the tail.
+
+**One budget, spent newest first, degrading rather than stopping.** 14,000 characters buys a full excerpt
+for the newest calls; when that no longer fits, older ones still get a **brief**; when even that does not
+fit, the call line stands alone — it still names the call and the file holding the output. A failure's
+brief is its matched error lines, or failing that the END of its output, never its first line: the first
+line of a failed command is its banner, the least informative line it has.
+
+A budget on the excerpts alone is not a budget. Measured on 300 long failing calls: 12k on excerpts and
+then a further 44k on unbounded briefs — 16k tokens, a quarter of the window, which is this section's own
+failure in reverse. With the ladder: **300 calls listed, 6.8k tokens**. A realistic 30-call turn costs
+~4k characters.
 
 ## Tool guard (`tool-guard.ts`)
 
@@ -1377,11 +1864,39 @@ Everything with a side effect keeps the ladder:
 | Attempt | Read-only tool | Side-effecting tool | Pollable tool (`status`) |
 |---|---|---|---|
 | 1st | runs | runs | runs |
-| 2nd identical | runs + "identical call 2, here is where the cached result is" | skipped, told the result is already in context | runs + `[POLLING NOTICE]`, throttled under `pollMinIntervalMs` |
-| 3rd identical | runs + note | **BLOCKED for the turn** | runs, still throttled |
-| 9th identical | runs + "answer or change approach" | — | — |
+| 2nd identical | runs + "identical call 2, here is where the cached result is" | runs + `[REPEAT 2]`, pointed at the ledger | runs + `[POLLING NOTICE]`, throttled under `pollMinIntervalMs` |
+| 3rd identical | runs + note | runs + `[REPEAT 3]` | runs, still throttled |
+| 9th identical | runs + "answer or change approach" | runs + note | — |
 | past `pollMaxPerTurn` | — | — | **BLOCKED for the turn** |
 | after a user **deny** | **BLOCKED immediately, for the turn** | same | same |
+
+### A repeat is a symptom, and refusing it treated the symptom
+
+Nothing with a side effect is refused for repeating any more, and the reason is upstream of this file. A
+model repeats a call when it **cannot see what the call returned**: the result went into the history, the
+history was compressed to fit the window, and what survived in the ledger was the first non-empty line of
+the output clipped to a hundred characters — so `bash(pytest …)` was remembered as
+`============ test session starts ============`, which says pytest ran and nothing about what it found.
+Refused the repeat, the model had no way to remember the answer *and* no way to fetch it, so it guessed,
+gave up, or reported work it had not done.
+
+The fix is the ledger carrying real output (below). What is left here is a **note** — you already have
+this, here is where the rest of it lives — attached to a call that runs anyway. Two further reasons the
+ban was the wrong instrument:
+
+- **Some repeats are the point.** "Has the server come up", "does the test pass now", "did that write
+  land" are the same call twice deliberately, and only the second answer is useful. A guard cannot tell
+  those from a loop without knowing what changed, and it does not.
+- **The loop it was closing is closed by the guard that owns it.** `requireRead` lives inside
+  `write_file`/`str_replace` and refuses an edit to unread lines every time it is asked — verified
+  directly, two identical attempts with no read between them both come back `refused — you have not
+  read`. The repeat ladder was a second fence around the same hole, and per `check:readguard`'s own
+  comment it was that second fence which broke a live run: `readGuard` prescribes "read it, then make the
+  same call again", and the repeat guard blocked the prescribed retry, so the edit never landed while the
+  turn reported *Done*.
+
+A **denial** is still refused on sight for the whole turn, and the poll cap still applies. Those are
+decisions about permission and cost, not about freshness.
 
 The note is worded to send the model to the FILE, not to the cache: told the cache held the result, the
 first live run of this policy read `t3-read_file.txt` — a snapshot of what that call returned — when what
@@ -4170,7 +4685,8 @@ src/
 │                       diagram.ts (validated PlantUML) · send-push.ts ·
 │                       arduino-{db,components-data,explain,diagram,toolchain}.ts
 │                       (toolchain.ts is the one place that knows arduino-cli and PWM pin maps)
-├── tool-guard.ts       per-turn repeat/deny/poll policy: warn → BLOCK → say so in the system prompt
+├── tool-guard.ts       per-turn deny/poll policy + repeat NOTES (a repeat is never refused; the
+│                       ledger carries the earlier answer instead)
 ├── deferral.ts         "the fix is to locate X" is not an answer — one nudge, no LLM
 ├── edit-truth.ts       per-turn edit ledger: a REPORTED change with nothing written, and repeated
 │                       misses on one file. Unconditional (QA is opt-in and declines here)
@@ -4184,7 +4700,8 @@ src/
 │   │                   any config↔import mismatch — a declared handler that never runs looks
 │   │                   exactly like support
 │   ├── deliverables.ts glob-ish pattern → "is this file actually on disk"
-│   ├── plan/{base,arduino}/     index.ts + config.json
+│   ├── plan/{base,arduino,greenfield}/  index.ts + config.json — greenfield is an EMPTY
+│   │                   directory: the python / typescript / unity layout, and git init
 │   ├── qa/{base,arduino}/       index.ts + config.json
 │   └── present/{base,arduino}/  index.ts + config.json
 ├── plan/               plan mode for big cross-feature prompts:
@@ -4369,6 +4886,15 @@ lazily on first use — boot is when it is worth knowing):
 
 `.shipped.json` in each local namespace dir maps id → sha256 of the bytes shipped at the time it was
 written. No record means "unknown", which falls through to the drift check rather than overwriting.
+
+**An install older than the sidecar has no record for anything, so the first row above could never
+fire on it and a shipped fix could never land.** Measured: a field added to the triage prompt's JSON
+contract stayed invisible on a machine whose copy was byte-identical to the previous release — the
+code reading the field was simply dead there, and nothing in any log said so, because the parse
+tolerates a missing field by design. So when there is no record AND the local text is **identical to
+what we ship right now**, the record is seeded: there is nothing of the operator's to lose, and the
+refresh works from the next change onward. A copy that DIFFERS is still never assumed to be ours —
+that one may be theirs, and guessing would overwrite it.
 
 Every refresh and repair is ANNOUNCED in the session. A prompt replaced silently is the same class of
 problem as one never replaced: text the operator cannot reason about.
