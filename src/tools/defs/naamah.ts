@@ -65,6 +65,23 @@ function declaredNames(src: string): string[] {
  */
 function hint(out: string): string {
   const tail = 'The design does NOT compile. Fix it before writing any implementation.';
+  /**
+   * A CHECKER THAT NEVER RAN IS NOT A FAILED CHECK — and this one cost a whole turn.
+   *
+   * ayin resolves naamah from its OWN build rather than PATH, so a stale vendored copy answers
+   * `unknown command "build"` and prints its help. That output then arrived wrapped in *"the design
+   * does NOT compile"*, which is a claim about the design and was false. Measured: the model read it,
+   * concluded "this environment's naamah does not support build", and finished the turn having
+   * written no implementation at all — the design gate stopped the work it exists to unblock.
+   *
+   * So a CLI-level refusal says what is actually wrong and what to do about it. Same rule as
+   * `buildcheck.ts`: absent is not failed.
+   */
+  if (/unknown command|ENOENT|not found/i.test(out)) {
+    return 'naamah itself refused that command — the copy ayin ships is too old for it, or missing. '
+      + 'This is a TOOLCHAIN fault, not a fault in your design: do not rewrite the design to work '
+      + 'around it. Report it and carry on with the implementation ungated.';
+  }
   if (/TS2391|TS2813|TS2814/.test(out)) {
     return 'A member with no body is only legal in an ambient declaration: write `declare class X { … }` '
       + '(or `interface X`), not a plain `class`. That is what a sketch is — the shape exists here, the '

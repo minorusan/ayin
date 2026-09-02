@@ -146,6 +146,16 @@ and the message names the fix (`git submodule update --init`, or install plantum
 generic failure to go and diagnose. An agent that refused to work because a diagram could not be drawn
 would be absurd.
 
+**The submodule pin is a version dependency, and a stale one cost a whole turn.** The `naamah` tool
+resolves the binary from ayin's own build, not from `PATH` — one door, deliberately. So when the pin sat
+two commits behind the `build` subcommand while the machine's global install had it, ayin ran a naamah
+that answered `unknown command "build"`. The tool wrapped that in *"the design does NOT compile"*, which
+is a claim about the design and was false; the model read it, concluded that this environment's naamah
+has no `build`, and ended the turn with no implementation written — the design gate stopped the work it
+exists to unblock. Two fixes, and the second is the one that generalises: the pin moved forward, and a
+CLI-level refusal (`unknown command`, `ENOENT`) is now reported as a **toolchain** fault that says to
+carry on ungated, never as a design failure. Same rule as `buildcheck.ts` — absent is not failed.
+
 One thing worth knowing about the pipeline: naamah reads its entity metadata out of the **rendered SVG**,
 where a package survives only as its label string. That is why the machine-readable half of a design rides
 in `' naamah:` comments — plantuml strips comments before rendering, so naamah never sees them, while the
