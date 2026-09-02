@@ -1,0 +1,11 @@
+Which kind of project does this request describe?
+
+Answer with exactly one word: python, node, unity, or none.
+
+  node    TypeScript or JavaScript — a web page, an HTTP server, an API, a CLI, a library, anything npm
+  python  a Python package, script, CLI or service
+  unity   a Unity game or simulation, anything with scenes, prefabs or MonoBehaviours
+  none    it describes none of these, or does not describe a new project at all
+
+THE REQUEST:
+{{REQUEST}}

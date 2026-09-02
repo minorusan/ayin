@@ -38,6 +38,12 @@ const { detectProject } = await import(`file://${join(DIST, 'executors', 'detect
 const { planExecutorFor } = await import(`file://${join(DIST, 'executors', 'registry.js')}`);
 const { basePlanExecutor } = await import(`file://${join(DIST, 'executors', 'plan', 'base', 'index.js')}`);
 const { ensureAyinDir } = await import(`file://${join(DIST, 'ayin-dir.js')}`);
+const { checkDeliverables } = await import(`file://${join(DIST, 'executors', 'deliverables.js')}`);
+// Loaded here rather than where it is used: `loadTools()` is async, and the assertions below sit inside
+// a plain block where a top-level await is not reliably accepted.
+process.argv.push('-p');
+const registeredTools = await import(`file://${join(DIST, 'tools.js')}`);
+await registeredTools.loadTools();
 
 let fails = 0;
 const ok = (cond, label, extra = '') => {
@@ -338,6 +344,38 @@ inEmptyDir((dir) => {
       ok(existsSync(join(d, '.naamah', 'README.md')), `${label}: .naamah/ exists and says what goes in it`);
     });
   }
+
+  /**
+   * SCAFFOLDING IS A TOOL, AND A SCAFFOLDED PROJECT IS NOT PLANNED AGAIN.
+   *
+   * Measured before this: the scaffold ran in 35ms and the turn took 8m51s — 121s writing a plan whose
+   * single phase was "verify the project", then 239s of a subagent running npm install / tsc / npm test
+   * through model round-trips. Three commands that take three seconds when run.
+   */
+  console.log('\n— scaffolding is a tool, and a finished project is not planned again —');
+  {
+    const scaffold = registeredTools.getTool('scaffold');
+    ok(!!scaffold, 'the `scaffold` tool is registered');
+    ok(scaffold?.icon === '🏗️', '  → with its own glyph', scaffold?.icon);
+    const names = (scaffold?.parameters ?? []).map((p) => p.name).join(',');
+    ok(names === 'dir,type,about', '  → dir, type, about — type optional, worked out from `about`', names);
+  }
+  inEmptyDir((d) => {
+    // The whole claim: everything a project needs, with no model, fast enough not to matter.
+    const c = detectProject(d, 'create a new typescript project, a small library with tests');
+    const started = Date.now();
+    const made = planExecutorFor(c).scaffold(c);
+    const ms = Date.now() - started;
+    ok(made.length >= 8, 'a scaffold produces a whole project in one deterministic pass', `${made.length} paths in ${ms}ms`);
+    ok(ms < 5000, '  → and it is fast — this is the 35ms half of a turn that used to take 8m51s', `${ms}ms`);
+    // …and every REQUIRED deliverable is already satisfied, which is what lets planning be skipped.
+    const ex = planExecutorFor(c);
+    const statuses = checkDeliverables(d, ex.deliverables(c)).filter((s) => s.deliverable.required);
+    const missing = statuses.filter((s) => !s.satisfied).map((s) => s.deliverable.patterns[0]);
+    ok(statuses.length > 0 && missing.length === 0,
+      '  → and satisfies every required deliverable, so there is nothing left to plan',
+      missing.length ? `missing: ${missing.join(' ')}` : `${statuses.length} satisfied`);
+  });
 
   /**
    * AYIN'S ARTEFACTS LIVE IN `.ayin/`, AND THE DIRECTORY IGNORES ITSELF.

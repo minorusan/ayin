@@ -83,6 +83,7 @@ import { pushActivity, setActivityDetail } from '../activity.js';
 import { addMessage, setAgentStatus, formatToolCallForChat, formatToolResultForChat } from '../ui.js';
 import { PLAN_CARD, PLAN_GLYPH, columns, phaseBody, shortPath } from './present.js';
 import { repoState } from '../executors/plan/git.js';
+import { checkDeliverables } from '../executors/deliverables.js';
 import { detectProject, describeProject } from '../executors/detect.js';
 import { planExecutorFor } from '../executors/registry.js';
 import type { ProjectContext } from '../executors/types.js';
@@ -483,6 +484,52 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       card(PLAN_CARD.scaffold, PLAN_GLYPH.scaffold,
         `${scaffolded.length} file${scaffolded.length === 1 ? '' : 's'} created${committed}`,
         columns(scaffolded.map((f) => shortPath(f, projectRoot))));
+    }
+
+    /**
+     * SCAFFOLDED AND ALREADY COMPLETE — so there is nothing to plan, and planning it costs minutes.
+     *
+     * Measured on "set up an empty typescript web ui project": the scaffold ran in 35ms and produced a
+     * project that installs, tests 4/4, typechecks, builds and serves its page. Plan mode then spent
+     * **121 seconds** writing a plan whose single phase was *"Verify existing project integrity"*, and
+     * the agent spent a further **239 seconds** in a subagent running `npm install`, `tsc` and
+     * `npm test` through model round-trips — three commands that take about three seconds when run.
+     * Eight minutes fifty-one in total, for a project that was finished before the first token.
+     *
+     * So: when the directory was greenfield and every REQUIRED deliverable now exists, the job the
+     * plan would describe is already done. Return grounding instead of a document — the agent still
+     * gets its turn and still does anything the request asked for beyond a bare project, it simply
+     * does not get handed a plan to re-create files that are already there.
+     *
+     * DELIBERATELY KEYED ON THE DELIVERABLES, not on "was it greenfield". A request that asks for more
+     * than a bare project has deliverables the scaffold does not write, and falls through to the full
+     * plan exactly as before.
+     */
+    if (ctx.greenfield && scaffolded.length) {
+      // `checkDeliverables` is the same disk check QA runs at the END of a turn. Asking it here, before
+      // planning, is the whole trick: the question "is this already done" has one answer and one
+      // implementation, and it was only ever being asked too late to save anything.
+      const statuses = checkDeliverables(projectRoot, executor.deliverables(ctx)).filter((s) => s.deliverable.required);
+      const required = statuses.map((s) => s.deliverable);
+      const outstanding = statuses.filter((s) => !s.satisfied);
+      if (statuses.length > 0 && outstanding.length === 0) {
+        const done = `The project already exists — `
+          + `${scaffolded.length} path(s) were scaffolded deterministically before this turn, and every `
+          + `required deliverable is on disk:\n`
+          + `${required.map((d) => `  ${d.patterns[0]} — ${d.label}`).join('\n')}\n\n`
+          + 'None of it was written by a model and it is identical every time. Do NOT re-create these '
+          + 'files, plan steps that produce them, or "verify the project structure" by reading them '
+          + 'back one at a time — running the project\'s own commands is the only check worth making, '
+          + 'and it is one shell call.\n\n'
+          + `${grounding}`;
+        card(PLAN_CARD.phases, PLAN_GLYPH.phases, 'nothing to plan — the scaffold satisfies the request',
+          required.map((d) => `✓ ${d.patterns[0]}`).join('\n'));
+        log('INFO', 'plan_skipped_scaffold_complete', { deliverables: String(required.length) });
+        return {
+          kind: 'grounding', path: '', body: done, features: t.features,
+          deliverables: renderDeliverableList(executor.deliverables(ctx), projectRoot),
+        };
+      }
     }
 
     // Mandatory, before exploration: if somebody else's API is involved, get its CURRENT shape from
