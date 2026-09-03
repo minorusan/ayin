@@ -35,8 +35,8 @@ import { addMessage, setAgentStatus } from './ui.js';
 import { showDialog, type DialogOption } from './dialog.js';
 import { setConfigValue } from './prompts.js';
 import { llmProvider, llmProviderName, setProviderOverride, providerOverrideName, resetProviderResolution } from './llm/select.js';
-import { openAiKey, openAiModel } from './llm/providers/openai.js';
-import { noKeyMessage } from './tools/credentials/openai.js';
+import { openAiKey, openAiModel, setOpenAiModel } from './llm/providers/openai.js';
+import { noKeyMessage, writeOpenAiModel } from './tools/credentials/openai.js';
 import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
 import { refreshActiveModel, activeModelId, resetModelResolution, setAdapter, adapterNames, activeAdapter } from './llm/manager.js';
 import { getConfig, getConfigString } from './prompts.js';
@@ -369,7 +369,7 @@ async function showProviderPicker(): Promise<void> {
       note: key ? (onOpenAi ? 'active · billed per token' : 'billed per token') : 'no key',
       // The absence of a key is the whole reason a row would not work, so it says the fix here rather
       // than after the operator has already picked it.
-      sub: key ? `${openAiModel()} · hosted, needs no GPU` : 'run /openai sk-… first — the key is verified before it is saved',
+      sub: key ? `${openAiModel()} · hosted, needs no GPU — pick this to choose the tier` : 'run /openai sk-… first — the key is verified before it is saved',
     },
   ];
 
@@ -382,6 +382,18 @@ async function showProviderPicker(): Promise<void> {
   if (choice < 0) return;
   if (choice === 1) {
     await handleProviderChoice('openai');
+    /**
+     * …then WHICH OpenAI model, because "who answers" was never the whole question.
+     *
+     * Only once we actually landed there: `handleProviderChoice` stays on local and explains itself
+     * when there is no key, when the endpoint is unreachable, or when the key is rejected, and
+     * following any of those with a model list would be a popup about a provider that is not serving.
+     *
+     * Choosing the row you are already on is a legitimate way to reach this — "change my tier" is the
+     * common case once OpenAI is the provider, and it is the only route to the picker that needs no
+     * argument remembered.
+     */
+    if ((await llmProvider()).name === 'openai') await showOpenAiModelPicker();
     return;
   }
   await handleProviderChoice('local');
@@ -475,13 +487,113 @@ export async function showIndulgePicker(): Promise<void> {
     + ' The interactive agent is unchanged.');
 }
 
+/**
+ * Pin which hosted model answers THIS agent, and remember it past the process.
+ *
+ * TWO WRITES, and both are needed. `setOpenAiModel` moves the live session; `writeOpenAiModel`
+ * persists it, because `ayin indulge`, `ayin watch` and the next TUI are separate processes and an
+ * operator who picked a tier should not have to pick it again in each of them — the same argument
+ * `handleProviderChoice` already makes about persisting the PROVIDER.
+ *
+ * THEN THE MANAGER IS RESET, which is the half that is easy to miss. `manager.ts` caches the model
+ * id, the dialect AND the context window; `contextTokensFor` differs per model, and `readCap()` sizes
+ * every file read from it. Skip the refresh and a session that just moved to a 1M-window model keeps
+ * budgeting reads against the old number — silently, and in the direction that wastes rounds.
+ */
+async function applyOpenAiModel(id: string): Promise<void> {
+  const wanted = id.trim();
+  if (!setOpenAiModel(wanted)) return;
+  writeOpenAiModel(wanted);
+  resetModelResolution();
+  await refreshActiveModel().catch(() => {});
+  addMessage('system', `OpenAI model: ${wanted} — this agent only. `
+    + 'Subagents (/set-subagent-model), Ctrl+B runs (/set-background-model) and corpus builds '
+    + '(/indulge-model) are separate choices and are unchanged.');
+  log('INFO', 'openai_model_chosen', { model: wanted });
+}
+
+/**
+ * WHICH hosted model answers you — the picker the main agent never had.
+ *
+ * Subagents, backgrounded runs and corpus builds each got a ranked picker; the agent the operator
+ * actually talks to could only be changed by re-pasting the key (`/openai sk-… <model>`), an env var,
+ * or `/set`. That asymmetry is the whole reason this exists: switching tier is a thing you do several
+ * times a day — cheap for the loop, the flagship for the one hard task — and a syntax that requires
+ * your API key in the scrollback is a syntax nobody uses twice.
+ *
+ * THE LIST IS THE ACCOUNT'S, NOT A TABLE HERE. `openAiChatModels()` asks what this key can actually
+ * reach, so it cannot offer an id that 404s and it picks up a new tier with no ayin release.
+ * `rankForAgentic` supplies the tier, the price and the caveats — including the one that reorders the
+ * list: on this endpoint gpt-5.5 is the only tier that takes function tools WITH reasoning on.
+ */
+export async function showOpenAiModelPicker(): Promise<void> {
+  const key = openAiKey();
+  if (!key) {
+    addMessage('system', noKeyMessage());
+    return;
+  }
+  const cur = openAiModel();
+  const ids = await openAiChatModels();
+  if (!ids.length) {
+    addMessage('system', 'Could not list models for that key — the account may be unreachable or out of quota. '
+      + 'Name one directly: /model openai gpt-5.6-luna.');
+    return;
+  }
+
+  const rows: DialogOption[] = rankForAgentic(ids).slice(0, 8).map((m) => ({
+    label: m.id,
+    note: m.id === cur ? 'current' : m.tag,
+    sub: m.why,
+  }));
+
+  const pick = await showDialog('Which OpenAI model answers you', rows, {
+    subtitle: 'this agent only · the tier IS the bill — a turn measured here runs ~150k prompt tokens',
+    selected: Math.max(0, rows.findIndex((r) => r.note === 'current')),
+    footer: '↑↓ select · Enter choose · Esc keep the current one',
+  });
+  if (pick < 0) return;
+
+  const chosen = rows[pick].label;
+  if (chosen === cur) {
+    addMessage('system', `Already on ${chosen} — nothing changed.`);
+    return;
+  }
+  await applyOpenAiModel(chosen);
+}
+
 export async function handleModelCommand(arg: string): Promise<void> {
-  const want = arg.trim().toLowerCase();
+  const parts = arg.trim().split(/\s+/).filter(Boolean);
+  const want = (parts[0] ?? '').toLowerCase();
+  // Everything after the provider is a model id — CASE PRESERVED. Model ids are opaque strings the
+  // API matches exactly; lowercasing the whole line (which is what this did) would silently mangle
+  // any id that is not already lower-case and hand the operator a 404 they cannot read.
+  const rest = parts.slice(1).join(' ').trim();
   const names = adapterNames();
   const cur = activeAdapter();
 
   if (!want) {
     await showProviderPicker();
+    return;
+  }
+
+  /**
+   * `/model openai [id]` — switch, and optionally pin the model in the same line.
+   *
+   * NO DIALOG ON THE TYPED FORM, deliberately. `showDialog` reaches the blessed screen, and a typed
+   * command must stay usable everywhere a command can be typed. The bare form prints how to choose
+   * instead of popping something up over a terminal that may not have one.
+   */
+  if (want === 'openai' || want === 'gpt') {
+    await handleProviderChoice('openai');
+    // It already said why if it refused (no key, unreachable, key rejected) — never pin a model onto
+    // a provider we did not actually land on.
+    if ((await llmProvider()).name !== 'openai') return;
+    if (rest) {
+      await applyOpenAiModel(rest);
+      return;
+    }
+    addMessage('system', `Model: ${openAiModel()}. Change it with /model (choose OpenAI, then a tier) `
+      + 'or name one directly: /model openai gpt-5.6-sol.');
     return;
   }
 

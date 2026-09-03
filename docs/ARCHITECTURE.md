@@ -111,6 +111,35 @@ Gated (`the paid provider is never reached by accident`).
   deciding to spend money are two decisions, and the old `/openai` merged them into one keystroke.
   The switch is refused outright when no key is configured — entering a provider that then throws on
   every prompt is a worse failure than refusing, because by then the operator has moved on.
+- **WHICH OpenAI model, for THIS agent** (`showOpenAiModelPicker`, `model-picker.ts`). Bare `/model` →
+  OpenAI now opens a **second popup**: the chat models the key can actually reach
+  (`openAiChatModels()`), ranked and annotated by `rankForAgentic` — the same list `/set-subagent-model`
+  and `/set-background-model` already offered. Chosen from the account rather than a table here, so it
+  cannot offer an id that 404s and it picks up a new tier with no ayin release.
+  - **The main agent was the ONE caller that could not pick.** Subagents, backgrounded runs and corpus
+    builds each had a ranked picker; the agent the operator talks to could be repointed only by
+    re-pasting the key (`/openai sk-… <model>`), `AYIN_OPENAI_MODEL`, or `/set`. Switching tier is a
+    several-times-a-day decision — a cheap tier for the ordinary loop, `gpt-5.5` for the one task that
+    needs reasoning — and a syntax that puts your API key in the scrollback is one nobody uses twice.
+  - **`/model openai <id>` pins one with no popup**, deliberately: `showDialog` reaches the blessed
+    screen, so every TYPED form stays usable where there is no terminal to draw on. Only the already-
+    interactive bare `/model` gains a step. Model ids keep their case — the command used to lowercase
+    its whole argument, which would hand any mixed-case id to the API as a 404 nobody could read.
+  - **`setOpenAiModel` clears `defaultIsGuess`**, and that is the load-bearing half. `resolveUnknownDefault`
+    repairs the GUESSED default from the account listing on a 404 and picks the cheapest tier it
+    recognises; left armed after a deliberate choice, the next 404 from any cause would silently move
+    the operator off the model they picked, invisibly. A model somebody chose is never a guess.
+  - **The choice persists** (`writeOpenAiModel`), because `ayin indulge`, `ayin watch` and the next TUI
+    are separate processes — the same argument the provider switch already makes. It rewrites only the
+    model line: the key is read back from the FILE, never from `readOpenAiKey()`, so a key supplied
+    through `OPENAI_API_KEY` by a CI job or a container is never copied onto disk as a side effect of
+    changing tier.
+  - **The manager is reset afterwards** (`resetModelResolution` + `refreshActiveModel`). `manager.ts`
+    caches the model id, the dialect and the context window; `contextTokensFor` differs per model and
+    `readCap()` sizes every file read from it, so skipping the refresh leaves a session on a 1M-window
+    model still budgeting reads against the old number.
+  - **This agent only.** Subagents, `Ctrl+B` runs and corpus builds are untouched, and the confirmation
+    line says so — three separate settings that look alike is exactly how one gets changed by accident.
 - It runs on the **official `openai` SDK**, a runtime dependency, not hand-rolled HTTP — one definition
   of the base URL, auth header, retry policy and error shape. There used to be a second, hand-rolled
   path (an "emergency fallback" in `connection.ts` that fired when no local endpoint answered) and being

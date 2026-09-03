@@ -265,6 +265,25 @@ export function openAiModel(): string {
 }
 
 /**
+ * Pin the model this session pays for — the one door, so `setModel` and `/model` cannot diverge.
+ *
+ * IT CLEARS `defaultIsGuess`, and that is the load-bearing half. `resolveUnknownDefault` exists to
+ * repair the GUESSED constant from the account's listing when the API says it does not exist — and it
+ * picks the cheapest tier it recognises. Left armed after an operator deliberately chose a model, the
+ * first 404 from any cause would silently move them off it and onto Luna, which reads as "ayin ignored
+ * my choice" and is invisible in the transcript. A model somebody chose is never a guess, whatever
+ * happens to it next.
+ */
+export function setOpenAiModel(id: string): boolean {
+  const wanted = id.trim();
+  if (!wanted) return false;
+  currentModel = wanted;
+  defaultIsGuess = false;
+  providerLog().info('openai_set_model', { model: wanted });
+  return true;
+}
+
+/**
  * Read structurally rather than as the SDK's tool-call union: newer API versions add call kinds
  * (custom tools, and whatever comes next) and a narrow type would make an unknown kind a COMPILE
  * error in a file that should simply skip it. Only `function` calls mean anything to ayin.
@@ -424,11 +443,7 @@ export function createOpenAiProvider(): LlmProvider {
 
     /** Switch which hosted model this session pays for. Accepts any id the account can list. */
     async setModel(model: string): Promise<boolean> {
-      const wanted = model.trim();
-      if (!wanted) return false;
-      currentModel = wanted;
-      providerLog().info('openai_set_model', { model: wanted });
-      return true;
+      return setOpenAiModel(model);
     },
   };
 }

@@ -49,6 +49,25 @@ export function writeOpenAiCredentials(c: OpenAiCredentials): string {
 }
 
 /**
+ * Persist ONLY the model, leaving the stored key exactly as it was.
+ *
+ * `/model` picks a model without being handed a key, so it cannot call `writeOpenAiCredentials` —
+ * that rewrites the whole file, and passing `''` for the key would DELETE a working credential as a
+ * side effect of choosing a tier.
+ *
+ * THE KEY IS READ FROM THE FILE, NOT FROM `readOpenAiKey()`, and the difference is a secret leak.
+ * `readOpenAiKey` prefers `process.env.OPENAI_API_KEY` — a key deliberately supplied by a CI job, a
+ * container or a shell export, whose owner chose NOT to put it on disk. Round-tripping it through
+ * here would write it to `~/.ayin-cli/openai.env` the first time someone changed model, and nothing
+ * would ever say so. An env-only setup correctly ends up with a file holding just the model line;
+ * `readOpenAiKey` still finds the key in the environment, where it was.
+ */
+export function writeOpenAiModel(model: string): string {
+  const stored = (readEnvFile(OPENAI_ENV_FILE).OPENAI_API_KEY ?? '').trim();
+  return writeOpenAiCredentials({ key: stored, model: model.trim() });
+}
+
+/**
  * THE message an operator sees when nothing is configured.
  *
  * Exported as one string because it is shown from three places — the provider on a generate, the status

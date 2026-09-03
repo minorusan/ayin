@@ -194,7 +194,11 @@ export const HELP: HelpEntry[] = [
   { name: '/help', kind: 'command', section: 'Session', short: 'This list' },
 
   // ── the model ──────────────────────────────────────────────────────────────────
-  { name: '/model', kind: 'command', section: 'Model', short: 'Who answers — local or OpenAI (popup) · /model gemma|qwen|glm|auto forces the tool-call dialect · /model <name|qwen|gemma> to switch straight away' },
+  {
+    name: '/model', kind: 'command', section: 'Model',
+    short: 'Who answers — local or OpenAI, then WHICH OpenAI model (popup) · /model openai <id> pins one · /model gemma|qwen|glm|auto forces the tool-call dialect',
+    tip: 'Pick the OpenAI tier for THIS agent in /model — cheap for the loop, the flagship for the one hard task.',
+  },
   { name: '/set', kind: 'command', section: 'Model', short: '/set <key> <value> — persist a setting (kebab-case: /set terminal-command …)' },
 
   // ── connectors ─────────────────────────────────────────────────────────────────
