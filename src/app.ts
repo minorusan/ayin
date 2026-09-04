@@ -7,6 +7,7 @@
  */
 
 // Redirect all console output to file — blessed owns the terminal.
+import { openExternal } from './open-external.js';
 import { log, captureConsole } from './log.js';
 captureConsole();
 
@@ -1081,7 +1082,15 @@ async function handleInput(text: string): Promise<void> {
           const poll = setInterval(() => {
             if (naamahSession?.url) {
               clearInterval(poll);
-              addMessage('system', `naamah: ${dir}\n${naamahSession.url}  — click a type card to comment; the page rebuilds when the design changes`);
+              // OPEN IT, like `/diff` does. Both commands exist to put an artefact in front of the
+              // operator's eyes, and a URL printed in a terminal is one copy-paste short of that —
+              // paid every time, for a page whose whole purpose is to be looked at right now. The
+              // URL is still printed, because `openExternal` can only report a definite failure and
+              // a page the operator wants on a second screen is theirs to move.
+              const opened = openExternal(naamahSession.url);
+              addMessage('system', `naamah: ${dir}\n${naamahSession.url}`
+                + `${opened ? '  — opened in your browser;' : '  —'} click a type card to comment;`
+                + ' the page rebuilds when the design changes');
             } else if (naamahSession?.error) {
               // The daemon died and said why. Its sentence, not ours — it names the actual fault.
               clearInterval(poll);
