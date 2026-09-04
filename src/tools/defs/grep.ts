@@ -2,8 +2,20 @@ import type { Tool } from '../base.js';
 import { FIND_LIMIT, GREP_LIMIT, boolParam, execAsync, resolveAgainstCwd, shq, suggestSimilarPaths } from '../lib.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { detectProfile, guidBlock, rankGrepLines, type GrepProfile } from '../grep-rank.js';
 
 const CWD = process.cwd();
+
+/**
+ * The ranked files that survived the cap.
+ *
+ * Annotating a file the reader cannot see is worse than not annotating: it reads as a hit that was
+ * shown, and the line it belongs to was cut.
+ */
+function filesShownIn(shown: string[], ordered: string[]): string[] {
+  const present = new Set(shown.map((l) => l.split(':')[0].split('-')[0]));
+  return ordered.filter((f) => shown.some((l) => l.startsWith(`${f}:`) || l.startsWith(`${f}-`)) || present.has(f));
+}
 
 /**
  * Directories a code search must never descend into.
@@ -30,7 +42,7 @@ const NEVER_RECURSE = [
 export const tool: Tool = {
     name: 'grep',
     icon: '🔍',
-    description: 'Search file contents RECURSIVELY under a directory (or in one file). The pattern is an EXTENDED regex — alternation (a|b), ?, +, () all work. Returns matching lines with file paths and line numbers. Prefer this over a shell grep: it prunes .git/node_modules/Library/dist, caps output, and takes exclude/count/only_matching/invert so a second pass or a pipe is rarely needed.',
+    description: 'Search file contents RECURSIVELY under a directory (or in one file). The pattern is an EXTENDED regex — alternation (a|b), ?, +, () all work. Returns matching lines with file paths and line numbers. Prefer this over a shell grep: it prunes .git/node_modules/Library/dist, caps output, RANKS hits so first-party code outranks third-party and the most relevant file kind comes first (per project type — Unity ranks .cs over .asset over .controller and reports the GUID of each script it names), and takes exclude/count/only_matching/invert so a second pass or a pipe is rarely needed.',
     parameters: [
       { name: 'pattern', type: 'string', description: 'Extended-regex pattern, e.g. "IsPickBooster|_skippedBalls"', required: true },
       { name: 'path', type: 'string', description: 'Directory or file to search', required: true },
@@ -44,6 +56,7 @@ export const tool: Tool = {
       { name: 'count', type: 'boolean', description: 'Return per-file MATCH COUNTS instead of lines — how much of this is there, before deciding whether to read it', required: false },
       { name: 'only_matching', type: 'boolean', description: 'Return only the matched text, not the whole line — how to list every symbol/name a pattern finds', required: false },
       { name: 'max_matches', type: 'number', description: 'Cap the results at N (default 50, or 30 files) — the `| head -N` of a shell grep', required: false },
+      { name: 'profile', type: 'string', description: 'Ranking profile: unity | typescript | general. Detected from the repo by default — pass it only to override that', required: false },
     ],
     async execute(params) {
       if (!params.pattern || !params.path) return 'Error: pattern and path required';
@@ -88,14 +101,42 @@ export const tool: Tool = {
       const excl = params.exclude ? ` | grep -vE -- ${shq(String(params.exclude))}` : '';
       // Counting prints `path:0` for every file grep looked at; only the non-zero lines are an answer.
       const zeroes = counting ? " | grep -vE ':0$'" : '';
+      /**
+       * SCAN WIDER THAN YOU SHOW, or the ranking is decorative.
+       *
+       * The `| head -N` used to cap at the display limit, which meant the shell threw away everything
+       * past N in WALK ORDER before any ranking could see it — so ranking only ever reordered the
+       * first N. Caught by testing: `MonoBehaviour` over a Unity `Assets/` returned ten TextMesh Pro
+       * files and reported eleven third-party hits ranked last, because the first-party `.cs` matches
+       * were cut by `head` before they were ever scored. The cap is a DISPLAY budget; the scan has to
+       * be big enough for the sort to mean something, and bounded so a pathological pattern cannot
+       * stream the repo through this process.
+       */
+      // A file list costs ONE SHORT LINE per result, so its scan can be far wider than a line
+      // search's for the same bytes — and it needs to be. Measured: `MonoBehaviour` over a Unity
+      // `Assets/` matches thousands of `.asset` YAML headers, and a 300-file scan never reached
+      // `Assets/Games` at all, so every first-party `.cs` was outside the window the sort could see.
+      const scan = filesOnly || counting ? 2000 : Math.min(Math.max(cap * 10, 200), 2000);
       const out = await execAsync(
         // `--include` MUST precede `--`: after the terminator grep reads every argument as a file
         // operand, so the filter became a missing filename ("grep: --include=*.cs: No such file")
         // and quietly stopped filtering. Caught by watching a real run, not by the build.
-        `grep ${flags.join(' ')}${inc}${prune} -- ${shq(String(params.pattern))} ${shq(String(params.path))}${zeroes}${excl} | head -${cap + 1}`,
+        `grep ${flags.join(' ')}${inc}${prune} -- ${shq(String(params.pattern))} ${shq(String(params.path))}${zeroes}${excl} | head -${scan + 1}`,
         { cwd: CWD },
       );
-      const lines = out === '(no output)' ? [] : out.split('\n').filter((l) => l.trim());
+      const raw = out === '(no output)' ? [] : out.split('\n').filter((l) => l.trim());
+      // RANK BEFORE CAPPING, which is the whole point: capping first would spend the 50 lines on
+      // whatever the filesystem walk happened to reach, and on a Unity repo that opened with
+      // `Assets/Plugins/…` and `Assets/Spine/Editor/…` — third-party code, ahead of every file the
+      // team can actually change. The cap is a budget, and ranking decides what it buys.
+      const profile: GrepProfile = ['unity', 'typescript', 'general'].includes(String(params.profile))
+        ? String(params.profile) as GrepProfile
+        : detectProfile(CWD);
+      // Grep gave up at the scan budget, so there is more than was even considered — a different
+      // fact from "more than was shown", and the advice that follows differs too.
+      const scanTruncated = raw.length > scan;
+      const ranked = rankGrepLines(CWD, raw.slice(0, scan), profile);
+      const lines = ranked.lines;
       if (!lines.length) {
         // An empty result must read as "your pattern matched nothing", never as "this code does not
         // exist" — that misreading is what sends the loop off hunting with ls/find.
@@ -116,9 +157,24 @@ export const tool: Tool = {
               : ['match', 'matches'];
       const unit = one;
       const plural = (n: number) => (n === 1 ? one : many);
-      if (lines.length > cap) {
-        return `${lines.slice(0, cap).join('\n')}\n(showing the first ${cap} ${plural(cap)} — there are MORE; narrow the pattern, add include=, or use files_only=true to see the spread)`;
+      // What was pushed down is SAID, not silently dropped: a hit in a plugin is occasionally the
+      // answer, and an agent that cannot tell "no third-party match" from "third-party matches you
+      // were not shown" will re-run the same search wider.
+      const sunk = ranked.thirdParty.length
+        ? `\n(${ranked.thirdParty.length} third-party file(s) ranked last: ${ranked.thirdParty.slice(0, 3).join(', ')}${ranked.thirdParty.length > 3 ? ', …' : ''})`
+        : '';
+      if (lines.length > cap || scanTruncated) {
+        const shown = lines.slice(0, cap);
+        const guids = profile === 'unity' ? guidBlock(CWD, filesShownIn(shown, ranked.files)) : '';
+        // RANKING WAS PARTIAL AND MUST SAY SO. Sorting a window is not sorting the result, and an
+        // agent told only "there are MORE" will read the top hit as the best in the repo when it is
+        // merely the best of the first two thousand grep reached.
+        const partial = scanTruncated
+          ? ` — and MORE than the ${scan} scanned, so this ranking covers only what was scanned; narrow the pattern or add include=`
+          : ' — there are MORE; narrow the pattern, add include=, or use files_only=true to see the spread';
+        return `${shown.join('\n')}\n(showing the first ${cap} ${plural(cap)}${partial})${sunk}${guids}`;
       }
-      return `${lines.join('\n')}\n(${lines.length} ${plural(lines.length)})`;
+      const guids = profile === 'unity' ? guidBlock(CWD, ranked.files) : '';
+      return `${lines.join('\n')}\n(${lines.length} ${plural(lines.length)})${sunk}${guids}`;
     },
   };
