@@ -20,6 +20,7 @@
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
+import { log } from '../log.js';
 
 /**
  * Unity's own marker for "this assembly is tests": the define constraint it uses to keep them out of
@@ -67,6 +68,13 @@ export interface AsmdefIndex {
   byGuid: Map<string, Asmdef>;
   /** Directories holding an asmdef, longest first — so ownership is a prefix walk. */
   dirsLongestFirst: Array<{ dir: string; asmdef: Asmdef }>;
+  /**
+   * Asmdefs found on disk that could not be parsed.
+   *
+   * Reported rather than dropped, because a missing asmdef silently reassigns every type it owns to
+   * the predefined assembly — which reads as a real reachability error in code that is fine.
+   */
+  unparsed: string[];
 }
 
 function walk(root: string, rel: string, out: string[]): void {
@@ -94,9 +102,25 @@ export function buildAsmdefIndex(repo: string): AsmdefIndex {
   walk(repo, '', paths);
 
   const all: Asmdef[] = [];
+  const unparsed: string[] = [];
   for (const p of paths) {
     let json: Record<string, unknown>;
-    try { json = JSON.parse(readFileSync(join(repo, p), 'utf-8')); } catch { continue; }
+    // STRIP THE BOM BEFORE PARSING, and say so when a parse still fails.
+    //
+    // `JSON.parse` throws on a leading U+FEFF, and Unity ships asmdefs that have one — Zenject's does.
+    // The old `catch { continue }` dropped it silently, which is the worst possible failure here: an
+    // asmdef missing from this index does not merely go unchecked, it makes every type it owns look
+    // like it lives in the predefined assembly. Measured on a real project: four asmdefs (Zenject,
+    // IngameDebugConsole, NativeGallery, UIEffect) were dropped for a BOM, so `SignalBus` resolved to
+    // Assembly-CSharp, the asmdef-reference check called Core.asmdef broken, and the QA loop wrote
+    // "Assembly-CSharp" into its references array — a thing Unity does not allow.
+    try {
+      json = JSON.parse(readFileSync(join(repo, p), 'utf-8').replace(/^\uFEFF/, ''));
+    } catch (err) {
+      unparsed.push(p);
+      log('WARN', 'asmdef_unparseable', { path: p, error: String(err).slice(0, 160) });
+      continue;
+    }
     const name = typeof json.name === 'string' ? json.name : '';
     if (!name) continue;
     const precompiled = Array.isArray(json.precompiledReferences) ? json.precompiledReferences.map(String) : [];
@@ -131,7 +155,7 @@ export function buildAsmdefIndex(repo: string): AsmdefIndex {
     .map((a) => ({ dir: a.dir, asmdef: a }))
     .sort((x, y) => y.dir.length - x.dir.length);
 
-  return { all, byName, byGuid, dirsLongestFirst };
+  return { all, byName, byGuid, dirsLongestFirst, unparsed };
 }
 
 /**

@@ -389,6 +389,14 @@ export interface ShapeFinding {
  * `addedFields` is what the diff added (empty for a new file, where every field is new) and is what makes
  * "a field was added" answerable rather than guessed.
  */
+/**
+ * Assemblies Unity creates itself. None of them can appear in an .asmdef `references` array.
+ */
+const PREDEFINED_ASSEMBLIES = new Set([
+  'Assembly-CSharp', 'Assembly-CSharp-firstpass',
+  'Assembly-CSharp-Editor', 'Assembly-CSharp-Editor-firstpass',
+]);
+
 export function inspectFile(opts: {
   repo: string;
   file: string;
@@ -415,10 +423,32 @@ export function inspectFile(opts: {
     unreachable.set(declaredIn, list);
   }
   for (const [assembly, typeNames] of unreachable) {
+    const named = typeNames.slice(0, 4).join(', ');
+    // AN ASMDEF CANNOT REFERENCE A PREDEFINED ASSEMBLY, so never advise adding one.
+    //
+    // Unity's dependency direction is one-way: Assembly-CSharp references every autoReferenced
+    // asmdef, and no asmdef may reference it back. Told otherwise, the QA loop wrote
+    // "Assembly-CSharp" into a real Core.asmdef references array and reported the issue fixed. The
+    // entry is not merely useless, it is invalid — and the loop had been handed it as `certain`.
+    //
+    // Reaching here usually means the type's own asmdef is missing from the index rather than that
+    // the type is really in the predefined assembly, so this says what it actually knows and stops
+    // short of an instruction. `certain` is false for the same reason: there is no mechanical fix.
+    if (PREDEFINED_ASSEMBLIES.has(assembly)) {
+      out.push({
+        kind: 'asmdef-reference',
+        certain: false,
+        line: `${rel} compiles into ${asmName} and names ${named}, which ayin resolved to ${assembly}. `
+          + 'An .asmdef CANNOT reference a predefined assembly — do NOT add it to the references array. '
+          + `Either ${named} really lives outside every .asmdef (then it must move into one, or this file must leave ${asmName}), `
+          + 'or the .asmdef that owns it failed to parse and was dropped from the index — check for one before changing anything.',
+      });
+      continue;
+    }
     out.push({
       kind: 'asmdef-reference',
       certain: true,
-      line: `${rel} compiles into ${asmName}, which does not reference ${assembly} — but names ${typeNames.slice(0, 4).join(', ')} from it. `
+      line: `${rel} compiles into ${asmName}, which does not reference ${assembly} — but names ${named} from it. `
         + (own
           ? `Add "${assembly}" to the references array of ${own.path}, or this is CS0246.`
           : `${assembly} is not autoReferenced, so the predefined assembly cannot see it — move the file into an assembly that references it.`),
