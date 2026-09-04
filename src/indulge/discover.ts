@@ -129,6 +129,8 @@ export interface DiscoverOptions {
   maxFiles?: number;
   /** Repo-relative roots to prune wholesale — third-party code. See vendor.ts. */
   vendorRoots?: string[];
+  /** Index test code too. Off by default — see isTestFile. */
+  keepTests?: boolean;
   /**
    * Repo-relative prefix this domain lives under. Nothing outside it is admitted, at any depth.
    *
@@ -199,7 +201,7 @@ const MIN_SEEDS = 6;
  */
 /** Exported for the gate: seeding is the step that decides whether a domain exists at all. */
 export function seedsByPathWords(
-  repoPath: string, domain: string, limit: number, vendorRoots: string[] = [], scope = '',
+  repoPath: string, domain: string, limit: number, vendorRoots: string[] = [], scope = '', keepTests = false,
 ): string[] {
   const joined = domain.toLowerCase().replace(/[^a-z0-9]/g, '');
   const words = domain.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
@@ -207,7 +209,7 @@ export function seedsByPathWords(
   // The walk returns ABSOLUTE paths; a seed is repo-relative everywhere else, and an absolute one
   // silently breaks `join(repoPath, file)` at read time. The scope fallback below relativized; this
   // did not, which is why it never worked when it fired.
-  const files = walkSources(repoPath, 20000, vendorRoots).files.map((abs) => rel(repoPath, abs));
+  const files = walkSources(repoPath, 20000, vendorRoots, keepTests).files.map((abs) => rel(repoPath, abs));
   const inScope = (f: string): boolean => !scope || f === scope || f.startsWith(`${scope}/`);
   const flat = (f: string): string => f.toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -280,7 +282,38 @@ export function extractPaths(answer: string): string[] {
 }
 
 /** Every source file a language handles, bounded and with the skip-list applied. */
-function walkSources(repoPath: string, cap: number, vendorRoots: string[] = []): { files: string[]; truncated: boolean } {
+/**
+ * Is this a TEST file — code that exercises the feature rather than being it?
+ *
+ * Tests were indexed like anything else, and on a real corpus they took 12% of the chunks and then
+ * OUT-RANKED the implementation on the questions people actually ask. Four of five behaviour queries
+ * in a 26-query battery landed on a `*Tests.cs` instead of the class under test, and the reason is
+ * not a scoring bug: a test's question — "what value does the Counter take after a 'Bad' move" — is
+ * phrased the way a human asks, so it wins on cosine against the implementation's own phrasing every
+ * time. The corpus was answering "where is this behaviour asserted" to a question about where it
+ * LIVES.
+ *
+ * Excluded BY DEFAULT for the same reason third-party code is, and with the same escape
+ * (`--keep-tests`): a test is real, readable, first-party code, and it is still not the thing the
+ * question was about.
+ *
+ * Matched on path and filename rather than by reading the file: a test framework's attributes vary
+ * per language and per decade, while `Tests/` and `FooTests.cs` are what every convention agrees on.
+ * A false negative costs one indexed file; a false positive silently drops real code, so the
+ * patterns stay conservative — `/Editor/` is NOT here, because editor tooling is production code.
+ */
+export function isTestFile(rel: string): boolean {
+  const p = rel.split(sep).join('/');
+  if (/(^|\/)(Tests?|__tests__|spec|Specs?)(\/|$)/i.test(p)) return true;
+  // FILENAME suffixes only, and a short list. `Mocks?`, `Fakes?` and a `Test`-ish PREFIX were here
+  // and had to go: `Assets/Scripts/Mock/LocalMocks.cs` is the offline-development provider, shipped
+  // and first-party, and dropping it would have removed real code on the strength of its name. A
+  // mock that IS test scaffolding sits under a test directory, which the rule above already catches.
+  const base = p.split('/').pop() ?? '';
+  return /(Tests?|Specs?|TestCase)\.[A-Za-z0-9]+$/i.test(base);
+}
+
+function walkSources(repoPath: string, cap: number, vendorRoots: string[] = [], keepTests = false): { files: string[]; truncated: boolean } {
   const files: string[] = [];
   const stack = [repoPath];
   while (stack.length) {
@@ -296,10 +329,14 @@ function walkSources(repoPath: string, cap: number, vendorRoots: string[] = []):
         // file count explodes — indexing it costs the walk, the reference resolution and, worst, real
         // questions generated about a library the team only consumes.
         if (vendorRoots.length && isUnderVendorRoot(relative(repoPath, abs).split(sep).join('/'), vendorRoots)) continue;
+        // Test trees are pruned at the DIRECTORY too — a `Tests/` folder is where they cluster, and
+        // walking it to reject each file one at a time indexes nothing and costs the same listing.
+        if (!keepTests && isTestFile(relative(repoPath, abs).split(sep).join('/'))) continue;
         stack.push(abs);
         continue;
       }
       if (!e.isFile() || !languageFor(abs)) continue;
+      if (!keepTests && isTestFile(relative(repoPath, abs).split(sep).join('/'))) continue;
       try { if (statSync(abs).size > MAX_SOURCE_BYTES) continue; } catch { continue; }
       files.push(abs);
     }
@@ -425,8 +462,8 @@ function resolveSpecifier(repoPath: string, dir: string, spec: string): string |
  * you ended up depending on. Tokenising and intersecting with the declared-type table does, and it
  * is still deterministic and checkable.
  */
-function buildIndex(repoPath: string, cap: number, onStatus?: (n: string) => void, vendorRoots: string[] = []): RefIndex {
-  const { files, truncated } = walkSources(repoPath, cap, vendorRoots);
+function buildIndex(repoPath: string, cap: number, onStatus?: (n: string) => void, vendorRoots: string[] = [], keepTests = false): RefIndex {
+  const { files, truncated } = walkSources(repoPath, cap, vendorRoots, keepTests);
   onStatus?.(`indexing ${files.length} source files${truncated ? ` (capped at ${cap})` : ''}`);
 
   const declaredIn = new Map<string, string[]>();
@@ -563,6 +600,8 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
   }
 
   const seeds: string[] = [];
+  const vendored: string[] = [];
+  const tests: string[] = [];
   for (const c of candidates) {
     const r = resolveInRepo(repoPath, c);
     if (!r) { if (!opts.seedsOverride) report.hallucinated.push(c); continue; }
@@ -570,6 +609,22 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
     // real files somewhere else. Counting them as bad guesses would blame explore for answering the
     // question it was asked.
     if (!inScope(r)) continue;
+    // THE VENDOR FILTER APPLIES TO EXPLORE'S SEEDS TOO.
+    //
+    // `walkSources` and `buildIndex` both honour it, so the WALK could never reach vendor code — and
+    // a seed does not come from the walk. Measured on a real corpus: explore named
+    // `spine-unity/.../SpineEditorUtilities.cs` for "scene manager" and a bundled web-view plugin for
+    // "skip", and 230 chunks were spent answering questions about third-party code that nobody in this
+    // repo can change. Every one of them walked straight past a vendor root that was already
+    // configured, because this loop was the one place that did not ask.
+    if ((opts.vendorRoots?.length ?? 0) && isUnderVendorRoot(r, opts.vendorRoots as string[])) {
+      vendored.push(r);
+      continue;
+    }
+    // AND THE SAME FOR TESTS. This loop is where the vendor filter leaked, for exactly this reason:
+    // a seed does not come from the walk, so a filter applied only in `walkSources` never sees it.
+    // Asked which files implement a feature, explore names its tests early and confidently.
+    if (opts.keepTests !== true && isTestFile(r)) { tests.push(r); continue; }
     // A corpus answers questions about CODE. `Core.csproj` is a generated file list, and a real run
     // even seeded on ayin's own `AYIN-REPORT-*.md` output — both produced questions, and an answer
     // about a project manifest is a spent investigation that helps nobody.
@@ -579,6 +634,14 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
   if (report.skippedNonSource.length) {
     onStatus?.(`${report.skippedNonSource.length} named path(s) are not source and were skipped`
       + ` (${report.skippedNonSource.slice(0, 3).join(', ')}${report.skippedNonSource.length > 3 ? ', …' : ''})`);
+  }
+  if (tests.length) {
+    onStatus?.(`${tests.length} named path(s) are test code and were skipped`
+      + ` (${tests.slice(0, 3).join(', ')}${tests.length > 3 ? ', …' : ''})`);
+  }
+  if (vendored.length) {
+    onStatus?.(`${vendored.length} named path(s) are third-party and were skipped`
+      + ` (${vendored.slice(0, 3).join(', ')}${vendored.length > 3 ? ', …' : ''})`);
   }
 
   // ── deterministic top-up: the domain's own words, matched against PATHS ─────────
@@ -592,7 +655,7 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
   // after a folder should never come back empty because a model failed to connect the words to it.
   if (!opts.seedsOverride && seeds.length < MIN_SEEDS) {
     const before = seeds.length;
-    for (const p of seedsByPathWords(repoPath, domain, MIN_SEEDS * 3, opts.vendorRoots ?? [], scope)) {
+    for (const p of seedsByPathWords(repoPath, domain, MIN_SEEDS * 3, opts.vendorRoots ?? [], scope, opts.keepTests === true)) {
       if (seeds.length >= MIN_SEEDS * 3) break;
       if (!inScope(p)) continue;
       if (!seeds.includes(p)) seeds.push(p);
@@ -614,7 +677,7 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
   // into a small honest corpus about the right place.
   if (!opts.seedsOverride && scope && seeds.length === 0) {
     const words = domain.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
-    const under = walkSources(repoPath, 20000, opts.vendorRoots ?? []).files
+    const under = walkSources(repoPath, 20000, opts.vendorRoots ?? [], opts.keepTests === true).files
       .map((abs) => rel(repoPath, abs))
       .filter(inScope);
     const scored = under
@@ -657,7 +720,7 @@ export async function discoverDomain(opts: DiscoverOptions): Promise<DiscoverRep
 
   // ── deterministic expansion ────────────────────────────────────────────────────
   if (maxDepth > 0) {
-    const index = buildIndex(repoPath, opts.maxIndexFiles ?? DEFAULT_MAX_INDEX_FILES, onStatus, opts.vendorRoots ?? []);
+    const index = buildIndex(repoPath, opts.maxIndexFiles ?? DEFAULT_MAX_INDEX_FILES, onStatus, opts.vendorRoots ?? [], opts.keepTests === true);
     report.indexed = index.indexed;
     report.truncated = index.truncated;
 

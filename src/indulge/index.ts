@@ -22,7 +22,8 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { answerQuestions } from './answer.js';
-import { discoverDomain } from './discover.js';
+import { languageFor } from '../entangle/index.js';
+import { discoverDomain, isTestFile } from './discover.js';
 import { embedCorpus } from './embed.js';
 import { generateQuestions } from './questions.js';
 import { writeReport } from './report.js';
@@ -72,6 +73,36 @@ export interface IndulgeArgs {
   jiraEpic?: string;
   /** `--per-ticket N` — questions asked of each ticket. */
   perTicket?: number;
+  /** `--from-diff <base>`: seed a domain from the files this branch changed against <base>. */
+  fromDiff?: string;
+  /** Index test code too. Off by default — see discover.ts isTestFile. */
+  keepTests?: boolean;
+}
+
+/** The domain a `--from-diff` build files its work under. Retrievable by name like any other. */
+const DIFF_DOMAIN = 'changed on this branch';
+
+/**
+ * Source files this branch has changed against `base`, repo-relative.
+ *
+ * `base...HEAD` — three dots, the symmetric difference from the merge base — so this is what the
+ * BRANCH did, not everything that has happened on `base` since. Non-source paths are dropped here
+ * rather than in discovery: a corpus about a feature has nothing to say about its `.meta` sidecars,
+ * its `.asset` files or a changed `.png`, and 621 of the diff's files are exactly those.
+ */
+export function changedSourceFiles(repoPath: string, base: string, keepTests = false): string[] {
+  let raw: string;
+  try {
+    raw = execFileSync('git', ['-C', repoPath, 'diff', '--name-only', `${base}...HEAD`], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 20_000, maxBuffer: 8 * 1024 * 1024,
+    });
+  } catch { return []; }
+  return raw.split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((f) => Boolean(languageFor(f)))
+    .filter((f) => keepTests || !isTestFile(f))
+    .filter((f) => existsSync(join(repoPath, f)));      // a DELETED file has nothing to answer about
 }
 
 /** `--flag value` and `--flag=value`, both. Unknown flags are reported, never guessed at. */
@@ -129,6 +160,8 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--rescan-vendor': args.rescanVendor = true; break;
       case '--classify-vendor': args.classifyVendor = true; break;
       case '--max-questions': args.maxQuestions = num(value(), 'max-questions'); break;
+      case '--from-diff': args.fromDiff = value(); break;
+      case '--keep-tests': args.keepTests = true; break;
       case '--jira': case '--epic': {
         const v = value().trim().toUpperCase();
         if (!/^[A-Z][A-Z0-9_]*-\d+$/.test(v)) {
@@ -183,6 +216,8 @@ const USAGE = [
   '  --depth N                    reference-walk depth (default 3)',
   '  --max-files N                cap discovered files per domain',
   '  --max-questions N            cap answers this run',
+  '  --from-diff <base>           seed from the files this branch changed against <base>',
+  '  --keep-tests                 index test code too (default: tests are skipped)',
   '  --categories \'["a","b"]\'     ANY angle. Tuned: git,dependencies,connections,functionality,gotchas',
   '                               anything else works too — "threadSafety" — the angle is named to the model',
 ].join('\n');
@@ -903,7 +938,25 @@ export async function runIndulge(argv: string[]): Promise<number> {
     return 0;
   }
 
-  if (args.domains.length === 0) { out('--domains is required (comma-separated).'); out(); out(USAGE); return 2; }
+  // ── --from-diff: the branch's own diff is the feature definition ────────────────
+  //
+  // A feature corpus was built by hand-writing nine domain phrases, and it still reached only 91 of
+  // the 182 files the branch had touched — one of them reached by no phrase at all. `git diff` knows
+  // the answer exactly and cannot hallucinate it: these are the files the work is IN. So they become
+  // the seeds of a domain, and the reference walk expands from there as it would from any seed.
+  //
+  // It ADDS a domain rather than replacing --domains: a diff says what changed, and a phrase says
+  // what it is called. Both are worth having, and only one of them survives a rebase.
+  let diffSeeds: string[] = [];
+  if (args.fromDiff) {
+    diffSeeds = changedSourceFiles(repoPath, args.fromDiff, args.keepTests === true);
+    if (!diffSeeds.length) {
+      out(`--from-diff ${args.fromDiff}: no changed source files (is "${args.fromDiff}" a ref this clone has?)`);
+      return 2;
+    }
+    out(`--from-diff ${args.fromDiff}: ${diffSeeds.length} changed source file(s) become seeds`);
+  }
+  if (args.domains.length === 0 && !diffSeeds.length) { out('--domains is required (comma-separated).'); out(); out(USAGE); return 2; }
 
   // Cooperative stop. The stages check this between records, so a signal costs at most the one
   // question in flight; a second signal is an operator who means it.
@@ -989,7 +1042,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
       out(`[discover] ${domain}`);
       const r = await discoverDomain({
         store, repoPath, domain, maxDepth: args.maxDepth, maxFiles: args.maxFiles, onStatus: status,
-        vendorRoots, scope, countOnly: args.dryRun,
+        vendorRoots, scope, countOnly: args.dryRun, keepTests: args.keepTests === true,
       });
       matched += r.added;
       progress('discover', i + 1, args.domains.length, domain);
@@ -999,6 +1052,22 @@ export async function runIndulge(argv: string[]): Promise<number> {
       if (r.seeds === 0) out(`  "${domain}" matched nothing in this repo — no files written.`);
       else out(`  ${r.added} file(s)${r.truncated ? ' (capped — the walk stopped early)' : ''}` +
         `${r.hallucinated.length ? ` · ${r.hallucinated.length} named path(s) did not exist and were dropped` : ''}`);
+    }
+
+    // The diff domain runs LAST so its files arrive at depth 0 even where a named domain already
+    // reached them at depth 1. A changed file is the feature, not its neighbourhood, and the
+    // question budget is smaller at depth — a seed that arrived as somebody else's neighbour would
+    // be asked two questions about the thing the branch is actually about.
+    if (diffSeeds.length && !shouldStop()) {
+      out(`[discover] ${DIFF_DOMAIN}`);
+      const r = await discoverDomain({
+        store, repoPath, domain: DIFF_DOMAIN, maxDepth: args.maxDepth, maxFiles: args.maxFiles,
+        onStatus: status, vendorRoots, seedsOverride: diffSeeds, countOnly: args.dryRun,
+        keepTests: args.keepTests === true,
+      });
+      matched += r.added;
+      recordTool('indulge:discover', DIFF_DOMAIN, JSON.stringify({ seeds: r.seeds, added: r.added }));
+      out(`  ${r.added} file(s)${r.truncated ? ' (capped — the walk stopped early)' : ''}`);
     }
 
     if (matched === 0) {
