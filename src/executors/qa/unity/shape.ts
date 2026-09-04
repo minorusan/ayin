@@ -51,6 +51,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import type { Asmdef, AsmdefIndex } from '../../../testrun/asmdef.js';
 import { owningAsmdef, resolveReference } from '../../../testrun/asmdef.js';
+import { log } from '../../../log.js';
 
 /** Types Unity's serializer cannot store, whatever the attribute says. Closed set, from its own docs. */
 const NOT_SERIALIZABLE = [
@@ -330,10 +331,57 @@ export interface TypeOwners {
  * type visible from here" cannot be answered at all, and with it the answer is a map lookup. Files under
  * no asmdef belong to the predefined assembly, which is exactly how Unity compiles them.
  */
+/**
+ * One file's parsed type names, with the mtime they were parsed at.
+ *
+ * The cache is per REPO and lives for the process: `inspectShape` rebuilds this on every QA run, and
+ * in a fix loop that is once per edit.
+ */
+interface OwnerEntry { mtimeMs: number; types: string[] }
+let ownersCache: { repo: string; files: Map<string, OwnerEntry> } | null = null;
+
+/** Drop the memo — for a test, or a caller that knows the tree changed under it. */
+export function clearTypeOwnersCache(): void { ownersCache = null; }
+
+/**
+ * Which assembly declares each type in the repo — re-reading only the files that CHANGED.
+ *
+ * This read and re-parsed every `.cs` in the project on every call, and every QA run calls it. On a
+ * real Unity project that is 3,475 files and 16 MB, measured at 2,380ms — the "few seconds of lag
+ * after an edit", paid again on each iteration of a fix loop:
+ *
+ *   directory walk + stat   490ms
+ *   reading 16 MB           780ms
+ *   parsing (readCsFacts) ~1,100ms
+ *
+ * The walk is unavoidable — the question "did anything change" cannot be answered without asking the
+ * filesystem — but the read and the parse are pure functions of a file's bytes, so an mtime keeps
+ * them. Only genuinely modified files are re-read, which in a fix loop is the one file just edited.
+ *
+ * `owningAsmdef` is recomputed every call and deliberately NOT cached with the types: adding an
+ * .asmdef moves types between assemblies without touching a single `.cs`, and a cache that survived
+ * that would answer confidently and wrongly.
+ *
+ * First-writer-wins on a duplicate type name is unchanged, and so is the walk order it depends on.
+ */
 export function typeOwners(repo: string, index: AsmdefIndex, limit = 20_000): TypeOwners {
+  const prev = ownersCache?.repo === repo ? ownersCache.files : new Map<string, OwnerEntry>();
+  const fresh = new Map<string, OwnerEntry>();
   const owner = new Map<string, string>();
   let scanned = 0;
+  let reread = 0;
   const skip = /^(Library|Temp|obj|Build|Builds|Logs|\.git|node_modules|ProjectSettings|UserSettings)$/;
+  // Ownership is a property of the DIRECTORY, not the file: an .asmdef governs a subtree, so every
+  // `.cs` beside another has the same owner. This was a 127-entry prefix walk per file — 3,475 files
+  // against 127 asmdefs is 440k string comparisons for roughly 400 distinct answers.
+  const ownerOfDir = new Map<string, string>();
+  const asmForDir = (dir: string, relFile: string): string => {
+    const hit = ownerOfDir.get(dir);
+    if (hit !== undefined) return hit;
+    const name = owningAsmdef(index, relFile)?.name ?? 'Assembly-CSharp';
+    ownerOfDir.set(dir, name);
+    return name;
+  };
   const walk = (dir: string): void => {
     if (scanned >= limit) return;
     let entries: string[];
@@ -347,13 +395,25 @@ export function typeOwners(repo: string, index: AsmdefIndex, limit = 20_000): Ty
       if (st.isDirectory()) { walk(p); continue; }
       if (extname(e).toLowerCase() !== '.cs') continue;
       scanned++;
-      let text = '';
-      try { text = readFileSync(p, 'utf-8'); } catch { continue; }
-      const asm = owningAsmdef(index, relative(repo, p))?.name ?? 'Assembly-CSharp';
-      for (const t of readCsFacts(text).types) if (!owner.has(t.name)) owner.set(t.name, asm);
+      const rel = relative(repo, p);
+      const cached = prev.get(rel);
+      let types: string[];
+      if (cached && cached.mtimeMs === st.mtimeMs) {
+        types = cached.types;
+      } else {
+        let text = '';
+        try { text = readFileSync(p, 'utf-8'); } catch { continue; }
+        types = readCsFacts(text).types.map((t) => t.name);
+        reread++;
+      }
+      fresh.set(rel, { mtimeMs: st.mtimeMs, types });
+      const asm = asmForDir(dir, rel);
+      for (const t of types) if (!owner.has(t)) owner.set(t, asm);
     }
   };
   walk(repo);
+  ownersCache = { repo, files: fresh };
+  log('DEBUG', 'qa_type_owners', { scanned, reread, cached: scanned - reread });
   return { owner, scanned };
 }
 

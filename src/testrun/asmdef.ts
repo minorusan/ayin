@@ -97,9 +97,28 @@ function guidOf(metaPath: string): string | null {
   } catch { return null; }
 }
 
+/**
+ * The index, memoised against the asmdefs' own mtimes.
+ *
+ * Rebuilt on every QA run, every testrun and every `unity` command, at ~295ms for 127 files. The
+ * directory walk still runs — it is how "did an asmdef appear or vanish" is answered — but reading
+ * and parsing 127 JSON files is a pure function of their bytes, so the signature below keeps it.
+ */
+let indexCache: { repo: string; signature: string; index: AsmdefIndex } | null = null;
+
+/** Drop the memo — for a test, or a caller that knows the tree changed under it. */
+export function clearAsmdefIndexCache(): void { indexCache = null; }
+
 export function buildAsmdefIndex(repo: string): AsmdefIndex {
   const paths: string[] = [];
   walk(repo, '', paths);
+
+  // Paths AND mtimes: an edited asmdef keeps its path, and a new one changes the list. Either
+  // invalidates, and the whole signature is one stat per asmdef.
+  const signature = paths.map((p) => {
+    try { return `${p}:${statSync(join(repo, p)).mtimeMs}`; } catch { return `${p}:0`; }
+  }).join('|');
+  if (indexCache && indexCache.repo === repo && indexCache.signature === signature) return indexCache.index;
 
   const all: Asmdef[] = [];
   const unparsed: string[] = [];
@@ -155,7 +174,9 @@ export function buildAsmdefIndex(repo: string): AsmdefIndex {
     .map((a) => ({ dir: a.dir, asmdef: a }))
     .sort((x, y) => y.dir.length - x.dir.length);
 
-  return { all, byName, byGuid, dirsLongestFirst, unparsed };
+  const built = { all, byName, byGuid, dirsLongestFirst, unparsed };
+  indexCache = { repo, signature, index: built };
+  return built;
 }
 
 /**
