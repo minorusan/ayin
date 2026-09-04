@@ -166,6 +166,28 @@ export interface NameHit {
   score: number;
 }
 
+/**
+ * May a match on this name RESTRICT the candidate set, or only boost inside it?
+ *
+ * **A single common word is not an identity.** This replaced a denylist, and the denylist is why:
+ * it held forty words and needed four more the morning it was measured on a fresh corpus. Queries
+ * that should have gone semantic were gated to one arbitrary chunk by an exact hit on a symbol
+ * literally named `multiplier`, `queue`, `Move` or `Streak` — every one of them a real identifier
+ * somewhere, every one of them also an ordinary English word the operator was using as English.
+ * Adding those four would have bought a week.
+ *
+ * A COMPOUND name cannot collide that way. `SolitaireStreakBrain` normalises to three words and a
+ * query only reaches 0.9 against it by containing the identifier itself; `RewardService` to two. A
+ * bare `move` reaches 1.00 against the entity `Move` by accident, so it may only boost — it still
+ * outranks any amount of word overlap, it simply cannot silence the rest of the corpus.
+ *
+ * Paths always gate: nobody types `Assets/…/SolitaireStreakBrain.cs` by accident.
+ */
+export function canGate(handle: Handle): boolean {
+  if (handle.kind === 'file') return true;
+  return handle.normalized.split(' ').filter(Boolean).length >= 2;
+}
+
 /** Score one query token against one handle. Exact first, then containment, then fuzzy. */
 function scoreToken(token: string, h: Handle): number {
   const t = normalizeName(token);

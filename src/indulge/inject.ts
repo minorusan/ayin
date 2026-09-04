@@ -27,7 +27,8 @@
 import { log } from '../log.js';
 import { isCorpusInjection } from '../modes.js';
 import { chunksByIds, embedQuery, hasUsableVectors, loadVectors, vectorSearch, liveVectors, QUERY_TIMEOUT_MS } from './embed.js';
-import { buildLexicon, lookupNames, type NameHit } from './lexicon.js';
+import { buildLexicon, canGate, lookupNames, type NameHit } from './lexicon.js';
+import { rerank, rerankCandidates, rerankEnabled, rerankFloor } from './rerank.js';
 import { assessChunk } from './staleness.js';
 import { citeLabel, openStore, type Chunk } from './store.js';
 
@@ -161,25 +162,11 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
   // gated the candidate set — so the chunk that actually answers it (the tail apex) was never
   // considered. An exact name is evidence; a fuzzy hit on an English word is a coincidence.
   const STRONG = 0.9;
-  /**
-   * A symbol whose name is also an ordinary English word may BOOST, never GATE.
-   *
-   * The comment above fixed the FUZZY case; an EXACT match walks straight through it. Measured on a
-   * real corpus: "what unloads game mode resources and when is that wrong" matched a symbol literally
-   * named `Resources` at score 1.00, which gated the candidate set to that ONE chunk — a test about
-   * mock state — so the semantic pass, restricted to it, found nothing and fell through to keyword.
-   * The answer was confidently wrong and read as a bad corpus rather than a bad gate.
-   *
-   * Same rule as everywhere else here: an ambiguous name is not an identity. Such a hit still scores
-   * as a weak one, so a genuinely relevant chunk keeps its boost — it simply cannot silence the rest.
-   */
-  const AMBIGUOUS_NAME = new Set([
-    'resources', 'resource', 'state', 'data', 'value', 'result', 'item', 'items', 'name', 'type',
-    'event', 'events', 'error', 'config', 'settings', 'manager', 'service', 'controller', 'view',
-    'model', 'game', 'time', 'text', 'file', 'path', 'point', 'points', 'size', 'index', 'count',
-    'input', 'output', 'context', 'session', 'target', 'source', 'content', 'action', 'status',
-  ]);
-  const gating = named.filter((n) => n.score >= STRONG && !AMBIGUOUS_NAME.has(n.handle.normalized.toLowerCase()));
+  // …and a name that is a single common word may BOOST but never GATE, however exact the match.
+  // `canGate` carries the reasoning and the four words that retired the denylist that used to live
+  // here. Restriction is now decided by the SHAPE of the name rather than by a list of the English
+  // words someone has been bitten by so far.
+  const gating = named.filter((n) => n.score >= STRONG && canGate(n.handle));
   const strongIds = new Set(gating.flatMap((n) => [...n.handle.chunkIds]));
   const namedIds = new Set(named.flatMap((n) => [...n.handle.chunkIds]));   // weak hits still BOOST
   const pool = strongIds.size ? all.filter((c) => strongIds.has(c.chunkId)) : all;
@@ -191,11 +178,47 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
   if (hasUsableVectors(store)) {
     try {
       const qv = await embedQuery(query);
+      // A WIDER NET WHEN A RERANKER WILL NARROW IT. The cheap stages only have to get the answer
+      // into the shortlist; measured, the right chunk for an assembly question sat at cosine #25, so
+      // asking cosine for `limit` and stopping there is what buried it.
+      const wide = rerankEnabled() ? Math.max(limit, rerankCandidates()) : limit;
+      // AND NO DOMAIN GATE WHEN A RERANKER IS RANKING. Domain top-K is a RECALL filter, and putting
+      // one in front of a precision filter is backwards. Measured: "what happens when a bundle
+      // download fails" has its answer at cosine #1 (0.773), which reranks to 0.49 — and the gate
+      // dropped it, because it picked `game mode bundles` and `reward handlers` as the top two
+      // domains while that chunk sits in `changed on this branch`. The stage below then correctly
+      // reported that nothing good was there, about a shortlist the best chunk never entered.
+      //
+      // Coarse-to-fine still holds; what changed is which stage decides. Cosine used to be final, so
+      // scoping before it was both cheaper and more accurate. Now cosine only has to get the answer
+      // into the window, and every filter above it can only lose.
       const hits = vectorSearch(liveVectors(store), qv, {
-        limit, within: strongIds.size ? strongIds : undefined,
+        limit: wide,
+        within: strongIds.size ? strongIds : undefined,
+        ...(rerankEnabled() ? { topDomains: Number.MAX_SAFE_INTEGER } : {}),
       });
       if (hits.length) {
-        return render(repoPath, store, chunksByIds(all, hits.map((h) => h.chunkId)), query, named, 'semantic');
+        const ordered = chunksByIds(all, hits.map((h) => h.chunkId));
+        if (!rerankEnabled()) {
+          return render(repoPath, store, ordered.slice(0, limit), query, named, 'semantic');
+        }
+        const scored = await rerank(query, ordered.map((c) => `${c.question}\n\n${c.answer}`));
+        // Fails open: no reranker, no reordering, and cosine's order stands.
+        if (!scored.length) {
+          return render(repoPath, store, ordered.slice(0, limit), query, named, 'semantic');
+        }
+        const floor = rerankFloor();
+        const kept = scored.filter((h) => h.score >= floor).slice(0, limit);
+        // NOTHING CLEARED THE FLOOR IS AN ANSWER. Cosine cannot say this — its relevant and
+        // irrelevant bands are 0.017 apart — and returning the best of a bad shortlist is how a
+        // corpus launders a guess into a citation. Saying so is the whole reason this stage exists.
+        if (!kept.length) {
+          return `Nothing in the corpus answers "${query}".`
+            + ` ${scored.length} candidate(s) were considered and the closest scored`
+            + ` ${scored[0].score.toFixed(2)} against a floor of ${floor}.`
+            + ` The corpus holds ${store.totals().chunks} answered question(s) for this repo.`;
+        }
+        return render(repoPath, store, kept.map((h) => ordered[h.index]), query, named, 'semantic');
       }
     } catch (e) {
       // SAY WHY, ON SCREEN. This catch hid a real failure for four rounds of debugging: the search
