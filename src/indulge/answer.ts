@@ -250,6 +250,33 @@ export function buildSources(repoPath: string, files: string[], budget = context
   return blocks.join('\n\n');
 }
 
+/**
+ * Deterministic project-type facts for `file`, from every indulger that has any.
+ *
+ * Appended AFTER the sources and before the questions, which keeps it inside the per-file prefix
+ * every question about that file shares — so the server's KV cache still pays for it once rather
+ * than once per question.
+ *
+ * A broken or throwing hook costs its own block and nothing else: this is the overnight path, and a
+ * night must not be lost to somebody's regex.
+ */
+export function hookEvidence(repoPath: string, file: string): string {
+  let source: string;
+  try { source = readFileSync(join(repoPath, file), 'utf-8'); } catch { return ''; }
+  const blocks: string[] = [];
+  for (const hook of indulgersFor(repoPath)) {
+    if (!hook.evidenceFor) continue;
+    try {
+      const text = hook.evidenceFor({ repoPath, file, source });
+      if (text && text.trim()) blocks.push(text.trim());
+    } catch { continue; }
+  }
+  if (!blocks.length) return '';
+  // Named as facts about the repo rather than as more source, because that is what they are: the
+  // model must be able to tell a binding it was handed from a line it read.
+  return `=== FACTS ABOUT ${file} (derived from the repository, not from the source above) ===\n${blocks.join('\n\n')}`;
+}
+
 /** The file with 1-based line numbers, clipped — the numbers are what a CITE line must refer to. */
 function readSource(repoPath: string, file: string): string {
   let text: string;
@@ -510,9 +537,10 @@ async function buildAnswerBatch(
   const out = new Map<string, { answer: string; citations: Citation[]; rejected: number }>();
   const sources = buildSources(repoPath, contextFilesFor(opts.store, file));
   if (!sources) return out;
+  const facts = hookEvidence(repoPath, file);
 
   const prompt = indulgePrompts().get('answerBatch', {
-    SOURCES: sources,
+    SOURCES: facts ? `${sources}\n\n${facts}` : sources,
     FILE: file,
     QUESTIONS: questions.map((q) => `- id: ${q.id}\n  ${q.text}`).join('\n'),
   });
@@ -581,8 +609,9 @@ async function buildAnswer(
   if (!gitFacts && !opts.deep && !opts.investigate) {
     const sources = buildSources(repoPath, contextFilesFor(opts.store, q.file));
     if (!sources) return null;
+    const facts = hookEvidence(repoPath, q.file);
     const direct = indulgePrompts().get('answerDirect', {
-      SOURCES: sources, FILE: q.file, QUESTION: q.text,
+      SOURCES: facts ? `${sources}\n\n${facts}` : sources, FILE: q.file, QUESTION: q.text,
     });
     let reply: string;
     try {
@@ -603,10 +632,17 @@ async function buildAnswer(
       });
   if (!evidence || evidence.trim().length < 20) return null;
 
+  // THE SAME FACTS THE DIRECT PATH GETS. `--deep` and `--investigate` are what an operator reaches
+  // for when thoroughness matters most, so they were the wrong paths to leave without the assembly
+  // and container facts: an explore loop reads code, and neither a `.asmdef` nor "who binds this" is
+  // in the code it reads. A git answer gets them too — "why does it look like this" is often
+  // answered by which assembly it had to live in.
+  const facts = hookEvidence(repoPath, q.file);
+
   const prompt = indulgePrompts().get('answerFrame', {
     FILE: q.file,
     QUESTION: q.text,
-    EVIDENCE: evidence,
+    EVIDENCE: facts ? `${evidence}\n\n${facts}` : evidence,
   });
   let reply: string;
   try {

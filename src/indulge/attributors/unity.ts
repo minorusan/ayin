@@ -104,7 +104,21 @@ export const unityAttributor: Attributor = {
     }
 
     // The overnight half, if the corpus covered this file. Free: it is already in the chunk.
-    const ext = ctx.chunks.map((c) => (c.ext as Record<string, unknown> | undefined)?.unity)
+    //
+    // ONLY FROM A CHUNK THAT IS ABOUT THIS FILE. `chunksForFile` also returns chunks that merely
+    // CITE it, and their `ext` describes the file THEY are about. Taking the first one with any
+    // `ext` made `SolitaireStreakBrain.cs` report the assembly of a test that cited it —
+    // `…SolitaireStreak.PlayTests` instead of `…SolitaireStreak`, and "bound in no container" for a
+    // type bound in the installer. A wrong assembly name is worse than none: it is the shape of
+    // fact this whole mechanism exists to supply, so it gets believed.
+    // `entity.file` is the SUBJECT when a chunk has one; `files[0]` is not, because `files` lists the
+    // sources an answer was given — a question about a test carries the class under test in there
+    // too. The offending chunk had `files[0]` pointing at this file and an entity in its test, and it
+    // sorted FIRST because it cited the lines being read, so an OR over the two fields still picked
+    // it. Subject first, and fall back to `files[0]` only for a chunk about a whole file.
+    const ext = ctx.chunks
+      .filter((c) => (c.entity ? c.entity.file === ctx.file : c.files?.[0] === ctx.file))
+      .map((c) => (c.ext as Record<string, unknown> | undefined)?.unity)
       .find((u): u is Record<string, unknown> => Boolean(u));
     if (ext) {
       const refs = ext.referencedBy as string[] | undefined;
@@ -114,6 +128,21 @@ export const unityAttributor: Attributor = {
         const sample = refs?.length ? ` (${refs.slice(0, 3).join(', ')}${total > 3 ? ', …' : ''})` : '';
         parts.push(`referenced by ${total} asset(s)${sample}${asOf ? ` as of ${asOf.slice(0, 10)}` : ''}`);
       }
+      // WHICH ASSEMBLY, AND WHETHER ANYTHING BINDS IT. Neither is derivable from the bytes of the
+      // file being read — the first lives in an .asmdef above it, the second in an installer
+      // elsewhere — and both decide whether an edit here can even compile against a type over there.
+      // The overnight side worked them out; this is the lookup.
+      const assembly = ext.assembly as string | undefined;
+      if (assembly) parts.push(`assembly ${assembly}`);
+      const bound = ext.boundByTotal as number | undefined;
+      if (typeof bound === 'number') {
+        const where = (ext.boundBy as string[] | undefined)?.[0];
+        parts.push(bound === 0
+          ? 'bound in no container'
+          : `bound in ${bound} container site(s)${where ? ` (${where})` : ''}`);
+      }
+      const cross = ext.crossAssembly as string[] | undefined;
+      if (cross?.length) parts.push(`crosses ${cross.slice(0, 2).join(', ')}`);
     }
     return parts.join(' · ');
   },

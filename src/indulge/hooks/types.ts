@@ -95,4 +95,23 @@ export interface Indulger {
   applies(repoPath: string): boolean;
   /** Extra facts for this chunk, or null. Returned rather than mutated, so the caller owns the write. */
   onChunkCreated(chunk: Chunk, ctx: IndulgeContext): Record<string, unknown> | null;
+  /**
+   * Project-type facts to put in front of the model BEFORE it answers, or null.
+   *
+   * `onChunkCreated` is too late for a whole class of question. Measured on a real corpus, the
+   * `connections` and `dependencies` angles owned 316 of 621 failed questions and 280 of the answers
+   * that came back saying the code shows no evidence — because it does not. "Who constructs this"
+   * lives in a container installer three directories away, and "does this cross an assembly
+   * boundary" lives in a build manifest that `languageFor()` correctly refuses as source. The model
+   * was shown the file, answered honestly that the file does not say, and the citation gate threw the
+   * answer away.
+   *
+   * Returned as TEXT for the same reason `attribute` is: the pack owns its wording and the caller
+   * owns the budget. Unlike `attribute` this runs OVERNIGHT, so it may scan — and unlike
+   * `onChunkCreated` its output is never stored, so it must carry `file:line` AND the line's text.
+   * A citation the model has not seen the text of is one it is guessing at.
+   *
+   * Optional: a pack with nothing deterministic to add before the answer omits it entirely.
+   */
+  evidenceFor?(ctx: IndulgeContext): string | null;
 }
