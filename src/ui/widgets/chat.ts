@@ -882,8 +882,19 @@ function toolFooter(tool: string, content: string, elapsedMs?: number): string {
  * used to be fed to blessed as markup, which silently ate or garbled it. When elapsedMs is
  * given, the card closes with a ✓/✗ + duration footer.
  */
+/**
+ * Tools whose result IS a unified diff, and which therefore get the diff renderer.
+ *
+ * `str_replace` was not here, so the single most-used edit tool in the loop fell to the generic path:
+ * TWO lines, clipped at 200 chars, painted in the context colour. An edit is the one tool result an
+ * operator most needs to actually see — it is the agent changing their code — and it was the least
+ * legible thing on screen. `prefab_edit` shares `buildUnifiedDiff` too; without it, a git diff would
+ * render as two grey lines of `diff --git`.
+ */
+const DIFF_TOOLS = new Set(['write_file', 'str_replace', 'prefab_edit']);
+
 export function formatToolResultForChat(tool: string, content: string, elapsedMs?: number): string {
-  if (tool !== 'write_file') {
+  if (!DIFF_TOOLS.has(tool)) {
     const lines = content.split('\n').filter(l => l.trim());
     if (lines.length === 0) {
       return elapsedMs === undefined
@@ -904,28 +915,16 @@ export function formatToolResultForChat(tool: string, content: string, elapsedMs
   // buried everything before it, including the answer you were reading. Head + tail with an honest
   // middle marker — a diff's end matters as often as its beginning, so a plain head cut is the wrong
   // shape here. The `File:` header line is always kept.
-  const diffLines = content.split('\n');
-  const overBudget = diffLines.length > DIFF_PREVIEW_LINES
-    || diffLines.reduce((a, l) => a + l.length + 1, 0) > PREVIEW_CHAR_BUDGET;
-  let headLines = diffLines;
-  let tailLines: string[] = [];
-  let omitted = 0;
-  let omittedChars = 0;
-  if (overBudget) {
-    const head = budgeted(diffLines, DIFF_PREVIEW_LINES - DIFF_TAIL_LINES);
-    headLines = head.shown;
-    const rest = diffLines.slice(headLines.length);
-    tailLines = rest.slice(-DIFF_TAIL_LINES);
-    const middle = rest.slice(0, Math.max(0, rest.length - tailLines.length));
-    omitted = middle.length;
-    omittedChars = middle.reduce((a, l) => a + l.length + 1, 0);
-  }
-
-  const rendered = [
-    ...headLines.map(styleDiffLine).filter((l): l is string => l !== null),
-    ...(omitted > 0 || omittedChars > 0 ? [omissionNote(omitted, omittedChars)] : []),
-    ...tailLines.map(styleDiffLine).filter((l): l is string => l !== null),
-  ];
+  // SHOWN WHOLE — no second cap here.
+  //
+  // There were two: `buildUnifiedDiff` bounds the diff to its own line budget and SAYS how much it
+  // cut, and then this re-cut the result to a head and a tail with a marker in the middle. Two caps
+  // at two layers meant a diff could lose lines twice, and the operator could not tell which cut had
+  // eaten what. One bound, at the producer, announced in the text — and the renderer paints all of
+  // what it is given. An edit is the thing you most need to read in full.
+  const rendered = content.split('\n')
+    .map(styleDiffLine)
+    .filter((l): l is string => l !== null);
   return rendered.join('\n') + toolFooter(tool, content, elapsedMs);
 }
 
@@ -966,10 +965,16 @@ export function formatGateCardForChat(
 /** One diff line, styled. Returns null for the `---`/`+++` headers, which carry nothing readable. */
 function styleDiffLine(line: string): string | null {
   const escaped = escapeBlessedTags(line);
-  if (line.startsWith('File: ')) {
+  // `diff --git a/x b/x` is the header now; `File: x` is kept for the older shape so a diff built
+  // anywhere else still renders.
+  if (line.startsWith('diff --git ') || line.startsWith('File: ')) {
     return `{bold}{${theme.diffFileFg}-fg}{${theme.diffFileBg}-bg} ${escaped} {/${theme.diffFileBg}-bg}{/}`;
   }
   if (line.startsWith('--- ') || line.startsWith('+++ ')) return null;
+  // The stat line and the cut notice are ABOUT the diff, not part of it: dim, so the eye goes to the
+  // coloured body first and finds the counts where git puts them.
+  if (/^\d+ file changed, /.test(line)) return `{${theme.dim}-fg}${escaped}{/}`;
+  if (line.startsWith('… ') || line.startsWith('(whitespace only')) return `{${theme.dim}-fg}${escaped}{/}`;
   if (line.startsWith('@@')) {
     return `{${theme.diffHunkFg}-fg}{${theme.diffHunkBg}-bg} ${escaped} {/${theme.diffHunkBg}-bg}{/}`;
   }
