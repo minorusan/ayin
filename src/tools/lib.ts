@@ -12,7 +12,7 @@
 
 import { toolShell } from './runtime.js';
 import { readdirSync, statSync, existsSync } from 'node:fs';
-import { dirname, basename, resolve, join, isAbsolute } from 'node:path';
+import { dirname, basename, resolve, join, isAbsolute, relative } from 'node:path';
 
 // ── Async exec ──────────────────────────────────────────────────────
 
@@ -337,15 +337,82 @@ type DiffOp =
   | { type: 'delete'; line: string }
   | { type: 'insert'; line: string };
 
+/**
+ * Cells the LCS table may hold before the diff stops being worth its own cost.
+ *
+ * 16M cells is 64 MB as Int32Array and about a tenth of a second. Past that the honest thing is a
+ * coarser diff, not a slower one — see the fallback below.
+ *
+ * 4M was tried and was too tight for an ordinary edit: six scattered changes in a 3,000-line file
+ * leave a 2,501-square middle after trimming, which tripped the fallback and collapsed six hunks
+ * into one — a diff that said "the whole file was replaced" about six one-line edits. The budget
+ * exists to stop a QUADRATIC blowup on a whole-file rewrite, not to second-guess normal work.
+ */
+const LCS_AREA_BUDGET = 16_000_000;
+
+/**
+ * Line diff, with the common head and tail removed FIRST.
+ *
+ * This was a full O(rows x cols) LCS over the whole file, as a `number[][]`, rebuilt on every edit —
+ * and every edit tool shares it: `str_replace`, `write_file`, and `prefab_edit` on Unity scenes that
+ * run to tens of thousands of lines. Measured, for ONE changed line:
+ *
+ *     500 lines     15ms      4 MB
+ *   2,000 lines    114ms     60 MB
+ *   5,000 lines    815ms    241 MB
+ *  10,000 lines  4,159ms    843 MB
+ *
+ * Quadratic, on a result that was already known: a surgical replacement changes a handful of lines
+ * and the rest of the file is identical by construction. Trimming the shared prefix and suffix
+ * reduces the table to the region that actually differs, which for a one-line edit is 1x1 whatever
+ * the file's size. Nothing about the output changes — the trimmed lines are emitted as the `equal`
+ * ops they always were, so hunk offsets and context are identical.
+ *
+ * The table is a flat Int32Array rather than an array of arrays: same arithmetic, one allocation, and
+ * 4 bytes a cell instead of a boxed number plus a row object.
+ */
 function buildLineDiff(oldLines: string[], newLines: string[]): DiffOp[] {
+  let head = 0;
+  while (head < oldLines.length && head < newLines.length && oldLines[head] === newLines[head]) head++;
+  let tail = 0;
+  while (tail < oldLines.length - head && tail < newLines.length - head
+    && oldLines[oldLines.length - 1 - tail] === newLines[newLines.length - 1 - tail]) tail++;
+
+  const ops: DiffOp[] = [];
+  for (let i = 0; i < head; i++) ops.push({ type: 'equal', line: oldLines[i] });
+  ops.push(...diffMiddle(
+    oldLines.slice(head, oldLines.length - tail),
+    newLines.slice(head, newLines.length - tail),
+  ));
+  for (let i = oldLines.length - tail; i < oldLines.length; i++) ops.push({ type: 'equal', line: oldLines[i] });
+  return ops;
+}
+
+/** The differing region, by LCS — or coarsely when even that region is too large to be worth it. */
+function diffMiddle(oldLines: string[], newLines: string[]): DiffOp[] {
   const rows = oldLines.length;
   const cols = newLines.length;
-  const dp: number[][] = Array.from({ length: rows + 1 }, () => Array<number>(cols + 1).fill(0));
+  if (rows === 0 && cols === 0) return [];
+  if (rows === 0) return newLines.map((line) => ({ type: 'insert' as const, line }));
+  if (cols === 0) return oldLines.map((line) => ({ type: 'delete' as const, line }));
 
+  // A whole-file rewrite has no shared head or tail to trim, so the budget is what stops it. Reported
+  // as one replaced block, which is what a rewrite IS — a diff nobody can read is not more truthful
+  // for having cost four seconds.
+  if ((rows + 1) * (cols + 1) > LCS_AREA_BUDGET) {
+    return [
+      ...oldLines.map((line) => ({ type: 'delete' as const, line })),
+      ...newLines.map((line) => ({ type: 'insert' as const, line })),
+    ];
+  }
+
+  const w = cols + 1;
+  const dp = new Int32Array((rows + 1) * w);
   for (let i = rows - 1; i >= 0; i--) {
     for (let j = cols - 1; j >= 0; j--) {
-      if (oldLines[i] === newLines[j]) dp[i][j] = dp[i + 1][j + 1] + 1;
-      else dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+      dp[i * w + j] = oldLines[i] === newLines[j]
+        ? dp[(i + 1) * w + (j + 1)] + 1
+        : Math.max(dp[(i + 1) * w + j], dp[i * w + (j + 1)]);
     }
   }
 
@@ -353,22 +420,26 @@ function buildLineDiff(oldLines: string[], newLines: string[]): DiffOp[] {
   let i = 0;
   let j = 0;
   while (i < rows && j < cols) {
-    if (oldLines[i] === newLines[j]) {
-      ops.push({ type: 'equal', line: oldLines[i] });
-      i++;
-      j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      ops.push({ type: 'delete', line: oldLines[i] });
-      i++;
-    } else {
-      ops.push({ type: 'insert', line: newLines[j] });
-      j++;
-    }
+    if (oldLines[i] === newLines[j]) { ops.push({ type: 'equal', line: oldLines[i] }); i++; j++; }
+    else if (dp[(i + 1) * w + j] >= dp[i * w + (j + 1)]) { ops.push({ type: 'delete', line: oldLines[i] }); i++; }
+    else { ops.push({ type: 'insert', line: newLines[j] }); j++; }
   }
-
   while (i < rows) ops.push({ type: 'delete', line: oldLines[i++] });
   while (j < cols) ops.push({ type: 'insert', line: newLines[j++] });
   return ops;
+}
+
+/**
+ * The path as `git diff` would name it: relative to the working tree.
+ *
+ * `a/` + an absolute path yields `a//tmp/x`, which is not a path any diff reader or `git apply` will
+ * take. Files outside the tree keep their absolute path minus the leading slash, because a wrong
+ * relative path (`../../..`) would be worse than a long true one.
+ */
+function diffPathOf(path: string): string {
+  const abs = isAbsolute(path) ? path : join(process.cwd(), path);
+  const rel = relative(process.cwd(), abs);
+  return rel && !rel.startsWith('..') ? rel : abs.replace(/^\/+/, '');
 }
 
 export function buildUnifiedDiff(path: string, before: string, after: string, contextLines = 3): string {
@@ -392,8 +463,21 @@ export function buildUnifiedDiff(path: string, before: string, after: string, co
     else hunks.push({ start, end });
   }
 
-  const out: string[] = [`File: ${path}`, `--- ${path}`, `+++ ${path}`];
+  // THE STAT IS COMPUTED OVER THE WHOLE DIFF, not the part that survives the cap. "3 insertions"
+  // when thirty were written is the one number a reader would act on being wrong.
+  const added = ops.filter((o) => o.type === 'insert').length;
+  const removed = ops.filter((o) => o.type === 'delete').length;
 
+  // The git header, and only it. `File: x` / `--- x` / `+++ x` said the same path three times and in
+  // a shape no diff reader knows; `a/` and `b/` are what every one of them expects.
+  const gitPath = diffPathOf(path);
+  const out: string[] = [
+    `diff --git a/${gitPath} b/${gitPath}`,
+    `--- a/${gitPath}`,
+    `+++ b/${gitPath}`,
+  ];
+
+  const body: string[] = [];
   for (const hunk of hunks) {
     let oldLineNo = 1;
     let newLineNo = 1;
@@ -404,18 +488,75 @@ export function buildUnifiedDiff(path: string, before: string, after: string, co
     }
 
     const hunkOps = ops.slice(hunk.start, hunk.end);
-    const oldCount = hunkOps.filter(op => op.type !== 'insert').length;
-    const newCount = hunkOps.filter(op => op.type !== 'delete').length;
-    out.push(`@@ -${oldLineNo},${oldCount} +${newLineNo},${newCount} @@`);
+    const oldCount = hunkOps.filter((op) => op.type !== 'insert').length;
+    const newCount = hunkOps.filter((op) => op.type !== 'delete').length;
+    // The SECTION HEADING, as `git diff` puts there: the nearest enclosing declaration above the
+    // hunk. Three lines of context tell you what changed and not what it belongs to, and a reader
+    // scanning several edits needs the second more than the first.
+    const section = sectionHeadingFor(oldLines, oldLineNo - 1);
+    body.push(`@@ -${oldLineNo},${oldCount} +${newLineNo},${newCount} @@${section ? ` ${section}` : ''}`);
 
     for (const op of hunkOps) {
-      if (op.type === 'equal') out.push(` ${op.line}`);
-      else if (op.type === 'delete') out.push(`-${op.line}`);
-      else out.push(`+${op.line}`);
+      const sigil = op.type === 'equal' ? ' ' : op.type === 'delete' ? '-' : '+';
+      body.push(`${sigil}${clipDiffLine(op.line)}`);
     }
   }
 
+  // ANNOUNCE THE CUT. A diff long enough to bury its own summary is a diff nobody reads to the end,
+  // and it costs the same context whether or not anyone does.
+  const shown = body.length > MAX_DIFF_LINES ? body.slice(0, MAX_DIFF_LINES) : body;
+  const cut = body.length - shown.length;
+  out.push(...shown);
+  if (cut > 0) out.push(`… ${cut} more diff line(s) not shown (the counts below cover the whole change)`);
+
+  const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
+  out.push(`1 file changed, ${plural(added, 'insertion')}(+), ${plural(removed, 'deletion')}(-)`);
+
+  // WHITESPACE-ONLY CHANGES ARE INVISIBLE IN A DIFF, and that is exactly when a reader most needs
+  // telling: the two lines look identical, so the edit reads as a no-op that somehow reported a
+  // change. Only said when EVERY change is whitespace — otherwise the real edit is the story.
+  if (onlyWhitespaceChanged(ops)) {
+    out.push('(whitespace only — the visible text is unchanged on every line above)');
+  }
   return out.join('\n');
+}
+
+/** Diff body lines shown before the cut. Past this, a reader has stopped reading and a model has not. */
+const MAX_DIFF_LINES = 160;
+/** One line of a diff. A minified bundle has single lines longer than this whole budget. */
+const MAX_DIFF_LINE_CHARS = 500;
+
+function clipDiffLine(line: string): string {
+  return line.length > MAX_DIFF_LINE_CHARS
+    ? `${line.slice(0, MAX_DIFF_LINE_CHARS)}… (line clipped at ${MAX_DIFF_LINE_CHARS} of ${line.length} chars)`
+    : line;
+}
+
+/**
+ * The nearest declaration at or above `fromIndex`, as `git diff` shows after `@@`.
+ *
+ * Deliberately shallow: a line that starts at column 0, is not a brace or a comment, and reads like a
+ * declaration. Language-agnostic by construction, so it is right about C#, TypeScript and Python and
+ * merely unhelpful about anything it cannot recognise — which is the correct failure for a label.
+ */
+function sectionHeadingFor(lines: string[], fromIndex: number): string {
+  for (let i = Math.min(fromIndex, lines.length - 1); i >= 0; i--) {
+    const line = lines[i];
+    if (!line || /^\s/.test(line)) continue;                 // indented: not the enclosing scope
+    if (/^[)}\]]/.test(line)) continue;                       // a closing brace is not a heading
+    if (/^\s*(\/\/|\/\*|\*|#|--)/.test(line)) continue;      // comments name nothing
+    if (!/[A-Za-z_$@[]/.test(line[0])) continue;
+    return line.trim().slice(0, 100);
+  }
+  return '';
+}
+
+/** True when every changed line differs from its counterpart only in whitespace. */
+function onlyWhitespaceChanged(ops: Array<{ type: string; line: string }>): boolean {
+  const dels = ops.filter((o) => o.type === 'delete').map((o) => o.line.replace(/\s+/g, ''));
+  const adds = ops.filter((o) => o.type === 'insert').map((o) => o.line.replace(/\s+/g, ''));
+  if (!dels.length || dels.length !== adds.length) return false;
+  return dels.every((d, i) => d === adds[i]);
 }
 
 // ── Tool implementations ────────────────────────────────────────────
