@@ -35,8 +35,36 @@ const indulgePrompts = (): ToolPrompts => toolPrompts('indulge');
 
 /** Chunks per model call. Small enough that one bad reply costs little, large enough to amortise. */
 const BATCH = 12;
-/** An answer shorter than this said nothing, whatever it said. */
-const MIN_ANSWER_CHARS = 40;
+/**
+ * A non-answer, and LENGTH IS NOT HOW YOU TELL.
+ *
+ * This was a flat floor: under 40 characters said nothing, whatever it said. Measured right after the
+ * answer prompts started asking for the fact and nothing else, that floor rejected 133 of 1,075
+ * chunks — 12% of the corpus filtered out of retrieval — and every one sampled was a correct cited
+ * fact: "The counter stays at 1", "It returns string.Empty", "PlayPerfect.GameModes.Rewards",
+ * "The Y-coordinate value is 140f". The answer prompt says in as many words that a short answer is a
+ * good answer; this rule was calling that a defect.
+ *
+ * The first repair kept the floor and acquitted anything holding a "concrete token" by regex. It
+ * still condemned `IRuntimeGameModesLogger`, `Core` and `_gameStartCoroutine`, because a regex for
+ * "looks like an identifier" is the same list-of-exceptions in another costume — and the identifiers
+ * a repo will invent tomorrow are not enumerable today.
+ *
+ * So the rule pass now decides only what is DECIDABLE. A non-answer is one that does not commit, and
+ * that is a closed set of shapes: `yes`, `no`, `it depends`, `unclear`. Whether a short but committed
+ * answer is worth keeping is a judgement, and the audit already has a pass for judgement — the model
+ * one, on question and answer alone. Spending the free pass on it meant guessing, and guessing here
+ * deletes evidence.
+ *
+ * `true` and `false` are deliberately NOT here: "what is the default value of X" is answered by one
+ * of them, and correctly.
+ */
+const NON_ANSWER = /^(yes|no|maybe|n\/?a|none|nothing|nothing known|unknown|unclear|it depends|not applicable|not specified)\.?$/i;
+
+export function saysNothing(answer: string): boolean {
+  const a = answer.trim();
+  return !a || NON_ANSWER.test(a);
+}
 
 export interface QaVerdict {
   chunkId: string;
@@ -71,7 +99,7 @@ export function ruleReject(chunk: Chunk): string | null {
   if (!q) return 'no question';
   if (q.length > 320) return 'question is an essay';
   if (!a) return 'no answer';
-  if (a.length < MIN_ANSWER_CHARS) return 'answer says nothing';
+  if (saysNothing(a)) return 'answer says nothing';
   // A chunk with no citation cannot exist by design; one that does is corruption, not an opinion.
   if (!chunk.citations?.length) return 'no citations';
   if (a.toLowerCase() === q.toLowerCase()) return 'answer restates the question';

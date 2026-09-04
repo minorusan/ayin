@@ -26,6 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { languageFor } from '../entangle/index.js';
+import { hookEvidence } from './answer.js';
 import { categoryBatchSize, singleFileBudgetChars } from './budget.js';
 import { toolLlm, toolPrompts, type ToolPrompts } from '../tools/runtime.js';
 import { ensureToolRuntime } from '../tool-wiring.js';
@@ -37,9 +38,32 @@ ensureToolRuntime();
 
 const indulgePrompts = (): ToolPrompts => toolPrompts('indulge');
 
-const DEFAULT_MAX_PER_TARGET = 4;
-const DEFAULT_MAX_PER_FILE = 40;
+const DEFAULT_MAX_PER_TARGET = 3;
 const DEFAULT_MAX_ENTITIES = 12;
+
+/**
+ * How much of a night ONE file may take — DERIVED FROM ITS SURFACE, not a constant.
+ *
+ * It was a flat 40, and 40 was the shape of the corpus rather than a limit on it: measured on a
+ * 4,419-chunk build, 167 files carried the whole corpus and EIGHTY-FOUR of them sat at 35 chunks or
+ * more — one installer took 123 — while 148 of the 182 files in the feature being worked on got
+ * nothing at all.
+ *
+ * A flat 15 then went wrong in the other direction, and that is the more interesting failure. Only
+ * ONE file of 97 reached the new cap; the median was 3, and a 900-line `GameManager` produced a
+ * single chunk. The cap was never what bound it — the prompt was, and a flat number cannot tell a
+ * twenty-member service from a twelve-line enum in the first place.
+ *
+ * So the budget is the sum of what this file's own targets are allowed, floored so a small type
+ * still gets asked about and capped so nothing can eat a night. A file earns its share of the
+ * corpus by having surface, which is the only signal available before anything has been asked.
+ */
+const MIN_PER_FILE = 6;
+const MAX_PER_FILE_CEILING = 40;
+
+export function perFileBudget(targets: number, perTarget: number): number {
+  return Math.min(MAX_PER_FILE_CEILING, Math.max(MIN_PER_FILE, targets * perTarget));
+}
 
 /** How much of a file the model is shown. Clipping is ANNOUNCED — a silently truncated file reads as
  *  the whole thing, and the model then writes questions about code it was never given. */
@@ -156,6 +180,50 @@ export function parseQuestions(reply: string, max: number): string[] {
   return out;
 }
 
+/**
+ * Content words of a question, for comparing two of them.
+ *
+ * Interrogatives and articles are dropped because they are exactly what differs between two askings
+ * of one question: "which transactions are included in CurrentSession" and "what transactions does
+ * CurrentSession include" are one question and one answer.
+ */
+const QUESTION_NOISE = new Set([
+  'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'does', 'do', 'did', 'has', 'have',
+  'what', 'which', 'how', 'when', 'where', 'why', 'who', 'whose', 'in', 'on', 'of', 'to', 'for',
+  'from', 'by', 'with', 'and', 'or', 'this', 'that', 'these', 'those', 'it', 'its', 'as', 'at',
+  'specific', 'specifically', 'exactly', 'actually', 'here', 'used', 'use', 'get', 'gets',
+]);
+
+export function questionTokens(text: string): Set<string> {
+  return new Set(text.toLowerCase().split(/[^a-z0-9]+/)
+    .filter((w) => w.length > 2 && !QUESTION_NOISE.has(w)));
+}
+
+/**
+ * Is this question one already asked about this file, in other words?
+ *
+ * The stable id catches a REPEAT — same text, same target — and nothing else, so two angles asking
+ * one question in slightly different words both store, both cost a full answer call, and both land
+ * in the corpus with identical answers. Measured on a real build: `functionality` and `gotchas` each
+ * asked what `CurrentSession` contains, and the two chunks' answers were the same sentence.
+ *
+ * Jaccard over content words, per FILE rather than per target, because the duplicate pair is usually
+ * one question filed against a class and against one of its members.
+ */
+const DUPLICATE_OVERLAP = 0.8;
+
+export function looksDuplicate(text: string, seen: Iterable<Set<string>>): boolean {
+  const a = questionTokens(text);
+  if (a.size < 3) return false;          // too short to judge; the id check still applies
+  for (const b of seen) {
+    let shared = 0;
+    for (const w of a) if (b.has(w)) shared++;
+    const union = a.size + b.size - shared;
+    if (union > 0 && shared / union >= DUPLICATE_OVERLAP) return true;
+  }
+  return false;
+}
+
 const label = (e: Entity | null): string => (e ? `${e.kind} ${e.name}` : 'the file as a whole');
 
 /**
@@ -169,7 +237,7 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
   const repoPath = resolve(opts.repoPath);
   const categories = opts.categories?.length ? opts.categories : CATEGORIES;
   const maxPerTarget = opts.maxPerTarget ?? DEFAULT_MAX_PER_TARGET;
-  const maxPerFile = opts.maxPerFile ?? DEFAULT_MAX_PER_FILE;
+  const maxPerFileOverride = opts.maxPerFile;
   const maxEntities = opts.maxEntities ?? DEFAULT_MAX_ENTITIES;
 
   const report: QuestionsReport = {
@@ -205,16 +273,26 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
   ]);
   const perFile = new Map<string, number>();
   for (const q of existing) perFile.set(q.file, (perFile.get(q.file) ?? 0) + 1);
+  // Content-word sets of every question already on disk, so a re-run does not re-ask one it already
+  // holds in other words — and so two angles in ONE run cannot each store the same question.
+  const seenText = new Map<string, Set<string>[]>();
+  for (const q of existing) {
+    const list = seenText.get(q.file);
+    if (list) list.push(questionTokens(q.text)); else seenText.set(q.file, [questionTokens(q.text)]);
+  }
 
   // Total is an upper bound: resumed triples are skipped without a call, and it is reported as such.
   let total = 0;
-  const plan: Array<{ file: string; source: string; targets: Array<Entity | null>; perTarget: number }> = [];
+  const plan: Array<{ file: string; source: string; targets: Array<Entity | null>; perTarget: number; cap: number }> = [];
   for (const path of paths) {
     let source: string;
     try { source = readFileSync(join(repoPath, path), 'utf-8'); } catch { report.skipped++; continue; }
     const budget = budgetFor(path);
     const targets = targetsFor(path, source, budget.entities);
-    plan.push({ file: path, source, targets, perTarget: budget.perTarget });
+    plan.push({
+      file: path, source, targets, perTarget: budget.perTarget,
+      cap: maxPerFileOverride ?? perFileBudget(targets.length, budget.perTarget),
+    });
     // Calls are per (FILE, category) now — targets ride along inside one prompt. Counting slots
     // here would report `up to 336 generation calls` for twelve files that will cost thirty-six,
     // and an inflated cost estimate is exactly the number that made the old per-target shape look
@@ -225,12 +303,21 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
   onStatus?.(`${plan.length} file(s) × ${categories.length} categor${categories.length === 1 ? 'y' : 'ies'} → up to ${total} generation call(s)`);
 
   let step = 0;
-  for (const { file, source, targets, perTarget } of plan) {
+  for (const { file, source, targets, perTarget, cap: maxPerFile } of plan) {
     const cap = maxSourceChars();
     const clipped = source.length > cap;
     const shown = clipped
       ? `${source.slice(0, cap)}\n… (file clipped at ${cap} of ${source.length} characters)`
       : source;
+
+    // THE SAME FACTS THE ANSWER STAGE WILL HAVE.
+    //
+    // A question is only worth asking if it can be answered, and stage 3 fails one it cannot prove.
+    // Asking "who constructs this" while showing only the file guarantees a question whose answer is
+    // not in the bytes anyone will be shown — measured at 316 of 621 failures across `connections`
+    // and `dependencies`. Showing the bindings and the assembly HERE means the angle asks about the
+    // wiring that exists, rather than about wiring the model assumes must be somewhere.
+    const facts = hookEvidence(repoPath, file);
 
     // ONE CALL PER (FILE, CATEGORY) — not per (entity, category).
     //
@@ -277,7 +364,7 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
           MAX: String(perTarget),
           ANGLES: [...wantedByCat.keys()].map((c) => `- ${c}: ${categoryFocus(c).replace(/\s+/g, ' ').slice(0, 400)}`).join('\n'),
           TARGETS: allTargets.map((e) => `- ${label(e)}`).join('\n'),
-          SOURCE: shown,
+          SOURCE: facts ? `${shown}\n\n${facts}` : shown,
         });
         let reply: string;
         try {
@@ -293,10 +380,14 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
           for (const [entity, texts] of parsed.get(cat) ?? []) {
             for (const text of texts) {
               if ((perFile.get(file) ?? 0) >= maxPerFile) break;
+              const already = seenText.get(file) ?? [];
+              if (looksDuplicate(text, already)) { report.duplicates++; continue; }
               const id = questionId(text, file, entity);
               if (store.addQuestion({ id, file, entity, category: cat, text })) {
                 report.generated++;
                 perFile.set(file, (perFile.get(file) ?? 0) + 1);
+                already.push(questionTokens(text));
+                seenText.set(file, already);
               } else {
                 report.duplicates++;
               }
@@ -331,7 +422,7 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
         FOCUS: categoryFocus(category),
         MAX: String(perTarget),
         TARGETS: wanted.map((e) => `- ${label(e)}`).join('\n'),
-        SOURCE: shown,
+        SOURCE: facts ? `${shown}\n\n${facts}` : shown,
       });
       let reply: string;
       try {
@@ -350,10 +441,14 @@ export async function generateQuestions(opts: QuestionOptions): Promise<Question
       for (const [entity, texts] of byTarget) {
         for (const text of texts) {
           if ((perFile.get(file) ?? 0) >= maxPerFile) break;
+          const already = seenText.get(file) ?? [];
+          if (looksDuplicate(text, already)) { report.duplicates++; continue; }
           const id = questionId(text, file, entity);
           if (store.addQuestion({ id, file, entity, category, text })) {
             report.generated++;
             perFile.set(file, (perFile.get(file) ?? 0) + 1);
+            already.push(questionTokens(text));
+            seenText.set(file, already);
           } else {
             report.duplicates++;
           }

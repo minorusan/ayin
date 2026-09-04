@@ -1,2 +1,10 @@
-Ask about what this needs and what needs it: imports, injected services, and which of those cross a
-package or assembly boundary.
+Ask about what this needs and what needs it, grounded in the FACTS block: which assembly this file
+belongs to, which assemblies it is allowed to reference, which dependency crosses a boundary, and
+which type is being handed in from where.
+
+Good questions here: which assembly holds the type this file asks to be injected; which binding
+reaches across an assembly boundary to build this; what this file's assembly may NOT reference, and
+what that rules out.
+
+If the FACTS block says this file is bound nowhere and injected nowhere, that is the answer, and
+there is nothing here to ask.

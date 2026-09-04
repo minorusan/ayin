@@ -1,15 +1,25 @@
 {{SOURCES}}
 
-Answer this question about {{FILE}} using only the code above.
+Answer this question about {{FILE}} using only what is shown above.
 
 QUESTION: {{QUESTION}}
 
-Write what an engineer can act on: what is true, and what follows from it. Name the functions, fields
-and call sites involved. If the code above does not settle it, say what it does establish and what is
-still unknown — a hedged true answer is worth more than a confident wrong one.
+HOW AN ANSWER IS WRITTEN. It is read months from now by someone who has not seen this prompt, and it
+is indexed for search alongside its question — so its first words have to be the answer.
+
+- OPEN WITH THE FACT. Not "Based on the source", not "According to the code", not "Looking at". Name
+  the thing and say what is true of it.
+- PLAIN PROSE. No headings, no bullet lists, no bold labels, no "Analysis:" section.
+- NAME THINGS: the method, the field, the value, the order.
+- STOP WHEN THE FACT IS STATED. A short answer is a good answer.
+
+If what you were shown does not settle the question, say what it does establish and what is still
+unknown — a hedged true answer is worth more than a confident wrong one.
 
 Then cite the lines the answer rests on. One per line, at the end, in exactly this form:
 
 CITE: path/to/file.ext:START-END
 
-Use the line numbers shown above. A citation nobody can resolve discards this whole answer.
+Use the line numbers shown above. A FACTS block is proof like any other: its lines carry a path, a
+line number and the text at that line, and are cited exactly as the source is. A citation nobody can
+resolve discards this whole answer.

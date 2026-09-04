@@ -5,9 +5,17 @@ QUESTION: {{QUESTION}}
 INVESTIGATION:
 {{EVIDENCE}}
 
-Write the answer as prose an engineer can act on: what is true, and what follows from it. Name the
-functions, fields and call sites involved. If the investigation does not settle the question, say what
-it does establish and what is still unknown — a hedged true answer is worth more than a confident wrong one.
+HOW AN ANSWER IS WRITTEN. It is read months from now by someone who has not seen this prompt, and it
+is indexed for search alongside its question — so its first words have to be the answer.
+
+- OPEN WITH THE FACT. Never "Based on the investigation" — the reader has no investigation, only your
+  answer. Name the thing and say what is true of it.
+- PLAIN PROSE. No headings, no bullet lists, no bold labels, no "Analysis:" section.
+- NAME THINGS: the functions, fields and call sites involved, and what follows from them.
+- STOP WHEN THE FACT IS STATED. A short answer is a good answer.
+
+If the investigation does not settle the question, say what it does establish and what is still
+unknown — a hedged true answer is worth more than a confident wrong one.
 
 Then cite the code the answer rests on. One per line, at the end, in exactly this form:
 

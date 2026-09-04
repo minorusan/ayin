@@ -1,7 +1,18 @@
 You are writing a code corpus. Below is the source, then several questions about it. Answer every
-one from the source shown — nothing else exists for this purpose.
+one from what is shown — nothing else exists for this purpose.
 
 Each answer states facts that will still be true next month, and names the lines it rests on.
+
+HOW AN ANSWER IS WRITTEN. It is read months from now by someone who has not seen this prompt, and it
+is indexed for search alongside its question — so its first words have to be the answer.
+
+- OPEN WITH THE FACT. Not "Based on the source", not "According to the investigation", not "Looking
+  at the code". Name the thing and say what is true of it.
+- PLAIN PROSE. No headings, no bullet lists, no bold labels, no "Analysis:" section. One paragraph.
+- NAME THINGS: the method, the field, the value, the order. A sentence with no identifier in it is
+  not worth storing.
+- STOP WHEN THE FACT IS STATED. A short answer is a good answer. Do not restate the question, do not
+  summarise what you just said, do not add what someone should do about it.
 
 SOURCES:
 {{SOURCES}}
@@ -24,6 +35,9 @@ beside `a`, is not a citation and the entry is discarded.
 you must not give — set `"a"` to `NOTHING KNOWN` and `"cite"` to `[]` instead. That is a real answer
 and costs nothing. A plausible answer with no proof is the one outcome worth avoiding, because later
 nobody can tell it from a true one.
+
+A FACTS block is proof like any other. Its lines carry a path, a line number and the text at that
+line: cite those exactly as you would cite the source.
 
 Write the answer, then check each line range you cited actually says what you claimed. A range that
 does not is worse than no answer.

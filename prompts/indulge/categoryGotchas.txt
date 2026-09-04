@@ -1,2 +1,7 @@
-Ask about what breaks: ordering, nullability, threading, silent failures, and the edits that look safe
-but are not.
+Ask about a failure this code CAN ACTUALLY HAVE, visible in what you were shown: a field read before
+anything writes it, an early return that skips a mutation below it, state that survives a reset, a
+collection mutated while something iterates it, an event raised before the state it describes is
+settled.
+
+Do not ask whether something is thread-safe, disposed or null-checked unless the code in front of
+you shows the risk. A hazard nobody can point at is not a gotcha.

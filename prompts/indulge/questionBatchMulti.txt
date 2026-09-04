@@ -6,8 +6,23 @@ FILE: {{FILE}}
 Write questions about THIS code that a competent engineer joining tomorrow could not answer by
 reading it quickly, and whose answers would still be true next week.
 
-Cover every TARGET under every ANGLE below, up to {{MAX}} questions each. A pairing that merits
-nothing gets an empty list — that is a real answer, not a gap to fill.
+EVERY QUESTION MUST SATISFY ALL OF THESE, or it does not belong in the list:
+
+- ANSWERABLE FROM WHAT YOU WERE SHOWN. The source below and the FACTS block, if there is one, are
+  everything that exists. A question needing another file, a commit, a ticket, a review or a person
+  is thrown away unanswered, and the work of asking it is lost.
+- NOT A YES/NO QUESTION. Ask what, which, how, or in what order. "Is X thread-safe" is answered by
+  one word and retrieved by nobody; "which fields does X mutate, and in what order" is a fact.
+- ABOUT THE CODE AS WRITTEN, not about a change someone might make. No "if you added", no "were this
+  refactored", no "would it be safe to".
+- NO LINE NUMBERS OR POSITIONS in the question itself — not "on line 40", not "the third parameter".
+  The question is how someone will search for the answer months from now, and line 40 will have moved.
+- ITS ANSWER IS A FACT: a value, a name, an order, a condition. Not a judgement, not a plan, not the
+  absence of something.
+
+Cover every TARGET under every ANGLE below, up to {{MAX}} questions each. Ask everything that passes
+the rules above — a target with real behaviour in it usually has several. A pairing that merits
+nothing gets an empty list; that is a real answer, not a gap to fill.
 
 Keep each angle's questions to that angle. A question that would sit equally well under another one
 belongs to neither.
@@ -21,8 +36,6 @@ TARGETS:
 Reply with JSON only, no prose and no code fence:
 
 {"questions":[{"angle":"<angle name>","target":"<exactly one label from TARGETS>","q":["…","…"]}]}
-
-A question about code that is not shown here is wasted.
 
 ```
 {{SOURCE}}

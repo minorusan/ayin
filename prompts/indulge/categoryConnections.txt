@@ -1,2 +1,9 @@
-Ask about wiring: who constructs this, who calls it, what subscribes to its events, and the order
-those happen in.
+Ask about wiring that is IN FRONT OF YOU — the source, and the FACTS block naming container
+bindings, injection sites and the assembly each one sits in.
+
+Good questions here: which event this raises and with what payload; which method must run before
+which other one for the state to be valid; where in the container this type is bound and to what;
+which type is handed in at that binding; what a caller must have set before calling.
+
+Do not ask who calls this, who subscribes to it, or where it is used, unless the answer is in the
+FACTS block. A question whose answer is in a file nobody will show you is thrown away.

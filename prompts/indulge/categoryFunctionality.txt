@@ -1,2 +1,5 @@
-Ask about behaviour: what it does, what it returns, what it guarantees, and which invariants the code
-assumes without stating.
+Ask about behaviour the code DECIDES: the value a member returns, the condition that selects one
+branch over another, the order in which state is mutated, the invariant the code preserves without
+stating it.
+
+An answer to a good question here contains a value, a name, an order or a condition.
