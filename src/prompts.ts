@@ -30,6 +30,10 @@ const DEFAULT_CONFIG: Record<string, number> = {
   // QA gate (qa/) — 0 passes disables it entirely.
   qaMaxPasses: 3,
   qaMinAnswerChars: 400,
+  // The skeptic pass (qa/skeptic.ts) — the pre-mortem, not the conformance check. A cap on the
+  // REPORT, not on the work: one call either way, and a list longer than this stops being read.
+  // 0 disables the pass entirely, the same shape as `qaMaxPasses`.
+  skepticMaxFindings: 8,
   // Tool guard (tool-guard.ts) — polling is the one legitimate repeat.
   pollMinIntervalMs: 15000,
   pollMaxPerTurn: 6,

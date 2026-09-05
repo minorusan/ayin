@@ -1481,6 +1481,11 @@ and `AYIN_PLAN=1` is kept as an explicit force that now agrees with the default 
 **QA stays opt-in** (`/qa`, `AYIN_QA=1`). The asymmetry is deliberate: planning costs one cheap triage
 call on a request that might not need it, while QA costs a whole pass over finished work.
 
+**The skeptic pass is opt-in too** (`/skeptic`, `AYIN_SKEPTIC=1`) and is a SEPARATE toggle, not a mode
+of `/qa` — see "The skeptic pass" below. They ask different questions, and folding the cheap
+non-blocking pre-mortem into the gate that can send work back for repair would have made the small
+thing depend on the expensive one.
+
 **A subagent may PLAN; it may not DELEGATE.** The parent used to spawn children with `AYIN_PLAN=0`,
 which enforced the wrong limit — the recursion rule is about the `subagent` tool, and it is already
 enforced where it belongs (`subagentsAllowed()` is false at depth ≥ 1, so the tool is never registered
@@ -2738,6 +2743,63 @@ import the screen).
 
 Gate: `npm run check:cost` — the arithmetic as a pure function (`computeUsage`), plus the four providers
 and the placement rules.
+
+## The skeptic pass (`src/qa/skeptic.ts`) — the other question
+
+The QA gate above asks **did this do what was asked**. This asks **how does it break anyway**. They
+are not degrees of the same check, and a change can pass the first cleanly while failing the second
+badly: it satisfied every criterion, it compiled, its tests were green, and the failure was never in
+the request — it was in the blast radius.
+
+`/skeptic` toggles it for the session, `/skepticthis <msg>` for one reply, `AYIN_SKEPTIC=1` arms it
+headlessly. It fires on the same deterministic shape as QA (files changed this turn + the reply reads
+like a completion report) with its own toggle on top, so it is useful on a turn where the gate is off.
+
+### What it is given, and why that is the whole feature
+
+Not "the changed files" — the judge already reads those. It gets **the diff plus the caller list**:
+
+- the turn's diff, from `diff/collect.ts` and filtered to *this turn's* files (a shared checkout is
+  full of other people's work; reviewing that would report failure modes in code the turn never
+  wrote, with no way to tell which was which);
+- **every other place in the repo that names what changed**, from `git grep` — the module's own name
+  plus the symbols that appear in the turn's added and removed lines. Deterministic: no model decides
+  what counts as a caller.
+
+That second half is the difference between a reviewer having opinions about a file and a reviewer
+seeing that three call sites pass one argument to a function that now takes two. Needles come from
+the CHANGED lines rather than from everything a file exports, so a comment-only edit costs nothing
+and a forty-export module does not become forty greps. Every budget (files, needles, hits, diff
+chars) announces itself in the rendered text when it bites — a silent clip would hand the model a
+partial repo it cannot know is partial, and "nothing else calls this" is exactly the wrong conclusion
+to reach from a truncated list. A directory that is not a git repo yields no evidence and says so.
+
+### It never blocks, and it says which half is guesswork
+
+Findings are a card and a line in the session record. There is no verdict, no fix loop, no failed
+gate — these are HYPOTHESES, some of them wrong, and the operator reading the card in the same second
+is a better filter than another model round. Each finding carries a `sure` flag the model is asked
+for explicitly, and the card sorts certain ones first: a list that presents eight guesses with the
+same weight as one measured fact is a list people learn to skim, and then the real finding goes past
+with the rest.
+
+`skepticPass` never throws — everything, including the deterministic half, is inside its try. That
+placement is not incidental: the first live run of this pass, pointed at its own diff, reported that
+`blastRadius()` sat *outside* the try and that a finished turn could therefore be taken down by its
+own pre-mortem. A function whose contract is "never throws" cannot rest on an audit of what it
+happens to call today.
+
+### On the model
+
+It runs on the session's own model, like the QA judge, because that is the one door this repo has.
+The strongest version spends a **different and cheaper** model — a second opinion is worth most when
+it does not share the context that made the mistake — and the seam exists already
+(`background.ts`'s `LaneTarget`, `/set-subagent-model`). That is the next step, not a shipped claim.
+
+`tool/check-skeptic.mjs` (`npm run check:skeptic`) pins the evidence half against a real temp git
+repo with real callers: the judged half is a model and cannot be pinned, but a caller list that
+silently comes back empty would leave the pass reviewing a file instead of a change with nothing in
+the output to say so.
 
 ## Tool-call format & parser (`parser.ts`)
 
@@ -5206,6 +5268,9 @@ src/
 │   ├── criteria.ts     acceptance criteria from the user's own prompts, before artifacts are seen;
 │   │                   baseline bars by file kind, plus the ids the QA executor asks for
 │   ├── review.ts       one judged pass → {verdict, summary, issues[]}
+│   ├── skeptic.ts      the PRE-MORTEM — a different question from the gate above: the turn's diff
+│   │                   plus every call site in the repo that names what changed (git grep), read
+│   │                   for how it breaks in production. One call, never blocks, never fixes
 │   └── index.ts        the trigger, the turn state, executor prepare→probe→criteria, the ≤3-pass
 │                       fix loop, the verdict card
 ├── indulge/            per-repo RAG corpus (Phase 1 — store + discovery so far, no command yet):

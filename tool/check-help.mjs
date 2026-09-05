@@ -35,7 +35,7 @@ const handled = new Set([...appSrc.matchAll(/case '(\/[a-z-]+)'/g)].map((m) => m
 const listed = new Set(help.slashEntries().map((e) => e.name));
 
 // Aliases and tool-owned commands are handled but deliberately not listed on their own line.
-const ALIASES = new Set(['/q', '/exit', '/planthis', '/qathis', '/presentthis', '/embedthis', '/unlock']);
+const ALIASES = new Set(['/q', '/exit', '/planthis', '/qathis', '/skepticthis', '/presentthis', '/embedthis', '/unlock']);
 const missing = [...handled].filter((c) => !listed.has(c) && !ALIASES.has(c));
 ok(missing.length === 0,
   'every slash command app.ts handles appears in the help list', missing.join(' '));

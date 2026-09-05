@@ -24,6 +24,7 @@
     "check:glyphs": "node tool/check-glyphs.mjs",
     "check:tool-icons": "node tool/check-tool-icons.mjs",
     "check:gates": "node tool/check-gates.mjs",
+    "check:skeptic": "node tool/check-skeptic.mjs",
     "check:background": "node tool/check-background.mjs",
     "check:explore": "node tool/check-explore.mjs",
     "check:watch": "node tool/check-watch.mjs",

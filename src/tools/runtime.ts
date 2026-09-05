@@ -126,8 +126,29 @@ export interface ToolServices {
    *
    * The host is responsible for refusing to recurse: at depth ≥ 1 there is no subagent to give, and
    * this throws rather than quietly spawning one. See `subagents.ts`.
+   *
+   * `signal` AND `onStatus` ARE NOT OPTIONAL EXTRAS HERE — they are the only two things that make a
+   * child survivable, and this port omitted both.
+   *
+   * A subagent is a PROCESS that runs for minutes, and `subagents.ts` deliberately gives it no
+   * timeout: "a clock cannot tell a subagent that is thinking from one that is stuck — only the signal
+   * can". That decision is correct, and it makes passing the signal the CALLER'S obligation. A caller
+   * that omits it has not built a slow tool, it has built an unkillable one — no timeout, no
+   * cancellation, and a blank card while it runs.
+   *
+   * Both fields existed on `SubagentOpts` and were forwarded by the `subagent` TOOL, which narrates
+   * and cancels correctly. They were simply absent from this interface, so `find_relevant_files` — the
+   * one tool that comes through here — had nowhere to put them and was silent and uncancellable for
+   * its whole multi-minute run. The port was the reason, not the tool.
    */
-  subagent(task: string, opts?: { cwd?: string; plan?: string }): Promise<{ ok: boolean; report: string; toolCalls: number; ms: number }>;
+  subagent(task: string, opts?: {
+    cwd?: string;
+    plan?: string;
+    /** Aborted when the caller's run is cancelled. Without it the child cannot be stopped AT ALL. */
+    signal?: AbortSignal;
+    /** The child's own narration, line by line, as it arrives. See `RunContext.onStatus`. */
+    onStatus?: (note: string) => void;
+  }): Promise<{ ok: boolean; report: string; toolCalls: number; ms: number }>;
 }
 
 let services: ToolServices | null = null;

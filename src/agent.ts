@@ -50,6 +50,7 @@ import { adoptBackgroundRun, backgroundHandoffLine, detachNotice, laneConfigured
 import { notePostmortemContext } from './postmortem.js';
 import { extractSignals } from './tools/signals.js';
 import { qaBeginTurn, qaChangedFiles, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn, qaPreparedUnits } from './qa/index.js';
+import { shouldRunSkepticThisTurn, skepticCard, skepticPass } from './qa/skeptic.js';
 import { regenerateTouchedDiagrams } from './arduino-diagram-regen.js';
 import { gateAdoption, nextBrief, implementedCount, stopAwaitingOperator } from './entangle/index.js';
 import { loadTools } from './tools.js';
@@ -1798,6 +1799,9 @@ async function runAgentTurn(userInput: string): Promise<void> {
       const gate = qaShouldRun(finalText);
       const qaWantsToRun = shouldRunQaThisTurn();
       const presenterWantsToRun = shouldRunPresenterThisTurn();
+      // Called UNCONDITIONALLY for the same reason the two above are: it consumes a one-shot
+      // `/skepticthis`, and a force left unspent would fire on a later, unrelated turn.
+      const skepticWantsToRun = shouldRunSkepticThisTurn();
       const doQa = gate.run && qaWantsToRun;
       const doPresenter = gate.run && presenterWantsToRun && !HEADLESS;
 
@@ -1930,6 +1934,27 @@ async function runAgentTurn(userInput: string): Promise<void> {
             // common case costs one pass instead of two.
           }
         }
+      }
+
+      /**
+       * ── the skeptic pass — the OTHER question ──────────────────────────
+       *
+       * QA asked whether the change does what was asked. This asks how it breaks anyway, over the
+       * diff plus every call site in the repo that names what changed (`qa/skeptic.ts`). It runs on
+       * the same deterministic shape as QA (files changed + the reply reads like a completion
+       * report) with its own toggle on top, so `/skeptic` is useful on a turn where `/qa` is off —
+       * they are different questions and an operator may want either.
+       *
+       * AFTER the QA block on purpose: a turn QA sent back for repair `continue`s above and never
+       * reaches here, so the pre-mortem is spent on the FINAL state of the change rather than on a
+       * draft that is about to be rewritten.
+       *
+       * It never blocks, never fixes and never fails the turn — the card is a list of hypotheses for
+       * the human already reading the screen.
+       */
+      if (!interrupted && gate.run && skepticWantsToRun) {
+        const result = await skepticPass(getGoal() || currentGoal, textForQa, gate.files, process.cwd(), () => interrupted);
+        qaShowCard(skepticCard(result));
       }
 
       // ── required project-type artifacts, UNCONDITIONALLY ──────────────

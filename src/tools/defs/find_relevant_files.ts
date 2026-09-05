@@ -1,5 +1,5 @@
 import { existsSync, statSync } from 'node:fs';
-import { BaseTool } from '../base.js';
+import { BaseTool, type RunContext } from '../base.js';
 import { resolveAgainstCwd } from '../lib.js';
 import { toolLog, toolSubagent } from '../runtime.js';
 
@@ -20,6 +20,21 @@ import { toolLog, toolSubagent } from '../runtime.js';
  *
  * IT NEVER RETURNS PROSE. The caller asked for files. A subagent that answers with a paragraph gets its
  * paragraph discarded and the caller is told plainly that the search produced nothing usable.
+ *
+ * IT TAKES `ctx`, AND THAT IS NOT COSMETIC. Delegating to a child means a PROCESS that runs for
+ * minutes, and `subagents.ts` gives it no timeout on purpose — "a clock cannot tell a subagent that is
+ * thinking from one that is stuck — only the signal can". Passing the signal is therefore this tool's
+ * obligation, not an optional courtesy: without it there is no timeout AND no cancellation, so Esc
+ * cannot reach the child and nothing in the system can end the run except the child finishing.
+ * Without `onStatus` the card is blank for the whole of it, which is indistinguishable from a hang and
+ * invites the operator to kill the session — the exact symptom `defs/subagent.ts` was fixed for
+ * ("5m30s of a blank card"), which this tool did not inherit because the runtime port had nowhere to
+ * carry the two fields.
+ *
+ * IT IS ALSO THE SLOWEST TOOL HERE, and honestly so: a child inherits the parent's provider unless
+ * `/set-subagent-model` says otherwise, and on a self-hosted card the model is one QUEUE — parent and
+ * child take turns for every round. Pointing children at a hosted model is what makes this tool quick;
+ * the narration below is what makes it bearable when they are not.
  */
 class FindRelevantFiles extends BaseTool {
   readonly name = 'find_relevant_files';
@@ -41,7 +56,7 @@ class FindRelevantFiles extends BaseTool {
     { name: 'cwd', type: 'string', description: 'Directory to search in. Defaults to the current one.', required: false },
   ];
 
-  async execute(params: Record<string, string>): Promise<string> {
+  async execute(params: Record<string, string>, ctx?: RunContext): Promise<string> {
     const task = String(params.task ?? '').trim();
     if (!task) return 'Error: task required';
     const cwd = params.cwd ? resolveAgainstCwd(String(params.cwd)) : process.cwd();
@@ -60,8 +75,24 @@ FILE: <path relative to ${cwd}> | <one line saying why this file matters to the 
 Paths must be real files that exist. Do not guess, do not list a file you have not confirmed, and do
 not list directories. If nothing is relevant, answer with the single word NONE.`;
 
-    const result = await toolSubagent()(brief, { cwd });
+    // Said BEFORE the spawn, because the first thing the operator needs to know is that a child is
+    // starting at all — the gap between the call and the child's first line of output is itself long
+    // enough to read as nothing happening.
+    ctx?.onStatus(`delegating to a search agent in ${cwd} → it will read candidates before naming them`);
+    const result = await toolSubagent()(brief, {
+      cwd,
+      // The two fields this tool could not pass until the runtime port was widened. See the header.
+      signal: ctx?.signal,
+      onStatus: ctx?.onStatus,
+    });
+    ctx?.onStatus(result.ok
+      ? `search agent finished — ${result.toolCalls} tool call(s) → verifying every path it named`
+      : `search agent FAILED after ${result.toolCalls} tool call(s) → reporting what came back`);
+
     const parsed = parseFileReport(result.report, cwd);
+
+    ctx?.onStatus(`${parsed.files.length} file(s) verified on disk`
+      + `${parsed.invented.length ? `, ${parsed.invented.length} invented and dropped` : ''}`);
 
     toolLog().info('find_relevant_files', {
       task: task.slice(0, 120),

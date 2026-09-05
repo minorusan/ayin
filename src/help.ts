@@ -116,6 +116,11 @@ export const HELP: HelpEntry[] = [
     tip: '/qa turns on a gate that checks the build and the artifacts against your actual request before answering.',
   },
   {
+    name: '/skeptic', kind: 'command', section: 'Code',
+    short: 'Pre-mortem the finished change — the diff plus every call site that names what it touched, read for how it breaks · /skepticthis <msg> for one reply',
+    tip: '/skeptic asks the other question: not "is this what you asked for" but "how does it break in production".',
+  },
+  {
     name: '/present', kind: 'command', section: 'Code',
     short: 'Presenter pass — a composed answer, with a diagram when it earns one · /presentthis <msg> for one reply',
   },

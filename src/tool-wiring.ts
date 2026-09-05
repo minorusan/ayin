@@ -98,7 +98,13 @@ export function ensureToolRuntime(): void {
     // A tool that needs an AGENT rather than an answer. Imported lazily for the same reason `llm` is:
     // `subagents.ts` pulls in the process spawner and the postmortem handlers, and a top-level import
     // from the wiring would drag them into every entry point that touches a tool.
-    subagent: async (task: string, opts?: { cwd?: string; plan?: string }) => {
+    // `signal` and `onStatus` pass STRAIGHT THROUGH — `SubagentOpts` has accepted both all along, and
+    // this annotation being narrower than the thing it forwards to is what silently discarded them.
+    // A field a port cannot name is a field its consumers cannot use, however well the layer below
+    // supports it.
+    subagent: async (task: string, opts?: {
+      cwd?: string; plan?: string; signal?: AbortSignal; onStatus?: (note: string) => void;
+    }) => {
       const { runSubagent, subagentsAllowed } = await import('./subagents.js');
       if (!subagentsAllowed()) {
         throw new Error('subagents are not available here — a subagent may not spawn subagents, and this session may have --disallow-subagents');

@@ -34,6 +34,7 @@ import { estimateSessionTokens } from './tokens.js';
 import { loadHistory, pushEntry, forgetEntry } from './history.js';
 import { forcePlanNextTurn, togglePlanSession } from './plan/index.js';
 import { toggleQaSession, forceQaNextTurn } from './qa/index.js';
+import { toggleSkepticSession, forceSkepticNextTurn } from './qa/skeptic.js';
 import { togglePresenterSession, forcePresenterNextTurn } from './presenter/index.js';
 import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation, recordSlashTurn } from './agent.js';
 import { findToolBySlash, slashTools, loadTools } from './tools.js';
@@ -1348,6 +1349,39 @@ async function handleInput(text: string): Promise<void> {
           return;
         }
         forceQaNextTurn();
+        text = arg;
+        break;
+      }
+      /**
+       * `/skeptic` — the PRE-MORTEM, and a different question from `/qa`.
+       *
+       * QA asks whether the change does what was asked. This asks how it breaks anyway: it reads the
+       * diff plus every call site in the repo that names what changed, and reports concrete failure
+       * modes. It never blocks and never fixes — see qa/skeptic.ts.
+       *
+       * Its own toggle rather than a mode of `/qa`, because wanting the cheap non-blocking pre-mortem
+       * is not the same as wanting the loop that can send work back for repair.
+       */
+      case '/skeptic': {
+        const arg = text.slice('/skeptic'.length).trim();
+        if (arg) {
+          addMessage('system', 'Usage: /skeptic — bare toggle, no argument. For a one-off pre-mortem: /skepticthis <message>');
+          return;
+        }
+        const enabled = toggleSkepticSession();
+        addMessage('system', enabled
+          ? 'Skeptic pass ON for the rest of this session — after each finished turn, the diff and every '
+            + 'call site that names what changed are read for how this breaks in production'
+          : 'Skeptic pass OFF for the rest of this session');
+        return;
+      }
+      case '/skepticthis': {
+        const arg = text.slice('/skepticthis'.length).trim();
+        if (!arg) {
+          addMessage('system', 'Usage: /skepticthis <message> — runs the pre-mortem on this one reply only');
+          return;
+        }
+        forceSkepticNextTurn();
         text = arg;
         break;
       }
