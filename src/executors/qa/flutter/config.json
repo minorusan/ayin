@@ -1,0 +1,10 @@
+{
+  "id": "flutter",
+  "kind": "qa",
+  "projectTypes": [
+    "flutter"
+  ],
+  "priority": 10,
+  "factsOnly": true,
+  "description": "Flutter QA — four deterministic checks and no judge: `flutter analyze` (the project's own lint set, errors and warnings enforced in the turn's own files), the project's own `flutter test` suite, file/widget separation read from the Dart (one widget per file, named after its class, reusable widgets that do not navigate), and routing (every @RoutePage screen registered in a router, no hand-edited .gr.dart). Generated routes are regenerated in prepare() so both the analyzer and the routing facts are answerable on the first pass."
+}

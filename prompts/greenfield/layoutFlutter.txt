@@ -3,7 +3,8 @@ convention.
 
   lib/main.dart                 runApp only. Nothing else belongs in it.
   lib/app.dart                  MaterialApp.router; ONE AppRouter, held as a field, never built in build().
-  lib/router/app_router.dart    @AutoRouterConfig, extends RootStackRouter, part 'app_router.gr.dart'.
+  lib/router/app_router.dart    @AutoRouterConfig, extends RootStackRouter; imports AND re-exports
+                                app_router.gr.dart, so a view importing the router can name a route.
   lib/views/<name>_view.dart    one screen per file, one class per file, each annotated @RoutePage().
   lib/widgets/<name>.dart       one widget per file, one class per file, no routing inside.
   test/<name>_test.dart         flutter_test: pump the real app and drive the router.

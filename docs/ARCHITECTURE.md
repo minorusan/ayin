@@ -1085,6 +1085,9 @@ src/executors/
   plan/flutter/       index.ts + config.json     ← flutter: greenfield's branch + the toolchain
   qa/base/            index.ts + config.json
   qa/arduino/         index.ts + config.json
+  qa/unity/           index.ts + config.json     ← factsOnly: does the C# compile
+  qa/node/            index.ts + config.json     ← factsOnly: tsc, the suite, a real boot
+  qa/flutter/         index.ts + config.json     ← factsOnly: analyze, the suite, separation, routing
   present/base/       index.ts + config.json
   present/arduino/    index.ts + config.json
 ```
@@ -1265,6 +1268,13 @@ keeps the layout, the deliverables, the survey and the prompts, and the owner ad
   because `flutter create` also templates `pubspec.yaml`, `lib/main.dart`, the README, the test and
   `.gitignore` — every one of which this scaffold has its own, deliberately different version of.
   Copying rather than generating in place means no ordering, no overwrite and nothing to undo.
+- **the generated routes are imported, never a `part`.** auto_route's part mode cannot add imports, so
+  the generated route classes borrow the router file's — and a view annotated `@RoutePage()` but not
+  yet registered still gets a route class generated, naming a view the router never imported. Measured:
+  a project that analyzed clean stopped compiling *inside generated code*, which is the most confusing
+  state an agent can be handed. In auto_route's default mode the generated library imports every view
+  itself; `app_router.dart` re-exports it, so a view still writes `import '../router/app_router.dart'`
+  and the router file imports no views at all.
 - **`flutter pub get` then the generator, fire and forget.** `scaffold()` is synchronous and runs
   inside the turn; blocking it on pub.dev plus a cold build_runner (measured: 44s, and it AOT-compiles
   its builders first) would freeze a TUI with no spinner. The grounding states that the pass was
@@ -1364,6 +1374,55 @@ there, already names the endpoints, and is already what a developer would run.
 
 Absent is still not failed: no `tsconfig.json`, no `node_modules`, no test script, no test files —
 each is reported unchecked. On the turn that *creates* a project, half of those are normal.
+
+### Flutter QA: the analyzer, the suite, and two things neither can see (`executors/qa/flutter/`)
+
+A Flutter project fell to `qa/base`, whose one contributed fact is `readme-substance` — `hard`, so it
+fails without the judge, and worded for the Arduino scaffold (*"too short to carry a parts list and a
+pin map"*). The generic judge was then handed code/docs criteria and **no analyzer result at all**, so
+the gate could not tell a Flutter turn that compiles from one that does not, while reliably failing
+both. `factsOnly: true`, four facts:
+
+| | |
+|---|---|
+| **the linter, which is also the compiler** | `flutter analyze` reports type errors and violations of the project's own `analysis_options.yaml` in one pass, tagged by severity. |
+| **does it still work** | `flutter test`, the project's own suite. For anything ayin scaffolds that suite pumps the real app and taps through the router, so it is the reachability check too. |
+| **file and widget separation** | read from the Dart: one public widget per file, the file named after it, screens where this project keeps screens, and a reusable widget that does not push routes. |
+| **routing** | every `@RoutePage()` screen the turn touched is registered in some router, the generated file is not hand-edited, and the route list has an entry point. |
+
+**Severity is the line, and the analyzer draws it.** The exit code cannot: `flutter analyze` exits 1
+for a single `info`, measured. So the output is parsed, and then split two ways — **errors are enforced
+wherever they are**, because an error means the package does not compile (the same stance
+`tsc --noEmit` and Unity's compile probe take), while **warnings and `info` are enforced only in the
+files this turn wrote**, because a repo carrying four hundred pre-existing lints must not fail every
+turn for them. That split is not theoretical: with the first version (*issues in changed files*), a new
+screen made the generated router reference a type it could not see, the error landed in a file the turn
+had not touched, and a project that did not build was reported as "clean, 2 more elsewhere".
+
+**Separation and routing are scanners, not a judge**, because every one of those questions has a single
+right answer visible in the text, and `flutter analyze` checks none of them. Two guards keep them from
+becoming the Unity-README failure in a new costume:
+
+- **the directories are discovered, never imposed.** `lib/views` | `lib/pages` | `lib/screens` and
+  `lib/widgets` | `lib/components` are all ordinary Flutter; a feature-first app has none of them, and
+  there the location checks report themselves *unchecked* rather than inventing a violation. Likewise a
+  project with no `@AutoRouterConfig` (go_router, plain `Navigator`) has its routing checks stay silent.
+- **a finding is `hard` only in a file the turn CREATED** — answered by `git status`, so a staged file
+  still counts as new. A pre-existing file ayin edited one line of is *reported*: "you touched this
+  legacy file, now split it into four widgets" is a gate inventing work nobody asked for. The single
+  exception is a hand-edited `.gr.dart`, which is `hard` wherever it is — the turn wrote into generated
+  code, and the next generator pass deletes that work.
+
+**`prepare()` regenerates the routes, and only when the turn made them stale** — a changed file that
+declares `@RoutePage()` or the router itself, plus a route class no `.gr.dart` carries yet. This is the
+arduino lesson: a route added without re-running the generator is an undefined name, so every
+route-adding turn would otherwise burn a whole fix pass on a command with no decision in it.
+
+`check-qa-flutter.mjs` pins all of it with no SDK — the Dart scanners, the analyzer's line format, the
+convention discovery and the created-vs-touched rule against a real git repo. The three parts that
+genuinely need Flutter (`analyze`, `test`, the codegen pass) were exercised on a real project instead:
+clean and 1/1 on a fresh scaffold, both failure paths reproduced with a planted error, and
+`route-unregistered` fired on a real unregistered screen.
 
 ### Does it compile? (`qa/buildcheck.ts`)
 
@@ -5320,7 +5379,8 @@ src/
 │   │                   EMPTY directory: the python / typescript / unity / flutter layout, and git
 │   │                   init; node and flutter own their type and add its toolchain (npm install,
 │   │                   and `flutter create` + pub get + build_runner)
-│   ├── qa/{base,arduino}/       index.ts + config.json
+│   ├── qa/{base,arduino,unity,node,flutter}/  index.ts + config.json — the last three are
+│   │                   factsOnly: a compiler / an analyzer and the project's own suite, no judge
 │   └── present/{base,arduino}/  index.ts + config.json
 ├── plan/               plan mode for big cross-feature prompts:
 │   ├── survey.ts       the GENERIC project survey (used by the base plan executor)

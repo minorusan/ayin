@@ -2122,12 +2122,12 @@ console.log('\nexecutors: detection + registry');
   // Every shipped config parses and cross-checks against an imported instance. loadRegistry THROWS
   // on any mismatch, so simply getting a list back is the assertion.
   const configs = reg.listExecutors();
-  // ELEVEN: base + arduino for plan/qa/present, plus qa/unity, qa/node, plan/greenfield, plan/node
-  // and plan/flutter. The count is asserted rather than the names because `loadRegistry` already
-  // THROWS on a config with no imported instance (or the reverse) — this line is what notices an
-  // executor added to neither list.
-  ok(configs.length === 11,
-    'eleven executors are declared and wired (base + arduino for plan/qa/present, plus qa/unity, qa/node, plan/greenfield, plan/node and plan/flutter)',
+  // TWELVE: base + arduino for plan/qa/present, plus qa/unity, qa/node, qa/flutter,
+  // plan/greenfield, plan/node and plan/flutter. The count is asserted rather than the names because
+  // `loadRegistry` already THROWS on a config with no imported instance (or the reverse) — this line
+  // is what notices an executor added to neither list.
+  ok(configs.length === 12,
+    'twelve executors are declared and wired (base + arduino for plan/qa/present, plus qa/{unity,node,flutter} and plan/{greenfield,node,flutter})',
     String(configs.length));
   // THE TWO THAT BOOTSTRAP, AND THE FACT THAT THEY DO NOT COLLIDE.
   //
@@ -2154,6 +2154,8 @@ console.log('\nexecutors: detection + registry');
     'and plan/greenfield does NOT also claim flutter — one owner per type, never a tie broken by id');
   ok(configs.some((c) => c.kind === 'qa' && c.id === 'unity' && c.factsOnly === true),
     'qa/unity declares factsOnly — a Unity turn is judged by a compiler, not by a model');
+  ok(configs.some((c) => c.kind === 'qa' && c.id === 'flutter' && c.factsOnly === true),
+    'qa/flutter declares factsOnly — a Flutter turn is judged by the analyzer, its own suite and two scanners');
   ok(configs.every((c) => c.projectTypes.length > 0), 'every config declares at least one project type');
 
   // The tree wins when it says anything.

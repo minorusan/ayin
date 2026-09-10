@@ -547,9 +547,11 @@ Bootstrapped deterministically — written without a model, so it is the same ev
  *   · `AppRouter extends RootStackRouter`, never `_$AppRouter`. auto_route ≥ 9 generates the route
  *     classes and NOT a router base class, so the `_$` form fails with `extends_non_class` and then
  *     every member of the router — `config()` included — reads as undefined.
- *   · `app_router.dart` imports `package:flutter/material.dart` even though nothing in it names a
- *     widget. The generated file is a `part`, so it inherits its parent's imports, and the `Key?` in
- *     a generated args class is undefined without it.
+ *   · the generated routes are IMPORTED and re-exported, never a `part`. In part mode the generated
+ *     file inherits this file's imports and can add none of its own, so a `Key?` in a generated args
+ *     class needs `material.dart` here — and, worse, a view that is annotated but not yet registered
+ *     generates a route class naming a type this file never imported, which breaks the build inside
+ *     generated code. The default mode imports every view itself.
  *   · a route with arguments generates a NON-const constructor, so `const DetailRoute(id: …)` is
  *     `const_with_non_const`.
  *   · the widget test imports only `flutter_test` and the app — an unused `material.dart` import is a
@@ -637,17 +639,21 @@ class _AppState extends State<App> {
 `;
 
 /**
- * `material.dart` is imported for the GENERATED file, which is a `part` of this one and inherits
- * these imports — a route with a `Key?` argument does not compile without it.
+ * IMPORTED AND RE-EXPORTED, NEVER A `part` — and that is a measured decision, not a style.
+ *
+ * auto_route's part-file mode cannot add imports (a `part` may not have any), so the generated route
+ * classes borrow this file's. Measured on a real turn: a view annotated `@RoutePage()` and not yet
+ * registered still gets a route class generated, that class names the view, this file did not import
+ * it — and a project that analyzed clean stopped compiling *inside a generated file*, which is the
+ * most confusing state an agent can be handed. In the default mode the generated library imports
+ * every view itself, so an unregistered view is harmless and the router file needs no view imports at
+ * all. `export` is what keeps `import '../router/app_router.dart'` enough for a view to name a route.
  */
 const FLUTTER_ROUTER = `import 'package:auto_route/auto_route.dart';
-import 'package:flutter/material.dart';
 
-import '../views/counter_view.dart';
-import '../views/detail_view.dart';
-import '../views/home_view.dart';
+import 'app_router.gr.dart';
 
-part 'app_router.gr.dart';
+export 'app_router.gr.dart';
 
 /// Every route in the app, in one list.
 ///
@@ -954,7 +960,7 @@ flutter build web   # or: apk · appbundle · ios · macos · linux · windows
 | \`lib/main.dart\` | \`runApp\`. Three lines; leave it alone. |
 | \`lib/app.dart\` | \`MaterialApp.router\`, theme, and the ONE \`AppRouter\` instance. |
 | \`lib/router/app_router.dart\` | every route, in one list. |
-| \`lib/router/app_router.gr.dart\` | **generated.** Never edit it; re-run the generator instead. |
+| \`lib/router/app_router.gr.dart\` | **generated**, and re-exported by \`app_router.dart\`. Never edit it. |
 | \`lib/views/*_view.dart\` | one screen per file, one class per file, each \`@RoutePage()\`. |
 | \`lib/widgets/*.dart\` | one widget per file, one class per file, no routing knowledge. |
 | \`test/navigation_test.dart\` | pumps the real app and taps through the router. |
@@ -971,12 +977,15 @@ are declared on the constructor (\`@PathParam('id') required this.id\`) and pass
 (\`DetailRoute(id: 'x')\`) — see \`lib/views/detail_view.dart\`. Keep \`dart run build_runner watch\`
 running while you work and step 3 happens by itself.
 
+The router file imports no views: the generated library imports them itself, which is why a
+\`@RoutePage()\` view you have not registered yet is harmless rather than a broken build.
+
 ## Why it will not launch
 
 | What you see | Why | Fix |
 |---|---|---|
 | \`Target of URI hasn't been generated: 'app_router.gr.dart'\`, or \`Undefined name 'HomeRoute'\` | the generator has not run since the last route change | \`dart run build_runner build\` |
-| \`Undefined class 'Key'\` inside \`app_router.gr.dart\` | the generated file is a \`part\` and inherits its parent's imports; \`app_router.dart\` lost \`package:flutter/material.dart\` | restore that import — the generated file is not the bug |
+| \`Undefined name 'HomeRoute'\` **although app_router.gr.dart exists** | the route classes live in \`app_router.gr.dart\`; the router file re-exports them | keep \`export 'app_router.gr.dart';\` in \`app_router.dart\` |
 | \`extends_non_class\` on \`_$AppRouter\`, then \`config()\` undefined | auto_route ≥ 9 generates routes, NOT a router base class | \`class AppRouter extends RootStackRouter\` |
 | \`const_with_non_const\` on a route you navigate to | a route WITH arguments generates a non-const constructor | drop the \`const\` |
 | \`These options have been removed and were ignored: --delete-conflicting-outputs\` | build_runner ≥ 2.15 dropped the flag | harmless; drop the flag |

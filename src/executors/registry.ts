@@ -37,6 +37,7 @@ import { baseQaExecutor } from './qa/base/index.js';
 import { arduinoQaExecutor } from './qa/arduino/index.js';
 import { unityQaExecutor } from './qa/unity/index.js';
 import { nodeQaExecutor } from './qa/node/index.js';
+import { flutterQaExecutor } from './qa/flutter/index.js';
 import { basePresentExecutor } from './present/base/index.js';
 import { arduinoPresentExecutor } from './present/arduino/index.js';
 
@@ -60,6 +61,10 @@ const INSTANCES: Record<string, AnyExecutor> = {
   'qa/arduino': arduinoQaExecutor,
   'qa/unity': unityQaExecutor,
   'qa/node': nodeQaExecutor,
+  // Flutter's gate is `flutter analyze` (the project's own lint set), its own test suite, and two
+  // things the analyzer cannot see: whether widgets and files are separated, and whether every
+  // annotated screen is actually routed. factsOnly, like unity and node — see qa/flutter/index.ts.
+  'qa/flutter': flutterQaExecutor,
   'present/base': basePresentExecutor,
   'present/arduino': arduinoPresentExecutor,
 };

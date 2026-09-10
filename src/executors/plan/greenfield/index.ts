@@ -185,7 +185,7 @@ const FACTS: Record<Branch, BranchFacts> = {
       {
         label: 'the router',
         patterns: ['lib/router/app_router.dart'],
-        why: 'the one AutoRoute list. Every screen is reachable only by having a line in it, and the generated route classes are a `part` of this file',
+        why: 'the one AutoRoute list. A screen is reachable only by having a line in it, and this file is what re-exports the generated route classes the rest of the app navigates with',
         required: true,
       },
       {
