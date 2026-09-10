@@ -54,6 +54,7 @@ import { HEADLESS } from './ui.js';
 import { armPostmortem, markCleanExit } from './postmortem.js';
 import { loadRules } from './rules.js';
 import { runBang, cancelBang, bangRunning } from './bang.js';
+import { checkBangSyntax } from './bang-check.js';
 import { getConfigString, setConfigValue, resetPromptsToDefaults, promptDriftWarnings, KNOWN_CONFIG_KEYS } from './prompts.js';
 import { isCorpusInjection, isLogCoverage, isVerbose, setCorpusInjection, setLogCoverage, setVerbose } from './modes.js';
 import { clearPendingCorpus, corpusForPrompt, setPendingCorpus } from './indulge/inject.js';
@@ -538,10 +539,16 @@ async function handleInput(text: string): Promise<void> {
       addMessage('system', 'Nothing after the `!`. `!<command>` runs it in your shell; the model never sees it.');
       return;
     }
+    // One tiny model call in front of the shell: it corrects the SPELLING of the line and nothing
+    // else, and any rewrite that escalates is thrown away by `vetRewrite` (bang-check.ts). It cannot
+    // block — a timeout or a dead endpoint runs what was typed. `runBang` is still verbatim.
+    setAgentStatus('Checking...');
+    const { command: toRun, note } = await checkBangSyntax(command);
+    if (note) addMessage('system', note);
     setAgentStatus('Running...');
-    const r = await runBang(command);
+    const r = await runBang(toRun);
     setAgentStatus('');
-    addMessage('tool', formatShellForChat(command, r.output, r));
+    addMessage('tool', formatShellForChat(toRun, r.output, r));
     return;
   }
 

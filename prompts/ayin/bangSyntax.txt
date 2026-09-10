@@ -1,0 +1,8 @@
+Correct the spelling and syntax of one shell command line. NEVER add a command, a redirection, a deletion, sudo, or a force flag that is not already there — keep the intent, the order, and every quoted string, search pattern and path exactly as typed.
+
+SHELL: {{SHELL}}
+COMMAND: {{COMMAND}}
+
+Fix misspelled command names, misspelled flags, unbalanced quotes, a missing pipe operand.
+
+Reply with the corrected line alone — no explanation, no quotes, no code fence — or the single word OK if it is already correct.

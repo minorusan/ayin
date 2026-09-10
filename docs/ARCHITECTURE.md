@@ -3444,6 +3444,38 @@ unreadable. It appears on the default `both` view via a fallback: the OBJECTIVE 
 goal, and without that fallback the tip would be invisible to everyone who has not set
 `AYIN_GOAL_VIEW`. It never enters the card itself — a tip in a bordered panel is shouting.
 
+## `!<command>` — the passthrough, and the spell-check in front of it
+
+`bang.ts` runs the line it is handed **verbatim**, in the platform shell, with nothing added to the
+model's context and no agent round spent. That absence of interpretation is the whole feature: `!` was
+built because typing `!git status -sb` as an ordinary prompt let the model decide what the operator
+"meant" and call `bash` with its own rewrite. It owes the operator three things only — a timeout, an
+output cap and a cancel — and all three announce themselves.
+
+**One thing may change the line, and it is not the agent.** `bang-check.ts` runs before the shell is
+spawned: one small call (`prompts/ayin/bangSyntax.txt`, no tools declared) that answers with the
+corrected line or `OK`, so a typo costs a correction rather than a "command not found" and a retype.
+`bang.ts` is untouched by this — it still receives one string and runs it — which is what keeps the
+passthrough contract testable in one place.
+
+The model's answer is **not trusted**. `vetRewrite` is model-free and rejects a rewrite that
+
+- introduces a destructive token the operator did not type (`rm`, `sudo`, `dd`, `mkfs`, a redirection,
+  `--force`, `--hard`, `kill`, …),
+- introduces an always-gated git op (`dangerousShellOp` says yes for the rewrite and no for the line),
+- changes what is inside a closed quote pair — measured, not feared: `grep -rn "wrold" src` came back
+  as `grep -rn "world" src`, a search for a different string that finds nothing, when the typo *was*
+  the search. The prompt forbids it and the model did it anyway, which is why the rule is code. A line
+  with no closed pair is exempt: there the fix on offer is the missing quote itself,
+- or is more than 3× the length of the line plus 40 characters — a correction, not a composition.
+
+A rejected rewrite is not an error: the typed line runs. So does a timeout (`bangCheckMs`, default
+3000ms, `0` disables), a malformed reply, a dead endpoint or a busy card — **the check can never block
+the passthrough**, and its failures are announced once per session rather than once per command. A
+change is announced every time, above the output, naming both lines.
+
+Gate: `npm run check:bang` — the verbatim assertions and the refusal table, no model, no network.
+
 ## `/testrun` — see [`TESTRUN.md`](TESTRUN.md)
 
 `/testrun <domains>` runs the C#/Unity tests covering a domain. Selection is fully deterministic —

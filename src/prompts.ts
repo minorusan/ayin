@@ -44,6 +44,9 @@ const DEFAULT_CONFIG: Record<string, number> = {
   // How many times the actionable plan (plan/plan.ts) may be sent back to the model after its
   // validator rejects it. 0 ships the first draft with its faults named instead of repairing it.
   planRepairPasses: 1,
+  // The spell-check in front of `!<command>` (bang-check.ts) — how long it may take before the line
+  // the operator typed runs unchecked. 0 disables the call entirely, the same shape as `qaMaxPasses`.
+  bangCheckMs: 3000,
   // Model picker (model-picker.ts) — hides small/utility models from the `/model` popup so it lists
   // only real choices. 0 disables the filter (shows everything installed).
   modelPickerMinSizeGiB: 15,
@@ -184,6 +187,9 @@ export const KNOWN_CONFIG_KEYS = [
   'backgroundProvider', 'backgroundModel',
   // Only honoured when the operator sets it — the round budget is otherwise unlimited (agent.ts).
   'maxToolRounds',
+  // Budget for the spell-check in front of `!<command>` (bang-check.ts). 0 turns it off, and `/set`
+  // must be able to say so honestly — the note the check prints on a timeout names this key.
+  'bangCheckMs',
   // `ayin launch`: the command that opens a terminal window, with {{SCRIPT}} for the launch script.
   // Every platform default is a guess about someone else's terminal — this is how they replace it.
   'terminalCommand',

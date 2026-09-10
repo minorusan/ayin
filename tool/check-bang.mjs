@@ -116,6 +116,46 @@ ok(await P.checkPermission('bash', { command: 'git checkout main' }) === 'deny',
 ok(await P.checkPermission('bash', { command: 'git status' }) === 'allow',
   'a harmless git command is untouched — this gate is narrow on purpose');
 
+// ── the spell-check in FRONT of the passthrough ─────────────────────────────────
+// `runBang` stays verbatim (above); the one thing allowed to change a typed line is `vetRewrite`,
+// and what it must mostly do is REFUSE. A model asked to "fix and maybe improve" a command will
+// helpfully add an `-f`, a redirection or an `rm`, and the operator approved none of them.
+
+const { vetRewrite } = await import(join(ROOT, 'dist/bang-check.js'));
+
+ok(vetRewrite('gti staus -sb', 'git status -sb') === 'git status -sb', 'a spelling fix is accepted');
+ok(vetRewrite('ls -la', 'OK') === null, 'a line that is already right runs as typed');
+ok(vetRewrite('ls -la', 'ok\n') === null, 'the OK answer is matched loosely (case, whitespace)');
+ok(vetRewrite('ls -la', '```sh\nls -la\n```') === null, 'a fence around the same line is not a change');
+ok(vetRewrite('gti staus', '```\ngit status\n```') === 'git status', 'a fenced correction is unwrapped');
+ok(vetRewrite('gti staus', '$ git status') === 'git status', 'a shell prompt marker is stripped');
+ok(vetRewrite('ls', '') === null, 'an empty reply runs what was typed');
+ok(vetRewrite('ls', 'I think you meant to list the files in the current directory, so here it is: ls -la')
+  === null, 'a chatty reply three times the length is not a correction');
+
+for (const [typed, reply, why] of [
+  ['ls /tmp', 'rm -rf /tmp', 'a deletion that was never typed'],
+  ['npm test', 'sudo npm test', 'sudo it was not given'],
+  ['git statu', 'git status && git push', 'a push bolted onto a read'],
+  ['git chekcout-ish note', 'git checkout main', 'an always-gated git op it did not ask for'],
+  ['npm run build', 'npm run build > out.log', 'a redirection that swallows the output'],
+  ['git reset', 'git reset --hard', 'a --hard that turns a no-op into data loss'],
+]) ok(vetRewrite(typed, reply) === null, `refused escalation — ${why}`, JSON.stringify(reply));
+
+// What is inside quotes is the operator's. This one was MEASURED against the live model, which
+// "corrected" the search pattern and turned a search for a typo into a search that finds nothing.
+ok(vetRewrite('grep -rn "wrold" src', 'grep -rn "world" src') === null,
+  'a rewrite that respells the search pattern is refused — the typo WAS the search');
+ok(vetRewrite("gti log --grep='teh fix'", "git log --grep='teh fix'") === "git log --grep='teh fix'",
+  'the command around an untouched quoted string is still corrected');
+ok(vetRewrite('echo "hi', 'echo "hi"') === 'echo "hi"',
+  'an unbalanced quote is still fixable — with no closed pair there is nothing to protect');
+
+ok(vetRewrite('rm -rf build', 'rm -rf build/') === 'rm -rf build/',
+  'an escalation already in the typed line is not an escalation — the operator typed it');
+ok(vetRewrite('git push origin man', 'git push origin main') === 'git push origin main',
+  'correcting a push the operator typed is still a correction (the permission gate is elsewhere)');
+
 console.log(fails ? `\nbang check: ${fails} FAILURE(S)\n` : '\nbang check: ok\n');
 process.exit(fails ? 1 : 0);
 
