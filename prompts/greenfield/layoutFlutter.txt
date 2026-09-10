@@ -1,0 +1,20 @@
+TARGET LAYOUT — a Flutter app routed with auto_route. Create these paths; do not invent a second
+convention.
+
+  lib/main.dart                 runApp only. Nothing else belongs in it.
+  lib/app.dart                  MaterialApp.router; ONE AppRouter, held as a field, never built in build().
+  lib/router/app_router.dart    @AutoRouterConfig, extends RootStackRouter, part 'app_router.gr.dart'.
+  lib/views/<name>_view.dart    one screen per file, one class per file, each annotated @RoutePage().
+  lib/widgets/<name>.dart       one widget per file, one class per file, no routing inside.
+  test/<name>_test.dart         flutter_test: pump the real app and drive the router.
+  pubspec.yaml                  name, SDK constraint, auto_route, dev auto_route_generator + build_runner.
+  analysis_options.yaml         include: package:flutter_lints/flutter.yaml
+  .gitignore                    .dart_tool/, /build/, *.iml, .idea/ — and never a .gr.dart file.
+  README.md                     already created as a stub at the root — fill THAT file in.
+
+ROUTES ARE GENERATED, NOT WRITTEN. `HomeRoute` comes out of build_runner reading @RoutePage(), so any
+step that adds or renames a route is followed by a step running `dart run build_runner build`. Never
+hand-write or edit a .gr.dart file.
+
+The platform folders — android/ ios/ web/ macos/ linux/ windows/ — belong to `flutter create`. No step
+writes a file inside them by hand.

@@ -40,13 +40,14 @@ class Scaffold extends BaseTool {
     'Create a new project in an EMPTY directory: the manifest, the layout, an entry point that runs, a '
     + 'test that passes, a .gitignore, a README and the .naamah design directory — then `git init` and '
     + 'an initial commit. Deterministic and instant; no model writes any of it. Pass `type` as python, '
-    + 'node (TypeScript) or unity, or leave it out and it is worked out from `about` and the directory. '
+    + 'node (TypeScript), unity or flutter, or leave it out and it is worked out from `about` and the '
+    + 'directory. '
     + 'Refuses a directory that already holds a project. Use this instead of planning steps that create '
     + 'a manifest, a tsconfig or an entry point by hand.';
 
   readonly parameters = [
     { name: 'dir', type: 'string', description: 'The directory to make into a project. Defaults to the current one.', required: false },
-    { name: 'type', type: 'string', description: 'python | node | unity. Omit to work it out.', required: false },
+    { name: 'type', type: 'string', description: 'python | node | unity | flutter. Omit to work it out.', required: false },
     { name: 'about', type: 'string', description: 'What the project is for, in the requester\'s own words. Used to decide the type when `type` is omitted.', required: false },
   ];
 
@@ -73,16 +74,16 @@ class Scaffold extends BaseTool {
     if (!asked && !KNOWN.includes(type)) {
       if (!about) {
         return 'Refused: nothing says what kind of project this should be. Pass `type` (python, node, '
-          + 'unity) or `about` describing what it is for. Guessing would produce the wrong project, '
-          + 'silently.';
+          + 'unity, flutter) or `about` describing what it is for. Guessing would produce the wrong '
+          + 'project, silently.';
       }
       ctx?.onStatus('deciding the project type');
       const answer = (await toolLlm().ask([{ role: 'user', content: this.prompt('classify', { REQUEST: about.slice(0, 2000) }) }]))
         .trim().toLowerCase();
       const picked = KNOWN.find((k) => answer.includes(k));
       if (!picked) {
-        return `Refused: "${about}" does not describe a python, node or unity project (the classifier `
-          + `answered "${answer.slice(0, 60)}"). Pass \`type\` explicitly if it is one of those.`;
+        return `Refused: "${about}" does not describe a python, node, unity or flutter project (the `
+          + `classifier answered "${answer.slice(0, 60)}"). Pass \`type\` explicitly if it is one of those.`;
       }
       type = picked;
       how = 'worked out from what you asked for';
@@ -127,13 +128,18 @@ class Scaffold extends BaseTool {
   }
 }
 
-const KNOWN: ProjectType[] = ['python', 'node', 'unity'];
+const KNOWN: ProjectType[] = ['python', 'node', 'unity', 'flutter'];
 
 /** What comes next, per type — stated so neither the agent nor the operator has to re-derive it. */
 const NEXT: Partial<Record<ProjectType, string>> = {
   node: 'Verify it with: npm install && npm test && npm run build. `npm run dev` serves the page on :3000.',
   python: 'Verify it with: python -m unittest discover -s tests — it passes with nothing installed.',
   unity: 'Open the folder in Unity Hub. Point ProjectSettings/ProjectVersion.txt at the editor you have first.',
+  // The background pass is stated because a route class that is not there YET reads as a broken
+  // scaffold rather than as an unfinished generator run.
+  flutter: 'Verify it with: flutter analyze && flutter test. `flutter pub get` and `dart run build_runner build` '
+    + 'are started in the background when the SDK is on PATH — if a route class or '
+    + 'lib/router/app_router.gr.dart is missing, run them.',
 };
 
 /** Nothing but a repository, if that. Mirrors `executors/plan/git.ts#isEmptyProjectDir`. */

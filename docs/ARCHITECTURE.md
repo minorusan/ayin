@@ -1082,6 +1082,7 @@ src/executors/
   plan/base/          index.ts + config.json     ← exactly the old behaviour
   plan/arduino/       index.ts + config.json
   plan/greenfield/    index.ts + config.json     ← an EMPTY directory: python / typescript / unity
+  plan/flutter/       index.ts + config.json     ← flutter: greenfield's branch + the toolchain
   qa/base/            index.ts + config.json
   qa/arduino/         index.ts + config.json
   present/base/       index.ts + config.json
@@ -1145,7 +1146,8 @@ and `node` — the last two sit at the end because their vocabulary is the broad
 that flashes the Arduino"* is claimed by the arduino patterns above them. `python`, `node` and `unity`
 are there so an empty directory plus *"set up a Python CLI"* reaches the **greenfield plan executor**
 below. Without a match the type is `unknown`, `greenfield` stays false, and plan mode then spends two
-full `explore` loops discovering that an empty directory is empty.
+full `explore` loops discovering that an empty directory is empty. `flutter` reaches **`plan/flutter`**,
+which is greenfield's flutter branch plus the toolchain the branch cannot run itself.
 
 ### What each contract does
 
@@ -1170,7 +1172,7 @@ actually has to decide, **the layout**, is never stated, and the base deliverabl
 README — so the validator in `plan/plan.ts` accepts a plan for a new Python project that never mentions
 `pyproject.toml`.
 
-So `plan/greenfield` carries **three branches**, one per type, because the folder structure of a
+So `plan/greenfield` carries **four branches**, one per type, because the folder structure of a
 typical project is exactly what differs:
 
 | Branch | Layout the plan is grounded in | Required deliverables beyond the README |
@@ -1178,6 +1180,7 @@ typical project is exactly what differs:
 | Python (`python`) | src layout, venv, editable install, pytest | `pyproject.toml` · `src/*/__init__.py` · `tests/test_*.py` · `.gitignore` |
 | TypeScript (`node`) | `tsc` to `dist/`, ESM, `node --test` | `package.json` · `tsconfig.json` · `src/index.ts` · `test/*.test.ts` · `.gitignore` |
 | Unity (`unity`) | `Assets/Scripts`, editor-owned scenes and `.meta` | `Assets/Scripts/*.cs` · `Packages/manifest.json` · `ProjectSettings/ProjectVersion.txt` · `.gitignore` |
+| Flutter (`flutter`) | `lib/` with one class per file, auto_route routing, generated route classes | `pubspec.yaml` · `lib/main.dart` · `lib/router/app_router.dart` · `lib/views/*.dart` · `lib/widgets/*.dart` · `test/*_test.dart` · `analysis_options.yaml` · `.gitignore` |
 
 #### The scaffold WRITES those layouts — `greenfield/files.ts`
 
@@ -1191,6 +1194,7 @@ entry point is `node:http`, its test runner is `node:test`, the Python test is `
 | TypeScript | `package.json` · `tsconfig.json` · `.gitignore` · `README.md` · `src/server.ts` · `src/index.ts` · `public/index.html` · `test/server.test.ts` | `npm install` → `npm test` 4/4 → `npm run typecheck` → `npm run build` → `npm start` serves the page, `/api/health`, and 404s the rest; `npm run dev` restarts on an edit under `src/` (measured: a route added mid-run answered 200 where it had 404'd) |
 | Python | `pyproject.toml` · `.gitignore` · `README.md` · `src/<mod>/__init__.py` · `src/<mod>/__main__.py` · `tests/test_smoke.py` | `python -m unittest discover -s tests` passes **with nothing installed** |
 | Unity | `Packages/manifest.json` · `ProjectSettings/ProjectVersion.txt` · `.gitignore` · `README.md` · `Assets/Scripts/<Name>Bootstrap.cs` | manifest parses; `ProjectVersion.txt` is what makes the Hub list the folder at all |
+| Flutter | `pubspec.yaml` · `analysis_options.yaml` · `.gitignore` · `README.md` · `lib/main.dart` · `lib/app.dart` · `lib/router/app_router.dart` · `lib/views/{home,counter,detail}_view.dart` · `lib/widgets/{primary_button,section_card,stat_tile}.dart` · `test/navigation_test.dart` | measured on Flutter 3.44 / Dart 3.12: 23 paths in 5.3s, then `flutter analyze` **clean**, `flutter test` **1/1** (it pumps the real app, taps through the router and asserts the counter), `flutter build web --release` and `flutter build macos` both **through** |
 
 **Every branch also gets `.naamah/README.md`.** The design step was described in the system prompt and
 created by the naamah tool on first sketch, which means it existed on the turns that remembered it.
@@ -1247,6 +1251,31 @@ file bootstrap**: `package.json`, `tsconfig.json`, `.gitignore` and a `src/index
 already decided. Without that, *"give me an empty TS endpoint for notes"* produced a plan naming a
 manifest that nothing ever wrote, and the model reached for Express and imported a package that was
 not installed.
+
+**Flutter is `plan/flutter`'s**, and for a harder reason than node's. auto_route puts every route
+class in a **generated** file: `HomeRoute` exists only once build_runner has read the `@RoutePage()`
+annotations, and `app_router.gr.dart` does not exist for the `part` directive to find until then. A
+file table alone therefore hands over a project that does not compile — so greenfield's flutter branch
+keeps the layout, the deliverables, the survey and the prompts, and the owner adds two things:
+
+- **the platform folders, synchronously.** `flutter create` is local and takes about five seconds, and
+  its output is 130-odd files of `android/ ios/ web/ macos/ linux/ windows/` that must be inside the
+  scaffold's baseline commit or the operator's first `git status` is a wall of untracked noise. It
+  runs in a **temporary directory** and only the platform folders plus `.metadata` are copied in,
+  because `flutter create` also templates `pubspec.yaml`, `lib/main.dart`, the README, the test and
+  `.gitignore` — every one of which this scaffold has its own, deliberately different version of.
+  Copying rather than generating in place means no ordering, no overwrite and nothing to undo.
+- **`flutter pub get` then the generator, fire and forget.** `scaffold()` is synchronous and runs
+  inside the turn; blocking it on pub.dev plus a cold build_runner (measured: 44s, and it AOT-compiles
+  its builders first) would freeze a TUI with no spinner. The grounding states that the pass was
+  started and gives the two commands verbatim, so a route class that is not there *yet* reads as an
+  unfinished background pass rather than as a broken router — and the model is told, in the same
+  breath, never to hand-write a `.gr.dart` file.
+
+No SDK on PATH is also an answer: every step is skipped, the file table still lands, and the project
+README's caveat table carries the one command that adds the platform folders later. Verified: `flutter
+create --platforms=… .` in a directory that already holds this scaffold leaves `lib/`, the test, the
+pubspec and the README byte-identical.
 
 The two were written independently for the same complaint and merged in 7200cee. Selection is
 **highest priority, ties broken by id**, so both claiming `node` at priority 100 would have let an
@@ -5287,8 +5316,10 @@ src/
 │   │                   any config↔import mismatch — a declared handler that never runs looks
 │   │                   exactly like support
 │   ├── deliverables.ts glob-ish pattern → "is this file actually on disk"
-│   ├── plan/{base,arduino,greenfield}/  index.ts + config.json — greenfield is an EMPTY
-│   │                   directory: the python / typescript / unity layout, and git init
+│   ├── plan/{base,arduino,greenfield,node,flutter}/  index.ts + config.json — greenfield is an
+│   │                   EMPTY directory: the python / typescript / unity / flutter layout, and git
+│   │                   init; node and flutter own their type and add its toolchain (npm install,
+│   │                   and `flutter create` + pub get + build_runner)
 │   ├── qa/{base,arduino}/       index.ts + config.json
 │   └── present/{base,arduino}/  index.ts + config.json
 ├── plan/               plan mode for big cross-feature prompts:

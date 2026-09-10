@@ -215,6 +215,7 @@ for (const [request, type, label, manifest, owner] of [
   ['set up an empty python project for a CLI that renames files', 'python', 'Python', 'pyproject.toml', 'greenfield'],
   ['create a new typescript project, a small library with tests', 'node', 'TypeScript', 'package.json', 'node'],
   ['start a unity project for a 2d platformer prototype', 'unity', 'Unity', 'Packages/manifest.json', 'greenfield'],
+  ['create a flutter app with a couple of screens', 'flutter', 'Flutter', 'pubspec.yaml', 'flutter'],
 ]) {
   inEmptyDir((dir) => {
     const ctx = detectProject(dir, request);
@@ -324,10 +325,16 @@ inEmptyDir((dir) => {
   // old TypeScript table wrote no test while the deliverables required `test/*.test.ts`. A plan for
   // the project the scaffold had just built was therefore rejectable. Asserted for every literal
   // (non-glob) required pattern, in every branch.
+  // FLUTTER IS HERE AND NOT IN THE GIT LOOP BELOW. Its scaffold starts `flutter pub get` and the
+  // generator in the background, which write `pubspec.lock` and `app_router.gr.dart` AFTER the
+  // baseline commit — so a "nothing uncommitted behind it" assertion on this type would pass or fail
+  // on a race with pub.dev. What must hold here is that the file table satisfies the deliverables,
+  // and that is what this loop asks.
   for (const [request, label] of [
     ['set up an empty python project for a CLI', 'python'],
     ['create a new typescript project, a small library with tests', 'typescript'],
     ['start a unity project for a 2d platformer prototype', 'unity'],
+    ['create a flutter app with a couple of screens', 'flutter'],
   ]) {
     inEmptyDir((d) => {
       const c = detectProject(d, request);

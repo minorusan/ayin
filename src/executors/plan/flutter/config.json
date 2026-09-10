@@ -1,0 +1,7 @@
+{
+  "id": "flutter",
+  "kind": "plan",
+  "projectTypes": ["flutter"],
+  "priority": 100,
+  "description": "Flutter planning — a real greenfield bootstrap: an app that routes with auto_route (router, views, widgets, a widget test), the platform folders from `flutter create`, and the `pub get` + build_runner pass that writes the route classes. Delegates every planning surface to plan/greenfield's flutter branch."
+}

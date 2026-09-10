@@ -32,6 +32,7 @@ import { basePlanExecutor } from './plan/base/index.js';
 import { arduinoPlanExecutor } from './plan/arduino/index.js';
 import { greenfieldPlanExecutor } from './plan/greenfield/index.js';
 import { nodePlanExecutor } from './plan/node/index.js';
+import { flutterPlanExecutor } from './plan/flutter/index.js';
 import { baseQaExecutor } from './qa/base/index.js';
 import { arduinoQaExecutor } from './qa/arduino/index.js';
 import { unityQaExecutor } from './qa/unity/index.js';
@@ -50,6 +51,11 @@ const INSTANCES: Record<string, AnyExecutor> = {
   // have produced a priority tie broken by id — a coin flip deciding which one bootstraps a project.
   'plan/greenfield': greenfieldPlanExecutor,
   'plan/node': nodePlanExecutor,
+  // THREE OWNERS, NO OVERLAP, for the same reason as the two above: `plan/flutter` claims flutter
+  // alone because auto_route's route classes come out of a generator, so a Flutter bootstrap that
+  // stops at the file table hands over a project that does not compile. Its planning surfaces are
+  // greenfield's flutter branch — the layout, the deliverables and the survey live there.
+  'plan/flutter': flutterPlanExecutor,
   'qa/base': baseQaExecutor,
   'qa/arduino': arduinoQaExecutor,
   'qa/unity': unityQaExecutor,

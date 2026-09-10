@@ -31,7 +31,7 @@ import type { ProjectType } from './types.js';
 /** Registered here as well as by the scaffold tool — `register` is idempotent and returns one bundle. */
 const scaffoldPrompts = prompts.register('scaffold', packagePath('prompts', 'scaffold')).bundle;
 
-export const CLASSIFIABLE: ProjectType[] = ['python', 'node', 'unity'];
+export const CLASSIFIABLE: ProjectType[] = ['python', 'node', 'unity', 'flutter'];
 
 /**
  * Which project type does this request describe, or null when it describes none of them.

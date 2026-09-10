@@ -1,0 +1,6 @@
+Watched running on a device: `flutter run -d <device>`, where hot reload (r) applies an edit in place
+and the console carries `debugPrint`. `flutter devices` lists the targets.
+
+For each feature: which view shows it, what a person taps to get there, and what the widget test
+asserts. `flutter analyze` clean and `flutter test` green are the floor, never the proof — a route that
+compiles can still be unreachable from the UI.

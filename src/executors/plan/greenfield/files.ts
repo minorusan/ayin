@@ -25,7 +25,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { log } from '../../../log.js';
 
-export type Branch = 'python' | 'typescript' | 'unity';
+export type Branch = 'python' | 'typescript' | 'unity' | 'flutter';
 
 /** A safe project/package name from a directory name. `My Notes!` → `my-notes`. */
 export function safeName(root: string, sep = '-'): string {
@@ -37,6 +37,16 @@ export function safeName(root: string, sep = '-'): string {
 export function pyName(root: string): string {
   const n = safeName(root, '_').replace(/[.-]+/g, '_');
   return /^[0-9]/.test(n) ? `p_${n}` : n;
+}
+
+/**
+ * A Dart package name: lowercase with underscores, never leading with a digit. `My Notes!` →
+ * `my_notes`. Pub REFUSES anything else, and it refuses it at `flutter pub get` — after the
+ * scaffold has reported success.
+ */
+export function dartName(root: string): string {
+  const n = safeName(root, '_').replace(/[.-]+/g, '_');
+  return /^[0-9]/.test(n) ? `app_${n}` : n;
 }
 
 /** Write a file only if absent. Returns the path when it wrote, so the caller can report it. */
@@ -526,6 +536,472 @@ another machine.
 Bootstrapped deterministically — written without a model, so it is the same every time.
 `;
 
+// ── Flutter: a routed app that analyzes clean, tests green and builds ─────────────────────────
+
+/**
+ * EVERY BYTE BELOW WAS RUN BEFORE IT WAS WRITTEN DOWN — Flutter 3.44 / Dart 3.12, `flutter analyze`
+ * clean, `flutter test` green, `flutter build web --release` through. Four of these files are the way
+ * they are because the first version of them did not compile, and the four errors are in the README's
+ * caveat table for the operator who hits them next:
+ *
+ *   · `AppRouter extends RootStackRouter`, never `_$AppRouter`. auto_route ≥ 9 generates the route
+ *     classes and NOT a router base class, so the `_$` form fails with `extends_non_class` and then
+ *     every member of the router — `config()` included — reads as undefined.
+ *   · `app_router.dart` imports `package:flutter/material.dart` even though nothing in it names a
+ *     widget. The generated file is a `part`, so it inherits its parent's imports, and the `Key?` in
+ *     a generated args class is undefined without it.
+ *   · a route with arguments generates a NON-const constructor, so `const DetailRoute(id: …)` is
+ *     `const_with_non_const`.
+ *   · the widget test imports only `flutter_test` and the app — an unused `material.dart` import is a
+ *     lint, and `flutter analyze` is a deliverable here.
+ *
+ * THE ONE THING THIS SCAFFOLD CANNOT DO ALONE is generate `app_router.gr.dart`: auto_route's routes
+ * come out of build_runner, so the project needs `flutter pub get` and one generator pass before it
+ * compiles. `plan/flutter` starts both; the README states them for every case where it could not.
+ */
+
+const FLUTTER_PUBSPEC = (name: string): string => `name: ${name}
+description: "${name} — a Flutter app routed with auto_route."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  # ^3.8.0 IS THE FLOOR THE DEPENDENCIES SET, not a preference: build_runner 2.15 and flutter_lints 6
+  # both declare it. An older SDK cannot resolve this file at all — run \`flutter upgrade\`.
+  sdk: ^3.8.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  auto_route: ^11.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  # The generator's major trails auto_route's on purpose — this is the pair pub actually resolves.
+  auto_route_generator: ^10.6.0
+  build_runner: ^2.15.1
+
+flutter:
+  uses-material-design: true
+`;
+
+/**
+ * The generated `.gr.dart` is deliberately NOT excluded from the analyzer. It carries its own
+ * `ignore_for_file: type=lint`, so lints are already quiet in it — but a real error there is almost
+ * always a missing import in the file it is a `part` of, and that is the one diagnostic worth seeing.
+ */
+const FLUTTER_ANALYSIS = `include: package:flutter_lints/flutter.yaml
+`;
+
+const FLUTTER_MAIN = `import 'package:flutter/material.dart';
+
+import 'app.dart';
+
+void main() {
+  runApp(const App());
+}
+`;
+
+const FLUTTER_APP = (name: string): string => `import 'package:flutter/material.dart';
+
+import 'router/app_router.dart';
+
+/// The root widget. The router is built ONCE, as a field — a router constructed inside \`build()\`
+/// is a new router on every rebuild, which drops the navigation stack.
+class App extends StatefulWidget {
+  const App({super.key});
+
+  @override
+  State<App> createState() => _AppState();
+}
+
+class _AppState extends State<App> {
+  final AppRouter _router = AppRouter();
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp.router(
+      title: '${name}',
+      theme: ThemeData(colorSchemeSeed: const Color(0xFF4F46E5), useMaterial3: true),
+      darkTheme: ThemeData(
+        colorSchemeSeed: const Color(0xFF4F46E5),
+        brightness: Brightness.dark,
+        useMaterial3: true,
+      ),
+      routerConfig: _router.config(),
+    );
+  }
+}
+`;
+
+/**
+ * `material.dart` is imported for the GENERATED file, which is a `part` of this one and inherits
+ * these imports — a route with a `Key?` argument does not compile without it.
+ */
+const FLUTTER_ROUTER = `import 'package:auto_route/auto_route.dart';
+import 'package:flutter/material.dart';
+
+import '../views/counter_view.dart';
+import '../views/detail_view.dart';
+import '../views/home_view.dart';
+
+part 'app_router.gr.dart';
+
+/// Every route in the app, in one list.
+///
+/// \`replaceInRouteName: 'View,Route'\` is what turns \`HomeView\` into the \`HomeRoute\` you navigate
+/// with. To add a screen: one \`@RoutePage()\` view file, one \`AutoRoute\` line here, then
+///
+///     dart run build_runner build
+///
+/// \`RootStackRouter\` is the base class — auto_route generates the route classes, not the router.
+@AutoRouterConfig(replaceInRouteName: 'View,Route')
+class AppRouter extends RootStackRouter {
+  @override
+  List<AutoRoute> get routes => [
+        AutoRoute(page: HomeRoute.page, path: '/', initial: true),
+        AutoRoute(page: CounterRoute.page, path: '/counter'),
+        AutoRoute(page: DetailRoute.page, path: '/detail/:id'),
+      ];
+}
+`;
+
+/** One view per file, one class per file — the convention the whole `lib/views` tree follows. */
+const FLUTTER_HOME_VIEW = `import 'package:auto_route/auto_route.dart';
+import 'package:flutter/material.dart';
+
+import '../router/app_router.dart';
+import '../widgets/primary_button.dart';
+import '../widgets/section_card.dart';
+
+/// \`@RoutePage()\` is what makes \`HomeRoute\` exist. A view without it cannot be routed to.
+@RoutePage()
+class HomeView extends StatelessWidget {
+  const HomeView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Home')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          SectionCard(
+            title: 'Counter',
+            body: 'State kept in a StatefulWidget.',
+            action: PrimaryButton(
+              label: 'Open counter',
+              onPressed: () => context.router.push(const CounterRoute()),
+            ),
+          ),
+          const SizedBox(height: 12),
+          SectionCard(
+            title: 'Detail',
+            body: 'A route that takes a path parameter.',
+            action: PrimaryButton(
+              label: 'Open detail',
+              // NOT const: a route with arguments generates a non-const constructor.
+              onPressed: () => context.router.push(DetailRoute(id: 'ayin')),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+`;
+
+const FLUTTER_COUNTER_VIEW = `import 'package:auto_route/auto_route.dart';
+import 'package:flutter/material.dart';
+
+import '../widgets/primary_button.dart';
+import '../widgets/stat_tile.dart';
+
+@RoutePage()
+class CounterView extends StatefulWidget {
+  const CounterView({super.key});
+
+  @override
+  State<CounterView> createState() => _CounterViewState();
+}
+
+class _CounterViewState extends State<CounterView> {
+  int _count = 0;
+
+  void _increment() => setState(() => _count++);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Counter')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            StatTile(label: 'Taps', value: '\$_count'),
+            const SizedBox(height: 16),
+            PrimaryButton(label: 'Add one', onPressed: _increment),
+          ],
+        ),
+      ),
+    );
+  }
+}
+`;
+
+const FLUTTER_DETAIL_VIEW = `import 'package:auto_route/auto_route.dart';
+import 'package:flutter/material.dart';
+
+import '../widgets/section_card.dart';
+
+/// \`@PathParam\` binds \`/detail/:id\` to the constructor argument, so the deep link
+/// \`/detail/ayin\` and \`DetailRoute(id: 'ayin')\` reach this widget with the same value.
+@RoutePage()
+class DetailView extends StatelessWidget {
+  const DetailView({@PathParam('id') required this.id, super.key});
+
+  final String id;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('Detail: \$id')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: SectionCard(title: id, body: 'Opened with id "\$id".'),
+      ),
+    );
+  }
+}
+`;
+
+/** One widget per file, in its own class, taking what it shows and doing nothing else. */
+const FLUTTER_PRIMARY_BUTTON = `import 'package:flutter/material.dart';
+
+class PrimaryButton extends StatelessWidget {
+  const PrimaryButton({required this.label, required this.onPressed, super.key});
+
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return FilledButton(onPressed: onPressed, child: Text(label));
+  }
+}
+`;
+
+const FLUTTER_SECTION_CARD = `import 'package:flutter/material.dart';
+
+class SectionCard extends StatelessWidget {
+  const SectionCard({required this.title, required this.body, this.action, super.key});
+
+  final String title;
+  final String body;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) {
+    final TextTheme text = Theme.of(context).textTheme;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: text.titleMedium),
+            const SizedBox(height: 4),
+            Text(body, style: text.bodyMedium),
+            if (action != null) ...[const SizedBox(height: 12), action!],
+          ],
+        ),
+      ),
+    );
+  }
+}
+`;
+
+const FLUTTER_STAT_TILE = `import 'package:flutter/material.dart';
+
+class StatTile extends StatelessWidget {
+  const StatTile({required this.label, required this.value, super.key});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return Column(
+      children: [
+        Text(value, style: theme.textTheme.displaySmall),
+        Text(label, style: theme.textTheme.labelLarge),
+      ],
+    );
+  }
+}
+`;
+
+/**
+ * A TEST THAT DRIVES THE ROUTER, not one that pumps a widget in isolation.
+ *
+ * It pumps the real `App`, taps through to a second route and asserts the state change there — so it
+ * fails if the router is misconfigured, which is the thing most likely to be wrong in a routed app
+ * and the thing a per-widget test cannot see. `pumpAndSettle` is required after a push: a route
+ * transition is an animation, and `pump` alone lands mid-flight.
+ */
+const FLUTTER_TEST = (name: string): string => `import 'package:flutter_test/flutter_test.dart';
+import 'package:${name}/app.dart';
+
+void main() {
+  testWidgets('home routes to the counter, and it counts', (WidgetTester tester) async {
+    await tester.pumpWidget(const App());
+    await tester.pumpAndSettle();
+
+    expect(find.text('Home'), findsOneWidget);
+
+    await tester.tap(find.text('Open counter'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Counter'), findsOneWidget);
+    expect(find.text('0'), findsOneWidget);
+
+    await tester.tap(find.text('Add one'));
+    await tester.pump();
+
+    expect(find.text('1'), findsOneWidget);
+  });
+}
+`;
+
+/**
+ * Flutter's own template, plus one deliberate omission: `*.gr.dart` is NOT ignored.
+ *
+ * The generated routes are committed, so a fresh clone builds after `flutter pub get` alone and a
+ * reviewer can see a new route arrive in the diff. Ignoring them makes "clone and run" fail on a
+ * missing file that no error message tells you to generate.
+ */
+const FLUTTER_GITIGNORE = `# Miscellaneous
+*.class
+*.log
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication and obfuscation
+app.*.symbols
+app.*.map.json
+
+# Android Studio build artifacts
+/android/app/debug
+/android/app/profile
+/android/app/release
+`;
+
+const FLUTTER_README = (name: string): string => `# ${name}
+
+A Flutter app routed with [auto_route](https://pub.dev/packages/auto_route). Bootstrapped
+deterministically by ayin: the layout below is the pattern to extend, not a suggestion.
+
+## Launch it
+
+\`\`\`bash
+flutter pub get                 # 1. resolve dependencies
+dart run build_runner build     # 2. generate lib/router/app_router.gr.dart
+flutter run -d chrome           # 3. run — or -d macos, or -d <id> from \`flutter devices\`
+\`\`\`
+
+**Steps 1 and 2 are not optional, and they are in that order.** \`HomeRoute\`, \`CounterRoute\` and
+\`DetailRoute\` do not exist in any file you can read — the generator writes them into
+\`lib/router/app_router.gr.dart\`, and nothing compiles until it has.
+
+Then, in any order:
+
+\`\`\`bash
+flutter analyze     # must print "No issues found!"
+flutter test        # one widget test: home → counter → tap → 1
+flutter build web   # or: apk · appbundle · ios · macos · linux · windows
+\`\`\`
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| \`lib/main.dart\` | \`runApp\`. Three lines; leave it alone. |
+| \`lib/app.dart\` | \`MaterialApp.router\`, theme, and the ONE \`AppRouter\` instance. |
+| \`lib/router/app_router.dart\` | every route, in one list. |
+| \`lib/router/app_router.gr.dart\` | **generated.** Never edit it; re-run the generator instead. |
+| \`lib/views/*_view.dart\` | one screen per file, one class per file, each \`@RoutePage()\`. |
+| \`lib/widgets/*.dart\` | one widget per file, one class per file, no routing knowledge. |
+| \`test/navigation_test.dart\` | pumps the real app and taps through the router. |
+
+## Adding a screen — the whole pattern
+
+1. \`lib/views/settings_view.dart\`: one class, \`@RoutePage()\`, \`class SettingsView extends StatelessWidget\`.
+2. \`lib/router/app_router.dart\`: \`AutoRoute(page: SettingsRoute.page, path: '/settings')\`.
+3. \`dart run build_runner build\` — \`SettingsRoute\` does not exist until this runs.
+4. Navigate: \`context.router.push(const SettingsRoute())\`.
+
+\`replaceInRouteName: 'View,Route'\` is what maps \`SettingsView\` → \`SettingsRoute\`. Path parameters
+are declared on the constructor (\`@PathParam('id') required this.id\`) and passed as arguments
+(\`DetailRoute(id: 'x')\`) — see \`lib/views/detail_view.dart\`. Keep \`dart run build_runner watch\`
+running while you work and step 3 happens by itself.
+
+## Why it will not launch
+
+| What you see | Why | Fix |
+|---|---|---|
+| \`Target of URI hasn't been generated: 'app_router.gr.dart'\`, or \`Undefined name 'HomeRoute'\` | the generator has not run since the last route change | \`dart run build_runner build\` |
+| \`Undefined class 'Key'\` inside \`app_router.gr.dart\` | the generated file is a \`part\` and inherits its parent's imports; \`app_router.dart\` lost \`package:flutter/material.dart\` | restore that import — the generated file is not the bug |
+| \`extends_non_class\` on \`_$AppRouter\`, then \`config()\` undefined | auto_route ≥ 9 generates routes, NOT a router base class | \`class AppRouter extends RootStackRouter\` |
+| \`const_with_non_const\` on a route you navigate to | a route WITH arguments generates a non-const constructor | drop the \`const\` |
+| \`These options have been removed and were ignored: --delete-conflicting-outputs\` | build_runner ≥ 2.15 dropped the flag | harmless; drop the flag |
+| \`Because ${name} requires SDK version ^3.8.0\` | the Dart SDK is older than the dependencies | \`flutter upgrade\` (or lower the constraint in \`pubspec.yaml\` and re-resolve at your own risk) |
+| \`No supported devices connected\` | nothing to run on | \`flutter devices\`. \`-d chrome\` needs Chrome; \`-d macos\` needs Xcode; a phone needs USB debugging |
+| \`android/\`, \`ios/\` or \`web/\` is missing | Flutter was not on PATH when the project was scaffolded, so the platform folders were never generated | \`flutter create --platforms=android,ios,web,macos .\` in this directory |
+| CocoaPods errors on an iOS/macOS build | pods not installed for the platform folder | \`sudo gem install cocoapods\`, then \`cd macos && pod install\` |
+| Android build stops on licences | the SDK licences were never accepted | \`flutter doctor --android-licenses\` |
+| \`pub get\` hangs or fails | no route to pub.dev, or a proxy | \`flutter pub get -v\`; set \`PUB_HOSTED_URL\` / \`FLUTTER_STORAGE_BASE_URL\` for a mirror |
+| something else entirely | | \`flutter doctor -v\` first — it names the broken piece, and it is usually not this project |
+
+## Dependencies
+
+- [Flutter SDK — install](https://docs.flutter.dev/get-started/install) · [flutter doctor](https://docs.flutter.dev/reference/flutter-cli)
+- [auto_route](https://pub.dev/packages/auto_route) · [API docs](https://pub.dev/documentation/auto_route/latest/)
+- [auto_route_generator](https://pub.dev/packages/auto_route_generator) · [build_runner](https://pub.dev/packages/build_runner)
+- [flutter_lints](https://pub.dev/packages/flutter_lints) · [Flutter cookbook](https://docs.flutter.dev/cookbook)
+
+## Notes
+
+The manifest, the router, the views, the widgets and the test were written without a model, so they
+are identical every time. The generated route file is deliberately **not** gitignored — commit it, and
+a fresh clone builds after \`flutter pub get\` alone while a new route still shows up in review as a diff.
+`;
+
 // ── the design directory, in every branch ─────────────────────────────────────────────────────
 
 /**
@@ -641,6 +1117,28 @@ export function branchFiles(branch: Branch, dir: string): Record<string, string>
       [`src/${mod}/__main__.py`]: PY_MAIN(mod),
       'tests/test_smoke.py': PY_TEST(mod),
       '.naamah/README.md': NAAMAH_README('Python'),
+    };
+  }
+  if (branch === 'flutter') {
+    const name = dartName(dir);
+    return {
+      'pubspec.yaml': FLUTTER_PUBSPEC(name),
+      'analysis_options.yaml': FLUTTER_ANALYSIS,
+      '.gitignore': FLUTTER_GITIGNORE,
+      'README.md': FLUTTER_README(name),
+      'lib/main.dart': FLUTTER_MAIN,
+      'lib/app.dart': FLUTTER_APP(name),
+      'lib/router/app_router.dart': FLUTTER_ROUTER,
+      'lib/views/home_view.dart': FLUTTER_HOME_VIEW,
+      'lib/views/counter_view.dart': FLUTTER_COUNTER_VIEW,
+      'lib/views/detail_view.dart': FLUTTER_DETAIL_VIEW,
+      'lib/widgets/primary_button.dart': FLUTTER_PRIMARY_BUTTON,
+      'lib/widgets/section_card.dart': FLUTTER_SECTION_CARD,
+      'lib/widgets/stat_tile.dart': FLUTTER_STAT_TILE,
+      'test/navigation_test.dart': FLUTTER_TEST(name),
+      // Naamah compiles TypeScript or C# sketches, so a Dart project's design is written in
+      // TypeScript — the same choice the python branch makes, for the same reason.
+      '.naamah/README.md': NAAMAH_README('TypeScript'),
     };
   }
   // unity

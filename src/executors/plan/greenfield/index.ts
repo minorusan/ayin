@@ -59,6 +59,12 @@ const greenfieldPrompts = prompts.register('greenfield', packagePath('prompts', 
  * The `typescript` branch below is KEPT: its layout and observability facts are still the right
  * answer if node ever comes back here, and deleting a prompt-backed branch to express a routing
  * decision would put the two in different places.
+ *
+ * `flutter` IS ABSENT FOR THE SAME REASON. `plan/flutter` owns it and delegates every surface here,
+ * adding the half this executor cannot do for a toolchain it does not own: the platform folders
+ * `flutter create` generates, and the `pub get` + build_runner pass that writes the routes. auto_route
+ * puts every route class in a GENERATED file, so a Flutter app that has never run the generator does
+ * not compile — a bootstrap that stops at the file table would hand over a project that cannot build.
  */
 const config: ExecutorConfig = {
   id: 'greenfield', kind: 'plan', projectTypes: ['python', 'unity'], priority: 100,
@@ -66,12 +72,13 @@ const config: ExecutorConfig = {
 };
 
 /** Which set of layout facts this project gets. `node` means TypeScript — the layout says so. */
-type Branch = 'python' | 'typescript' | 'unity';
+type Branch = 'python' | 'typescript' | 'unity' | 'flutter';
 
 const BRANCH_OF: Partial<Record<ProjectType, Branch>> = {
   python: 'python',
   node: 'typescript',
   unity: 'unity',
+  flutter: 'flutter',
 };
 
 interface BranchFacts {
@@ -152,6 +159,63 @@ const FACTS: Record<Branch, BranchFacts> = {
         label: 'the ignore file',
         patterns: ['.gitignore'],
         why: '`node_modules/`, `dist/`, `*.tsbuildinfo` — the repository is initialised empty, and the first commit is where build output gets in',
+        required: true,
+      },
+    ],
+  },
+
+  flutter: {
+    label: 'Flutter',
+    toolchain: 'flutter · dart · flutter pub get · dart run build_runner build · flutter analyze · flutter test · flutter run -d <device>',
+    layoutPrompt: 'layoutFlutter',
+    observabilityPrompt: 'observabilityFlutter',
+    deliverables: [
+      {
+        label: 'the package manifest',
+        patterns: ['pubspec.yaml'],
+        why: 'the app name, the SDK constraint and the dependency set — `flutter pub get` reads nothing else, and no Dart file resolves an import without it',
+        required: true,
+      },
+      {
+        label: 'the entry point',
+        patterns: ['lib/main.dart'],
+        why: '`flutter run` and `flutter build` look for lib/main.dart by name — a Flutter app whose entry point is anywhere else does not start',
+        required: true,
+      },
+      {
+        label: 'the router',
+        patterns: ['lib/router/app_router.dart'],
+        why: 'the one AutoRoute list. Every screen is reachable only by having a line in it, and the generated route classes are a `part` of this file',
+        required: true,
+      },
+      {
+        label: 'the views',
+        patterns: ['lib/views/*.dart'],
+        why: 'one screen per file, one class per file, each annotated @RoutePage() — the annotation is what makes a route class exist at all',
+        required: true,
+      },
+      {
+        label: 'the widgets',
+        patterns: ['lib/widgets/*.dart'],
+        why: 'one widget per file in its own class, with no routing inside — the split that keeps a view composable and a widget testable',
+        required: true,
+      },
+      {
+        label: 'the widget test',
+        patterns: ['test/*_test.dart'],
+        why: 'one flutter_test that pumps the real app and drives the router — the only check that a route is actually reachable',
+        required: true,
+      },
+      {
+        label: 'the lint configuration',
+        patterns: ['analysis_options.yaml'],
+        why: '`flutter analyze` reads it; without it the analyzer runs with no lint set and the project has no definition of clean',
+        required: true,
+      },
+      {
+        label: 'the ignore file',
+        patterns: ['.gitignore'],
+        why: '`.dart_tool/`, `/build/`, `.idea/`, `*.iml` — the repository is initialised empty, and the first commit is where build output gets in',
         required: true,
       },
     ],
