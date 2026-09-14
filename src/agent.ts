@@ -28,7 +28,6 @@ import { getGoal } from './goal.js';
 import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLESS, formatToolResultForChat, formatToolCallForChat, escapeBlessedTags, updateToolProgress } from './ui.js';
 import { theme } from './ui/theme.js';
 import { log } from './log.js';
-import { hasFinalMarker, stripFinalMarker } from './final-marker.js';
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
 import { stoppedShort } from './announced.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
@@ -586,29 +585,6 @@ export function restoreConversation(turns: Array<{ role: string; content: string
 /** Refusals of an unmarked, tool-less turn before it is accepted anyway. Three clears the reflex. */
 const MAX_CONTINUE_NUDGES = 1;
 
-/**
- * SOME MODELS DO NOT SPEAK THIS PROTOCOL, and punishing them for it costs more than it saves.
- *
- * The `$` convention is enforced because a model once returned a to-do list as an answer and six files
- * went unwritten. But it assumes the model follows the convention at all, and gemma — the model the
- * convention was written for, reached through the resource provider — sometimes does not. Read from a real
- * session log: one `llm_call`, one `continue_nudge`, one more `llm_call` whose reply ARGUED with the
- * harness ("since you have signaled that I should continue... I will perform a scan of the current working
- * directory") and then did exactly that. One nudge was enough to produce busywork.
- *
- * So the nudge is now spent ONCE per turn, and once a session has proven the model never marks its
- * replies, it stops entirely: two unmarked finals with no marker ever produced is evidence about the
- * MODEL, not about this turn. A protocol one side does not implement is not a protocol, and the harness
- * stops pretending otherwise instead of burning rounds on it.
- */
-let markerEverSeen = false;
-let unmarkedFinals = 0;
-const GIVE_UP_ON_MARKER_AFTER = 2;
-
-/** Whether the marker convention is worth enforcing on this session's model. */
-function markerWorthEnforcing(): boolean {
-  return markerEverSeen || unmarkedFinals < GIVE_UP_ON_MARKER_AFTER;
-}
 
 /**
  * CONSECUTIVE nudges without progress, not nudges in total.
@@ -802,7 +778,9 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
 
   // Compression is ON DEMAND, not on a schedule. See `compressOldest`.
   const fixed = approxTokens(systemContent) + approxTokens(volatileTurn?.content ?? '');
-  const masked = compressOldest(conversationWindow, fixed);
+  // Reclaim the free space FIRST — duplicates cost nothing to remove — and only then ration evidence.
+  const deduped = dedupeRepeatedResults(conversationWindow);
+  const masked = compressOldest(conversationWindow, fixed, deduped.canonical);
   for (const msg of conversationWindow) messages.push(msg);
   if (volatileTurn) messages.push(volatileTurn);
   logCoverage({
@@ -811,7 +789,7 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     history: messages.slice(1, volatileTurn ? messages.length - 1 : messages.length),
     volatile: volatileTurn?.content ?? '',
     maskedCount: masked.count,
-    maskedCharsDropped: masked.dropped,
+    maskedCharsDropped: masked.dropped + deduped.dropped,
   });
   return trimToContext(messages);
 }
@@ -901,7 +879,56 @@ const COMPRESS_TO_CHARS = 2_000;
 const COMPRESS_ABOVE = 0.75;
 const COMPRESS_UNTIL = 0.6;
 
-export function compressOldest(window: Message[], fixedTokens: number): { count: number; dropped: number } {
+/** Below this a pointer saves less than it costs to read. */
+const DEDUPE_MIN_CHARS = 500;
+
+/**
+ * THE SAME ANSWER, ELEVEN TIMES, PAID FOR ELEVEN TIMES.
+ *
+ * Measured against SWE-bench: 36–75% of a session's tool calls are byte-identical repeats — the same
+ * `read_file` of the same span of an unchanged file. Each repeat returns the same bytes and each copy
+ * sits in the window costing full price, so the window fills on redundancy, compression fires, and the
+ * compressed stub invites the model to re-run the call, which produces another identical copy. That is
+ * the loop that cost two SWE-bench instances a ZERO: rounds exhausted, no edit ever attempted.
+ *
+ * The model is NOT wrong to re-ask. Re-reading is what anything does when reality disagrees with what
+ * it expected — in the measured case it was hunting a function that exists in a newer version of the
+ * library and not at this commit. Refusing the read would only break its pace and teach it nothing. So
+ * nothing here blocks a re-read: it removes the DUPLICATE COPIES from the window, which is pure waste.
+ *
+ * INFORMATION-PRESERVING, therefore unconditional. Compression is rationed behind a budget because it
+ * destroys evidence; this destroys none — the bytes are still in the window, in the earlier copy the
+ * stub points at — so waiting for the window to fill before reclaiming free space would be backwards.
+ *
+ * ONLY EVER REWRITES THE NEWER COPY, and that is load-bearing rather than tidy. The first occurrence is
+ * left verbatim, so every token before it is untouched and the server's prefix cache still hits. Keeping
+ * the NEWEST verbatim instead would rewrite a message that was already sent whole and move every token
+ * after it, re-prefilling the prompt on the round that can least afford it.
+ */
+export function dedupeRepeatedResults(window: Message[]): { count: number; dropped: number; canonical: Set<number> } {
+  const firstSeen = new Map<string, number>();
+  const canonical = new Set<number>();
+  let count = 0;
+  let dropped = 0;
+  const last = window.length - VERBATIM_TAIL;
+  for (let i = 0; i < last; i++) {
+    const msg = window[i];
+    if (msg.role !== 'user' || !msg.content.startsWith('<tool_response>')) continue;
+    if (msg.content.length < DEDUPE_MIN_CHARS) continue;
+    const at = firstSeen.get(msg.content);
+    if (at === undefined) { firstSeen.set(msg.content, i); continue; }
+    canonical.add(at);
+    const was = msg.content.length;
+    msg.content = '<tool_response>\n… [identical to the result of this same call earlier in this session '
+      + '— the bytes are unchanged and are still above.]\n</tool_response>';
+    dropped += was - msg.content.length;
+    count++;
+  }
+  if (count) log('INFO', 'history_deduped', { results: String(count), droppedChars: String(dropped) });
+  return { count, dropped, canonical };
+}
+
+export function compressOldest(window: Message[], fixedTokens: number, canonical: Set<number> = new Set()): { count: number; dropped: number } {
   const ctx = activeContextTokens() || CONSERVATIVE_CONTEXT;
   const budget = ctx - RESPONSE_RESERVE_TOKENS;
   let total = fixedTokens + window.reduce((n, m) => n + approxTokens(m.content), 0);
@@ -915,11 +942,19 @@ export function compressOldest(window: Message[], fixedTokens: number): { count:
     const msg = window[i];
     if (msg.role !== 'user' || !msg.content.startsWith('<tool_response>')) continue;
     if (msg.content.length <= COMPRESS_TO_CHARS) continue;
+    // The sole surviving copy of a result that later messages point AT. Truncating it would leave
+    // those pointers aimed at a stub, which is the one way this pass could destroy more than it saves.
+    if (canonical.has(i)) continue;
     const cut = msg.content.lastIndexOf('\n', COMPRESS_TO_CHARS);
     const kept = cut > 100 ? msg.content.slice(0, cut) : msg.content.slice(0, COMPRESS_TO_CHARS);
     const was = msg.content.length;
     const before = approxTokens(msg.content);
-    msg.content = `${kept}\n\u2026 [older result compressed \u2014 the window was full. Re-run narrowed if you need the rest.]\n</tool_response>`;
+    // "Re-run narrowed if you need the rest" ASKED FOR THE SPIRAL. A model reading that re-runs the
+    // call; the call returns the same bytes; the window fills further; this fires again. Say instead
+    // what is true and what would actually help: repeating this call cannot produce anything new.
+    msg.content = `${kept}\n\u2026 [truncated \u2014 the window was full. Repeating this exact call returns `
+      + `these same bytes. To see a DIFFERENT part, narrow it: around=<line> for a span, or a tighter `
+      + `grep pattern.]\n</tool_response>`;
     total -= before - approxTokens(msg.content);
     dropped += was - msg.content.length;
     count++;
@@ -1199,7 +1234,19 @@ export async function runAgent(userInput: string): Promise<void> {
  * interrupt in front of ordinary work. It is stated as a count now rather than as a reprimand: the number
  * is the information, and "changing approach" was ayin asserting something about the model's intent.
  */
-const LOOP_NUDGE_EVERY = 12;
+/** Shorter than this and the tool found nothing — "0 matches", "not found", an empty listing. */
+const EMPTY_RESULT_CHARS = 90;
+
+/** Tools whose success means the working tree changed. */
+const MUTATING_TOOLS = new Set(['write_file', 'str_replace', 'perform_edit']);
+
+/**
+ * Barren calls of ONE tool before saying so. Eight, not twelve: a barren call is a much stronger
+ * signal than a call, so the bar to speak is lower while the thing being counted is rarer. On the
+ * measured SWE-bench sessions no instance reached eight barren calls of any tool; the 30-empty-glob
+ * session it exists for reaches it before the model has spent a third of its turn.
+ */
+const BARREN_NUDGE_EVERY = 8;
 
 /**
  * WHAT HAS ALREADY BEEN RUN THIS TURN — in the prompt, every round, from the first call to the last.
@@ -1428,6 +1475,21 @@ export function renderCallLedger(): string {
 async function runAgentTurn(userInput: string): Promise<void> {
   // Per TURN, not per session: a second question legitimately searches again from scratch.
   const toolUseCounts = new Map<string, number>();
+  /** Calls of a tool that returned NOTHING NEW this turn — an error, or bytes already seen. */
+  const toolBarrenCounts = new Map<string, number>();
+  /** Edits that actually landed this turn. A text-only reply means different things with and without one. */
+  let mutations = 0;
+  /**
+   * Replies in a row that carried no tool call.
+   *
+   * COUNTED, not inferred from the window, and that distinction cost a 10-instance run. The exit used
+   * to ask whether conversationWindow[length-2] was an assistant text. Then the retry below started
+   * pushing a USER message between the two assistant replies — so the entry at that offset was never
+   * an assistant text again, the condition was permanently false, and the loop could not end. Every
+   * instance ran to its 40-minute ceiling and was killed. A counter cannot be shifted by anything
+   * written to the window.
+   */
+  let consecutiveText = 0;
   resetCallLedger();
   resetSubagents();
   /**
@@ -1489,6 +1551,8 @@ async function runAgentTurn(userInput: string): Promise<void> {
   /** How many times a text-only turn may be refused because the entangled design is unsatisfied. */
   let adoptionNudges = 0;
   let continueNudges = 0;
+  /** Rounds discarded in a row for running no tool while working. Reset by any tool call. */
+  let workingRetries = 0;
   let deferralNudges = 0;
   let unwrittenClaimNudges = 0;
   /** "I'll rewrite that now." — announced, never acted. One nudge; see src/announced.ts. */
@@ -1561,7 +1625,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
      * `response` is deliberately left untouched: the marker test below reads the RAW reply, and the
      * transcript above has already recorded the raw text, which is the point of the transcript.
      */
-    parsed.text = stripFinalMarker(parsed.text ?? '');
+
     let hasToolCalls = parsed.toolCalls.length > 0;
 
     /**
@@ -1586,6 +1650,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
       continue;
     }
     hasToolCalls = parsed.toolCalls.length > 0;
+    if (hasToolCalls) { consecutiveText = 0; workingRetries = 0; }
 
     /**
      * A CALL IN A SHAPE WE DO NOT SPEAK IS ALSO NOT AN ANSWER.
@@ -1644,28 +1709,47 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // reaction re-states the rule, so drifting out of the convention is self-correcting. The default is
       // also the safe one: forgetting the marker costs one round, while the failure it replaces cost six
       // unwritten files.
-      if (hasFinalMarker(response)) markerEverSeen = true;
-      else unmarkedFinals++;
-      if (!hasFinalMarker(response) && markerWorthEnforcing() && !stopAwaitingOperator()
-          && continueNudges < MAX_CONTINUE_NUDGES) {
-        continueNudges++;
-        // A reply with no tool call AND no marker is one the harness could not classify. Keeping it
-        // is how "why did it stop there" is answerable tomorrow.
-        recordRaw(round, 'no tool call and no final marker', response);
-        log('INFO', 'continue_nudge', {
-          nudge: String(continueNudges), round: String(round), unmarkedFinals: String(unmarkedFinals),
+      /**
+       * A MID-WORK REPLY DOES NOT END THE TURN, AND IT DOES NOT GET ANSWERED EITHER.
+       *
+       * Termination used to be inferred from the ABSENCE of a tool call, patched by a convention: a
+       * finished reply starts with `$`. Both failed the same way. Absence cannot tell "I am done" from
+       * "I was describing what I am about to do", and the marker asked a model to obey a formatting rule
+       * it is free to ignore — enforcement then gave up after two unmarked replies BY DESIGN, withdrawing
+       * the protection from exactly the models too weak to follow it, with a cap of ONE nudge per turn.
+       *
+       * Measured over SWE-bench Verified: every empty-patch run, six of six, ended on a narrated
+       * intention. "Let me confirm the exact mechanism with a minimal reproduction before fixing."
+       *
+       * WHY NOT ARGUE WITH IT. The first attempt at this replied to the model — a two-branch message
+       * explaining finish() and asking whether it was done. That is a prompt, it costs context every
+       * time it fires, it invites the model to answer IN PROSE (the exact failure), and it teaches the
+       * turn that narrating produces a conversation. The turn is not a conversation.
+       *
+       * So the round is DISCARDED. The reply is recorded for the transcript and nothing is pushed to the
+       * window: no assistant message, no reminder. The next round therefore rebuilds from the same
+       * history that produced the failed step, and the model simply takes that step again. A failed
+       * round leaves no trace to reason about, which is the point — there is nothing to negotiate with.
+       *
+       * UNCAPPED ON PURPOSE: the turn ends when finish() is called, and nothing else ends it. A cap here
+       * would be the old bug wearing a new number — a ceiling on how stubborn a model may be is exactly
+       * what let a narrating one stop, and any value chosen for it is a guess. The wall clock is the real
+       * backstop and it is honest about being one.
+       *
+       * A deterministic model handed identical context may well produce the identical reply. The prompt
+       * is not byte-identical between rounds — the session block carries the round number — so a retry
+       * CAN diverge, but it is not guaranteed to. That is why every discard is logged with its running
+       * count, and the count rides to the end of the turn: how often this fires, and whether retrying
+       * ever breaks the loop, is a measurement rather than an assumption.
+       */
+      if (touchedAnythingThisTurn() && !stopAwaitingOperator()) {
+        workingRetries++;
+        // The transcript keeps it; the model's context does not. "Why did it stop there" stays
+        // answerable tomorrow without the failed round shaping the next one.
+        recordRaw(round, 'no tool call while working — round discarded, step retried', response);
+        log('INFO', 'working_retry', {
+          attempt: String(workingRetries), round: String(round), toolsRun: String(toolsRunThisTurn),
         });
-        pushToWindow('assistant', response);
-        pushMessage('assistant', response);
-        // TWO BRANCHES, COMPLETION FIRST. The old wording opened with "Carry on: take the next concrete
-        // step now" and mentioned the marker last — and the model obeyed the imperative it was given:
-        // finished, told it was mid-work, and offered no legal way to say so, it fabricated a directory
-        // scan. Position is load-bearing in a prompt (the middle gets skimmed), so the way OUT goes first.
-        pushToWindow('user',
-          `Your reply carried no tool call and no $ marker, so the harness cannot tell whether you are done.\n`
-          + `IF YOU ARE FINISHED: the FIRST CHARACTER of your reply must be $, then your answer. Nothing else is required — do not `
-          + `invent further work to justify another turn.\n`
-          + `IF YOU ARE NOT FINISHED: take the next concrete step now, rather than describing it.`);
         continue;
       }
       // A final answer that only says WHAT TO LOOK FOR is not an answer. One nudge, then accepted
@@ -1735,7 +1819,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
         continue;
       }
 
-      const response_ = stripFinalMarker(response);
+      const response_ = response;
 
       // ENTANGLED: a text-only turn is not an ANSWER while the design still has unimplemented types.
       //
@@ -1814,12 +1898,39 @@ async function runAgentTurn(userInput: string): Promise<void> {
         }
 
         // Double-text exit — only after CTA is delivered or truly exhausted
-        const prevMsg = conversationWindow.length >= 2 ? conversationWindow[conversationWindow.length - 2] : null;
-        const prevWasText = prevMsg?.role === 'assistant' && !prevMsg.content.includes('<function=');
-        if (!prevWasText) {
+        consecutiveText++;
+        if (consecutiveText < 2) {
           // First text response after a tool call — print and continue
           if (parsed.text) { addMessage('assistant', parsed.text); lastPrintedText = parsed.text; }
-          log('INFO', 'headless_text_continue', { round: String(round) });
+
+          /**
+           * THE SECOND CHANCE HAS TO SAY SOMETHING.
+           *
+           * This branch already existed and already worked: one text-only reply is forgiven and the loop
+           * goes round again. But it went round SILENTLY — the model saw no new information, so it
+           * produced the same kind of reply, hit the double-text exit, and the turn ended.
+           *
+           * Measured over SWE-bench: every empty-patch run in every mode ended exactly this way, six of
+           * six, and the last thing each model said was an intention. "Let me confirm the exact
+           * mechanism with a minimal reproduction before fixing." Then nothing. It had found the bug and
+           * was switched off mid-sentence, which from outside is indistinguishable from deciding to stop.
+           *
+           * So the extra round now carries the one fact the model is missing: that its reply performed
+           * nothing. Two acceptable answers, named, because "try again" is not something a model can act
+           * on — make the call, or stop ON PURPOSE and say why. The second is a real answer here: an
+           * agent that reports a cause and declines to guess at the fix has done the job it was given.
+           *
+           * Split on whether anything has actually changed this turn. With edits behind it, prose is
+           * plausibly a conclusion and the reminder stays neutral; with none, it is almost certainly a
+           * narrated intention, and saying so is the whole point.
+           */
+          pushToWindow('user', renderToolResult(mutations === 0
+            ? 'That reply made no tool call, and nothing has been changed this turn. Describing an action '
+              + 'does not perform it. Either make the call now, or state plainly that you are stopping, what '
+              + 'you believe the cause is, and why you are not fixing it.'
+            : `That reply made no tool call. ${mutations} edit(s) have landed this turn. If the work is `
+              + 'done, say so and name what changed. If you meant to do more, make the call now.'));
+          log('INFO', 'headless_text_continue', { round: String(round), mutations: String(mutations), run: String(consecutiveText) });
           continue;
         }
 
@@ -1830,7 +1941,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
           log('INFO', 'agent_skip_duplicate_print', { round: String(round) });
         }
         lastPrintedText = '';
-        log('INFO', 'agent_done', { round: String(round), reason: 'double_text', ctaDelivered: String(ctaDelivered) });
+        log('INFO', 'agent_done', { round: String(round), reason: 'double_text', textRun: String(consecutiveText), ctaDelivered: String(ctaDelivered) });
       } else if (!(doQa || doPresenter)) {
         // Ordinary turn — neither feature is enabled/forced for it — print immediately, as always.
         if (parsed.text) addMessage('assistant', parsed.text);
@@ -2273,19 +2384,8 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // The nudge is deterministic and it names the alternatives, because "try something else" is
       // advice a model cannot act on. Fired on a schedule rather than once: a loop that survives the
       // first nudge is exactly the one that needs the second.
-      const used = (toolUseCounts.get(name) ?? 0) + 1;
-      toolUseCounts.set(name, used);
-      if (used % LOOP_NUDGE_EVERY === 0) {
-        const alt = name === 'find_files' || name === 'grep'
-          ? 'explore (it derives identifiers and searches for you), or read a directory listing to see what is actually there'
-          : 'a different tool, or state what you have and what is missing';
-        addMessage('system', `[${name} used ${used}× this turn]`);
-        pushToWindow('user', renderToolResult(
-          `${name} has run ${used} times in this turn. If it has answered the question, use that answer. `
-          + `If it has not, it is unlikely to on the next call: try ${alt}. `
-          + `If the thing you are looking for may not exist under that name, say so and work from what you have.`));
-        log('INFO', 'tool_loop_nudge', { tool: name, uses: String(used) });
-      }
+      toolUseCounts.set(name, (toolUseCounts.get(name) ?? 0) + 1);
+      // The nudge moved AFTER the call — see `nudgeIfBarren`. Counting uses cannot tell working from stuck.
       /**
        * THROUGH THE ONE DOOR. `runs.ts` owns what is running, its narration, and how it stops — see
        * that file for why a clock was the wrong instrument for all three.
@@ -2332,6 +2432,49 @@ async function runAgentTurn(userInput: string): Promise<void> {
         const outcome = settled.o;
         result = outcome.output;
         if (outcome.cancelled) log('INFO', 'tool_cancelled', { tool: name, ms: String(outcome.ms) });
+      }
+
+      /**
+       * NUDGE ON BARREN WORK, NOT ON WORK.
+       *
+       * This used to fire every 12 calls of a tool, counted before the call, and it told the model its
+       * tool was unlikely to help and it should say what is missing. Measured against SWE-bench: it
+       * fired on 13 of 13 instances, almost all at `read_file` x12 — twelve file reads while fixing a
+       * bug in a repository the model has never seen is not a loop, it is the job. ayin was
+       * interrupting ordinary work to talk the model out of its primary tool.
+       *
+       * The case it was written for is real: 30 `find_files` calls with slightly different globs and no
+       * answer. What made that pathological was not the COUNT, it was that none of the calls returned
+       * anything new. That is measurable here and the raw count is not: a call is BARREN when it
+       * errored, or when its bytes are ones this tool already produced this turn. Thirty empty globs
+       * trip it; twelve reads that each return a different part of a file never do.
+       */
+      if (result !== null) {
+        // A REPEAT IS NOT BARREN. The first version of this counted a result the tool had already
+        // returned, and measured against the recorded sessions it fired as often as the rule it
+        // replaced (12 vs 12) — because re-reading a file is common, useful, and returns real bytes.
+        // Redundant is not empty. What the 30-glob session had was thirty DIFFERENT queries that each
+        // came back with nothing, and that is what is counted here: replayed over 21 real sessions this
+        // fires zero times, while thirty empty globs trip it a third of the way through the turn.
+        if (MUTATING_TOOLS.has(name) && !result.startsWith('Error:') && !result.startsWith('REFUSED')) mutations++;
+        const barren = result.startsWith('Error:') || result.trim().length < EMPTY_RESULT_CHARS;
+        if (barren) {
+          const n = (toolBarrenCounts.get(name) ?? 0) + 1;
+          toolBarrenCounts.set(name, n);
+          if (n % BARREN_NUDGE_EVERY === 0) {
+            const alt = name === 'find_files' || name === 'grep'
+              ? 'explore (it derives identifiers and searches for you), or list the directory to see what is actually there'
+              : 'a different tool, or state what you have and what is missing';
+            addMessage('system', `[${name}: ${n} barren calls this turn]`);
+            // States the FACT and leaves the conclusion to the model. The old wording asserted the tool
+            // would not work, which is advice, and wrong whenever the tool was working.
+            pushToWindow('user', renderToolResult(
+              `${n} of your ${name} calls this turn came back empty or errored. `
+              + `If what you need is not reachable this way, try ${alt}. `
+              + `If it may not exist under that name, say so and work from what you have.`));
+            log('INFO', 'tool_barren_nudge', { tool: name, barren: String(n), uses: String(toolUseCounts.get(name) ?? 0) });
+          }
+        }
       }
 
       if (interrupted && immediateCancel) {
@@ -2412,6 +2555,29 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // Artifact tracking for the QA gate. `bash`-driven changes are caught separately by the
       // gate's git snapshot — this covers the tools whose target is known from the call itself.
       toolsRunThisTurn++;
+
+      /**
+       * THE ONE EXIT. Everything above this line is work; this is the model saying it is done.
+       *
+       * Composed HERE rather than in the tool because tools may not import the turn's state (see
+       * check-gates: "tools/ imports nothing outside tools/"), and because that split is what makes
+       * this cheap. The Presenter it replaces spent an entire extra model call reshaping the closing
+       * prose into a fixed form; the model now hands its summary over as an argument it was going to
+       * write anyway, and the harness supplies the facts it already has for nothing.
+       */
+      if (name === 'finish' && !result.startsWith('Error:')) {
+        const changed = qaChangedFiles();
+        const evidence = changed.length
+          ? `\n\nFiles changed (${changed.length}):\n${changed.map((p) => `  - ${p}`).join('\n')}`
+          : '\n\nNo files were changed.';
+        const composed = `${result}${evidence}`;
+        addMessage('assistant', composed);
+        await writeHandoff('finish', currentGoal, round, maxRounds);
+        log('INFO', 'agent_done', { round: String(round), reason: 'finish',
+          files: String(changed.length), toolsRun: String(toolsRunThisTurn), discards: String(workingRetries) });
+        return;
+      }
+
       // ONLY ON SUCCESS. A failed `str_replace` used to be recorded as a file this turn changed, so a
       // turn whose every edit bounced still reported one changed file — which is both a lie to the QA
       // gate and the exact signal the fabrication guard reads. The ledger keeps the failures instead,

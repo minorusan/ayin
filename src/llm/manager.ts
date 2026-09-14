@@ -456,7 +456,7 @@ export function renderToolCall(call: ParsedToolCall): string { return activeDial
 export function renderToolResult(body: string): string {
   const rendered = activeDialect().renderToolResult(body);
   if (toolMode() !== 'native') return rendered;
-  return `${rendered}\n\n${getPrompt('finalMarkerReminder')}`;
+  return rendered;
 }
 
 // ── Generation façade (model-agnostic; served by the active provider) ──

@@ -3,7 +3,7 @@ import { buildUnifiedDiff } from '../lib.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { gateWrite } from '../../entangle/index.js';
-import { readBackAfter, requireRead } from '../readGuard.js';
+import { noteEdit, readBackAfter, requireRead } from '../readGuard.js';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -50,6 +50,7 @@ export const tool: Tool = {
       const back = readBackAfter(params.path, params.content);
       if (!back.ok) return `Error: write_file wrote ${params.path} but the ${back.note}`;
       const diff = buildUnifiedDiff(params.path, before, params.content);
+      noteEdit(params.path, diff);
       if (!existed) return `Created ${params.path} (${params.content.split('\n').length} lines, ${back.note}).\n${diff}`;
       // An overwrite is visible in the diff — but a full-rewrite diff of a large file is precisely the
       // result that overflows the window, so the fact that content was REPLACED (and how much of it

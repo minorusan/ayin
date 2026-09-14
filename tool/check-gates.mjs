@@ -629,7 +629,10 @@ const readTool = toolsMod.getTool('read_file');
 const bigFile = join(sRoot, 'big.ts');
 writeFileSync(bigFile, Array.from({ length: 1200 }, (_, i) => `line ${i + 1}`).join('\n'));
 let r1 = await readTool.execute({ path: bigFile });
-ok(/unread: \d+-1200/.test(r1) && /slide there/.test(r1),
+// A first read of a big file now shows both ENDS, so the unread range is the middle rather than the
+// tail. The invariant is unchanged and is checked harder here: the file did not come back whole
+// (line 900 sits in the gap), and the reply says what is missing and how to reach it.
+ok(/unread: \d+-\d+/.test(r1) && /slide there/.test(r1) && !r1.includes('900\tline 900'),
   'a read with no limit is capped and SAYS what is still unread and how to continue, instead of returning a file the window then cuts silently');
 ok(!/line 1000\b/.test(r1), 'the cap actually applies');
 // The SECOND param-free read must not repeat the first window — that was a wasted round.
@@ -825,34 +828,49 @@ console.log('\nayin refuses to start without a model');
     '--check reports on a dirty tree; only an actual pull refuses to clobber uncommitted work');
 }
 
-// THE FINISHED-REPLY MARKER IS ACCEPTED AT EITHER END.
-// The contract says a finished reply starts with `$`; gemma4 routinely appends it instead. Read strictly,
-// that is an unmarked reply, so the loop nudged a model that had just said it was done — a wasted round
-// on every turn. Position is not the signal.
-console.log('\nthe $ marker is read wherever the model puts it');
+// A TASK ENDS ONLY WHEN finish() IS CALLED.
+// This replaces the `$` marker, which asked the model to comply with a formatting rule and gave up
+// enforcing it after two unmarked replies — withdrawing the protection from exactly the models too weak
+// to follow it. Measured over SWE-bench Verified: every empty-patch run, six of six, ended on a narrated
+// intention that the harness read as a finished answer. A tool call is not a convention.
+// A LANGUAGE THE CLASSIFIER DOES NOT KNOW IS INVISIBLE TO THE QA GATE.
+// `qaChangedFiles()` DROPS anything of kind 'other', so an unlisted extension does not get reviewed
+// less — it does not get reviewed at all, and `qaShouldRun` declines with "nothing changed this turn".
+// It happened to `.ino` once and was fixed; `.py` was still missing, so across a whole SWE-bench run of
+// twelve Python repositories the gate never looked at a single file. Twice is a pattern, hence a gate.
+console.log('\nevery language the agent edits is classified as code');
 {
-  const fm = await import(`file://${join(DIST, 'final-marker.js')}`);
-  ok(fm.hasFinalMarker('$ done here'), 'leading marker still works');
-  ok(fm.hasFinalMarker('the work is done. $'), 'a TRAILING marker counts as finished');
-  ok(fm.hasFinalMarker('all files written\n$'), 'and one alone on the last line');
-  // The reason the trailing form demands whitespace before it: prose about money must not end a turn.
-  ok(!fm.hasFinalMarker('the licence costs 5$'), 'a dollar sign with no space before it is prose, not a marker');
-  ok(!fm.hasFinalMarker('next I will edit the file'), 'an unmarked reply is still unfinished');
-  ok(fm.stripFinalMarker('the work is done. $') === 'the work is done.',
-    'the trailing marker is stripped from what the operator reads', JSON.stringify(fm.stripFinalMarker('the work is done. $')));
-  ok(fm.stripFinalMarker('$ done') === 'done', 'and so is the leading one');
+  const probes = await import(`file://${join(DIST, 'qa', 'probes.js')}`);
+  for (const ext of ['.py', '.ts', '.js', '.rs', '.go', '.java', '.rb', '.ino', '.c', '.cpp', '.sh']) {
+    ok(probes.classify(`src/thing${ext}`) === 'code', `${ext} is code, so a change to it reaches the gate`);
+  }
+  ok(probes.classify('notes.txt') === 'other', 'and something genuinely not code still classifies as other');
+}
 
-  // AND IT MUST NEVER BE PRINTED. The marker is a signal to the harness, not text for the operator, but
-  // the reply is painted from `parsed.text` in six places — the earliest of them before the old strip
-  // point — so the `$` was shown every time. Invisible while models put it first (it reads as a prompt
-  // character); obvious the moment gemma4 began appending it to finished answers.
+console.log('\nfinish() is the only exit, and it carries the answer');
+{
+  const fin = await import(`file://${join(DIST, 'tools', 'defs', 'finish.js')}`);
+  const empty = await fin.tool.execute({ summary: '  ' });
+  ok(empty.startsWith('Error:'), 'an empty summary is REFUSED — a silent finish is the bug being abolished', empty.slice(0, 60));
+  const plain = await fin.tool.execute({ summary: 'renamed the flag and updated both callers' });
+  ok(plain === 'renamed the flag and updated both callers', 'a summary comes back verbatim for the harness to compose');
+  const diagnosed = await fin.tool.execute({ summary: 'not fixing this', cause: 'models.py prepare_content_length sets the header unconditionally' });
+  ok(/Cause: models\.py/.test(diagnosed), 'a diagnosis-only finish is a first-class answer, not a failure', diagnosed.split('\n').pop());
+
   const agentSrc = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
-  ok(/parsed\.text = stripFinalMarker\(parsed\.text \?\? ''\);/.test(agentSrc),
-    'the marker is stripped from parsed.text at the parse site, before any print path can reach it');
-  const strippedAt = agentSrc.indexOf('parsed.text = stripFinalMarker');
-  const firstPrint = agentSrc.indexOf("addMessage('assistant', parsed.text)");
-  ok(strippedAt > 0 && firstPrint > strippedAt,
-    'and it is stripped BEFORE the first print, not after — the ordering is the whole bug');
+  ok(/name === 'finish'[\s\S]{0,400}?qaChangedFiles\(\)/.test(agentSrc),
+    'the loop composes the answer from the turn evidence, which the tool layer may not reach');
+  ok(/touchedAnythingThisTurn\(\) && !stopAwaitingOperator\(\)[\s\S]{0,300}?workingRetries\+\+/.test(agentSrc),
+    'a working turn DISCARDS a tool-less reply and retries the step instead of ending');
+  const discardAt = agentSrc.indexOf('workingRetries++');
+  const block = agentSrc.slice(discardAt, discardAt + 600);
+  ok(!/pushToWindow/.test(block),
+    'and pushes NOTHING to the window — a discarded round leaves no trace to negotiate with');
+  ok(!/hasFinalMarker|stripFinalMarker|markerWorthEnforcing/.test(agentSrc),
+    'and no trace of the marker contract survives in the loop');
+  const sys = readFileSync(join(DIST, '..', 'prompts', 'ayin', 'system.txt'), 'utf-8');
+  ok(/A TASK ENDS ONLY WHEN YOU CALL finish\(\)/.test(sys) && !/FINISHED REPLIES START WITH/.test(sys),
+    'the system prompt states the finish contract and no longer asks for a dollar sign');
 }
 
 // A provider that BILLS may be the fresh-clone DEFAULT, but must never be reached by accident: not
@@ -1007,25 +1025,15 @@ console.log('\nnaama: authoring a design as structured facts');
 console.log('\nthe $ marker: a finished reply says so, and the harness verifies it');
 {
   const sys = readFileSync(join(DIST, '..', 'prompts', 'ayin', 'system.txt'), 'utf-8');
-  ok(/^FINISHED REPLIES START WITH \$/.test(sys),
+  ok(/^A TASK ENDS ONLY WHEN YOU CALL finish\(\)/.test(sys),
     'the rule is the FIRST thing in the system prompt — position is load-bearing, the middle gets skimmed');
   const ag = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
-  // The marker now lives in its own module and is accepted at EITHER end — see the note there. The rule
-  // stated to the model is still "start with $", because one position has to be taught; what changed is
-  // that the harness no longer PUNISHES the other one.
-  const fmSrc = readFileSync(join(DIST, '..', 'src', 'final-marker.ts'), 'utf-8');
-  ok(/export const FINAL_MARKER = \/\^/.test(fmSrc), 'the leading marker is still anchored to the START');
-  ok(/FINAL_MARKER_TRAILING = \/\(\?:\^\|\\s\)/.test(fmSrc),
-    'and the trailing form requires whitespace before it, so prose about money is not a marker');
-  ok(/MAX_CONTINUE_NUDGES/.test(ag) && /continueNudges < MAX_CONTINUE_NUDGES/.test(ag),
-    'the nudge is capped — a model that cannot progress must not spin');
-  ok(/recordAnswer\(response_\)/.test(ag) && /transcribeAnswer\(response_\)/.test(ag),
-    'the marker is stripped before the answer is recorded, not shown to the user');
-  const marker = /^\s*\$\s?/;
-  ok(marker.test('$ done') && marker.test('\n$done'), 'a marked reply is recognised, leading newline tolerated');
-  ok(!marker.test('Now I will write the remaining types'), 'an unmarked reply is not mistaken for an answer');
-  ok(!marker.test('the cost is $5 per call'), 'a $ elsewhere in the text is not the marker');
-  ok('$ done'.replace(marker, '') === 'done', 'stripping removes exactly the marker');
+  // The marker is gone: termination is a finish() call, not a formatting convention the model may ignore.
+  ok(!/MAX_WORKING_RETRIES/.test(ag),
+    'discards are UNCAPPED — the turn ends at finish(), and a cap is the old bug wearing a new number');
+  ok(/if \(hasToolCalls\) \{ consecutiveText = 0; workingRetries = 0; \}/.test(ag),
+    '…and any tool call resets it, so a model that IS advancing is never cut off');
+  ok(/name === 'finish'/.test(ag), 'finish() is what ends a turn');
 }
 
 // ENTANGLE — A WRITE THAT BREAKS THE DESIGN DOES NOT LAND.
@@ -1189,12 +1197,14 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
   const agSrc = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
   ok(/stopAwaitingOperator\(\) \? \[\] : gateAdoption\(\)/.test(agSrc),
     'the adoption nudge yields to a pending stop');
-  ok(/!hasFinalMarker\(response\) && markerWorthEnforcing\(\) && !stopAwaitingOperator\(\)/.test(agSrc),
-    'so does the $ marker nudge — a stop is a legitimate end of turn');
-  // The nudge must offer a way to SAY you are finished, first. Without it, a model that is done has only
-  // one sanctioned action — do more work — and it invents some. Measured from a real session log.
-  ok(/IF YOU ARE FINISHED/.test(agSrc) && agSrc.indexOf('IF YOU ARE FINISHED') < agSrc.indexOf('IF YOU ARE NOT FINISHED'),
-    'and the nudge leads with the completion branch, not with "carry on"');
+  ok(/touchedAnythingThisTurn\(\) && !stopAwaitingOperator\(\)/.test(agSrc),
+    'so does the working retry — a stop is a legitimate end of turn');
+  // THERE IS NO LONGER A NUDGE TO WORD. The old one explained finish() and asked whether the model was
+  // done — a prompt that costs context every time it fires and invites an answer IN PROSE, which is the
+  // failure it was meant to correct. The round is discarded instead: the way a model says it is finished
+  // is finish(), and the only thing the harness says about a tool-less round is nothing.
+  ok(!/IF YOU ARE FINISHED/.test(agSrc),
+    'the loop does not argue with a tool-less reply — it discards the round');
 
   ent.disentangle();
   ok(ent.gateWrite(join(cs, 'P.cs'), 'namespace Widgets.Core { public interface IAnything {} }') === null,
@@ -2936,18 +2946,6 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
     ok(/DENIED, not allowed/.test(cmd), 'the message states what is still gated, rather than implying nothing is');
   }
 
-  // ── the finished-reply marker, and the three places models put it ──────────
-  //
-  // A `$` opening the LAST line of a multi-line reply was caught by neither pattern: not at the
-  // string start (no `m` flag, deliberately) and not the last non-space character, because a word
-  // follows it. It reached the operator's screen as `$ Done.` after they had asked for it to be gone.
-  {
-    const fm = readFileSync(join(DIST, '..', 'src', 'final-marker.ts'), 'utf-8');
-    ok(/const FINAL_MARKER_LAST_LINE = /.test(fm),
-      'a marker opening the last line is stripped — models put it there and neither old pattern caught it');
-    ok(/function insideCodeFence/.test(fm),
-      'a `$` inside a fenced block is a SHELL PROMPT and must survive — `$ npm run build` is not a signal');
-  }
 
   // ── the model-resolution state has THREE values, not two ───────────────────
   //

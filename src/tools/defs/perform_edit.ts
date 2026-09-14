@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { BaseTool } from '../base.js';
 import { resolveAgainstCwd, suggestSimilarPaths } from '../lib.js';
+import { noteEdit } from '../readGuard.js';
 import { toolLlm, toolLog } from '../runtime.js';
 
 /**
@@ -77,13 +78,69 @@ class PerformEdit extends BaseTool {
         + 'something this file does not contain. Read the file if you need to see why, or restate the edit.';
     }
 
+    // THE MODEL STOPPED EARLY AND WE WERE ABOUT TO WRITE IT.
+    //
+    // Measured: `lib/matplotlib/axes/_axes.py`, 8164 lines, one line to change. The model was handed the
+    // whole file and asked for the whole file back; it returned 833 lines and this function wrote them.
+    // 7331 lines of a core module deleted, a plausible-looking diff, and QA passed it. A file that
+    // cannot survive the round trip must not be edited this way at all — `str_replace` exists for it.
+    const cut = truncationOf(before, after);
+    if (cut) {
+      toolLog().warn('perform_edit_truncated', { file, ...cut });
+      return `REFUSED to write ${file} — the edit came back TRUNCATED, not edited.\n\n`
+        + `The file has ${cut.beforeLines} lines; the model returned ${cut.afterLines}, and the end of the `
+        + `file is missing (${cut.removed} lines dropped with nothing replacing them). That is a model that `
+        + `ran out of room, not a change you asked for. The file is UNTOUCHED.\n\n`
+        + `Use str_replace on this file: it edits a named region and cannot drop the rest.`;
+    }
+
     try { writeFileSync(path, after); } catch (err) {
       return `Error: cannot write ${file}: ${err instanceof Error ? err.message : String(err)}`;
     }
+    const diff = lineDiff(before, after);
+    noteEdit(path, diff);
     toolLog().info('perform_edit_applied', { file, beforeBytes: String(before.length), afterBytes: String(after.length) });
-    return `Edit was made to ${file} with changes:\n\n${lineDiff(before, after)}`;
+    return `Edit was made to ${file} with changes:\n\n${diff}`;
   }
 }
+
+/**
+ * Did the model TRUNCATE the file rather than edit it? Null when the change looks like a real edit.
+ *
+ * THE DISCRIMINATOR IS THE TAIL, not the size. A legitimate deletion — "drop the deprecated block" —
+ * removes a region and leaves the rest of the file after it intact, so the common tail is non-empty.
+ * A model that ran out of room stops mid-file: everything from some point to the end is simply gone,
+ * so the common tail is ZERO and nothing was added in place of what went missing.
+ *
+ * Both conditions are required, which is what keeps this from blocking honest work: deleting the last
+ * function in a file is a zero tail, but it does not also drop two-fifths of the file. The line floor
+ * keeps it away from small files, where a rewrite is cheap, obviously correct, and not the failure
+ * mode being guarded against.
+ */
+export function truncationOf(before: string, after: string):
+  { beforeLines: string; afterLines: string; removed: string } | null {
+  const a = before.split('\n');
+  const b = after.split('\n');
+  if (a.length < MIN_LINES_TO_GUARD) return null;
+
+  let head = 0;
+  while (head < a.length && head < b.length && a[head] === b[head]) head++;
+  let tail = 0;
+  while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+
+  const removed = a.length - head - tail;
+  const added = b.length - head - tail;
+  if (tail !== 0) return null;                       // the end of the file survived — a real edit
+  if (added >= removed) return null;                 // it replaced what it removed — a real edit
+  if (b.length > a.length * MAX_SHRINK) return null; // barely shorter — a real edit
+
+  return { beforeLines: String(a.length), afterLines: String(b.length), removed: String(removed - added) };
+}
+
+/** Below this a whole-file rewrite is cheap and reliable; the failure being guarded is a LARGE file. */
+const MIN_LINES_TO_GUARD = 200;
+/** Keeping under three-fifths of the file while losing its end is not an edit anyone asked for. */
+const MAX_SHRINK = 0.6;
 
 /** ```lang … ``` around the whole answer, and nothing else. A fence INSIDE the file is left alone. */
 export function stripFence(text: string): string {

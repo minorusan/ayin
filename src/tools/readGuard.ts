@@ -262,7 +262,42 @@ export function readCount(): number {
   return reads.size;
 }
 
+/**
+ * WHAT CHANGED SINCE YOU LAST LOOKED — parked against the path, handed over on the next read of it.
+ *
+ * A model that has just edited a file re-reads it to see how the edit landed. That is the correct
+ * instinct and the read is worth serving — but serving it as the FULL window re-sends bytes the model
+ * already has in order to reveal the handful of lines that moved, and in a 40k window that re-send is
+ * what tips the prompt over the compression threshold. Measured: the same result re-fetched up to
+ * eleven times, the window filling on the repeats, and two SWE-bench instances losing every round to
+ * the spiral without ever attempting an edit.
+ *
+ * So the edit tools leave the diff they ALREADY computed here, and the next read spends a few lines
+ * answering "how did it land" instead of a few thousand. Consumed on read, never accumulating: a note
+ * nobody came back for is about a file the model stopped caring about.
+ */
+const editNotes = new Map<string, string[]>();
+
+/** Enough to describe consecutive edits to one file; beyond that the oldest stopped being the answer. */
+const EDIT_NOTES_KEPT = 3;
+
+export function noteEdit(path: string, summary: string): void {
+  if (!summary.trim()) return;
+  const key = resolveAgainstCwd(path);
+  const list = [...(editNotes.get(key) ?? []), summary.trim()];
+  editNotes.set(key, list.slice(-EDIT_NOTES_KEPT));
+}
+
+/** The notes for this path, and they are GONE afterwards — a note is delivered once. */
+export function takeEditNotes(path: string): string[] {
+  const key = resolveAgainstCwd(path);
+  const list = editNotes.get(key) ?? [];
+  editNotes.delete(key);
+  return list;
+}
+
 /** For gates: forget everything. There is no other way to reset an in-memory guard. */
 export function _resetReadGuard(): void {
   reads.clear();
+  editNotes.clear();
 }

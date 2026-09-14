@@ -31,6 +31,7 @@
  *      after another, which is what the plan's own phase ordering already describes.
  */
 
+import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -444,7 +445,13 @@ async function spawnSubagent(task: string, opts: SubagentOpts = {}): Promise<Sub
     ? `${task}\n\nA plan for this task has already been written to ${planFile}. Read that file first and follow it.`
     : task;
 
-  log('INFO', 'subagent_start', { cwd, plan: opts.plan ?? '', chars: String(prompt.length) });
+  // Named by the PARENT so the correlation is a fact rather than a timestamp guess, and so the
+  // filename itself says depth - a directory listing now distinguishes parent from child.
+  const childDepth = subagentDepth() + 1;
+  const childLog = join(homedir(), '.ayin-cli', 'logs',
+    `subagent-d${childDepth}-${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}.log`);
+  log('INFO', 'subagent_start', { cwd, plan: opts.plan ?? '', chars: String(prompt.length),
+    depth: String(childDepth), log: childLog });
 
   return new Promise<SubagentResult>((resolve) => {
     let out = '';
@@ -453,7 +460,8 @@ async function spawnSubagent(task: string, opts: SubagentOpts = {}): Promise<Sub
       cwd,
       env: {
         ...process.env,
-        AYIN_SUBAGENT_DEPTH: String(subagentDepth() + 1),
+        AYIN_SUBAGENT_DEPTH: String(childDepth),
+        AYIN_LOG_FILE: childLog,
         // A CHILD THIS PROCESS MAY LATER KILL MUST LEAVE A NOTE. Cancelling a subagent kills a process
         // nobody was watching, and everything it had learned dies with it unless it wrote it down.
         // Inherited rather than always-on: the operator asked for postmortems, or did not.

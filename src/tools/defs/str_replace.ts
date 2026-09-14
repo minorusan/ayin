@@ -2,7 +2,7 @@ import type { Tool } from '../base.js';
 import { buildUnifiedDiff, diagnoseMiss, resolveAgainstCwd, suggestSimilarPaths } from '../lib.js';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { gateWrite } from '../../entangle/index.js';
-import { readBackAfter, requireRead } from '../readGuard.js';
+import { noteEdit, readBackAfter, requireRead } from '../readGuard.js';
 
 export const tool: Tool = {
     name: 'str_replace',
@@ -52,6 +52,8 @@ export const tool: Tool = {
       // diff built from in-memory strings can never notice.
       const back = readBackAfter(resolved, after);
       if (!back.ok) return `Error: str_replace wrote ${params.path} but the ${back.note}`;
-      return `${buildUnifiedDiff(params.path, before, after)}\n(${back.note})`;
+      const diff = buildUnifiedDiff(params.path, before, after);
+      noteEdit(resolved, diff);
+      return `${diff}\n(${back.note})`;
     },
   };

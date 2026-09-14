@@ -99,7 +99,11 @@ const BIG = join(DIR, 'big.ts');
 
   const a = await readFile.execute({ path: BIG });
   ok(/^\(lines 1-/.test(a), 'the first read starts at line 1', a.split('\n')[0]);
-  ok(/unread: \d+-1001/.test(a), '...and the footer names the unread range', a.split('\n')[0]);
+  ok(/unread: \d+-\d+/.test(a), '...and the footer names the unread range', a.split('\n')[0]);
+  // The opening move on a file too big to fit is an OUTLINE: the top AND the end, with the gap
+  // between them counted. Returning only the head meant the end of a large file was never seen
+  // without deliberate paging, and the first read taught the model nothing about its shape.
+  ok(/^\(lines 1-\d+ and \d+-1001 of 1001/.test(a), '...and a big file opens with BOTH ends', a.split('\n')[0]);
   ok(!/slid past/.test(a), '...and does not claim to have slid');
 
   const b = await readFile.execute({ path: BIG });

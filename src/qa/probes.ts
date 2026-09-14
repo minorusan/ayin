@@ -41,7 +41,13 @@ const UI_EXT = new Set(['.html', '.htm', '.css', '.scss', '.sass', '.less', '.ts
 // cosmetic gap: an unclassified file gets `kind: 'other'`, and `qaChangedFiles()` DROPS anything of
 // kind 'other' from the review entirely — an Arduino sketch was invisible to the gate outright, not
 // merely under-reviewed.
-const CODE_EXT = new Set(['.ts', '.js', '.mjs', '.cjs', '.cs', '.go', '.rs', '.java', '.kt', '.rb', '.php', '.swift', '.c', '.h', '.cc', '.cpp', '.hpp', '.sh', '.zsh', '.mjs', '.ino', '.pde']);
+// `.py` was missing too, and it cost more than the sketch did: every Python edit classified as 'other'
+// and was dropped, so on a whole SWE-bench run — twelve Python repositories — the QA gate never saw a
+// single changed file and declined every turn with "nothing changed this turn". A gate that does not
+// fail but silently does not LOOK is the failure mode this list keeps reproducing; extensions are
+// added here whenever a language reaches the agent, not whenever someone remembers.
+const CODE_EXT = new Set(['.ts', '.js', '.mjs', '.cjs', '.cs', '.go', '.rs', '.java', '.kt', '.rb', '.php', '.swift', '.c', '.h', '.cc', '.cpp', '.hpp', '.sh', '.zsh', '.ino', '.pde',
+  '.py', '.pyi', '.pyx', '.lua', '.pl', '.pm', '.r', '.jl', '.scala', '.m', '.mm', '.hs', '.ex', '.exs', '.erl', '.clj', '.sql']);
 const DOC_EXT = new Set(['.md', '.mdx', '.rst', '.adoc']);
 const CONFIG_EXT = new Set(['.json', '.yml', '.yaml', '.toml', '.ini', '.env', '.conf']);
 

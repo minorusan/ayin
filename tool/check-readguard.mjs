@@ -93,7 +93,12 @@ console.log('\nstr_replace — a CAPPED read does not license an edit in the unr
   writeFileSync(big, lines.join('\n') + '\n', 'utf-8');
 
   const head = await readFile.execute({ path: big });
-  ok(/of 1001/.test(head) && /unread: \d+-1001/.test(head), 'the read is capped and names what is unread', head.split('\n')[0]);
+  // A first read of a big file now shows BOTH ends and leaves the MIDDLE unread, so the unread range
+  // is no longer the tail. What has to stay true is what the next assertion depends on: the footer
+  // names the unread region, and the line about to be edited is inside it.
+  const gap = /unread: (\d+)-(\d+)/.exec(head);
+  ok(/of 1001/.test(head) && !!gap && 950 >= +gap[1] && 950 <= +gap[2],
+    'the read is capped and names what is unread, including line 950', head.split('\n')[0]);
 
   const r = await strReplace.execute({ path: big, old_str: 'const line950 = 950;', new_str: 'const line950 = 0;' });
   ok(r.startsWith('Error:') && /have not read that part/.test(r),

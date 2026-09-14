@@ -6,8 +6,14 @@ import { addPendingImage, isImagePath, preprocessImage } from '../../image.js';
 import { corpusBlockFor, chunksForFile } from '../../indulge/inject.js';
 import { log } from '../../log.js';
 import { attributeFile } from '../../indulge/attribution.js';
-import { coverage, recordRead } from '../readGuard.js';
-import { AROUND_DEFAULT, centeredWindow, clampSpan, describeSpans, slideWindow, snapEnd, spanLines, unreadRanges } from '../readWindow.js';
+import { coverage, recordRead, takeEditNotes } from '../readGuard.js';
+import { AROUND_DEFAULT, centeredWindow, clampSpan, describeSpans, slideWindow, snapEnd, snapStart, spanLines, unreadRanges } from '../readWindow.js';
+
+/** How much of a first big-file read is spent on the END of the file rather than its top. */
+const OUTLINE_TAIL_LINES = 40;
+
+/** A diff longer than this stops being a summary and becomes the re-send it replaces. */
+const EDIT_NOTE_MAX_CHARS = 1_200;
 
 export const tool: Tool = {
     name: 'read_file',
@@ -118,6 +124,17 @@ export const tool: Tool = {
       const seen = askedAround || askedOffset || tailN ? null : coverage(resolved);
       let slidPast: string | null = null;
       let span: [number, number];
+      /**
+       * THE FIRST LOOK AT A BIG FILE SHOULD BE A MAP, NOT ITS IMPORTS.
+       *
+       * A param-free read returned the top of the file, which for anything large is licence headers
+       * and imports -- readWindow.ts says so itself. The model learns nothing about the shape of the
+       * file, and its END (exports, the registry, the main entry) was never seen at all without
+       * deliberate paging. So the FIRST param-free read of a file too big to fit returns BOTH ends and
+       * says how much sits between them. Subsequent reads slide exactly as before: this changes the
+       * opening move only, not the paths the model steers itself down afterwards.
+       */
+      let outlineTail: [number, number] | null = null;
       if (tailN > 0) {
         span = clampSpan([total - tailN + 1, total], total);
       } else if (askedAround > 0) {
@@ -133,7 +150,14 @@ export const tool: Tool = {
           span = slid;
           slidPast = describeSpans(seen!.spans);
         } else {
-          span = clampSpan([1, snapEnd(lines, 1, size, total)], total);
+          // Nothing read yet AND the file does not fit: spend part of the budget on the tail.
+          const wantOutline = !seen?.spans.length && total > size;
+          const headLines = wantOutline ? Math.max(1, size - OUTLINE_TAIL_LINES) : size;
+          span = clampSpan([1, snapEnd(lines, 1, headLines, total)], total);
+          if (wantOutline) {
+            const start = Math.max(span[1] + 1, total - OUTLINE_TAIL_LINES + 1);
+            if (start <= total) outlineTail = clampSpan([snapStart(lines, start), total], total);
+          }
         }
       }
 
@@ -145,14 +169,24 @@ export const tool: Tool = {
       if (!slice.length) {
         return `Error: offset ${askedOffset || 1} is past the end of ${params.path} (${total} lines).`;
       }
-      const numbered = slice.map((l, i) => `${off2 + i + 1}\t${l}`).join('\n');
+      const number = (from: number, to: number): string =>
+        lines.slice(from - 1, to).map((l, i) => `${from + i}\t${l}`).join('\n');
+      const gap = outlineTail ? outlineTail[0] - span[1] - 1 : 0;
+      const numbered = outlineTail
+        ? `${number(span[0], span[1])}\n\u2026 [${gap} lines between here and the end are not shown -- read `
+          + `again with no offset to slide into them, or around=<line> to centre on one]\n`
+          + `${number(outlineTail[0], outlineTail[1])}`
+        : slice.map((l, i) => `${off2 + i + 1}\t${l}`).join('\n');
       const lastShown = span[1];
       // The COUNTS, always. 19 shell `wc -l` calls existed only because a read never said how big the
       // file was unless it happened to truncate; now every reply carries it, so "is this file big?" is
       // never its own call.
       const bytes = raw.length >= 1024 ? `, ${(raw.length / 1024).toFixed(1)} KB` : `, ${raw.length} B`;
       const slidNote = slidPast ? ` — slid past what you already read (${slidPast})` : '';
-      const header = `(lines ${span[0]}-${lastShown} of ${total}${bytes}${slidNote})\n`;
+      const shown = outlineTail
+        ? `lines ${span[0]}-${lastShown} and ${outlineTail[0]}-${outlineTail[1]}`
+        : `lines ${span[0]}-${lastShown}`;
+      const header = `(${shown} of ${total}${bytes}${slidNote})\n`;
       /**
        * WHAT IS STILL UNSEEN, as line ranges, every time the file is not fully read.
        *
@@ -161,7 +195,7 @@ export const tool: Tool = {
        * to know 1-800 was already behind it. The complement is the honest answer, and it is the number the
        * next call needs.
        */
-      const covered = [...(seen?.spans ?? []), span] as [number, number][];
+      const covered = [...(seen?.spans ?? []), span, ...(outlineTail ? [outlineTail] : [])] as [number, number][];
       const unread = unreadRanges(covered, total);
       const capNote = askedLimit && askedLimit > maxLines ? `; limit is capped at ${maxLines} lines/call by the served model's context` : '';
       const footer = unread.length
@@ -192,6 +226,23 @@ export const tool: Tool = {
       // capped read of a 5000-line file must not license an edit at line 4012 in the part that never
       // came back. See `../readGuard.ts`.
       recordRead(resolved, [span[0], lastShown], total);
-      return `${attribution}${header}${numbered}${footer}${corpus}`;
+      if (outlineTail) recordRead(resolved, outlineTail, total);
+      /**
+       * HOW YOUR EDIT LANDED, answered before the file itself.
+       *
+       * Capped, and the cap is the point: an uncapped diff of a large rewrite is the same wall of bytes
+       * this exists to avoid re-sending, and it would push the window toward the compression that
+       * starts the re-read spiral. A clipped diff still answers "did it land where I meant"; the file
+       * below answers everything else.
+       */
+      const notes = takeEditNotes(resolved);
+      const changed = notes.length
+        ? `(this file was edited since you last read it — what changed:)\n`
+          + notes.map((n) => (n.length > EDIT_NOTE_MAX_CHARS
+            ? `${n.slice(0, EDIT_NOTE_MAX_CHARS)}\n… [diff clipped — the file below is the current truth]`
+            : n)).join('\n')
+          + '\n\n'
+        : '';
+      return `${attribution}${changed}${header}${numbered}${footer}${corpus}`;
     },
   };

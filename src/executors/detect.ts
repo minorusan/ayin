@@ -67,7 +67,9 @@ function hasShallowMarker(dir: string): boolean {
   const has = (p: string) => existsSync(join(dir, p));
   return has('platformio.ini') || has('sketch.yaml') || (has('Assets') && has('ProjectSettings'))
     || has('pubspec.yaml') || has('Cargo.toml') || has('go.mod') || has('package.json')
-    || has('pyproject.toml') || has('requirements.txt');
+    // setup.py PREDATES pyproject.toml and still carries much of the Python world. Leaving it out
+    // made every setup.py-era repository — matplotlib, django, scikit-learn — invisible here.
+    || has('pyproject.toml') || has('requirements.txt') || has('setup.py') || has('setup.cfg');
 }
 
 /** Two is a pattern. One project beside a `docs/` folder is a project with a docs folder. */
@@ -127,6 +129,8 @@ function fromTree(root: string): { type: ProjectType; evidence: string } | null 
   if (has('package.json')) return { type: 'node', evidence: 'package.json' };
   if (has('pyproject.toml')) return { type: 'python', evidence: 'pyproject.toml' };
   if (has('requirements.txt')) return { type: 'python', evidence: 'requirements.txt' };
+  if (has('setup.py')) return { type: 'python', evidence: 'setup.py' };
+  if (has('setup.cfg')) return { type: 'python', evidence: 'setup.cfg' };
   const sln = findFile(root, /\.(sln|csproj)$/i, 2);
   if (sln) return { type: 'dotnet', evidence: sln };
 
@@ -190,10 +194,7 @@ function fromRequest(request: string): { type: ProjectType; evidence: string } |
   return null;
 }
 
-/** True when the directory holds nothing that looks like a project of any kind. */
-function isEmptyOfProjects(root: string): boolean {
-  return fromTree(root) === null;
-}
+
 
 /**
  * Entries that do not make a directory USED: what ayin itself writes at project start, plus OS noise.
@@ -271,7 +272,18 @@ export function detectProject(cwd = process.cwd(), request = '', targetDir = '')
     return { root, targetDir: '', type: 'unknown', evidence: 'a directory that holds several projects, not a project itself', greenfield: false };
   }
 
-  if (request.trim() && isEmptyOfProjects(root)) {
+  // GREENFIELD IS AUTHORISED BY AN EMPTY DIRECTORY, NEVER BY A FAILED DETECTION.
+  //
+  // This asked `isEmptyOfProjects(root)`, which was `fromTree(root) === null` — "I could not name a
+  // type" standing in for "there is nothing here". Those are different sentences and the gap between
+  // them is somebody's repository: matplotlib carries setup.py and no pyproject.toml, so ONE missing
+  // marker made an 8,000-file tree read as new ground and the scaffolder wrote a pyproject.toml, a
+  // src/<name>/ package and a tests/test_smoke.py into it. Twice, deterministically.
+  //
+  // `isFreshDirectory` asks the question that actually licenses writing: is there nothing here except
+  // what ayin itself puts there. An unrecognised marker now costs a detection — recoverable — instead
+  // of a scaffold into a live project, which is not.
+  if (request.trim() && isFreshDirectory(root)) {
     const asked = fromRequest(request);
     if (asked) return { root, targetDir: '', type: asked.type, evidence: asked.evidence, greenfield: true };
   }

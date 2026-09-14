@@ -42,7 +42,20 @@ const LOG_DIR = join(homedir(), '.ayin-cli', 'logs');
 mkdirSync(LOG_DIR, { recursive: true });
 
 const ts = new Date().toISOString().replace(/[:.]/g, '-');
-const LOG_FILE = join(LOG_DIR, `session-${ts}.log`);
+
+/**
+ * A SUBAGENT LOG THAT DOES NOT KNOW IT IS ONE.
+ *
+ * Every process writes its own session file, and a child's looked exactly like a parent's: same name
+ * shape, same opening events, nothing recording AYIN_SUBAGENT_DEPTH. So a delegated run left N
+ * indistinguishable files and the only way to tell which was whose was to compare timestamps against
+ * the parent's subagent_start - archaeology, on the runs that most need reading.
+ *
+ * The spawner names the file instead. It knows the depth, it knows where the child will write, and it
+ * can put both in its own log line. Falls back to the timestamp name when nobody set it, which is
+ * every ordinary session.
+ */
+const LOG_FILE = process.env.AYIN_LOG_FILE || join(LOG_DIR, `session-${ts}.log`);
 
 /** Where this process is logging — so a debug bundle can copy it without guessing the name. */
 export function currentLogFile(): string {
