@@ -209,6 +209,33 @@ export function getAllTools(): Tool[] {
  * hidden from one and offered by another cannot happen. `getAllTools()` stays the full set for name
  * resolution and `/help`: a slash-only tool still exists, it is just not the agent's to reach for.
  */
+/**
+ * THE WORK SET — what a non-interactive turn is allowed to choose from.
+ *
+ * Tool schemas are not free and they are not counted: measured, the 28 callable tools are 27,534 chars
+ * of JSON = ~7,648 tokens, 19% of a 40,000 window, spent before the task is read. `prompt_coverage`
+ * never saw them, so every context figure ayin logged was 19 points optimistic — round 349 of
+ * pylint-4551 reported 108% while actually sitting near 127%.
+ *
+ * What stays is what a turn that reads, edits and verifies actually reaches for, plus the two the
+ * operator has called load-bearing: `subagent` (how ayin does anything at depth) and `corpus_search`
+ * (ayin is built for RAG). What goes is the domain furniture — Unity prefabs, Arduino, Jira, diagrams —
+ * which on a Python bug is ~2,370 tokens of schema describing tools the turn will never call, and the
+ * search tools `bash` already subsumes (`grep` alone is 635 tokens, three times `bash`).
+ *
+ * INTERACTIVE SESSIONS ARE UNTOUCHED. There the catalogue is the point — the operator asks for a
+ * diagram and ayin must know it can draw one.
+ */
+const WORK_TOOLS = new Set([
+  'read_file', 'read_files', 'write_file', 'perform_edit', 'str_replace',
+  'bash', 'explore', 'corpus_search', 'subagent', 'finish',
+]);
+
+let leanTools = false;
+/** Turned on for a headless turn; see `WORK_TOOLS`. `AYIN_ALL_TOOLS=1` opts back out. */
+export function setLeanTools(on: boolean): void { leanTools = on && process.env.AYIN_ALL_TOOLS !== '1'; }
+export function isLeanTools(): boolean { return leanTools; }
+
 export function modelTools(): Tool[] {
   assertLoaded();
   // The design workflow is OFF by default (`modes.ts#isNaamah`), and off means the tool is not in the
@@ -216,7 +243,10 @@ export function modelTools(): Tool[] {
   // for it, which is how a model invents its own workflow for one. `getAllTools()` still has it, so
   // `/help` and name resolution are unaffected.
   const withoutDesign = isNaamah() ? tools : tools.filter((t) => t.name !== 'naamah');
-  return withoutDesign.filter((t) => !t.slashOnly);
+  const offered = withoutDesign.filter((t) => !t.slashOnly);
+  // A tool withheld here is withheld from the catalogue, the native schemas and the unknown-tool hint
+  // alike — the same invariant the comment above states, applied to the work set.
+  return leanTools ? offered.filter((t) => WORK_TOOLS.has(t.name)) : offered;
 }
 
 // ── System prompt XML ───────────────────────────────────────────────

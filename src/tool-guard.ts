@@ -29,7 +29,8 @@
  * here pretends to persist.
  */
 
-import { statSync } from 'node:fs';
+import { statSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
 import { getConfig } from './prompts.js';
 import { log } from './log.js';
@@ -207,6 +208,9 @@ function witnessOfKeyTargets(paths: string[]): string {
  * What the call's target looks like right now: `mtime:size`, or `missing`, or '' when the call names no
  * path at all. Two calls with the same witness are asking the same question of the same bytes.
  */
+/** Above this a file is not window material; mtime:size stays the honest answer rather than a slow lie. */
+const WITNESS_HASH_MAX_BYTES = 2 * 1024 * 1024;
+
 function witnessOf(params: Record<string, string>): string {
   const raw = params.path ?? params.file ?? '';
   if (!raw.trim()) return '';
@@ -215,7 +219,27 @@ function witnessOf(params: Record<string, string>): string {
     const st = statSync(abs);
     // A directory's own mtime moves when entries are added or removed — weaker than a file's, and still
     // the difference between "the folder I searched is the folder I searched" and a guess.
-    return st.isDirectory() ? `dir:${Math.floor(st.mtimeMs)}` : `${Math.floor(st.mtimeMs)}:${st.size}`;
+    if (st.isDirectory()) return `dir:${Math.floor(st.mtimeMs)}`;
+    // ── CONTENT, NOT mtime ──────────────────────────────────────────────────────────────────────
+    //
+    // `mtime:size` answers "was this file touched", and the question is "did these bytes change". The
+    // two part company constantly and in both directions:
+    //
+    //   FALSE MOVE — the comment above `guardNoteMutation` records a subagent writing the same
+    //   `index.html` twelve times, byte-identical, md5 unchanged, and the guard reporting the world had
+    //   moved 21 times. Measured again on pylint-4551: 152 `guard_repeat_allowed_stale`, on a run whose
+    //   281 bash calls were `python -c` probes churning __pycache__ mtimes across the tree. Every one of
+    //   those excused a repeat the guard existed to stop.
+    //
+    //   FALSE STILLNESS — the dangerous one. A one-character `sed -i` preserves size, and within one
+    //   millisecond preserves the floored mtime too. The guard then swears nothing changed while the
+    //   file underneath has, which is exactly the third-party edit a re-read is FOR.
+    //
+    // Source files are kilobytes; hashing one costs microseconds and no context at all. Above the cap a
+    // file is not something an agent reads into a window anyway, and mtime:size remains the honest
+    // fallback rather than a lie about having hashed it.
+    if (st.size > WITNESS_HASH_MAX_BYTES) return `big:${Math.floor(st.mtimeMs)}:${st.size}`;
+    return `h:${createHash('sha1').update(readFileSync(abs)).digest('hex').slice(0, 16)}`;
   } catch {
     return 'missing';
   }
@@ -508,4 +532,67 @@ export function guardDirective(): string {
 /** How many distinct calls are currently blocked — for logging and the status line. */
 export function guardBlockedCount(): number {
   return blocked.size + denied.size;
+}
+
+// ── identical OUTPUT, not identical parameters ───────────────────────────────────────────────────
+
+/**
+ * Refuse a call that has returned THE SAME BYTES too many times running.
+ *
+ * Everything above this line keys on the call: same tool, same parameters, and a witness of the file it
+ * names. That is blind in exactly the case that burned four hours. Measured on pylint-4551 with a
+ * healthy context (48.6% used, no window trimmed, half the budget free): 573 rounds, 561 bash calls,
+ * ZERO edits, and 372 of those calls were `git status --short && git diff --stat` returning "(no
+ * output)" every single time. 196 repeat warnings, 196 allowed. The guard could not object because
+ *
+ *   - the parameters DID vary — `git status && git diff`, `git status; git diff`, plus an `ls` tacked
+ *     on — so a parameter key saw four different calls, not one loop;
+ *   - `git status` names no path, so `witnessOf` returns '' and the content witness has nothing to
+ *     hash. Step 2's fix covers file calls and cannot see a pathless command at all.
+ *
+ * The output does not have that problem. A call that returns the same bytes it returned last time has
+ * told the agent nothing, whatever its parameters said, whatever it names.
+ *
+ * AND IT PERMITS THE LEGITIMATE REPEAT FOR FREE — which is the reason the guard above allows rather
+ * than blocks. "Has the server come up", "does the test pass now", "did that write land" are the same
+ * call twice on purpose, and the second answer is the useful one BECAUSE IT DIFFERS. Different bytes
+ * reset the counter. Only a call that is genuinely telling the agent nothing new is refused.
+ */
+/**
+ * Keyed by tool AND the output's own hash, counting every occurrence in the turn.
+ *
+ * The first cut keyed on the tool alone and compared only against the PREVIOUS result, which made it
+ * blind to the exact shape it was built for. Measured: 25 refusals on requests-1142, ZERO on
+ * pylint-4551 — the run with 372 identical `git status` calls — because pylint interleaves. One
+ * `pytest` between two `git status` calls reset the counter, forever. Consecutiveness was never the
+ * property that mattered; RECURRENCE is.
+ */
+const outputSeen = new Map<string, number>();
+
+/** Two identical answers are a confirmation. The third is a loop. */
+const IDENTICAL_OUTPUT_MAX = 2;
+
+/** Never refused: the exit, and anything whose whole job is to change the world. */
+const NEVER_STALE = new Set(['finish', 'perform_edit', 'write_file', 'str_replace', 'subagent']);
+
+export function resetOutputEchoes(): void { outputSeen.clear(); }
+
+/**
+ * `null` to pass the result through; a refusal body to send instead of it.
+ *
+ * Keyed on tool + output only. The parameters are deliberately NOT in the key: the loop above wrote its
+ * command four different ways and meant one thing every time.
+ */
+export function refuseIfEcho(tool: string, result: string): string | null {
+  if (NEVER_STALE.has(tool)) return null;
+  const key = `${tool}|${createHash('sha1').update(result).digest('hex').slice(0, 16)}`;
+  const run = (outputSeen.get(key) ?? 0) + 1;
+  outputSeen.set(key, run);
+  if (run <= IDENTICAL_OUTPUT_MAX) return null;
+  log('WARN', 'output_echo_refused', { tool, run: String(run) });
+  const ord = run === 3 ? '3rd' : `${run}th`;
+  return `[REFUSED — this is the ${ord} time ${tool} has returned these exact bytes this turn. `
+    + `The answer has not changed and will not change by asking again; nothing new can come from repeating it. `
+    + `If you are checking whether your work landed, you have not done the work yet — make the edit. `
+    + `If you are waiting on something, do something else first so there is something to see.]`;
 }

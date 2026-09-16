@@ -25,9 +25,16 @@ import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution, modelTools } from './tools.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
 import { getGoal } from './goal.js';
+import { hasClearPicture, PICTURE_REQUEST, briefIsUsable } from './clear-picture.js';
+// A CHILD MUST NOT HAND OVER. It is already the fresh context this mechanism creates, and at depth
+// >= 1 `subagent` is not registered at all — so a handover there would ask for a process that cannot
+// exist, and the recursion rule would be enforced by a failure instead of by a check.
+import { subagentsAllowed } from './subagents.js';
 import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLESS, formatToolResultForChat, formatToolCallForChat, escapeBlessedTags, updateToolProgress } from './ui.js';
 import { theme } from './ui/theme.js';
 import { log } from './log.js';
+import { shapeFileResult, resetFileViews } from './file-view.js';
+import { refuseIfEcho, resetOutputEchoes } from './tool-guard.js';
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
 import { stoppedShort } from './announced.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
@@ -1359,6 +1366,29 @@ const LEDGER_SIGNAL_RE = new RegExp([
  */
 const LEDGER_DETAIL_BUDGET_CHARS = 14_000;
 
+/**
+ * THE PARAMETERS OF A CALL ARE NOT A DETAIL — they were the whole bill.
+ *
+ * `LEDGER_HEAD_CHARS` clipped every line of OUTPUT and nothing clipped the call's own parameters, so a
+ * `bash` whose command is a multi-line Python heredoc put all of it in the ledger, once per call, on
+ * every round. Measured on pylint-4551: 379 calls averaging 142 parameter chars = 69,105 chars of bare
+ * call lines, ~19,200 tokens of a 40,000 window, re-sent 348 times. The detail budget above was doing
+ * its job perfectly while the line it prefixes was unbounded.
+ */
+const LEDGER_PARAM_CHARS = 100;
+
+/**
+ * What the CALL LINES together may spend, newest first.
+ *
+ * "Every call still gets its line" was affordable at the 12-char parameters the gate tested with and
+ * nowhere else. The invariant that actually matters is that a call the model made is DISCOVERABLE — so
+ * the newest calls keep their own line and their file, and older ones fold into a deduped tally that
+ * still names them. A turn that runs the same command ninety times then says so in one line.
+ */
+const LEDGER_LINES_BUDGET_CHARS = 9_000;
+/** How many distinct calls the folded tally may name before it, too, degrades to a count. */
+const LEDGER_TALLY_MAX = 25;
+
 export function noteRanCall(tool: string, params: string, ok: boolean, outcome: string): void {
   const clip = (l: string) => (l.length > LEDGER_HEAD_CHARS ? `${l.slice(0, LEDGER_HEAD_CHARS - 1)}\u2026` : l);
   const all = outcome.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim().length > 0);
@@ -1441,10 +1471,35 @@ export function renderCallLedger(): string {
     if (spent + cost(brief) <= LEDGER_DETAIL_BUDGET_CHARS) { detail.set(i, brief); spent += cost(brief); }
   }
 
+  // Newest first, under a budget: what a call line costs is now bounded the same way its excerpt is.
+  const clipParams = (p: string): string => {
+    const flat = p.replace(/\s+/g, ' ').trim();
+    return flat.length > LEDGER_PARAM_CHARS ? `${flat.slice(0, LEDGER_PARAM_CHARS - 1)}…` : flat;
+  };
+  const listed = new Set<number>();
+  let lineSpend = 0;
+  for (let i = callLedger.length - 1; i >= 0; i--) {
+    const c = callLedger[i];
+    const approx = c.tool.length + clipParams(c.params).length + (c.file ? c.file.length + 14 : 0) + 8;
+    if (lineSpend + approx > LEDGER_LINES_BUDGET_CHARS) break;
+    lineSpend += approx;
+    listed.add(i);
+  }
+  // Nothing is lost, it is COUNTED: an unlisted call folds into a tally keyed by what it was, so a turn
+  // that ran the same read ninety times says that in one line instead of ninety.
+  const tally = new Map<string, number>();
+  for (let i = 0; i < callLedger.length; i++) {
+    if (listed.has(i)) continue;
+    const c = callLedger[i];
+    const key = `${c.tool}(${clipParams(c.params)})`;
+    tally.set(key, (tally.get(key) ?? 0) + 1);
+  }
+
   const lines = callLedger.map((c, i) => {
+    if (!listed.has(i)) return '';
     const where = c.file ? `  [${humanBytes(c.bytes)} → ${c.file}]` : '';
     const status = c.ok ? '' : 'FAILED: ';
-    const call = `${i + 1}. ${c.tool}(${c.params})${where}`;
+    const call = `${i + 1}. ${c.tool}(${clipParams(c.params)})${where}`;
     const shown = detail.get(i);
     // No detail left in the budget: the call line ALONE. It already names the call and the file holding
     // the output, and a "(not shown)" line repeated two hundred times says that same nothing two hundred
@@ -1454,7 +1509,13 @@ export function renderCallLedger(): string {
     const more = c.bytes && c.file && shown.length > 3 ? `\n     ... full output in ${c.file}` : '';
     return `${call}\n   ${status}${shown.join('\n   ')}${more}`;
   });
-  const head = lines;
+  const folded = [...tally.entries()].sort((a, b) => b[1] - a[1]);
+  const foldedLines = folded.length
+    ? ['', `Earlier in this turn (${folded.reduce((n, [, k]) => n + k, 0)} call(s), output still on disk):`]
+      .concat(folded.slice(0, LEDGER_TALLY_MAX).map(([k, n]) => `  ${k}${n > 1 ? `  ×${n}` : ''}`))
+      .concat(folded.length > LEDGER_TALLY_MAX ? [`  … and ${folded.length - LEDGER_TALLY_MAX} other distinct call(s)`] : [])
+    : [];
+  const head = lines.filter((l) => l !== '').concat(foldedLines);
   const earlier = earlierCalls.length
     ? `\nFrom earlier turns this session — the answers are still on disk, read the file rather than re-running:\n`
       + earlierCalls.map((c) => `  ${c.file}  ${c.tool}(${c.params})  ${humanBytes(c.bytes)}`).join('\n')
@@ -1491,6 +1552,8 @@ async function runAgentTurn(userInput: string): Promise<void> {
    */
   let consecutiveText = 0;
   resetCallLedger();
+  resetFileViews();
+  resetOutputEchoes();
   resetSubagents();
   /**
    * THE TURN'S SIGNAL. Every run is chained to it, so cancelling the turn cancels its tools — and
@@ -1553,6 +1616,10 @@ async function runAgentTurn(userInput: string): Promise<void> {
   let continueNudges = 0;
   /** Rounds discarded in a row for running no tool while working. Reset by any tool call. */
   let workingRetries = 0;
+  /** The diagnosis handover happens ONCE per turn — see the block that uses it. */
+  let pictureAsked = false;
+  /** Set between asking for the picture and receiving it, so the next reply is read as the brief. */
+  let awaitingPicture = false;
   let deferralNudges = 0;
   let unwrittenClaimNudges = 0;
   /** "I'll rewrite that now." — announced, never acted. One nudge; see src/announced.ts. */
@@ -1651,6 +1718,63 @@ async function runAgentTurn(userInput: string): Promise<void> {
     }
     hasToolCalls = parsed.toolCalls.length > 0;
     if (hasToolCalls) { consecutiveText = 0; workingRetries = 0; }
+
+    /**
+     * THE DIAGNOSIS HANDOVER — cut the round at the moment of insight and start the work clean.
+     *
+     * MEASURED over 100 finding-statements in three recorded SWE-bench runs: a stated diagnosis was
+     * followed by an edit SIX times. The rest of the time the model re-derived the same conclusion —
+     * verbatim, 16 times in one session — each restatement followed by re-reading the file it had just
+     * read. It is not lost and it is not wrong: on django-10554 it named the cause correctly and then
+     * spent 80 rounds and 62 shell calls never attempting an edit.
+     *
+     * The loop is FED BY ITS OWN HISTORY. A context thick with the model's narration is one where the
+     * highest-probability next token is more narration, so asking it to try harder cannot work — the
+     * thing to remove is the history. So: stop, ask for the finding as a FORM rather than prose, and
+     * hand that form to a subagent, which is a fresh process with an empty context and the full
+     * primitive set. It reads as an implementation brief because that is all it is; there is no
+     * investigation to restate because the child never saw one.
+     *
+     * ONCE PER TURN. A second handover would be the loop again, one level down.
+     */
+    if (awaitingPicture) {
+      awaitingPicture = false;
+      const brief = (parsed.text ?? '').trim();
+      if (briefIsUsable(brief)) {
+        log('INFO', 'picture_dispatch', { chars: String(brief.length) });
+        addMessage('system', '[diagnosis handed to a fresh implementer]');
+        const { runSubagent } = await import('./subagents.js');
+        // THE CHILD DECIDES WHAT IT WAS HANDED, and that is what makes one mechanism do two jobs. A
+        // picture is not always an edit: it can be a finished answer — wrong branch, works as designed,
+        // the caller's own bug. Told it may be either, a fresh process implements the first and audits
+        // the second, and neither case needs the parent to have classified it correctly first.
+        const res = await runSubagent(
+          `You are about to implement a decision per this contract. It may be the case that it is not a `
+          + `direct implementation request but a verbatim solution answer — a conclusion rather than a `
+          + `task. In that case do not invent work: perform a sceptic run, confirm or refute it against `
+          + `the code, and report what you found.\n\n${brief}`,
+          { cwd: process.cwd() },
+        );
+        pushToWindow('user', renderToolResult(
+          `Your picture was handed to a fresh process to implement or to audit. It reports:\n\n${res.report}\n\n`
+          + `Check what actually changed on disk, then call finish().`));
+        continue;
+      }
+      // Nothing worth passing on. Let the turn carry on rather than spend a child on two words.
+      log('INFO', 'picture_unusable', { chars: String(brief.length) });
+    } else if (!pictureAsked && subagentsAllowed() && hasClearPicture(parsed.text ?? response)) {
+      pictureAsked = true;
+      awaitingPicture = true;
+      log('INFO', 'picture_detected', { round: String(round), hadToolCalls: String(hasToolCalls) });
+      addMessage('system', '[diagnosis detected — asking for it in full]');
+      // The finding itself stays; the question is about it. Any tool calls in this round are DROPPED —
+      // that is the cut, and it is the point: the next thing that happens is the handover, not more
+      // of whatever the model was about to re-read.
+      pushToWindow('assistant', response);
+      pushMessage('assistant', response);
+      pushToWindow('user', PICTURE_REQUEST);
+      continue;
+    }
 
     /**
      * A CALL IN A SHAPE WE DO NOT SPEAK IS ALSO NOT AN ANSWER.
@@ -2281,6 +2405,34 @@ async function runAgentTurn(userInput: string): Promise<void> {
         addMessage('system', `Denied: ${name}(${paramPreview})`);
         log('INFO', 'tool_denied', { tool: name });
 
+        /**
+         * A DENIAL IS INFORMATION, NOT THE END, WHEN NOBODY CAN ANSWER.
+         *
+         * Below this, an interactive deny explains itself to the operator and RETURNS — correct, because
+         * the operator said no and the next move is theirs. Headless has no operator, so that return
+         * abandons the turn: no agent_done, no finish, and whatever was in flight is lost.
+         *
+         * Measured: a 130-round, 64-minute SWE-bench turn ended at the moment the model tried
+         * `git checkout -- compiler.py` to revert its own edits. The refusal was right; ending the turn
+         * on it was not. The patch survived only because the revert was blocked.
+         *
+         * The read-only path immediately above already does the right thing here, with a comment saying
+         * 'without this the doggo dies on its first bash' — the same bug, found once, fixed for one mode.
+         * A refusal the model can read is a refusal it can work around, which is the whole point of
+         * `withheldRedirect` and of the denial explanation itself.
+         */
+        if (HEADLESS) {
+          const denyCall = renderToolCall({ name, params });
+          pushToWindow('assistant', textPrefix ? `${textPrefix}\n\n${denyCall}` : denyCall);
+          noteRanCall(name, JSON.stringify(params).slice(0, 80), false, 'denied');
+          pushToWindow('user', renderToolResult(
+            `${name} was DENIED and did not run. Nobody is watching this session, so asking which `
+            + `alternative to approve will not be answered. Work around it with what you are allowed to `
+            + `do, or call finish() stating what you could not do and why.`));
+          log('INFO', 'tool_denied_headless_continue', { tool: name });
+          continue roundLoop;
+        }
+
         interrupted = false;
         setAgentStatus('Explaining...');
         try {
@@ -2628,7 +2780,22 @@ async function runAgentTurn(userInput: string): Promise<void> {
        */
       const resultHead = nativeMode ? `${name}(${paramPreview}) →\n` : '';
       noteRanCall(name, paramPreview, true, result);
-      pushToWindow('user', renderToolResult(resultHead + clipForWindow(result) + (guard.note ?? '') + editMissNote));
+      /**
+       * A FILE GOES IN ONCE. A re-read returns what changed, or says nothing did — see `file-view.ts`.
+       *
+       * The guard's REPEAT paragraph is suppressed when the shaped body already carries that news, and
+       * that suppression is not cosmetic: the incrementing `[REPEAT n:` counter was appended to exactly
+       * the messages that were repeats, which made every copy a unique string and defeated
+       * `dedupeRepeatedResults` entirely. 101 warnings, 18 dedupes, measured.
+       */
+      // A call that returned these exact bytes already has nothing left to say — see `refuseIfEcho`.
+      // Checked BEFORE the file view, so a refusal is never mistaken for new file contents.
+      const echo = refuseIfEcho(name, result);
+      const shaped = echo !== null
+        ? { body: echo, suppressRepeatNote: true }
+        : shapeFileResult(name, params as Record<string, unknown>, result, clipForWindow(result), conversationWindow);
+      const repeatNote = shaped.suppressRepeatNote ? '' : (guard.note ?? '');
+      pushToWindow('user', renderToolResult(resultHead + shaped.body + repeatNote + editMissNote));
       pushMessage('assistant', `[tool: ${name}(${paramPreview})]`);
 
       // CTA just delivered — tell the model it's done. This prevents the

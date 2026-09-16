@@ -67,6 +67,15 @@ const NOISE_EXTENSIONS = new Set([
 function isNoise(path: string): boolean {
   const lower = path.toLowerCase();
   for (const ext of NOISE_EXTENSIONS) if (lower.endsWith(ext)) return true;
+  // A SKIPPED DIRECTORY IS SKIPPED HOWEVER THE FILE WAS NAMED.
+  //
+  // SKIP_DIRS guarded the WALK and nothing else, so a path the model named was admitted from inside
+  // one: measured on psf/requests, the first question generated was about `build/lib/requests/
+  // cookies.py` — setuptools' stale COPY of a module whose original sits at `requests/cookies.py`.
+  // Every answer about it would describe code the agent cannot edit and tests do not run, and the
+  // duplicate would then compete with the real file at retrieval time. Same argument as the
+  // extensions above: it exists, so the path check passed, and existing was never the question.
+  for (const seg of path.split('/')) if (SKIP_DIRS.has(seg)) return true;
   return false;
 }
 
@@ -259,8 +268,12 @@ export function resolveInRepo(repoPath: string, candidate: string): string | nul
   try {
     if (!existsSync(abs) || !statSync(abs).isFile()) return null;
   } catch { return null; }
-  if (isNoise(cleaned)) return null;   // exists, but a `.meta` GUID answers no question
-  return rel(root, abs);
+  // The RELATIVE path, because that is the repo's own spelling: an absolute candidate would drag the
+  // host's directory names through the test, and a checkout that merely lives under `~/build/` is
+  // not litter.
+  const r = rel(root, abs);
+  if (isNoise(r)) return null;   // exists, but a `.meta` GUID answers no question
+  return r;
 }
 
 /**
@@ -405,6 +418,7 @@ const IMPORT_EXTS = ['', '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '
  * Every resolution is checked against the filesystem, so an import of something deleted adds nothing.
  */
 export function importEdges(repoPath: string, file: string, source: string): string[] {
+  if (file.endsWith('.py')) return pythonImportEdges(repoPath, file, source);
   const dir = join(repoPath, file, '..');
   const out: string[] = [];
   const specs = [
@@ -418,6 +432,69 @@ export function importEdges(repoPath: string, file: string, source: string): str
     if (!spec.startsWith('.')) continue; // a package, not a file in this repo
     const target = resolveSpecifier(repoPath, dir, spec);
     if (target && target !== file && !out.includes(target)) out.push(target);
+  }
+  return out;
+}
+
+/**
+ * Files a Python source imports, resolved to paths that exist.
+ *
+ * Python is the one language here where the import statement is BOTH a manifest-level fact and a
+ * file-level one: `from pylint.checkers import BaseChecker` names exactly one file on disk. That is
+ * why this is safe where the C# `using` promotion documented in `buildIndex` was not — a `using`
+ * links a file to every file in a namespace (measured: 22,639 edges, 80 files became 194), while a
+ * dotted module name is a room, not a wing.
+ *
+ * It is also load-bearing rather than a bonus. `referencesOf` deliberately returns only the TOP
+ * segment (`requests.models` → `requests`) because entangle asks which manifest unit a file crosses,
+ * and that answer resolves to no file at all. Measured on psf/requests before this existed: "0 import
+ * edge(s) resolved" on a repo whose every module imports its siblings by name.
+ *
+ * Absolute names are tried from the repo root and from `src/`, the two layouts that cover packaging
+ * in practice. Anything that does not resolve to a real file adds nothing — a stdlib or third-party
+ * import simply finds no candidate and is dropped, with no list of names to keep in sync.
+ */
+function pythonImportEdges(repoPath: string, file: string, source: string): string[] {
+  const out: string[] = [];
+  const add = (base: string): void => {
+    // A module is `x.py`; a package is `x/__init__.py`. Both are one file, which is the whole point.
+    for (const cand of [`${base}.py`, `${base}/__init__.py`]) {
+      const t = resolveInRepo(repoPath, cand);
+      if (t && t !== file && !out.includes(t)) { out.push(t); return; }
+    }
+  };
+  /** Where an absolute dotted name could live. `src/` is the other half of Python packaging. */
+  const absBases = (mod: string): string[] => {
+    const p = mod.replace(/\./g, '/');
+    return [p, `src/${p}`];
+  };
+
+  // `import a.b.c`, `import a.b as x`, `import a, b` — always absolute in Python 3.
+  for (const m of source.matchAll(/^[ \t]*import[ \t]+([^#\n(]+)/gm)) {
+    for (const part of m[1].split(',')) {
+      const mod = part.trim().split(/\s+as\s+/)[0].trim();
+      if (!/^[A-Za-z_][\w.]*$/.test(mod)) continue;
+      for (const b of absBases(mod)) add(b);
+    }
+  }
+
+  // `from a.b import c`, `from .b import c`, `from . import c`, `from ..x import y`.
+  for (const m of source.matchAll(/^[ \t]*from[ \t]+(\.*)([A-Za-z_][\w.]*)?[ \t]+import[ \t]+([^#\n]+)/gm)) {
+    const dots = m[1].length, mod = (m[2] ?? '').replace(/\./g, '/'), names = m[3];
+    // One leading dot is this package; each further dot is one level up from it.
+    const here = rel(repoPath, join(repoPath, file, '..'));
+    const bases = dots === 0
+      ? absBases(mod)
+      : [[here, ...Array(dots - 1).fill('..'), mod].filter(Boolean).join('/')];
+    for (const b of bases) {
+      add(b);
+      // `c` in `from a.b import c` may be a submodule rather than a name inside `a/b.py`. Only
+      // plain identifiers are tried; `import *` and parenthesised lists name nothing resolvable.
+      for (const n of names.split(',').slice(0, 20)) {
+        const name = n.trim().split(/\s+as\s+/)[0].trim();
+        if (/^[A-Za-z_]\w*$/.test(name)) add(`${b}/${name}`);
+      }
+    }
   }
   return out;
 }
@@ -547,7 +624,14 @@ function buildIndex(repoPath: string, cap: number, onStatus?: (n: string) => voi
   // 2 incomplete. Breadth without precision is the wrong trade at depth 2: a `using` names a wing of
   // the building where a mention names a room.
   const totalEdges = [...imports.values()].reduce((n, v) => n + v.length, 0);
-  onStatus?.(`${totalEdges} import edge(s) resolved${totalEdges === 0 ? ' (C#: none by design — edges come from mentions + namespace visibility)' : ''}`);
+  // The parenthetical is not decoration. This line read "0 import edge(s) resolved (C#: none by
+  // design)" on psf/requests for a whole session, and it was taken at face value — a language whose
+  // imports ARE its graph, reporting zero, wearing another language's excuse. Say which case it is.
+  const importing = files.some((f) => /\.(py|ts|tsx|mts|cts|js|jsx|mjs|cjs|dart)$/.test(f));
+  const why = !importing
+    ? ' (C#: none by design — edges come from mentions + namespace visibility)'
+    : ' — BUT this repo has files whose imports name files; the walk is running on mentions alone';
+  onStatus?.(`${totalEdges} import edge(s) resolved${totalEdges === 0 ? why : ''}`);
   const ambient = [...mentionedBy.entries()].filter(([, who]) => who.size > MAX_MENTIONERS).length;
   if (ambient) onStatus?.(`${ambient} name(s) are mentioned everywhere — ignored as edges`);
   return { declaredIn, mentions, mentionedBy, imports, importedBy, namespace, visible, indexed: files.length, truncated };

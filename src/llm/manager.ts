@@ -360,6 +360,13 @@ export function unexecutedCallText(raw: string, toolNames: readonly string[]): s
   for (const name of toolNames) {
     const re = new RegExp(`(^|\\n)\\s*\\[?\\s*${name}\\s*\\(\\s*\\w+\\s*=`);
     if (re.test(prose)) return name;
+    // THE OTHER SHAPE, and it cost a 64-minute run. In NATIVE tool mode a call arrives in the API's
+    // structured field and nothing parses the text — so a model that writes ayin's own XML-ish syntax
+    // as prose emits `<function=finish><parameter=summary>…`, which every dialect ignores. Measured:
+    // qwen3.8 did exactly that for its finish() call, the turn ended with the answer unsent, and the
+    // structured log recorded zero finish calls while the transcript plainly contained one.
+    const xml = new RegExp(`<function\\s*=\\s*${name}\\s*>`, 'i');
+    if (xml.test(prose)) return name;
   }
   return null;
 }

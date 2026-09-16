@@ -215,8 +215,34 @@ resetCallLedger();
 for (let i = 0; i < 300; i++) noteRanCall('bash', `cmd=echo ${i}`, true, `line ${i}`);
 const big = renderCallLedger();
 const lines = big.split('\n').filter((l) => /^\d+\. /.test(l));
-if (lines.length !== 300) fail(`${lines.length} of 300 calls listed — every call this turn must appear`);
+// ACCOUNTED FOR, not necessarily LISTED. "Every call gets its own line" was affordable only at the
+// 12-char parameters this case uses; see the long-parameter case below for what it cost in the field.
+// The invariant that survives is that no call vanishes silently: it is listed, or it is in the tally.
+const tallied = /Earlier in this turn \((\d+) call\(s\)/.exec(big);
+const accounted = lines.length + (tallied ? Number(tallied[1]) : 0);
+if (accounted !== 300) fail(`${accounted} of 300 calls accounted for — a call vanished from the ledger`);
 if (big.length > 14000) fail(`300 short calls rendered ${big.length} chars — the render must stay bounded`);
+
+/**
+ * LONG PARAMETERS — the case this gate did not have, and the one that actually happened.
+ *
+ * Every case above used a 12-character parameter, so the unbounded `${c.params}` in the call line never
+ * showed up. In the field a `bash` command is a multi-line Python heredoc: measured on pylint-4551, 379
+ * calls averaging 142 parameter chars put ~19,200 tokens of bare call lines into a 40,000 window, on
+ * every one of 348 rounds. The detail budget was holding perfectly; the line it prefixes was not bounded
+ * at all.
+ */
+resetCallLedger();
+const fatParam = 'command=cd /testbed && python -c "' + 'import astroid; code = ' + "'''".repeat(3)
+  + Array.from({ length: 12 }, (_, i) => `class C${i}(object):    def __init__(self, a: str = None): self.a = a`).join(' ')
+  + '"';
+for (let i = 0; i < 380; i++) noteRanCall('bash', `${fatParam} # ${i}`, true, `line ${i}`);
+const fat = renderCallLedger();
+if (fat.length > 20000) fail(`380 long-parameter calls rendered ${fat.length} chars — parameters are not clipped`);
+const fatTally = /Earlier in this turn \((\d+) call\(s\)/.exec(fat);
+const fatListed = fat.split('\n').filter((l) => /^\d+\. /.test(l)).length;
+if (fatListed + (fatTally ? Number(fatTally[1]) : 0) !== 380) fail('a long-parameter call vanished from the ledger');
+if (!fat.includes('…')) fail('long parameters were not clipped');
 
 resetCallLedger();
 const longOut = Array.from({ length: 60 }, (_, i) => `output line ${i} which is reasonably long for a tool result`).join('\n');
@@ -230,6 +256,94 @@ if (huge.length > 30000) fail(`300 LONG failing calls rendered ${huge.length} ch
 if (/earlier call\(s\) not listed/.test(big)) fail('the render still prints a drop seam, but nothing is dropped any more');
 if (!big.includes('cmd=echo 299')) fail('the render kept the oldest calls instead of the most recent');
 resetCallLedger();
+
+/**
+ * FILE VIEWS — materialize once, then say what changed.
+ *
+ * The case these exist for: pylint-4551 read the same files for 348 rounds and every copy landed in
+ * full, because the guard appended an INCREMENTING "[REPEAT n:" to exactly the messages that were
+ * repeats, so no two were byte-equal and the dedupe never fired. 101 warnings, 18 dedupes.
+ */
+const fv = await import('../dist/file-view.js');
+// A REALISTIC SIZE. The first draft used a 60-char file and asserted the pointer was shorter than it —
+// which it is not, and cannot be: a pointer that explains itself costs ~200 chars. The claim worth
+// testing is that the CONTENTS are not re-sent, not that the reply is short in absolute terms.
+const FILE = Array.from({ length: 80 }, (_, i) => `    def method_${i}(self, a: str = None):  # line ${i}`).join('\n')
+  + '\n    def __init__(self, a: str = None):\n        self.a = a\n';
+const win = [];
+const push = (body) => { win.push({ role: 'user', content: '<tool_response>' + body + '</tool_response>' }); return body; };
+
+fv.resetFileViews();
+const first = fv.shapeFileResult('read_file', { path: 'f.py' }, FILE, FILE, win);
+if (first.body !== FILE) fail('a first read must materialize the file in full');
+push(first.body);
+
+const again = fv.shapeFileResult('read_file', { path: 'f.py' }, FILE, FILE, win);
+if (again.body.includes('method_40')) fail('an unchanged re-read re-sent the file contents');
+if (again.body.length > 400) fail(`an unchanged re-read cost ${again.body.length} chars — it must be a pointer`);
+if (!/unchanged/.test(again.body)) fail('an unchanged re-read must say so');
+if (!again.suppressRepeatNote) fail('the REPEAT note must be suppressed — it is what broke dedupe');
+
+const EDITED = FILE.replace('    def __init__(self, a: str = None):', '    def __init__(self, a: int = 0):');
+const diffed = fv.shapeFileResult('read_file', { path: 'f.py' }, EDITED, EDITED, win);
+if (!/CHANGED/.test(diffed.body)) fail('a changed re-read must report the change');
+if (!/^\+.*a: int/m.test(diffed.body)) fail('the diff must show the new line');
+if (diffed.body.includes('method_40')) fail('a small edit re-sent the whole file instead of a diff');
+
+// A DIFFERENT REGION IS A DIFFERENT QUESTION — never answered with a diff of bytes never seen.
+const region = fv.shapeFileResult('read_file', { path: 'f.py', offset: 40, limit: 10 }, FILE, FILE, win);
+if (region.body !== FILE) fail('a new region must materialize, not diff against another region');
+
+// EVICTION: if the copy is gone from the window, there is no copy — materialize again.
+win.length = 0;
+const afterEvict = fv.shapeFileResult('read_file', { path: 'f.py' }, EDITED, EDITED, win);
+if (afterEvict.body !== EDITED) fail('after eviction the file must be materialized again, not diffed');
+fv.resetFileViews();
+console.log('             file views: materialize / unchanged / diff / region / eviction all hold');
+
+/**
+ * ECHO REFUSAL — the same BYTES, not the same parameters.
+ *
+ * pylint-4551 with a healthy context: 573 rounds, zero edits, 372 `git status && git diff` calls all
+ * returning "(no output)". The parameters varied (`&&` vs `;`, a trailing `ls`) so a parameter key saw
+ * four calls; `git status` names no path so the content witness had nothing to hash. The output was
+ * identical every time.
+ */
+const tg = await import('../dist/tool-guard.js');
+tg.resetOutputEchoes();
+if (tg.refuseIfEcho('bash', '') !== null) fail('a first result must pass through');
+if (tg.refuseIfEcho('bash', '') !== null) fail('a second identical result is a confirmation, not a loop');
+const third = tg.refuseIfEcho('bash', '');
+if (third === null) fail('a third identical result must be refused');
+if (!/REFUSED/.test(third)) fail('the refusal must say so');
+// NEW BYTES ARE THEIR OWN QUESTION — "does the test pass now" keeps working because a different
+// answer has its own count, not because it clears anybody else's.
+if (tg.refuseIfEcho('bash', 'now it fails differently') !== null) fail('a changed result must pass through');
+if (tg.refuseIfEcho('bash', 'now it fails differently') !== null) fail('a second new-byte result is a confirmation');
+
+/**
+ * INTERLEAVED — the case the first implementation got wrong, and the only case that mattered.
+ *
+ * Keying on the tool and comparing against the PREVIOUS result alone gave 25 refusals on requests-1142
+ * and ZERO on pylint-4551, the run with 372 identical `git status` calls: one `pytest` between any two
+ * of them reset the counter. Consecutiveness was never the property; recurrence is.
+ */
+tg.resetOutputEchoes();
+let refusedInterleaved = 0;
+for (let i = 0; i < 6; i++) {
+  if (tg.refuseIfEcho('bash', 'ON BRANCH MAIN\nnothing to commit') !== null) refusedInterleaved++;
+  tg.refuseIfEcho('bash', `pytest run ${i} — different every time`);   // the interleaving call
+}
+if (refusedInterleaved === 0) fail('an interleaved identical result was never refused — the loop is still invisible');
+if (refusedInterleaved < 3) fail(`only ${refusedInterleaved} of 6 interleaved repeats refused`);
+// The exit and the mutators are never refused.
+tg.resetOutputEchoes();
+for (let i = 0; i < 5; i++) {
+  if (tg.refuseIfEcho('finish', 'done') !== null) fail('finish must never be refused');
+  if (tg.refuseIfEcho('perform_edit', 'ok') !== null) fail('an edit must never be refused');
+}
+tg.resetOutputEchoes();
+console.log('             echo refusal: 3rd identical refused, new bytes reset, finish/edit exempt');
 
 console.log(`check-window: OK — trimmed to ${after}/${budget} tokens, ${headroom} of headroom, prefix intact`);
 console.log(`             compression: ${quiet.count} cuts when it fits, ${cut.count} when it does not (${cut.dropped} chars)`);

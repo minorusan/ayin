@@ -37,7 +37,7 @@ import { toggleQaSession, forceQaNextTurn } from './qa/index.js';
 import { toggleSkepticSession, forceSkepticNextTurn } from './qa/skeptic.js';
 import { togglePresenterSession, forcePresenterNextTurn } from './presenter/index.js';
 import { runAgent, interruptAgent, enqueueAgentMessage, restoreConversation, recordSlashTurn } from './agent.js';
-import { findToolBySlash, slashTools, loadTools } from './tools.js';
+import { setLeanTools, findToolBySlash, slashTools, loadTools } from './tools.js';
 import { startPromptServer, serverLanUrl, serverUrl } from './prompt-server.js';
 import { appendTurn as appendTicketTurn } from './sprint/chat.js';
 import { addNote, markDone, markFailed, reapAbandoned } from './diff/comments.js';
@@ -1753,6 +1753,9 @@ async function main(): Promise<void> {
     return;
   }
   if (HEADLESS) {
+    // A headless turn is a WORK turn: it gets the work tool set, not the whole catalogue. See
+    // `tools.ts#WORK_TOOLS` for what that costs and why the interactive path keeps everything.
+    setLeanTools(true);
     // ARMED BEFORE THE WORK, MARKED CLEAN AFTER IT. Anything between the two that ends the process —
     // a signal from a parent cancelling this subagent, an uncaught throw, a bare process.exit — leaves
     // a note saying where it got to. See `postmortem.ts`.
@@ -1875,6 +1878,23 @@ async function runHeadless(): Promise<void> {
       if (heldTicketReply) appendTicketTurn(ticketKey, 'note', heldTicketReply);
       heldTicketReply = text;
     });
+  }
+
+  // THE CORPUS REACHES HEADLESS TOO.
+  //
+  // The interactive path looks the task up in the corpus before the first prompt (see the
+  // `wantCorpus` block). Headless called `runAgent` directly and got none of it — so every
+  // non-interactive run, which is every benchmark run and every subagent, worked with the corpus
+  // switched off in all but name. Measured on psf/requests: asking the corpus "why is a
+  // Content-Length header added to a GET request with no body" returns `prepare_content_length`
+  // with its line numbers, which is the fix site. Handing that over at round 0 instead of hoping
+  // the model reads its way there is the entire point of having built the corpus.
+  //
+  // The other two paths (chunks attached to a `read_file`, and the `corpus_search` tool) were
+  // always live here; they answer "what do we know about this FILE", not "about this TASK".
+  if (isCorpusInjection()) {
+    try { setPendingCorpus(await corpusForPrompt(process.cwd(), prompt)); }
+    catch { setPendingCorpus(null); }   // a corpus that cannot be read must not take the run with it
   }
 
   try {
