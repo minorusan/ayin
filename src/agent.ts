@@ -15,7 +15,8 @@
 
 import { formatTurnTimings, resetTurnTimings, timed } from './timing.js';
 import { waiveReadOnce } from './tools/readGuard.js';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { cancelActiveThinking } from './connection.js';
@@ -34,7 +35,10 @@ import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLE
 import { theme } from './ui/theme.js';
 import { log } from './log.js';
 import { shapeFileResult, resetFileViews } from './file-view.js';
-import { refuseIfEcho, resetOutputEchoes } from './tool-guard.js';
+import { grepRewrite } from './bash-to-grep.js';
+import { skepticInjection, inSkepticPass, closeSkepticPass, resetSkepticPass, resetSkepticRun, beginVerifyTurn, tickSkepticPass, verifyAttempts, verifyBudgetSpent } from './skeptic-pass.js';
+import { refuseIfEcho, resetOutputEchoes, isStateQuery } from './tool-guard.js';
+import { ACCOUNT_REQUEST, beginLostTurn, lostNudge, lostReport, noteCall, resetLost, restartDepth, restartExhausted, unverifiedReport } from './lost.js';
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
 import { stoppedShort } from './announced.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
@@ -743,7 +747,18 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
   // Judge verdict — routes the agent's next action
   if (judgeVerdict?.confidence === 'high') {
     volatile += `\n\nYour gathered facts are sufficient to produce a complete answer. Write your final output now.`;
-  } else if (judgeVerdict && judgeExtensions >= MAX_JUDGE_EXTENSIONS && judgeRoundsGranted <= 0) {
+  // THE JUDGE MAY NOT DECLARE BANKRUPTCY WHILE THE ROUND BUDGET IS FULL.
+  //
+  // Its extension budget was counted independently of `maxRounds`, so "you are out of investigation
+  // budget" could arrive at round 23 of 55. Measured on a real run: the model had already written the
+  // correct root cause AND the correct one-line fix (`hlcode.strip()` in `visit_literal`), then closed
+  // with "the fix is not yet applied — investigation budget exhausted" and called finish() with 32
+  // rounds still available. A right answer, thrown away by a message about a budget that was not spent.
+  //
+  // Past three quarters of the rounds the message is true and worth sending; before that the judge is
+  // entitled to say what is missing (the branch below) but not to call time.
+  } else if (judgeVerdict && judgeExtensions >= MAX_JUDGE_EXTENSIONS && judgeRoundsGranted <= 0
+             && (!Number.isFinite(maxRounds) || round >= Math.floor(maxRounds * 0.75))) {
     // The budget is spent. NOW wrapping up is right — and say why, so a partial answer is labelled as
     // partial rather than presented as a conclusion.
     volatile += `\n\nYou are out of investigation budget. Write up what you have, and say plainly which parts are unconfirmed. What was still missing: ${judgeVerdict.reasoning}`;
@@ -892,11 +907,11 @@ const DEDUPE_MIN_CHARS = 500;
 /**
  * THE SAME ANSWER, ELEVEN TIMES, PAID FOR ELEVEN TIMES.
  *
- * Measured against SWE-bench: 36–75% of a session's tool calls are byte-identical repeats — the same
+ * Measured on real runs: 36–75% of a session's tool calls are byte-identical repeats — the same
  * `read_file` of the same span of an unchanged file. Each repeat returns the same bytes and each copy
  * sits in the window costing full price, so the window fills on redundancy, compression fires, and the
  * compressed stub invites the model to re-run the call, which produces another identical copy. That is
- * the loop that cost two SWE-bench instances a ZERO: rounds exhausted, no edit ever attempted.
+ * the loop that cost two real repositories a ZERO: rounds exhausted, no edit ever attempted.
  *
  * The model is NOT wrong to re-ask. Re-reading is what anything does when reality disagrees with what
  * it expected — in the measured case it was hunting a function that exists in a newer version of the
@@ -1222,6 +1237,9 @@ async function runDiagram(userInput: string): Promise<void> {
  */
 export async function runAgent(userInput: string): Promise<void> {
   resetTurnTimings();
+  resetLost();
+  resetSkepticRun();
+  originalGoal = userInput;
   // A new turn is not "the last prompt plus a tool result", so the growth arithmetic starts over —
   // otherwise the first call of turn two would price the whole new prompt as something a tool added.
   resetUsageBaseline();
@@ -1250,7 +1268,7 @@ const MUTATING_TOOLS = new Set(['write_file', 'str_replace', 'perform_edit']);
 /**
  * Barren calls of ONE tool before saying so. Eight, not twelve: a barren call is a much stronger
  * signal than a call, so the bar to speak is lower while the thing being counted is rarer. On the
- * measured SWE-bench sessions no instance reached eight barren calls of any tool; the 30-empty-glob
+ * measured runs no instance reached eight barren calls of any tool; the 30-empty-glob
  * session it exists for reaches it before the model has spent a third of its turn.
  */
 const BARREN_NUDGE_EVERY = 8;
@@ -1331,6 +1349,54 @@ const LEDGER_HEAD_LINES = 10;
 /** The END is where a failing command puts its summary — pytest, tsc, a stack trace, a shell exit. */
 const LEDGER_TAIL_LINES = 10;
 /** How many matched middle lines may be lifted out. */
+/** With no round cap there is no "rounds left" to offer the skeptic pass; give it a turn's worth. */
+const PASS_ROUNDS_WHEN_UNBOUNDED = 12;
+
+/**
+ * PROOF ALREADY EXISTS when a command SUCCEEDED AFTER the last thing that changed a file.
+ *
+ * Deliberately coarse. It is not trying to recognise a test suite — "did anything you ran come back
+ * clean since you last edited" is the question, and a model that edits then runs the failing case is
+ * exactly the one that should not be stopped to prove itself again. Reset per turn with everything else.
+ */
+let noEditReportAsked = false;
+/** The diff has been shown at the door this turn. Only ever goes true — see the review block. */
+let diffReviewShown = false;
+/** Enough to read a real fix; past this it is the re-send the review exists to avoid. */
+const DIFF_REVIEW_MAX_CHARS = 6000;
+/** The round the clap fired on, or -1. Read once after the loop — see the branch there. */
+let lostAtRound = -1;
+/** Why the clap fired, for the log and the report. */
+let lostWhy = '';
+/** The verification budget ran out — end the turn with an account. See . */
+let verificationExhausted = false;
+/** The agent's own last word on what it could not prove. Captured once, kept verbatim. */
+let verificationAccount = '';
+/** The task as the OPERATOR wrote it, captured once per run. See the relaunch branch. */
+let originalGoal = '';
+
+/**
+ * WHERE A REPORT GOES — and it is NEVER the working tree.
+ *
+ * ayin's own diagnostics are not the user's work. Written to `process.cwd()` they land in the
+ * repository being edited, where they show up in `git status`, get swept into `git add -A`, and appear
+ * in any diff cut from the tree — an agent quietly adding untracked files to someone's project and
+ * then handing back a change that contains them. Measured on a real run: a submitted diff of **32,762
+ * bytes over three files**, of which the actual fix was two lines and the rest was two report files
+ * this loop had written. The model could not have removed them; it never knew they existed.
+ *
+ * `~/.ayin-cli` is where every other durable thing already lives — artifacts, logs, history — so the
+ * report still outlives the process, which was the whole point of writing it down. Failing to write
+ * one is never a reason to skip the restart: the report is evidence, not the mechanism.
+ */
+function reportPath(name: string): string {
+  const dir = join(homedir(), '.ayin-cli', 'reports');
+  mkdirSync(dir, { recursive: true });
+  return join(dir, name);
+}
+let mutatedAtRound = -1;
+let succeededAtRound = -1;
+
 const LEDGER_SIGNAL_LINES = 20;
 /** Per line, so one enormous line cannot eat the whole budget. */
 const LEDGER_HEAD_CHARS = 160;
@@ -1371,7 +1437,7 @@ const LEDGER_DETAIL_BUDGET_CHARS = 14_000;
  *
  * `LEDGER_HEAD_CHARS` clipped every line of OUTPUT and nothing clipped the call's own parameters, so a
  * `bash` whose command is a multi-line Python heredoc put all of it in the ledger, once per call, on
- * every round. Measured on pylint-4551: 379 calls averaging 142 parameter chars = 69,105 chars of bare
+ * every round. Measured on a real run: 379 calls averaging 142 parameter chars = 69,105 chars of bare
  * call lines, ~19,200 tokens of a 40,000 window, re-sent 348 times. The detail budget above was doing
  * its job perfectly while the line it prefixes was unbounded.
  */
@@ -1533,6 +1599,31 @@ export function renderCallLedger(): string {
   });
 }
 
+/**
+ * WHAT IS ON DISK — not what THIS turn changed.
+ *
+ * A report describes the TREE, which survives a restart, and `qaChangedFiles()` is the per-turn QA
+ * ledger, which `runAgentTurn` deliberately clears. Reading the ledger to describe the tree made a
+ * restarted turn report "Nothing. The working tree is clean." over a correct one-line fix that was
+ * sitting in the file, and then take the no-edit branch of the mandate: "Make the edit the task asks
+ * for." Measured live — the agent was told to redo work it had already done, which is how a clean fix
+ * acquires a second, conflicting one.
+ *
+ * `status --porcelain` rather than `diff --name-only` because a file the agent CREATED is a change
+ * the report must name, and an untracked file is invisible to `diff`.
+ */
+function treeChangedFiles(): string[] {
+  try {
+    return execSync('git status --porcelain', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
+      .split('\n')
+      .map((l) => l.slice(3).trim())
+      .filter(Boolean);
+  } catch {
+    // Not a git repository. The ledger is then the only account of what was touched.
+    return qaChangedFiles().map((f) => f.path).filter(Boolean);
+  }
+}
+
 async function runAgentTurn(userInput: string): Promise<void> {
   // Per TURN, not per session: a second question legitimately searches again from scratch.
   const toolUseCounts = new Map<string, number>();
@@ -1554,6 +1645,33 @@ async function runAgentTurn(userInput: string): Promise<void> {
   resetCallLedger();
   resetFileViews();
   resetOutputEchoes();
+  beginLostTurn();
+  resetSkepticPass();
+  noEditReportAsked = false;
+  diffReviewShown = false;
+  verificationExhausted = false;
+  verificationAccount = '';
+  /**
+   * A turn that STARTS with a change already in the tree is a turn spent confirming, not finding.
+   *
+   * ASKED OF GIT, NOT OF THE QA LAYER. `qaChangedFiles()` is tool-tracked writes ∪ git-dirty, and its
+   * baseline is established by `qaBeginTurn()` — which runs LATER in this same function. Called from
+   * here it answered "nothing changed" on a tree that plainly had a modified file, so the budget never
+   * counted a single turn and could not fire. Measured: three restarts with `M lib/matplotlib/axes/
+   * _axes.py` in `git status` and the counter still at zero.
+   *
+   * `git diff --quiet` exits 1 when the tree is dirty. It depends on no harness state and cannot be
+   * read before it is ready.
+   */
+  let treeDirty = false;
+  try {
+    execSync('git diff --quiet', { cwd: process.cwd(), stdio: 'ignore' });
+  } catch {
+    treeDirty = true;   // non-zero exit — there are unstaged changes
+  }
+  beginVerifyTurn(treeDirty);
+  mutatedAtRound = -1;
+  succeededAtRound = -1;
   resetSubagents();
   /**
    * THE TURN'S SIGNAL. Every run is chained to it, so cancelling the turn cancels its tools — and
@@ -1630,7 +1748,12 @@ async function runAgentTurn(userInput: string): Promise<void> {
   const touchedAnythingThisTurn = (): boolean => toolsRunThisTurn > 0;
   /** How much the design had absorbed at the last nudge, so progress can clear the stall counter. */
   let lastImplemented = -1;
-  roundLoop: for (let round = 0; round < maxRounds; round++) {
+  // THE SKEPTIC PASS RUNS PAST THE ROUND CAP, on purpose and only while it is open.
+  //
+  // The cap bounds INVESTIGATION. The pass is verification of work already done, it is granted once per
+  // turn, and it expires on its own budget (`tickSkepticPass`), so this cannot become an escape hatch
+  // from the cap — it is a fixed, bounded extension that exists only after the model has said it is done.
+  roundLoop: for (let round = 0; round < maxRounds || inSkepticPass(); round++) {
     drainQueuedMessages();
 
     if (interrupted) {
@@ -1642,6 +1765,59 @@ async function runAgentTurn(userInput: string): Promise<void> {
 
     const messages = buildMessages(round, maxRounds);
     setAgentStatus(round === 0 ? 'Thinking...' : `Thinking... (round ${round + 1})`);
+    /**
+     * THE ROUND CAP IS ALSO AN EXIT, and it is the one that most needs proving.
+     *
+     * The gate was hung on `finish()` alone. Measured on two runs: both ran to round 90
+     * of 90 with finish_calls = 0 — they never claimed to be done, they were simply cut off. -13989 had
+     * made 12 edits and produced a patch by then. So the work that ships LEAST examined is exactly the
+     * work nobody ever declared finished, and hanging verification off the declaration missed all of it.
+     *
+     * One round before the cap, offer the pass on the same terms as finish. Its reserve lets the loop
+     * continue past `maxRounds` (see the loop condition) and it expires on its own budget.
+     */
+    if (Number.isFinite(maxRounds) && round === maxRounds - 1 && !inSkepticPass()) {
+      const changedAtCap = qaChangedFiles().filter((f) => f.path).map((f) => f.path);
+      const capInj = skepticInjection({
+        changedFiles: changedAtCap,
+        provenSinceEdit: succeededAtRound > mutatedAtRound,
+        isDiagnosisOnly: changedAtCap.length === 0,
+        roundsLeft: 0,
+      });
+      if (capInj) pushToWindow('user', capInj);
+    }
+
+    // Spends one round of the skeptic pass's budget; it closes itself when that runs out.
+    tickSkepticPass();
+    /**
+     * THE VERIFICATION BUDGET IS SPENT — end the turn and say what happened.
+     *
+     * An expiring pass used to change nothing: the reserve ran out and the loop carried on as though it
+     * had never opened. So a model that would not conclude simply verified forever — measured, with the
+     * correct one-line fix on disk since round 24 and four test commands cycling indefinitely after it.
+     *
+     * Three attempts, then this. Not a round cap: an agent that PROVES its change closes the pass and
+     * never reaches here, and an agent still finding new things never opens a third. What this bounds
+     * is failing to verify, which is the one activity with no end state of its own.
+     */
+    if (verifyBudgetSpent() && !verificationExhausted) {
+      /**
+       * ONE ROUND TO SAY WHAT IS MISSING, then the turn ends whatever comes back.
+       *
+       * The harness can derive the diff, the commands and the count. It cannot derive WHICH observation
+       * was missing or what prevented it — no network for a dependency, a suite that will not run in
+       * this container, an artefact nobody can see. That sentence is the entire value of the handoff to
+       * whoever picks this up, and only the agent can write it.
+       *
+       * `verificationExhausted` is set BEFORE the reply arrives, so the next pass through this branch
+       * cannot ask twice: the request is made once and the following reply is the last word.
+       */
+      verificationExhausted = true;
+      log('WARN', 'verify_budget_spent', { round: String(round), attempts: String(verifyAttempts()) });
+      pushToWindow('user', ACCOUNT_REQUEST);
+      continue roundLoop;
+    }
+    if (verificationExhausted && verificationAccount) break roundLoop;
     log('INFO', 'llm_call', { round: String(round), windowSize: String(conversationWindow.length) });
 
     let response: string;
@@ -1722,10 +1898,10 @@ async function runAgentTurn(userInput: string): Promise<void> {
     /**
      * THE DIAGNOSIS HANDOVER — cut the round at the moment of insight and start the work clean.
      *
-     * MEASURED over 100 finding-statements in three recorded SWE-bench runs: a stated diagnosis was
+     * MEASURED over 100 finding-statements in three recorded runs: a stated diagnosis was
      * followed by an edit SIX times. The rest of the time the model re-derived the same conclusion —
      * verbatim, 16 times in one session — each restatement followed by re-reading the file it had just
-     * read. It is not lost and it is not wrong: on django-10554 it named the cause correctly and then
+     * read. It is not lost and it is not wrong: on one run it named the cause correctly and then
      * spent 80 rounds and 62 shell calls never attempting an edit.
      *
      * The loop is FED BY ITS OWN HISTORY. A context thick with the model's narration is one where the
@@ -1802,6 +1978,26 @@ async function runAgentTurn(userInput: string): Promise<void> {
     // The RAW model text, before any parsing strips the tool-call markup — this is the thing you need
     // when the question is "why did it call that", and it is the first thing every other record drops.
     transcribeResponse(round, activeModelId(), response, parsed.toolCalls.length);
+    /**
+     * THE ACCOUNT IS WHATEVER COMES BACK NEXT — prose or not.
+     *
+     * The first version captured it only in the working-retry branch, which requires a reply with NO
+     * tool call. Asked for its last word, the model answered with a tool call instead, that branch
+     * never ran, and the report shipped saying "(the agent gave no account)" — the one section only
+     * the agent could fill, empty, on the first live firing.
+     *
+     * So it is taken here, before anything dispatches: one round after the request, whatever shape the
+     * reply has, and the turn ends. An empty capture still ends it — a model that answers a direct
+     * question with nothing has told us something, and asking twice is the loop this file exists to
+     * prevent.
+     */
+    if (verificationExhausted && !verificationAccount) {
+      verificationAccount = (parsed.text ?? response ?? '').trim() || '(the agent answered with no text)';
+      log('INFO', 'verify_account_captured', {
+        chars: String(verificationAccount.length), hadToolCall: String(parsed.toolCalls.length > 0),
+      });
+      break roundLoop;
+    }
 
     // For tool-call rounds: print pre-tool reasoning immediately (both modes).
     // Marked INTERIM: this is prose on the way to a tool call, and the TUI sets it a tab in and paler so
@@ -1842,7 +2038,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * it is free to ignore — enforcement then gave up after two unmarked replies BY DESIGN, withdrawing
        * the protection from exactly the models too weak to follow it, with a cap of ONE nudge per turn.
        *
-       * Measured over SWE-bench Verified: every empty-patch run, six of six, ended on a narrated
+       * Measured across a suite of real repository issues: every empty-patch run, six of six, ended on a narrated
        * intention. "Let me confirm the exact mechanism with a minimal reproduction before fixing."
        *
        * WHY NOT ARGUE WITH IT. The first attempt at this replied to the model — a two-branch message
@@ -1874,6 +2070,40 @@ async function runAgentTurn(userInput: string): Promise<void> {
         log('INFO', 'working_retry', {
           attempt: String(workingRetries), round: String(round), toolsRun: String(toolsRunThisTurn),
         });
+        /**
+         * A ROUND THAT MADE NO CALL IS STILL A ROUND THAT DID NOTHING — and the clap could not see it.
+         *
+         * `noteCall` runs where a tool runs, so a reply with no tool call never reached the detector:
+         * the window froze, the refusal streak stayed at zero, and an agent that had stopped ACTING
+         * entirely registered as idle rather than stuck. Measured: 300 model calls, 90 tool calls,
+         * **245 discarded rounds**, `toolsRun` pinned at 4 for the last 245 of them. Roughly nineteen
+         * full-context generations a minute, producing nothing, with no mechanism able to notice.
+         *
+         * NOT A CAP. The comment above is right that a ceiling on stubbornness is the old bug with a
+         * new number. This is the same rule already applied to every other round — did it change
+         * anything — and the same remedy: a sober restart. That remedy is also the only one that can
+         * break this particular loop, because the loop is DETERMINISM. The round is discarded, so the
+         * next prompt rebuilds from identical history and a temperature-zero model answers identically
+         * forever. Retrying cannot diverge; replacing the context can.
+         *
+         * Keyed on the reply text, so three identical refusals-to-act trip the streak rule and prose
+         * that merely cycles trips the window rule.
+         */
+        /**
+         * THE ACCOUNT ARRIVES HERE, as prose with no tool call — which is exactly what was asked for.
+         *
+         * This branch discards a reply that carries no tool call, on the grounds that narrating is not
+         * working. When the verification budget has just been spent that reasoning inverts: prose IS
+         * the deliverable, and discarding it would throw away the one sentence only the agent can
+         * write. Captured before the discard, and the loop ends on the next pass.
+         */
+        /**
+         * An idle round is always a CLAP, never a nudge. A nudge is a note appended to a tool result
+         * — and this branch has no tool result, because that is the whole defect. There is nothing to
+         * append it to, and the round is discarded, so a note would vanish with it.
+         */
+        const idleWhy = noteCall(round, 'reply', '', response.slice(0, 2000), true);
+        if (idleWhy) { lostAtRound = round; lostWhy = `${idleWhy.why} (no tool call made)`; break roundLoop; }
         continue;
       }
       // A final answer that only says WHAT TO LOOK FOR is not an answer. One nudge, then accepted
@@ -2021,9 +2251,26 @@ async function runAgentTurn(userInput: string): Promise<void> {
           continue;
         }
 
-        // Double-text exit — only after CTA is delivered or truly exhausted
+        /**
+         * IN HEADLESS, PROSE IS NEVER AN EXIT. `finish()` is the only way out.
+         *
+         * Interactive is different and stays different: there, a reply with no tool call IS the answer,
+         * the operator reads it, and the turn is over. Headless has no reader. A model that narrates
+         * "let me check X" and stops has not answered anybody — it has been switched off mid-sentence,
+         * and from outside that is indistinguishable from deciding it was done.
+         *
+         * This used to forgive ONE such reply and exit on the second (`reason: double_text`). Measured
+         * over a real benchmark: every empty-patch run in every mode ended exactly that way, six of six, each
+         * with an intention as its last words. The cap made it worse rather than better — with rounds
+         * bounded the model finished at round 89 of 90, and with the hook on `finish` the two matplotlib
+         * runs reached the cap having never called it at all.
+         *
+         * So the count is gone. Every text-only reply is answered with the same fact — nothing was
+         * performed, nobody is reading this, say `finish()` if you are done — and the loop goes round.
+         * The operator owns the stop button; the model owns `finish()`; nothing else ends a headless turn.
+         */
         consecutiveText++;
-        if (consecutiveText < 2) {
+        {
           // First text response after a tool call — print and continue
           if (parsed.text) { addMessage('assistant', parsed.text); lastPrintedText = parsed.text; }
 
@@ -2034,7 +2281,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
            * goes round again. But it went round SILENTLY — the model saw no new information, so it
            * produced the same kind of reply, hit the double-text exit, and the turn ended.
            *
-           * Measured over SWE-bench: every empty-patch run in every mode ended exactly this way, six of
+           * Measured on real runs: every empty-patch run in every mode ended exactly this way, six of
            * six, and the last thing each model said was an intention. "Let me confirm the exact
            * mechanism with a minimal reproduction before fixing." Then nothing. It had found the bug and
            * was switched off mid-sentence, which from outside is indistinguishable from deciding to stop.
@@ -2048,12 +2295,15 @@ async function runAgentTurn(userInput: string): Promise<void> {
            * plausibly a conclusion and the reminder stays neutral; with none, it is almost certainly a
            * narrated intention, and saying so is the whole point.
            */
-          pushToWindow('user', renderToolResult(mutations === 0
-            ? 'That reply made no tool call, and nothing has been changed this turn. Describing an action '
-              + 'does not perform it. Either make the call now, or state plainly that you are stopping, what '
-              + 'you believe the cause is, and why you are not fixing it.'
-            : `That reply made no tool call. ${mutations} edit(s) have landed this turn. If the work is `
-              + 'done, say so and name what changed. If you meant to do more, make the call now.'));
+          pushToWindow('user', renderToolResult(
+            'This session is headless — there is no one reading your replies, so prose reaches nobody and '
+            + 'changes nothing. '
+            + (mutations === 0
+              ? 'Nothing has been changed this turn either; describing an action does not perform it. '
+              : `${mutations} edit(s) have landed this turn. `)
+            + 'If the work is done, call finish() with a summary — that is the only way this turn ends. '
+            + 'If you are stopping without a fix, call finish() and give the cause. Otherwise make the next '
+            + 'tool call now.'));
           log('INFO', 'headless_text_continue', { round: String(round), mutations: String(mutations), run: String(consecutiveText) });
           continue;
         }
@@ -2065,6 +2315,8 @@ async function runAgentTurn(userInput: string): Promise<void> {
           log('INFO', 'agent_skip_duplicate_print', { round: String(round) });
         }
         lastPrintedText = '';
+        // Unreachable in headless by design — see above. Kept so the shape of the branch stays honest
+        // if the guard above is ever loosened again.
         log('INFO', 'agent_done', { round: String(round), reason: 'double_text', textRun: String(consecutiveText), ctaDelivered: String(ctaDelivered) });
       } else if (!(doQa || doPresenter)) {
         // Ordinary turn — neither feature is enabled/forced for it — print immediately, as always.
@@ -2239,7 +2491,8 @@ async function runAgentTurn(userInput: string): Promise<void> {
     if (prewarmed > 1) addMessage('system', `Running ${prewarmed} subagents in parallel.`);
 
     for (let tcIdx = 0; tcIdx < parsed.toolCalls.length; tcIdx++) {
-      const { name, params } = parsed.toolCalls[tcIdx];
+      // `let`, because a bare shell grep is rewritten into the grep tool below before dispatch.
+      let { name, params } = parsed.toolCalls[tcIdx];
       const firstInBatch = tcIdx === 0;
       const textPrefix = firstInBatch ? parsed.text : '';
 
@@ -2259,6 +2512,26 @@ async function runAgentTurn(userInput: string): Promise<void> {
       }
       seenInBatch.add(batchKey);
 
+      /**
+       * A SHELL GREP BECOMES THE GREP TOOL — deterministically, before anything runs.
+       *
+       * Measured: 863 bash calls to 37 read_file over one 900-round instance. A shell grep returns a
+       * blob, so the corpus cannot attach what it knows about the files it names, file views cannot
+       * dedupe it by region, and the ledger records a command instead of a search. The tool returns the
+       * same answer addressed by path. Only a BARE grep is rewritten (see `grepRewrite`); a pipeline is
+       * left alone, because half a pipeline is worse than none.
+       *
+       * `grep` is deliberately absent from the headless tool set — 635 tokens of schema, three times
+       * `bash`. The agent keeps asking in shell and gets the structured answer regardless.
+       */
+      if (name === 'bash' && typeof params.command === 'string') {
+        const rw = grepRewrite(params.command);
+        if (rw && getTool('grep')) {
+          log('INFO', 'bash_rewritten_to_grep', { from: params.command.slice(0, 120), pattern: rw.params.pattern });
+          name = 'grep';
+          params = rw.params;
+        }
+      }
       const tool = getTool(name);
       // A slash-only tool EXISTS but is not the agent's to call. Saying "unknown tool" would be a lie
       // the model would then try to route around; saying who can run it is actionable.
@@ -2337,6 +2610,9 @@ async function runAgentTurn(userInput: string): Promise<void> {
         pushToWindow('assistant', textPrefix ? `${textPrefix}\n[${name}: ${guard.label ?? 'blocked'}]` : `[${name}: ${guard.label ?? 'blocked'}]`);
         noteRanCall(name, JSON.stringify(params).slice(0, 80), false, guard.label ?? 'blocked');
         pushToWindow('user', renderToolResult(guard.note ?? 'This call was blocked.'));
+        const blockWhy = noteCall(round, name, JSON.stringify(params), guard.label ?? 'blocked', true);
+        if (blockWhy?.kind === 'clap') { lostAtRound = round; lostWhy = blockWhy.why; break roundLoop; }
+        if (blockWhy) pushToWindow('user', renderToolResult(lostNudge(blockWhy.why)));
         continue;
       }
 
@@ -2412,7 +2688,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
          * the operator said no and the next move is theirs. Headless has no operator, so that return
          * abandons the turn: no agent_done, no finish, and whatever was in flight is lost.
          *
-         * Measured: a 130-round, 64-minute SWE-bench turn ended at the moment the model tried
+         * Measured: a 130-round, 64-minute a real benchmark turn ended at the moment the model tried
          * `git checkout -- compiler.py` to revert its own edits. The refusal was right; ending the turn
          * on it was not. The patch survived only because the revert was blocked.
          *
@@ -2590,7 +2866,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * NUDGE ON BARREN WORK, NOT ON WORK.
        *
        * This used to fire every 12 calls of a tool, counted before the call, and it told the model its
-       * tool was unlikely to help and it should say what is missing. Measured against SWE-bench: it
+       * tool was unlikely to help and it should say what is missing. Measured on real runs: it
        * fired on 13 of 13 instances, almost all at `read_file` x12 — twelve file reads while fixing a
        * bug in a repository the model has never seen is not a loop, it is the job. ayin was
        * interrupting ordinary work to talk the model out of its primary tool.
@@ -2719,8 +2995,116 @@ async function runAgentTurn(userInput: string): Promise<void> {
        */
       if (name === 'finish' && !result.startsWith('Error:')) {
         const changed = qaChangedFiles();
-        const evidence = changed.length
-          ? `\n\nFiles changed (${changed.length}):\n${changed.map((p) => `  - ${p}`).join('\n')}`
+        /**
+         * THE EXIT IS GATED ON A PROOF ATTEMPT — once per turn. See `skeptic-pass.ts`.
+         *
+         * The judge already asks "are you done?" every few calls and it does not work: that question
+         * invites yes. This asks for an observation, which is an action and either happens or does not.
+         * When it opens, `finish` is NOT honoured — the loop continues with the injection in the window
+         * and full tools, so the model can build, render, run, and `look` at the result.
+         */
+        /**
+         * A TURN THAT CHANGED NOTHING STILL OWES AN ACCOUNT.
+         *
+         * Zero edits is a legitimate outcome — the operator's bar is "find the cause reliably", and an
+         * agent that reports a cause and declines to guess has done the job. What is NOT acceptable is
+         * leaving without saying anything, which is what happened six of six times: the last words were
+         * an intention and the patch was empty.
+         *
+         * So the empty-handed exit is allowed but not silent. If `finish()` arrives with no files
+         * changed and no `cause`, it is held ONCE for the account, then honoured whatever comes back —
+         * this asks a question, it does not gate the door. The report is written beside the run so it
+         * survives the container.
+         */
+        if (!noEditReportAsked && changed.length === 0 && !/\S/.test(String(params.cause ?? ''))) {
+          noEditReportAsked = true;
+          log('INFO', 'no_edit_report_requested', { round: String(round) });
+          pushToWindow('user', renderToolResult(
+            'Nothing was changed this turn, so before you go: leave the account. What did you actually '
+            + 'find — the file, the function, the mechanism? What would the fix be? And why are you not '
+            + 'making it: is it unclear, unverifiable here, or out of scope? Call finish() again with that '
+            + 'as the cause. This is the last thing asked of you; whatever you say next is accepted.'));
+          continue roundLoop;
+        }
+
+        if (!inSkepticPass()) {
+          const inj = skepticInjection({
+            changedFiles: changed.filter((f) => f.path).map((f) => f.path),
+            provenSinceEdit: succeededAtRound > mutatedAtRound,
+            isDiagnosisOnly: changed.length === 0,
+            roundsLeft: Number.isFinite(maxRounds) ? maxRounds - round : PASS_ROUNDS_WHEN_UNBOUNDED,
+          });
+          if (inj) {
+            pushToWindow('user', inj);
+            pushMessage('assistant', '[tool: finish(...) — held for verification]');
+            continue roundLoop;
+          }
+        } else {
+          closeSkepticPass();
+        }
+        /**
+         * THE DIFF, ONCE, AT THE DOOR — the last thing before the turn ends.
+         *
+         * A CONFIRMATION, NOT A LICENCE TO ACT. The first finish does not finish: it prints the
+         * accumulated diff with a fixed checklist and increments a stage counter. The model sees the
+         * complete set of changes it is about to hand over exactly once, at the only moment it is
+         * certain to be paying attention — the moment it is trying to leave.
+         *
+         * WHY THIS AND NOT MORE SKEPTIC. The skeptic pass grants a reserve of ROUNDS and invites the
+         * model to go make an observation. That is right when an edit has just landed and the question
+         * is whether it works. It is wrong here, because a licence to act is what the failure mode
+         * abuses: one run answered it by running one verification command 28 times. This is
+         * not a licence. It is one message, it recurses never — `diffReviewShown` only ever goes true —
+         * and the next `finish()` is honoured whatever the model says.
+         *
+         * Only when something changed. An empty-handed exit has its own account above, and showing an
+         * empty diff would be a round spent proving there is nothing to look at.
+         */
+        if (!diffReviewShown && changed.length > 0) {
+          diffReviewShown = true;
+          let full = '';
+          try { full = execSync('git diff', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 }); } catch { /* not a repo */ }
+          const clipped = full.length > DIFF_REVIEW_MAX_CHARS
+            ? `${full.slice(0, DIFF_REVIEW_MAX_CHARS)}\n… [diff clipped; ${full.length - DIFF_REVIEW_MAX_CHARS} more characters]`
+            : full;
+          log('INFO', 'diff_review_shown', { round: String(round), files: String(changed.length), chars: String(full.length) });
+          pushToWindow('user', renderToolResult(
+            `Before you finish — everything you are about to hand over:\n\n<diff>\n${clipped || '(git reports no diff)'}\n</diff>\n\n`
+            + `Check it, then call finish() again to confirm:\n`
+            + `1. Every hunk above is one you meant to make. Anything you do not recognise, revert.\n`
+            + `2. No TEST file is modified. If one is, revert it.\n`
+            + `3. No scratch or reproduction script is left in the tree.\n\n`
+            + `You are asked this once. The next finish() ends the turn whatever you say — do not re-run `
+            + `tests, and do not verify anything again.`));
+          pushMessage('assistant', '[tool: finish(...) — diff shown for confirmation]');
+          continue roundLoop;
+        }
+        /**
+         * `.path`, BECAUSE THESE ARE RECORDS AND NOT STRINGS — and the bug was not cosmetic.
+         *
+         * `qaChangedFiles()` returns `ChangedFile[]`; interpolating one yields "[object Object]".
+         * Measured on a real run: the model was handed "Files changed (1): - [object Object]" and
+         * signed off saying "the working fix is the one currently on disk", while the produced patch was
+         * ZERO BYTES. It had reverted its own edit, and the evidence line — the one thing here whose job
+         * is to tell it what actually landed — confirmed a change it could not name.
+         *
+         * So the count alone is not evidence either: a file can be touched and end up byte-identical.
+         * Say which files, and say when nothing survived in them.
+         */
+        // Written beside the run, because the container is thrown away and the transcript is not indexed.
+        if (changed.length === 0) {
+          try {
+            const body = `# ayin — no edits made\n\nround ${round}\n\n## What the model reported\n\n${result}\n\n`
+              + `## Cause given\n\n${String(params.cause ?? '(none)')}\n`;
+            writeFileSync(reportPath('ayin-no-edit-report.md'), body);
+            log('INFO', 'no_edit_report_written', { round: String(round) });
+          } catch (err) {
+            log('WARN', 'no_edit_report_failed', { error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        const named = changed.filter((f) => f.path);
+        const evidence = named.length
+          ? `\n\nFiles changed (${named.length}):\n${named.map((f) => `  - ${f.path}${f.exists ? '' : ' (deleted)'}`).join('\n')}`
           : '\n\nNo files were changed.';
         const composed = `${result}${evidence}`;
         addMessage('assistant', composed);
@@ -2790,12 +3174,58 @@ async function runAgentTurn(userInput: string): Promise<void> {
        */
       // A call that returned these exact bytes already has nothing left to say — see `refuseIfEcho`.
       // Checked BEFORE the file view, so a refusal is never mistaken for new file contents.
-      const echo = refuseIfEcho(name, result);
+      // See `mutatedAtRound` — the skeptic gate asks whether anything has come back clean since the edit.
+      if (MUTATING_TOOLS.has(name)) mutatedAtRound = round;
+      /**
+       * THE PASS OPENS WHEN A CHANGE LANDS — not only when the model says it is done.
+       *
+       * Hanging verification off `finish()` alone meant it never ran: measured, one run edited
+       * at round 107 and never called finish at all, and the two matplotlib runs before it hit their
+       * round cap with finish_calls = 0. An edit is the moment a claim about the world exists and the
+       * moment it is cheapest to check — 800 rounds later the model is defending a conclusion instead
+       * of testing one.
+       */
+      if (MUTATING_TOOLS.has(name) && !result.startsWith('Error:') && !inSkepticPass()) {
+        const changedNow = qaChangedFiles().filter((f) => f.path).map((f) => f.path);
+        const editInj = skepticInjection({
+          at: 'edit',
+          changedFiles: changedNow,
+          provenSinceEdit: false,
+          isDiagnosisOnly: false,
+          roundsLeft: Number.isFinite(maxRounds) ? maxRounds - round : PASS_ROUNDS_WHEN_UNBOUNDED,
+        });
+        if (editInj) pushToWindow('user', editInj);
+      }
+      else if (!result.startsWith('Error:') && !/^(Command exited|Error)/.test(result)) succeededAtRound = round;
+
+      // A `git diff` repeating after an edit is confirmation, not an echo — see `refuseIfEcho`.
+      const stateCheck = name === 'bash' && typeof params.command === 'string' && isStateQuery(params.command);
+      const echo = refuseIfEcho(name, result, stateCheck, mutations);
+      /**
+       * EVERY EXECUTED CALL IS RECORDED HERE, refused or not — that is the change that matters.
+       *
+       * The first version only counted refusals, and so was blind to the loop that actually burns the
+       * GPU: calls the guard correctly ACCEPTS, each differing from the last by a few bytes, cycling
+       * forever. `noteCall` sees the call AND what it returned, so a repeat is visible whether or not
+       * anything refused it. See `lost.ts` for the measurement.
+       */
+      const lostWhyNow = noteCall(round, name, JSON.stringify(params), echo ?? result, echo !== null);
+      if (lostWhyNow?.kind === 'clap') {
+        lostAtRound = round;
+        lostWhy = lostWhyNow.why;
+        pushToWindow('user', renderToolResult(echo ?? clipForWindow(result)));
+        break roundLoop;
+      }
+      /**
+       * A NUDGE KEEPS THE TURN. The result still goes to the window below; the note rides after it,
+       * so the model sees what the call returned AND that it has now seen it several times.
+       */
+      const nudgeNote = lostWhyNow ? lostNudge(lostWhyNow.why) : '';
       const shaped = echo !== null
         ? { body: echo, suppressRepeatNote: true }
         : shapeFileResult(name, params as Record<string, unknown>, result, clipForWindow(result), conversationWindow);
       const repeatNote = shaped.suppressRepeatNote ? '' : (guard.note ?? '');
-      pushToWindow('user', renderToolResult(resultHead + shaped.body + repeatNote + editMissNote));
+      pushToWindow('user', renderToolResult(resultHead + shaped.body + repeatNote + editMissNote + nudgeNote));
       pushMessage('assistant', `[tool: ${name}(${paramPreview})]`);
 
       // CTA just delivered — tell the model it's done. This prevents the
@@ -2895,6 +3325,85 @@ async function runAgentTurn(userInput: string): Promise<void> {
         }
       }
     } catch {}
+  }
+
+  /**
+   * THE CLAP LANDED — the loop was broken because the agent had stopped doing anything.
+   *
+   * Interactive is an EXIT WITH A REPLY: there is an operator here, and handing them what it did and
+   * what it could not prove is worth more than a restart they did not ask for.
+   *
+   * Headless is a RESTART IN PLACE. `runAgentTurn` already clears the window, the ledger, the file
+   * views, the echo table, the skeptic state and the subagents at its top — that IS sober. Same
+   * process, so nothing depends on how ayin was launched, which matters inside a benchmark container
+   * where the parent command is not ours to re-issue. The new prompt is the original plus the report:
+   * the next agent starts with something rather than from nothing, which was the whole point.
+   *
+   * THE CHAIN IS BOUNDED — see `RESTART_MAX`. This comment used to claim `clapsUsed()` capped it at
+   * one; `clapsUsed` was never imported, and `claps` is zeroed by `beginLostTurn` at the top of the
+   * relaunched turn, so nothing bounded anything. Measured consequence: a chain of twelve restarts, four
+   * hours of wall clock, not one edit. A restart is a whole attempt, so an unbounded chain is an
+   * unbounded run wearing the costume of a recovery.
+   */
+  /**
+   * THE VERIFICATION BUDGET RAN OUT. Report and stop — no restart.
+   *
+   * Deliberately NOT a clap. A clap says "you are going in circles, here is a clean context, try
+   * again"; this says "you changed something, you could not establish whether it works, and a fourth
+   * attempt is not going to differ from the third". The work is kept — the patch is collected from the
+   * tree regardless — and what is handed back is the state of the evidence rather than a verdict.
+   */
+  if (verificationExhausted) {
+    const changed = treeChangedFiles();
+    let diff = '';
+    try { diff = execSync('git diff', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 }); } catch { /* not a repo */ }
+    const report = unverifiedReport(originalGoal || userInput, changed, diff, verifyAttempts(), verificationAccount);
+    try { writeFileSync(reportPath('ayin-unverified-report.md'), report); } catch { /* the report is evidence, not the mechanism */ }
+    log('WARN', 'verify_exhausted_exit', { attempts: String(verifyAttempts()), changed: String(changed.length) });
+    addMessage('assistant', report);
+    if (HEADLESS) pushToWindow('assistant', report);
+    return;
+  }
+
+  if (lostAtRound >= 0) {
+    const changed = treeChangedFiles();
+    let diff = '';
+    try { diff = execSync('git diff', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 }); } catch { /* not a repo, or nothing to diff */ }
+    /**
+     * THE ORIGINAL TASK, NEVER THE COMPOSED ONE — or the report eats itself.
+     *
+     * A restart runs `runAgentTurn(originalTask + report)`, so on the NEXT clap `userInput` already
+     * contains the previous report. Writing that under "## The task" nests each report inside the one
+     * before it and the prompt doubles every restart. Measured: after eight restarts the report file
+     * was 493,324 bytes against a 40,000-token window — the relaunched agent was handed a recursive
+     * nesting doll, the window trimmed it to rubble, and it fell back to the only thing still legible.
+     * Every "the mandate does not convince the model" reading of that run was wrong: the mandate was
+     * never intact by the time the model saw it.
+     */
+    const report = lostReport(originalGoal || userInput, changed, diff, lostWhy);
+    if (!HEADLESS) {
+      addMessage('assistant', report);
+      log('INFO', 'agent_lost_exit', { round: String(lostAtRound), changed: String(changed.length) });
+      return;
+    }
+    try { writeFileSync(reportPath('ayin-lost-report.md'), report); } catch { /* a report that cannot be written is not a reason to skip the restart */ }
+    /**
+     * OUT OF RESTARTS. Report and stop — do not relaunch into a thirteenth identical attempt.
+     *
+     * Nothing is thrown away: the report is on disk and the tree is whatever the run left in it, which
+     * is where a patch is collected from. What ends is the treadmill.
+     */
+    if (restartExhausted()) {
+      log('WARN', 'agent_lost_exhausted', { round: String(lostAtRound), depth: String(restartDepth()), changed: String(changed.length) });
+      addMessage('assistant', report);
+      if (HEADLESS) pushToWindow('assistant', report);
+      return;
+    }
+    log('WARN', 'agent_lost_relaunch', { round: String(lostAtRound), changed: String(changed.length), depth: String(restartDepth()) });
+    addMessage('system', `lost at round ${lostAtRound} (${lostWhy}) — restart ${restartDepth()} with a report and a narrowed mandate`);
+    lostAtRound = -1;
+    await runAgentTurn(`${userInput}\n\n---\n\n${report}`);
+    return;
   }
 
   log('WARN', 'max_rounds_reached', { maxRounds: String(maxRounds), ctaDelivered: String(ctaDelivered) });

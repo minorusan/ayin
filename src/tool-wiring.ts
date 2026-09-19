@@ -17,6 +17,7 @@ import { spawnShell, killTree } from './shell.js';
 import { getConfigString } from './prompts.js';
 import { prompts, packagePath } from './prompts-service.js';
 import { llmBaseUrl } from './connection.js';
+import { languageFor } from './entangle/index.js';
 import { initToolRuntime, toolRuntimeReady, type ToolProcess } from './tools/runtime.js';
 import { initProviderRuntime, providerRuntimeReady } from './llm/providers/runtime.js';
 import { takePendingImages } from './image.js';
@@ -82,6 +83,19 @@ export function ensureToolRuntime(): void {
       //
       // A cancelled dialog and an unanswerable one are the same answer to the caller: no.
       return picked < 0 || picked >= choices.length ? null : choices[picked].id;
+    },
+    /**
+     * entangle's per-language parsers, handed over as data.
+     *
+     * `tools/skeleton.ts` answers a file too big for the window as structure instead of bytes, which
+     * needs a parser per repo type — and `tools/` imports nothing outside `tools/`. So the parser
+     * arrives the way the model and the shell do. `languageFor` is a pure lookup by extension, so
+     * unlike `llm` there is nothing here to import lazily.
+     */
+    structure: {
+      handles: (path) => languageFor(path) !== null,
+      of: (path, source) => languageFor(path)?.surfaceOf(source) ?? [],
+      facts: (path, bodyLines) => languageFor(path)?.bodyFactsOf?.(bodyLines) ?? null,
     },
     shell: {
       spawn: (command, opts) => spawnShell(command, opts) as unknown as ToolProcess,

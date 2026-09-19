@@ -269,7 +269,7 @@ export function readCount(): number {
  * instinct and the read is worth serving — but serving it as the FULL window re-sends bytes the model
  * already has in order to reveal the handful of lines that moved, and in a 40k window that re-send is
  * what tips the prompt over the compression threshold. Measured: the same result re-fetched up to
- * eleven times, the window filling on the repeats, and two SWE-bench instances losing every round to
+ * eleven times, the window filling on the repeats, and two real repositories losing every round to
  * the spiral without ever attempting an edit.
  *
  * So the edit tools leave the diff they ALREADY computed here, and the next read spends a few lines

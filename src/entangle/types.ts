@@ -70,6 +70,16 @@ export interface DeclaredMember {
   kind: MemberKind;
   /** The declaration as written, so a signature can be compared and not merely a name. */
   sig?: string;
+  /**
+   * WHERE IT LIVES — 1-based, inclusive, `line` on the declaration and `endLine` on its last body line.
+   *
+   * The parsers always knew this and threw it away, because entangle only ever asked "what is declared".
+   * A skeleton of a file too big to read asks a second question — "where do I look" — and without an
+   * answer the model goes back to guessing byte offsets, which is the loop this exists to end.
+   * Optional: a language that cannot say honestly must not guess, and the renderer omits the range.
+   */
+  line?: number;
+  endLine?: number;
   /** Closure applies to the PUBLIC surface only — a private helper is the implementation freedom the
    *  operator explicitly wants. Over-constrain this and the model hides structure in tuples,
    *  dictionaries-as-objects and 200-line methods, which is worse and invisible to a type diff. */
@@ -80,6 +90,24 @@ export interface DeclaredType {
   name: string;
   kind: TypeKind;
   members: DeclaredMember[];
+  /** The line the type is declared on, 1-based. See `DeclaredMember.line`. */
+  line?: number;
+}
+
+/**
+ * What a method's body does, without claiming to know what it MEANS.
+ *
+ * Read the two lists together or not at all. `assigns` is syntactic — `self.x = …`, `self.x += …`,
+ * `del self.x` — and it is silent about mutation that happens through a call, which is most of it:
+ * `self.axes.viewLim.intervalx = v` inside a helper assigns nothing this scan can see. That is why the
+ * field is not called `modifies`. A model told "modifies: nothing" stops looking; a model told
+ * "assigns: nothing, calls: Axes.viewLim" follows the call, which is where the answer is.
+ */
+export interface BodyFacts {
+  /** Fields this body writes to directly, by name, without `self.`/`this.`. */
+  assigns: string[];
+  /** Calls it makes that are not defined in this file — the edges out. */
+  calls: string[];
 }
 
 /**
@@ -110,6 +138,16 @@ export interface SurfaceLanguage {
   domainOf(path: string): Domain | null;
   /** Types and members declared in this source. Declarations only — bodies are not parsed. */
   surfaceOf(source: string): DeclaredType[];
+  /**
+   * What one member's body touches. OPTIONAL, and a language that has not implemented it says nothing
+   * rather than something wrong — the skeleton then prints signatures and line ranges alone, which is
+   * already most of the value.
+   *
+   * It takes the body's own lines rather than the whole file because the caller has already decided
+   * which member this is, from `line`/`endLine`; handing over the file would invite a second, divergent
+   * idea of where a method begins.
+   */
+  bodyFactsOf?(bodyLines: string[]): BodyFacts;
   /** Imported/referenced units, for checking against `Domain.allows`. */
   referencesOf(source: string): string[];
   /**

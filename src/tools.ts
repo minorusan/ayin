@@ -215,7 +215,7 @@ export function getAllTools(): Tool[] {
  * Tool schemas are not free and they are not counted: measured, the 28 callable tools are 27,534 chars
  * of JSON = ~7,648 tokens, 19% of a 40,000 window, spent before the task is read. `prompt_coverage`
  * never saw them, so every context figure ayin logged was 19 points optimistic — round 349 of
- * pylint-4551 reported 108% while actually sitting near 127%.
+ * one run reported 108% while actually sitting near 127%.
  *
  * What stays is what a turn that reads, edits and verifies actually reaches for, plus the two the
  * operator has called load-bearing: `subagent` (how ayin does anything at depth) and `corpus_search`
@@ -229,6 +229,16 @@ export function getAllTools(): Tool[] {
 const WORK_TOOLS = new Set([
   'read_file', 'read_files', 'write_file', 'perform_edit', 'str_replace',
   'bash', 'explore', 'corpus_search', 'subagent', 'finish',
+  // EYES. Without this the skeptic pass can render a figure and still not look at it, which is the
+  // exact gap it exists to close — rendered-output bugs got an edit 1/6 against 12/13 elsewhere.
+  'look',
+  /**
+   * NOT OPTIONAL HERE. `read_file` on a file past the window cap returns STRUCTURE and tells the
+   * model to fetch bodies with this — so withholding it leaves a turn holding a map, instructed to
+   * use a tool that is not in its catalogue, with nothing to do but go back to guessing offsets.
+   * Two parameters; the schema is among the smallest in the set.
+   */
+  'expand_method',
 ]);
 
 let leanTools = false;

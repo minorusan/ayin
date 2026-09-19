@@ -88,6 +88,51 @@ export function chunksForFile(repoPath: string, file: string, range?: LineRange)
  * fresher exists, because "this was true on dev last week" is worth more than silence, provided it
  * says so.
  */
+/**
+ * WHAT INDULGE ALREADY ANSWERED ABOUT THE FILES A SEARCH FOUND.
+ *
+ * `corpusBlockFor` hangs off `read_file`, and measured over a full night the agent barely reads files:
+ * One run made 900 rounds with 863 `bash` calls against 37 `read_file`. The knowledge we spent a
+ * day building was invisible for 95% of everything it looked at, and it grepped past its own answers
+ * for six hours.
+ *
+ * Takes the RANKED FILE LIST rather than the raw output, because the tool already knows which files it
+ * matched and in what order — re-parsing its own text was how the first attempt missed single-file
+ * searches entirely (`grep(pattern, path=x.py)` prints bare `43: def …` lines with no path prefix,
+ * since there is no ambiguity to resolve).
+ *
+ * DELIBERATELY THINNER THAN A READ. A read is "show me this file" and earns several answers; a search
+ * scans many, and full blocks for five files would put kilobytes behind every query.
+ */
+const SEARCH_NOTE_FILES = 5;
+
+export function corpusNotesForFiles(repoPath: string, files: string[]): string {
+  if (!isCorpusInjection() || files.length === 0) return '';
+  const out: string[] = [];
+  for (const file of files.slice(0, SEARCH_NOTE_FILES)) {
+    const all = chunksForFile(repoPath, file);
+    if (all.length === 0) continue;
+    const usable = all
+      .map((c) => ({ chunk: c, state: assessChunk(repoPath, c) }))
+      .filter((a) => a.state.state !== 'missing');
+    if (usable.length === 0) continue;
+    const { chunk } = usable[0];
+    const answer = chunk.answer.length > MAX_ANSWER_CHARS
+      ? `${chunk.answer.slice(0, MAX_ANSWER_CHARS)}…`
+      : chunk.answer;
+    out.push('');
+    out.push(`${file} — ${usable.length} answered question(s) already`);
+    out.push(`Q. ${chunk.question}`);
+    out.push(answer);
+  }
+  if (out.length === 0) return '';
+  log('INFO', 'corpus_notes_on_search', { files: String(out.length / 4) });
+  return ['', '--- indulge already answered questions about these files ---']
+    .concat(out)
+    .concat(['', 'Ask corpus_search for more. Notes from an earlier pass, not the code.'])
+    .join('\n');
+}
+
 export function corpusBlockFor(repoPath: string, file: string, range?: LineRange): string | null {
   if (!isCorpusInjection()) return null;
   const all = chunksForFile(repoPath, file, range);
@@ -312,12 +357,64 @@ export function clearPendingCorpus(): void { pending = null; }
  * Short and anaphoric prompts are skipped outright: "continue" and "yes" carry no query, and a
  * retrieval keyed on them is noise dressed as evidence.
  */
+/**
+ * ASK THE MODEL WHAT TO SEARCH FOR, THEN SEARCH. Measured over 20 real runs against the
+ * files the real fix touches:
+ *
+ *                     raw issue text     model-written query
+ *     recall@2            2/20  10%           7/20  35%
+ *     recall@5            2/20  10%           9/20  45%
+ *     recall@10           4/20  20%          11/20  55%
+ *     recall@20           6/20  30%          11/20  55%
+ *
+ * Both curves flatten at K=20, so this was never a ranking-depth problem — the right file was not in
+ * the candidate set at all. A corpus speaks in identifiers; a bug report speaks in behaviour ("inverting
+ * a log axis doesn't work", "nominal scale should draw like categorical"), and the embedding of that
+ * prose lands nowhere near the implementation. The raw-text hits were exactly the issues that happened
+ * to quote an identifier already — `url_for`, `content-length`, a literal `\sphinxcode{` — and nothing
+ * else. One short generation turns the question into the language the corpus is written in.
+ *
+ * One run is the case worth remembering: four failed runs, 115 rounds of grepping for
+ * `sql/compiler.py` — which was IN the corpus, unreachable from the issue text, and comes back at K=5
+ * once the model names `queryset union order_by SQLCompiler`.
+ *
+ * Fail-soft by design: if the call errors or returns nothing usable, fall back to the prompt itself,
+ * which is exactly the old behaviour and still worth 10%.
+ */
+const QUERY_PROMPT = 'A bug report or task description is below. Name ONLY the functions, methods, '
+  + 'classes and module paths most likely involved. Output a single space-separated list of bare '
+  + 'identifiers. No prose, no explanation, no markdown.\n\n---\n';
+
+/** Enough to carry the repro snippet, which is where the identifiers usually are. */
+const QUERY_SOURCE_CHARS = 1800;
+/** K=10 is where recall plateaus; past it the curve is flat and the tokens are wasted. */
+const PROMPT_INJECT_LIMIT = 8;
+
+async function identifierQuery(prompt: string): Promise<string> {
+  try {
+    // IMPORTED LAZILY, ON PURPOSE. A top-level import of '../llm/manager.js' pulls its module
+    // initialisation into every consumer of inject.ts, and `budget.ts` sizes its char budget from that
+    // module's `activeContextTokens()` — check:indulge went from green to three failures about window
+    // budgeting the moment the import was added, with no behavioural change to retrieval at all.
+    const { llmCall } = await import('../llm/manager.js');
+    const said = (await llmCall(QUERY_PROMPT + prompt.slice(0, QUERY_SOURCE_CHARS))).trim();
+    // A model that answers in prose has not given us identifiers; the raw prompt is no worse.
+    const flat = said.replace(/\s+/g, ' ').slice(0, 300);
+    if (!flat || flat.split(' ').length > 40) return prompt;
+    log('INFO', 'corpus_query_rewritten', { query: flat.slice(0, 120) });
+    return flat;
+  } catch (err) {
+    log('WARN', 'corpus_query_rewrite_failed', { error: err instanceof Error ? err.message : String(err) });
+    return prompt;
+  }
+}
+
 export async function corpusForPrompt(repoPath: string, prompt: string): Promise<string | null> {
   const words = prompt.trim().split(/\s+/).filter(Boolean);
   if (words.length < 3) return null;
   const store = openStore(repoPath);
   if (!store.exists() || store.totals().chunks === 0) return null;
-  const found = await corpusSearch(repoPath, prompt, 2);
+  const found = await corpusSearch(repoPath, await identifierQuery(prompt), PROMPT_INJECT_LIMIT);
   if (/^No corpus|^Nothing in the corpus|^Query too short/.test(found)) return null;
   return found;
 }

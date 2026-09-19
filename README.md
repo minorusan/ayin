@@ -42,6 +42,10 @@ on an OpenAI key and you need no GPU at all.
 - **Web search with no key and no container.** `web_search` queries DuckDuckGo in-process and reads
   the top pages itself — nothing to install, nothing to sign up for. Point it at your own
   [SearXNG](https://github.com/searxng/searxng) if you have one and it will prefer that.
+- **It notices when it is stuck.** A loop with no round cap can run forever, and the failure is not
+  dramatic — it is the same command, with slightly different output, until someone notices. ayin
+  watches the last twenty calls for four shapes of repetition and acts on them, and the recovery it
+  reaches for is bounded. See [*When the loop gets lost*](#when-the-loop-gets-lost).
 - **Headless or interactive.** A blessed TUI for live work; `-p "task"` for one-shot,
   scriptable runs (CI, batch jobs, parent agents).
 
@@ -257,6 +261,8 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 | `str_replace` | Surgical single-match edit — **preferred for edits** | — |
 | `bash` | Run a shell command, bounded at 120s and 256 KB | — |
 | `explore` | Deterministic code localization — ranked `file:line` spans quoted verbatim, plus the couplings that are not text (Unity GUIDs, string keys). No model inside; sub-second | — |
+| `expand_method` | One method body by name, with its exact line range and what it touches — the other half of the structural read below | — |
+| `look` | Look at an image — a rendered plot, a screenshot, a PDF page. It arrives on the next turn and the model judges it itself | — |
 | `status` | Check on tools that went background | — |
 | `web_search` | DuckDuckGo in-process, reads the top pages, reports rate-limiting as rate-limiting | — |
 | `naama` | Author a design as facts, one line each; check it is implementable; render it | `render` needs plantuml |
@@ -273,12 +279,12 @@ ayin's loop calls these tools (each is a unique name; the model invokes them by 
 | `sentry_auth` | Same, for Sentry — token plus organization slug | — |
 | `slack_auth` | Same, for Slack — a bot token is refused, before it is even checked against the API | — |
 
-**Fifteen of the twenty-two need nothing but Node and a POSIX shell** — including `naama` and
+**Seventeen of the twenty-four need nothing but Node and a POSIX shell** — including `naama` and
 `entangle`, which is the pair worth reading about below. Three want `plantuml`; the Jira, Sentry and
 Slack tools are inert until you run `/jira-auth` / `/sentry-auth` / `/slack-auth`.
 
 Several own a **slash command**, which runs the tool directly instead of asking the model to pick it:
-`/jira`, `/sentry`, `/slack`, and the credential commands `/openai`, `/jira-auth`, `/sentry-auth`,
+`/grep`, `/jira`, `/sentry`, `/slack`, and the credential commands `/openai`, `/jira-auth`, `/sentry-auth`,
 `/slack-auth`. Any tool can declare one.
 
 Nothing here needs a server ayin does not talk to directly. Tools that consumed a *private backend* were
@@ -367,6 +373,68 @@ prompt reach the model, with the plan already in context.
 The plan is on disk *before* implementation starts, so an interrupted machine leaves the thinking
 behind rather than half a feature. `AYIN_PLAN=0` is a hard kill switch beating the toggle *and*
 `/planthis`; `planMinChars` / `planExploreCalls` tune the toggled-on behavior.
+
+## A file too big to read answers with its shape
+
+A model asked to read an 8,000-line file gets a window's worth of bytes and an offset, and what
+follows is byte-paging: read 1–500, read 500–1000, guess again. One measured run read the same file
+27 times without ever reaching the method it needed.
+
+So past the window cap `read_file` returns **structure instead of text** — the classes, their fields,
+every method's signature and the exact line range it occupies, plus what each one assigns and which
+calls leave the file:
+
+```
+_axes.py — 8,240 lines, 75 methods. Structure shown; use expand_method for a body.
+
+class Axes(_AxesBase)
+  hist(self, x, bins=None, range=None, ...)                    6366-6902
+      assigns: self._autoscaleXon, self.dataLim
+      calls: np.histogram, cbook._reshape_2D, self.bar
+  ...
+```
+
+8,240 lines become 154. Then `expand_method(path, "Axes.hist")` returns that one body, and the lines
+it returned count as read, so an edit to them is allowed. A bare name matching several classes is
+**refused with the candidates listed** rather than resolved by order — returning `Tick`'s override when
+the model meant `XAxis`'s produces a body that looks entirely plausible and an edit that lands in the
+wrong class.
+
+Which declarations exist is a per-language question, so the parser comes from `entangle`'s surface
+layer — one per repo type, not one regex pretending to be universal.
+
+## When the loop gets lost
+
+`finish()` is the only ordinary way out of a turn: no round budget, no clock, no token ceiling. A run
+that keeps learning things is allowed to keep going. What is *not* allowed is running in place.
+
+A detector sees every tool call — the ones that ran, the ones the guard blocked, and the ones whose
+output was identical to an earlier call — and watches the last twenty for four shapes:
+
+| shape | what it means |
+|---|---|
+| three refusals in a row | the guard has said no three times and nothing changed |
+| the same call **and** the same result, four times in twenty | identical output is not new information |
+| two calls alternating for six turns | a cycle a repeat-counter cannot see |
+| the same call six times, output varying | possibly thinking — **nudged first**, clapped only if it happens again |
+
+The first three end the turn. The fourth sends a note and keeps the context, because six runs of a
+reproduction script is plausibly a model building understanding, and throwing that away costs more
+than it saves. The nudge also **clears those calls from the window**, so the model has room to act on
+it — without that it is a clap with a longer name, and the next call, whatever it is, ends the turn.
+
+Ending a turn in headless mode means a **restart in place**: same process, clean context, handed the
+original task plus a report of the diff on disk and every route earlier attempts closed off. That
+chain is **bounded at five**. An unbounded one is not a recovery, it is the same twenty-minute attempt
+run over and over — measured at twelve restarts and four hours on a single task, with no edit to show
+for it.
+
+Separately, a turn that has changed something and cannot prove it gets **three attempts to verify**,
+then stops and reports: what it changed, how it tried to check, and — asked of the model directly,
+because nothing else can derive it — which observation was missing and what prevented it.
+
+[**`docs/LOOP.md`**](docs/LOOP.md) draws all of this as a statechart: every state a turn can be in and
+every way out of it.
 
 ## QA gate — the completion report gets checked
 
@@ -849,6 +917,9 @@ See [`SETUP.md`](SETUP.md) for the full list of tunables.
 - [`SETUP.md`](SETUP.md) — install, connect a model (Ollama / backend / adapter / OpenAI), run.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the agent loop, the LLM manager &
   dialects, tools, parser, and how everything fits.
+- [`docs/LOOP.md`](docs/LOOP.md) — the loop as a state machine: every state, every exit, the
+  repetition detector, the bounded restart chain and the verification budget. Read it before changing
+  control flow.
 
 ## License
 

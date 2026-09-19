@@ -1,7 +1,8 @@
 import type { Tool } from '../base.js';
+import { corpusNotesForFiles } from '../../indulge/inject.js';
 import { FIND_LIMIT, GREP_LIMIT, boolParam, execAsync, resolveAgainstCwd, shq, suggestSimilarPaths } from '../lib.js';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { detectProfile, guidBlock, rankGrepLines, type GrepProfile } from '../grep-rank.js';
 
 const CWD = process.cwd();
@@ -39,6 +40,24 @@ const NEVER_RECURSE = [
   'dist', 'build', 'out', '.next', 'coverage', '__pycache__', '.venv', 'vendor',
 ];
 
+/**
+ * WHICH FILES THE CORPUS NOTES ARE ABOUT.
+ *
+ * A recursive search prints `path:line:text` and the ranked list is real filenames. A search of ONE
+ * FILE prints bare `43:    def …` — there is no ambiguity to resolve so the path is never repeated —
+ * and `pathOfLine` then treats the line text itself as a path. So when the searched path IS a file,
+ * that file is the answer and the parsed list is noise.
+ */
+function notesTargets(cwd: string, searched: string | undefined, ranked: string[]): string[] {
+  if (searched) {
+    try {
+      const abs = resolveAgainstCwd(searched);
+      if (statSync(abs).isFile()) return [relative(cwd, abs) || searched];
+    } catch { /* not a path we can stat — fall through to the parsed list */ }
+  }
+  return ranked;
+}
+
 export const tool: Tool = {
     name: 'grep',
     icon: '🔍',
@@ -56,8 +75,25 @@ export const tool: Tool = {
       { name: 'count', type: 'boolean', description: 'Return per-file MATCH COUNTS instead of lines — how much of this is there, before deciding whether to read it', required: false },
       { name: 'only_matching', type: 'boolean', description: 'Return only the matched text, not the whole line — how to list every symbol/name a pattern finds', required: false },
       { name: 'max_matches', type: 'number', description: 'Cap the results at N (default 50, or 30 files) — the `| head -N` of a shell grep', required: false },
-      { name: 'profile', type: 'string', description: 'Ranking profile: unity | typescript | general. Detected from the repo by default — pass it only to override that', required: false },
+      { name: 'profile', type: 'string', description: 'Ranking profile: unity | typescript | general | python. Detected from the repo by default — pass it only to override that', required: false },
     ],
+    /**
+     * The operator gets the same search the agent gets, without spending a turn asking for it.
+     *
+     * A slash command carries ONE argument, and for a search that argument is the PATTERN — the whole
+     * rest of the line, unsplit, so a regex with spaces survives. The path is pinned to the tree the
+     * session is in: "grep this project" is what the operator means by typing it, and the pruning and
+     * ranking are exactly what make searching the whole tree affordable.
+     */
+    slash: {
+      command: 'grep',
+      param: 'pattern',
+      usage: '/grep <regex> — ranked search of this tree; first-party code first, results in an overlay',
+      defaults: { path: '.' },
+      // Dozens of `path:line:text` rows: in the chat they scroll the conversation away and cannot be
+      // paged back; in the overlay they are read and closed.
+      overlay: true,
+    },
     async execute(params) {
       if (!params.pattern || !params.path) return 'Error: pattern and path required';
       if (!existsSync(resolveAgainstCwd(params.path))) {
@@ -129,7 +165,7 @@ export const tool: Tool = {
       // whatever the filesystem walk happened to reach, and on a Unity repo that opened with
       // `Assets/Plugins/…` and `Assets/Spine/Editor/…` — third-party code, ahead of every file the
       // team can actually change. The cap is a budget, and ranking decides what it buys.
-      const profile: GrepProfile = ['unity', 'typescript', 'general'].includes(String(params.profile))
+      const profile: GrepProfile = ['unity', 'typescript', 'general', 'python'].includes(String(params.profile))
         ? String(params.profile) as GrepProfile
         : detectProfile(CWD);
       // Grep gave up at the scan budget, so there is more than was even considered — a different
@@ -165,16 +201,21 @@ export const tool: Tool = {
         : '';
       if (lines.length > cap || scanTruncated) {
         const shown = lines.slice(0, cap);
-        const guids = profile === 'unity' ? guidBlock(CWD, filesShownIn(shown, ranked.files)) : '';
+        const shownFiles = notesTargets(CWD, params.path, filesShownIn(shown, ranked.files));
+        const guids = profile === 'unity' ? guidBlock(CWD, shownFiles) : '';
+        // Same shape as the GUID block above it: a per-result annotation the profile earns. Only the
+        // files actually SHOWN — annotating a file the agent cannot see in this result is noise.
+        const notes = corpusNotesForFiles(CWD, shownFiles);
         // RANKING WAS PARTIAL AND MUST SAY SO. Sorting a window is not sorting the result, and an
         // agent told only "there are MORE" will read the top hit as the best in the repo when it is
         // merely the best of the first two thousand grep reached.
         const partial = scanTruncated
           ? ` — and MORE than the ${scan} scanned, so this ranking covers only what was scanned; narrow the pattern or add include=`
           : ' — there are MORE; narrow the pattern, add include=, or use files_only=true to see the spread';
-        return `${shown.join('\n')}\n(showing the first ${cap} ${plural(cap)}${partial})${sunk}${guids}`;
+        return `${shown.join('\n')}\n(showing the first ${cap} ${plural(cap)}${partial})${sunk}${guids}${notes}`;
       }
       const guids = profile === 'unity' ? guidBlock(CWD, ranked.files) : '';
-      return `${lines.join('\n')}\n(${lines.length} ${plural(lines.length)})${sunk}${guids}`;
+      const notes = corpusNotesForFiles(CWD, notesTargets(CWD, params.path, ranked.files));
+      return `${lines.join('\n')}\n(${lines.length} ${plural(lines.length)})${sunk}${guids}${notes}`;
     },
   };

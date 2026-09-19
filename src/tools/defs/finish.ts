@@ -8,7 +8,7 @@ import type { Tool } from '../base.js';
  * "I have finished" and "I was describing what I am about to do". A 27B model narrates constantly, so
  * the second was read as the first and the turn ended mid-sentence.
  *
- * Measured over SWE-bench Verified: EVERY empty-patch run, in every configuration, six of six, ended
+ * Measured across a suite of real repository issues: EVERY empty-patch run, in every configuration, six of six, ended
  * exactly that way. The last thing each one said was an intention — "Let me confirm the exact mechanism
  * with a minimal reproduction before fixing." Then the harness switched it off. It had found the bug.
  *

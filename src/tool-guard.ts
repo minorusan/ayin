@@ -227,7 +227,7 @@ function witnessOf(params: Record<string, string>): string {
     //
     //   FALSE MOVE — the comment above `guardNoteMutation` records a subagent writing the same
     //   `index.html` twelve times, byte-identical, md5 unchanged, and the guard reporting the world had
-    //   moved 21 times. Measured again on pylint-4551: 152 `guard_repeat_allowed_stale`, on a run whose
+    //   moved 21 times. Measured again on another run: 152 `guard_repeat_allowed_stale`, on a run whose
     //   281 bash calls were `python -c` probes churning __pycache__ mtimes across the tree. Every one of
     //   those excused a repeat the guard existed to stop.
     //
@@ -350,7 +350,21 @@ export function guardCheck(name: string, params: Record<string, string>): GuardD
   if (prior) {
     const fileChanged = witness !== '' && prior.witness !== '' && witness !== prior.witness;
     const filesWritten = bumps.some((b) => b.epoch > prior.epoch && b.key !== key);
-    const readSince = targetsOf(params).some((p) => (readsAt.get(p) ?? 0) > prior.readEpoch);
+    /**
+     * A READ NEVER LIFTS A READ.
+     *
+     * The lift exists so an EDIT can retry after re-reading the lines it was refused for. But
+     * `guardNoteRead` fires after every TREE_SAFE call that names a path — including the read itself —
+     * so for a read of the same file the condition is SELF-SATISFYING: call 1 bumps the epoch, call 2
+     * sees "you have READ the file since", restarts the ladder at 1, and bumps the epoch again for
+     * call 3. The read ladder below could therefore never reach even its first note.
+     *
+     * Measured on a real run: 27 reads of one 2,300-line file across 42 minutes, returning to
+     * the same three neighbourhoods, with 29 `guard_repeat_allowed_stale` and not one read note. The
+     * edit case this was built for is untouched — `perform_edit` is not a repeatable read.
+     */
+    const readSince = !REPEATABLE_READS.has(name)
+      && targetsOf(params).some((p) => (readsAt.get(p) ?? 0) > prior.readEpoch);
     if (fileChanged || filesWritten || readSince) {
       calls.set(key, { count: 1, lastAt: now, witness, epoch: mutationEpoch, readEpoch });
       const wasBlocked = blocked.delete(key);
@@ -540,7 +554,7 @@ export function guardBlockedCount(): number {
  * Refuse a call that has returned THE SAME BYTES too many times running.
  *
  * Everything above this line keys on the call: same tool, same parameters, and a witness of the file it
- * names. That is blind in exactly the case that burned four hours. Measured on pylint-4551 with a
+ * names. That is blind in exactly the case that burned four hours. Measured on a real run with a
  * healthy context (48.6% used, no window trimmed, half the budget free): 573 rounds, 561 bash calls,
  * ZERO edits, and 372 of those calls were `git status --short && git diff --stat` returning "(no
  * output)" every single time. 196 repeat warnings, 196 allowed. The guard could not object because
@@ -562,12 +576,12 @@ export function guardBlockedCount(): number {
  * Keyed by tool AND the output's own hash, counting every occurrence in the turn.
  *
  * The first cut keyed on the tool alone and compared only against the PREVIOUS result, which made it
- * blind to the exact shape it was built for. Measured: 25 refusals on requests-1142, ZERO on
- * pylint-4551 — the run with 372 identical `git status` calls — because pylint interleaves. One
+ * blind to the exact shape it was built for. Measured: 25 refusals on a real run, ZERO on
+ * the other run — the one with 372 identical `git status` calls — because it interleaves. One
  * `pytest` between two `git status` calls reset the counter, forever. Consecutiveness was never the
  * property that mattered; RECURRENCE is.
  */
-const outputSeen = new Map<string, number>();
+const outputSeen = new Map<string, { run: number; epoch: number }>();
 
 /** Two identical answers are a confirmation. The third is a loop. */
 const IDENTICAL_OUTPUT_MAX = 2;
@@ -575,7 +589,25 @@ const IDENTICAL_OUTPUT_MAX = 2;
 /** Never refused: the exit, and anything whose whole job is to change the world. */
 const NEVER_STALE = new Set(['finish', 'perform_edit', 'write_file', 'str_replace', 'subagent']);
 
+/**
+ * A STATE QUERY IS NEVER AN ECHO — "unchanged" is the answer, not a wasted call.
+ *
+ * Measured on a real run: it edited at round 107 and then asked
+ * `git diff HEAD -- lib/matplotlib/axes/_axes.py` for the next EIGHT HUNDRED rounds, 443 of which were
+ * refused because the bytes were identical. They were identical because the edit was still there,
+ * which is exactly what it was asking. The rule punished the model for checking its own work and then
+ * left it unable to finish, because it would not finish without confirming.
+ *
+ * The loop this guard exists for looks different: a real run ran 372 identical `git status` calls
+ * having made NO edit at all. So the pathology is asking about state that nothing has changed — not
+ * asking about state. `mutatedSince` is what separates them, and the caller supplies it.
+ */
+const STATE_QUERY = /\bgit\s+(diff|status|stash\s+list|log)\b|^\s*(ls|pwd|stat)\b/;
+
 export function resetOutputEchoes(): void { outputSeen.clear(); }
+
+/** Exported so the caller can ask "is this command about state?" without duplicating the pattern. */
+export function isStateQuery(command: string): boolean { return STATE_QUERY.test(command); }
 
 /**
  * `null` to pass the result through; a refusal body to send instead of it.
@@ -583,16 +615,37 @@ export function resetOutputEchoes(): void { outputSeen.clear(); }
  * Keyed on tool + output only. The parameters are deliberately NOT in the key: the loop above wrote its
  * command four different ways and meant one thing every time.
  */
-export function refuseIfEcho(tool: string, result: string): string | null {
+export function refuseIfEcho(tool: string, result: string, stateQuery = false, edits = 0): string | null {
   if (NEVER_STALE.has(tool)) return null;
   const key = `${tool}|${createHash('sha1').update(result).digest('hex').slice(0, 16)}`;
-  const run = (outputSeen.get(key) ?? 0) + 1;
-  outputSeen.set(key, run);
+  const prior = outputSeen.get(key);
+  const run = (prior?.run ?? 0) + 1;
+
+  /**
+   * THE EXEMPTION IS PER QUERY, NOT PER TURN — the first cut got this wrong and it cost a run.
+   *
+   * "A state check after an edit is confirmation" is right. "An edit happened at some point, so every
+   * state check forever is confirmation" is what I actually wrote, and a real run edited at round
+   * 5 and then ran 564 bash calls of which 18 were distinct, with the guard silent for all of them.
+   * Removing a wall is not the same as opening a door.
+   *
+   * What earns a repeat is the world having MOVED since this exact question was last asked. An edit
+   * between two `git diff`s makes the second one a different question; no edit between them makes it
+   * the same question twice.
+   */
+  const moved = stateQuery && prior !== undefined && edits > prior.epoch;
+  outputSeen.set(key, { run: moved ? 1 : run, epoch: edits });
+  if (moved) return null;
   if (run <= IDENTICAL_OUTPUT_MAX) return null;
-  log('WARN', 'output_echo_refused', { tool, run: String(run) });
+
+  log('WARN', 'output_echo_refused', { tool, run: String(run), stateQuery: String(stateQuery) });
   const ord = run === 3 ? '3rd' : `${run}th`;
-  return `[REFUSED — this is the ${ord} time ${tool} has returned these exact bytes this turn. `
-    + `The answer has not changed and will not change by asking again; nothing new can come from repeating it. `
-    + `If you are checking whether your work landed, you have not done the work yet — make the edit. `
-    + `If you are waiting on something, do something else first so there is something to see.]`;
+  return stateQuery
+    ? `[REFUSED — ${tool} has returned these exact bytes ${ord} time, and nothing has changed since you `
+      + `last asked. The state is what it was; asking again cannot tell you otherwise. Change something, `
+      + `or act on what it already says.]`
+    : `[REFUSED — this is the ${ord} time ${tool} has returned these exact bytes this turn. `
+      + `The answer has not changed and will not change by asking again; nothing new can come from repeating it. `
+      + `If you are checking whether your work landed, you have not done the work yet — make the edit. `
+      + `If you are waiting on something, do something else first so there is something to see.]`;
 }

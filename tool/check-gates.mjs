@@ -831,12 +831,12 @@ console.log('\nayin refuses to start without a model');
 // A TASK ENDS ONLY WHEN finish() IS CALLED.
 // This replaces the `$` marker, which asked the model to comply with a formatting rule and gave up
 // enforcing it after two unmarked replies — withdrawing the protection from exactly the models too weak
-// to follow it. Measured over SWE-bench Verified: every empty-patch run, six of six, ended on a narrated
+// to follow it. Measured across a suite of real repository issues: every empty-patch run, six of six, ended on a narrated
 // intention that the harness read as a finished answer. A tool call is not a convention.
 // A LANGUAGE THE CLASSIFIER DOES NOT KNOW IS INVISIBLE TO THE QA GATE.
 // `qaChangedFiles()` DROPS anything of kind 'other', so an unlisted extension does not get reviewed
 // less — it does not get reviewed at all, and `qaShouldRun` declines with "nothing changed this turn".
-// It happened to `.ino` once and was fixed; `.py` was still missing, so across a whole SWE-bench run of
+// It happened to `.ino` once and was fixed; `.py` was still missing, so across a whole benchmark run of
 // twelve Python repositories the gate never looked at a single file. Twice is a pattern, hence a gate.
 console.log('\nevery language the agent edits is classified as code');
 {

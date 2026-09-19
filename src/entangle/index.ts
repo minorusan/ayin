@@ -31,7 +31,7 @@ export { renderStop, checkAdoption } from './check.js';
  */
 // PYTHON IS IN THE LIST BECAUSE ITS ABSENCE WAS SILENT. `languageFor` is the gate indulge's discovery
 // uses to decide a seed is source at all, so with no Python surface every .py file in every repository
-// was 'not source' and a corpus could not be built for one — measured on two SWE-bench repos, six
+// was 'not source' and a corpus could not be built for one — measured on two real repositories, six
 // domains each, every seed discarded and zero chunks written. A language missing from here does not
 // degrade the corpus, it abolishes it.
 const LANGUAGES: SurfaceLanguage[] = [csharp, typescript, dart, python];

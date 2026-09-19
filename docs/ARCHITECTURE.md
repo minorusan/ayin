@@ -22,6 +22,11 @@ doc describes how the pieces fit.
 Everything runs locally. There is **no service discovery, no remote orchestration** — ayin
 needs only Node, a POSIX shell, and one HTTP LLM endpoint.
 
+> **[`docs/LOOP.md`](LOOP.md) draws the loop as a state machine** — every state the turn can be in
+> and every way out of it, including the clap, the restart chain and its bound, the verification
+> budget and the gates on `finish()`. Read it before changing control flow in `agent.ts`,
+> `lost.ts` or `skeptic-pass.ts`, and update it in the same change.
+
 ## LLM connection (`connection.ts`)
 
 The transport under the two *contract-shaped* providers (`direct`, `resource`). A deliberately tiny
@@ -379,6 +384,7 @@ satisfies it, which is why `ToolProcess` is a structural shape rather than node'
 | `prompts.getConfigString` | `toolConfig(key)` |
 | `prompts-service` (3 + a type) | `toolPrompts(namespace)` — the tool names WHAT, never where |
 | `connection.llmBaseUrl` | `toolBackendUrl()` |
+| `entangle.languageFor` | `toolStructure().handles/of/facts` — per-language source structure |
 | `qa/probes` | **moved out** — see below |
 
 `ToolLlm` deliberately takes no sampling options: nothing sets any today, and an
@@ -2889,6 +2895,89 @@ repo with real callers: the judged half is a model and cannot be pinned, but a c
 silently comes back empty would leave the pass reviewing a file instead of a change with nothing in
 the output to say so.
 
+## The clap — a cycle ends the turn (`src/lost.ts`)
+
+**No budget lives here.** Not rounds, not money, not a clock — `finish()` remains the only way out.
+This never counts how much work has been done, only whether the last stretch of it was the *same*
+work. A run that keeps learning things runs forever, by design.
+
+A **window** of the last 20 calls, and three scenarios — the shape is taken from OpenHands'
+`StuckDetector`, whose thresholds are 4 / 3 / 3 / 6:
+
+| scenario | fires at |
+|---|---|
+| the same call returned the same result | **4** times in the window |
+| calls refused in a row | **3** |
+| two calls alternating A-B-A-B | **6** turns |
+
+**Why a window and not a streak — measured, and it cost a live run.** The first version fired only on
+three consecutive *refusals*. That caught matplotlib-13989's first loop (28 copies of one command, 25
+refusals in a row) and the restart worked: clean window, report delivered, correct diff intact. Then
+the sober agent looped again and the clap never fired, because the second loop was made of **accepted**
+calls — `9× git diff && pytest`, `9× pytest -x -q`, `4× pytest unequal_bins`, `3× git status && git diff`.
+Each differs by a few bytes, so each returns new output, so the echo guard correctly allows every one.
+Longest refusal streak in that phase: **one**. A streak counter cannot see a cycle.
+
+Replaying the shipped detector over the real logs:
+
+| run | calls | streak rule | window rule |
+|---|---|---|---|
+| 13989, before the restart | 18 | fired | clap at 17 |
+| 13989, after the restart | 74 | **never** | **clap at 15** |
+| 14623, never edited at all | 96 | never | **clap at 32** |
+
+**Two deliberate departures from OpenHands.** Their `_event_eq` includes the event's `thought`, so a
+model that varies its narration while issuing the identical tool call escapes their repeat scenario
+entirely; ayin keys on the call and its result, never on the model's prose. And their oscillation
+scenario compares observations too, which any test that prints a duration defeats — ayin's alternation
+test keys on the **call alone**, because two calls taking turns six times is a cycle whether or not
+their output wobbles.
+
+**One clap per TURN, and a restart is a new turn.** A chain of restarts is not a budget being spent; it
+is the same rule applying again to a fresh context, and the report carries `attempt N` so the next
+agent knows earlier restarts did not break the pattern. `resetLost()` runs in `runAgent`,
+`beginLostTurn()` in `runAgentTurn`.
+
+**What happens:**
+
+- **Interactive** — exit the turn with the report as the reply. There is an operator here; a restart
+  they did not ask for is worth less than being told what it did and what it could not prove.
+- **Headless** — write `ayin-lost-report.md`, then **restart in place**: `runAgentTurn` already clears
+  the window, ledger, file views, echo table, skeptic state and subagents at its top, which is what
+  "sober" means. Same process, so nothing depends on how ayin was launched — which matters inside a
+  benchmark container where the parent command is not ours to re-issue. The new prompt is the original
+  **plus the report**, so the next agent starts with something instead of from nothing.
+
+**Two mandates, because "verify the fix" is an instruction about nothing when there is no fix:**
+
+| | the next agent is told |
+|---|---|
+| an edit is on disk | the diff, the calls that went nowhere — verify it with one test run, then finish; if you cannot verify it, say so and finish anyway; do not re-derive it |
+| the tree is clean | the dead ends — take a different route, make the edit or finish and state why the cause resists one |
+
+**One clap per turn** (`clapsUsed()`). A second lost state after a sober restart is a task the model
+cannot do, and a third context is not what fixes it. `resetLost()` runs in `runAgent`, never in
+`runAgentTurn` — the relaunch re-enters the latter, and resetting the count there would licence an
+unbounded chain of restarts.
+
+`npm run check:lost` pins every threshold, the regression it exists for (four identical *accepted*
+calls), a three-command cycle, the A-B-A-B case, that 60 rounds of genuinely different work never clap,
+that a repeat scrolling out of the window is forgotten, the per-turn clap with chaining, and both
+mandates.
+
+### The diff, once, at the door
+
+Taken from SWE-agent's `review_on_submit`: the first `finish()` with changes on disk **does not
+finish**. It returns the complete `git diff` with a fixed checklist — every hunk is one you meant,
+no test file modified, no scratch script left — and the loop continues. The next `finish()` is
+honoured whatever the model says.
+
+Why this and not more skeptic pass: the skeptic grants a reserve of *rounds* and invites the model to
+go make an observation. That is right when an edit has just landed. It is wrong at the door, because a
+licence to act is exactly what the failure mode abuses — 13989 answered it by running one verification
+command 28 times. This is one message, `diffReviewShown` only ever goes true, and it cannot recurse.
+Skipped entirely when nothing changed; the empty-handed exit has its own account.
+
 ## Tool-call format & parser (`parser.ts`)
 
 ayin uses **text** tool-calls (no native function-calling API required):
@@ -3005,6 +3094,13 @@ whose only content is relaying text into a tool the operator already named by ty
   status instead of printing usage.
 - The turn is written into the agent's conversation window (`recordSlashTurn`), so a follow-up like
   "which of those is blocked?" reaches a model that actually saw the tickets.
+
+**`/grep <regex>`** is the same mechanism on a non-connector: the operator gets ayin's ranked search —
+first-party code over vendored, the right file kind first per project type, `.git`/`node_modules`/
+`dist`/`__pycache__` pruned — without spending a round asking the model to run it. The argument is the
+**pattern**, taken as the whole rest of the line so a regex with spaces survives; `path` is pinned to
+`.` by `defaults`, because "grep this project" is what typing it means. `overlay: true` — dozens of
+`path:line:text` rows in the chat scroll the conversation away and cannot be paged back.
 
 ### Connectors (`src/tools/connectors/`)
 
@@ -3217,6 +3313,59 @@ model immediately followed it with a narrower read.
 
 `npm run check:readwindow` pins the arithmetic at its edges (line 1, line `total`, a window wider than the
 file) plus the slide, the no-slide-when-changed case, and the focused default.
+
+### A file too big for the window is answered as STRUCTURE (`src/tools/skeleton.ts`, `expand_method`)
+
+Every window above is a **byte** window. For a file past the cap they all say the same thing — here is
+a slice, here is how much you did not get — and the only move left is to guess the next offset.
+Measured on matplotlib-14623: **27 reads of one 2,300-line file in 42 minutes**, circling three
+neighbourhoods (940-1046, 1876, 1990-2154), never editing. What it was hunting — which class declares
+`set_view_interval`, and where — is one line of a skeleton.
+
+So a **param-free first read of a file over the cap** returns structure instead of text:
+
+```
+axis.py — 2487 lines, too big for one window. Structure only, no bodies:
+
+class Axis  line 679
+  fields: major, minor, axes, isDefault_label, …
+  def set_view_interval(self, vmin, vmax, ignore=False)   955-968
+  def set_default_intervals(self)   1013-1025
+      assigns _view_interval · calls martist.Artist.set_clip_path
+
+For a body: expand_method(path=axis.py, method=Class.method).
+```
+
+305 lines standing in for 2,487, and the model picks a **body** rather than an offset.
+
+- **Structure comes from `SurfaceLanguage`** through the `structure` delegate on the tool runtime — so
+  it is per-repo-type by construction, and `tools/` still imports nothing outside `tools/`.
+- **`assigns` is syntactic, and is not called `modifies`.** It sees `self.x = …` and, deliberately, the
+  whole chain in `self.axes.dataLim.intervalx = …` — collapsing that to `axes` would say the opposite
+  of what happened. It is blind to mutation through a call, which is why the `calls` line sits beside
+  it: read the two together or not at all.
+- **`calls` lists the edges that LEAVE the file.** `self._get_tick(...)` is two lines down in the same
+  skeleton; `np.floor(...)` and `axes.transAxes.transform(...)` cannot be followed without another file.
+- **Three tiers** — full, then signatures-only, then names — so a file whose skeleton itself overflows
+  degrades instead of truncating, and the header says which tier came back.
+- **No line numbers, no skeleton.** A language that records declarations but not their extent yields a
+  map with no coordinates, and every `expand_method` against it would refuse. Python records ranges;
+  the other three do not yet, and their files take the byte window exactly as before.
+
+**`expand_method(path, method)` returns one body**, its line range, and its facts. Two rules:
+
+- **Ambiguity is refused, never resolved by order.** `axis.py` declares `get_view_interval` on four
+  classes. Returning the first hands over `Tick`'s when the model meant `XAxis`'s — a plausible-looking
+  override, an edit in the wrong class, and nothing on screen to say why. A bare name matching several
+  is refused with the list; `XAxis.get_view_interval` is accepted.
+- **It registers the lines it showed** (`recordRead`). Without that, `readGuard` refuses the edit that
+  follows — a skeleton returns line *numbers*, never lines — and its recovery advice is
+  `read_file around=1876`, which is the byte-paging loop this replaces, restored by the tool meant to
+  replace it. Verified end to end: the same `str_replace` is refused after a skeleton alone and lands
+  after `expand_method`.
+
+`expand_method` is in `WORK_TOOLS`: a headless turn holding a map, told to use a tool that is not in
+its catalogue, has nothing to do but go back to guessing offsets.
 
 ### The base tools tell the truth about their own limits
 

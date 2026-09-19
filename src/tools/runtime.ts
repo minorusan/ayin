@@ -82,8 +82,51 @@ export interface ToolChoice {
   destructive?: boolean;
 }
 
+/**
+ * A declaration found in a source file. Typed structurally, like `ToolProcess` above, so this file
+ * keeps its no-imports property — core happens to satisfy it with entangle's `DeclaredType`.
+ */
+export interface ToolMember {
+  name: string;
+  kind: string;
+  sig?: string;
+  /** 1-based, inclusive. Absent when the language cannot say honestly. */
+  line?: number;
+  endLine?: number;
+}
+
+export interface ToolType {
+  name: string;
+  kind: string;
+  line?: number;
+  members: ToolMember[];
+}
+
+/**
+ * WHAT IS IN A SOURCE FILE, without a tool knowing that entangle exists.
+ *
+ * A file too big for the window is answered as structure rather than bytes (`tools/skeleton.ts`), and
+ * the structure has to come from a per-language parser. Importing that parser directly is the hard
+ * edge from `tools/` to ayin's source layout the whole runtime exists to remove — and the gate says
+ * so out loud. So it arrives as a delegate, exactly like `llm.ask` and `subagent`.
+ *
+ * `facts` returns null where a language has not implemented body analysis. Null is "this language
+ * does not say", never "the body touches nothing" — the caller prints signatures alone rather than
+ * asserting an emptiness nobody measured.
+ */
+export interface ToolStructure {
+  /** Whether any parser here claims this path, by extension. */
+  handles(path: string): boolean;
+  /** Types and members declared in this source, with line ranges where the language records them. */
+  of(path: string, source: string): ToolType[];
+  /** What one member's body assigns and calls, given that member's lines. */
+  facts(path: string, bodyLines: string[]): { assigns: string[]; calls: string[] } | null;
+}
+
 export interface ToolServices {
   llm: ToolLlm;
+  /** Per-language source structure. See `ToolStructure`. */
+  structure: ToolStructure;
   log: ToolLogger;
   /** Show the user something as the tool works. A host with no UI can drop it. */
   report(message: string): void;
@@ -192,6 +235,11 @@ export function toolReport(message: string): void {
 
 export function toolShell(): ToolShell {
   return require_().shell;
+}
+
+/** Per-language source structure, for a tool that answers a file as shape rather than as bytes. */
+export function toolStructure(): ToolStructure {
+  return require_().structure;
 }
 
 /** Ask the operator. Resolves null when there is nobody to ask — treat that as "no". */

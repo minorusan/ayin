@@ -276,7 +276,13 @@ export async function llmChat(
         msg.includes('ECONNREFUSED') ||
         msg.includes('endpoint 502') ||
         msg.includes('endpoint 503') ||
-        msg.includes('endpoint 504');
+        msg.includes('endpoint 504') ||
+        // 500 IS TRANSIENT FROM THIS ENDPOINT. Ollama answers 500 for "Did not receive done or success
+        // response in stream" — the server is up, the stream broke mid-generation. Measured: 2 of 981
+        // requests, and BOTH killed their instance outright — one died at round 28 of 90 after
+        // 14 minutes of work, with the retry already written and one line away from being used. A 500
+        // that is genuinely deterministic costs one extra attempt and then fails as before.
+        msg.includes('endpoint 500');
 
       const aborted = controller.signal.aborted && !transient;
       if (controller.signal.aborted && transient) {

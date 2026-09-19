@@ -32,7 +32,7 @@ import { join } from 'node:path';
 import { candidateDirs, isUnderVendorRoot, knownVendorRoots, loadCachedVendorRoots } from '../indulge/vendor.js';
 import { openStore } from '../indulge/store.js';
 
-export type GrepProfile = 'general' | 'typescript' | 'unity';
+export type GrepProfile = 'general' | 'typescript' | 'unity' | 'python';
 
 /**
  * Path shapes that are third-party or generated wherever they appear.
@@ -46,6 +46,16 @@ const NOT_AUTHORED = [
   /(^|\/)external\//i, /(^|\/)\.yarn\//, /(^|\/)Packages\//,
   /\.min\.(js|css)$/i, /\.designer\.cs$/i, /\.g\.cs$/i, /\.generated\.[a-z]+$/i,
   /\.pb\.(go|ts|js|cs)$/i, /_pb2\.py$/i,
+  /**
+   * PYTHON'S BUILD AND ENVIRONMENT TREES. `build/lib/` is the one with a measurement behind it:
+   * setuptools leaves a COPY of every module there, so a repo that has ever been built answers every
+   * grep twice — once from source and once from a stale duplicate. On psf/requests that duplicate was
+   * the FIRST thing indulge asked a question about (`build/lib/requests/cookies.py`), and a fix applied
+   * there changes nothing the tests run.
+   */
+  /(^|\/)build\/lib(\.[^/]+)?\//, /(^|\/)site-packages\//, /(^|\/)\.tox\//,
+  /(^|\/)\.venv\//, /(^|\/)venv\//, /(^|\/)\.eggs\//, /[^/]+\.egg-info\//,
+  /(^|\/)__pycache__\//,
 ];
 
 /** Extension ranking per profile, best first. Anything unlisted sorts after everything listed. */
@@ -55,10 +65,27 @@ const RANKS: Record<GrepProfile, string[]> = {
   unity: ['.cs', '.asset', '.controller', '.prefab', '.unity', '.shader', '.json', '.asmdef', '.meta'],
   typescript: ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.json', '.md'],
   general: ['.ts', '.tsx', '.js', '.cs', '.py', '.go', '.rs', '.java', '.kt', '.rb', '.c', '.h', '.cpp', '.hpp', '.dart', '.json', '.md'],
+  // A `.pyi` restates a `.py` the way a `.d.ts` restates a `.ts`; `.pyx`/`.pxd` are the Cython half
+  // and answer a different question than the Python one being asked.
+  python: ['.py', '.pyi', '.pyx', '.pxd', '.cfg', '.toml', '.json', '.rst', '.md'],
 };
 
-/** A `.d.ts` restates a `.ts`; ranking them together puts the restatement above the source. */
-const DEMOTED = [/\.d\.ts$/i, /\.meta$/i];
+/**
+ * A `.d.ts` restates a `.ts`; ranking them together puts the restatement above the source.
+ *
+ * THE PYTHON ENTRIES ARE NOT SYMMETRY — they are where a Python search actually goes wrong. Measured on
+ * django: a grep for `get_order_by` ranks `tests/queries/tests.py` level with
+ * `django/db/models/sql/compiler.py`, and the test file is both larger and more numerous, so it wins on
+ * volume. In this benchmark editing tests is FORBIDDEN, and outside it a test is evidence about the
+ * fix rather than the fix — either way it is the second thing to read, never the first. `migrations/`
+ * and `__init__.py` are generated or re-export files that restate what real modules already say.
+ */
+const DEMOTED = [
+  /\.d\.ts$/i, /\.meta$/i,
+  /\.pyi$/i,
+  /(^|\/)tests?\//i, /(^|\/)test_[^/]+\.py$/i, /[^/]+_test\.py$/i, /(^|\/)conftest\.py$/i,
+  /(^|\/)migrations\//i, /(^|\/)__init__\.py$/i, /(^|\/)setup\.py$/i,
+];
 
 const ext = (p: string): string => {
   const base = p.split('/').pop() ?? p;
@@ -83,6 +110,13 @@ export function detectProfile(repoPath: string): GrepProfile {
   } else if (existsSync(join(repoPath, 'tsconfig.json'))
     || existsSync(join(repoPath, 'package.json'))) {
     p = 'typescript';
+  } else if (existsSync(join(repoPath, 'pyproject.toml'))
+    || existsSync(join(repoPath, 'setup.py'))
+    || existsSync(join(repoPath, 'setup.cfg'))) {
+    // AFTER typescript on purpose: a Python repo often ships a `package.json` for docs tooling or a
+    // JS test harness, and would otherwise be ranked as a TypeScript project — which is how every repo
+    // in this benchmark was being ranked, with `.py` in fifth place behind `.ts`, `.tsx`, `.js`, `.cs`.
+    p = 'python';
   }
   profileCache.set(repoPath, p);
   return p;
@@ -150,6 +184,26 @@ export function pathOfLine(line: string): string | null {
  * still outrank a third-party `.cs`, because the question is about this team's code and a plugin's
  * source is the one place an answer cannot be acted on.
  */
+/**
+ * A hit on a DEFINITION beats a hit on a use — worth one extension rank, no more.
+ *
+ * Python states this unambiguously in a way most languages do not: `def name(` and `class Name` at the
+ * start of a line are the definition and nothing else is. Searching for `hist` in matplotlib returns the
+ * method, every call of it, and every mention in a docstring; the question is nearly always the first.
+ *
+ * Deliberately SMALL. It breaks ties between files of the same kind; it must not lift a test file that
+ * defines `test_hist` above the source file that defines `hist`, which is why demotion is larger.
+ */
+const PY_DEFINITION = /^\s*(?:async\s+)?(?:def|class)\s/;
+
+export function definitionBonus(profile: GrepProfile, lines: string[]): number {
+  if (profile !== 'python') return 0;
+  return lines.some((l) => {
+    const i = l.indexOf(':');
+    return i > 0 && PY_DEFINITION.test(l.slice(i + 1).replace(/^\d+[:-]/, ''));
+  }) ? 1 : 0;
+}
+
 export function scoreFile(repoPath: string, rel: string, profile: GrepProfile): number {
   const order = RANKS[profile];
   const i = order.indexOf(ext(rel));
@@ -188,7 +242,9 @@ export function rankGrepLines(repoPath: string, out: string[], profile: GrepProf
     current = g;
   }
 
-  const scored = groups.map((g, i) => ({ g, s: scoreFile(repoPath, g.path, profile), i }));
+  const scored = groups.map((g, i) => ({
+    g, s: scoreFile(repoPath, g.path, profile) + definitionBonus(profile, g.lines), i,
+  }));
   scored.sort((a, b) => (b.s - a.s) || (a.i - b.i));
 
   return {

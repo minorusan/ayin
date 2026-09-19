@@ -7,13 +7,66 @@ import { corpusBlockFor, chunksForFile } from '../../indulge/inject.js';
 import { log } from '../../log.js';
 import { attributeFile } from '../../indulge/attribution.js';
 import { coverage, recordRead, takeEditNotes } from '../readGuard.js';
+import { skeletonOf } from '../skeleton.js';
 import { AROUND_DEFAULT, centeredWindow, clampSpan, describeSpans, slideWindow, snapEnd, snapStart, spanLines, unreadRanges } from '../readWindow.js';
 
 /** How much of a first big-file read is spent on the END of the file rather than its top. */
 const OUTLINE_TAIL_LINES = 40;
 
+/**
+ * Reads of ONE too-big file before its structure is offered instead of another window.
+ *
+ * THE FEATURE WAS UNREACHABLE. The structure view triggered only on a PARAM-FREE read, on the
+ * principle that a model which knows where it is going should not be handed a map. Measured on a real
+ * run: of five reads of a 2,486-line file, EVERY ONE carried an explicit offset. The model never opens
+ * a file — it greps for a definition, gets a line number, reads a window around it, does not find
+ * enough, and greps again with a slightly different pattern. 28 greps, 5 windowed reads, no edit. The
+ * map that answers its question in one call sat behind a door it never knocked on.
+ *
+ * Two is deliberate paging. Three windows into the same large file is hunting, and hunting is the
+ * thing structure replaces.
+ */
+const HUNT_READS = 3;
+
+/**
+ * Windowed reads per file this session, for `HUNT_READS`.
+ *
+ * Counted here rather than derived from `coverage()` spans: adjacent windows MERGE into one span, so
+ * three reads of the same neighbourhood look like one region and the signal disappears exactly where
+ * it matters most. The count is what the sentence means — how many times has this been asked for.
+ * Cleared when `coverage()` reports the file changed, which is the same staleness rule the spans obey.
+ */
+const windowedReads = new Map<string, number>();
+
 /** A diff longer than this stops being a summary and becomes the re-send it replaces. */
 const EDIT_NOTE_MAX_CHARS = 1_200;
+
+/**
+ * The structure of a file, as a reply — or null when no language claims it or it declares nothing.
+ *
+ * One function because two callers now need it: the first read of a too-big file, and the read that
+ * shows the model has started hunting. `why` names which, so the log can tell them apart and the
+ * model is told why it got a map instead of the lines it asked for.
+ */
+function structureReply(
+  resolved: string, shown: string, text: string, budget: number, total: number, why: string,
+): string | null {
+  const skel = skeletonOf(resolved, text, budget);
+  if (!skel) return null;
+  log('INFO', 'read_file_skeleton', {
+    path: shown, tier: skel.tier, types: String(skel.types), members: String(skel.members),
+    lines: String(total), why,
+  });
+  const partial = skel.tier === 'full' ? '' : ` (${skel.tier} form — the full one did not fit)`;
+  const lead = why === 'first read'
+    ? `${shown} — ${total} lines, too big for one window. Structure only, no bodies${partial}:`
+    : `${shown} — ${total} lines. You have read ${why} of this file without finding what you are after, `
+      + `so here is its structure instead of another window${partial}:`;
+  return `${lead}\n\n${skel.text}\n\n`
+    + `For a body: expand_method(path=${shown}, method=Class.method). It returns the code and counts as `
+    + `having read those lines, so an edit to them is allowed.\n`
+    + `read_file with offset= or around= still returns text, if you want the file itself.`;
+}
 
 export const tool: Tool = {
     name: 'read_file',
@@ -79,7 +132,8 @@ export const tool: Tool = {
       if (raw.includes(0)) {
         return `Error: ${params.path} is a binary file (${(raw.length / 1024).toFixed(1)} KB). Use bash (file, strings, xxd) if you need to inspect it.`;
       }
-      const lines = raw.toString('utf-8').split('\n');
+      const text = raw.toString('utf-8');
+      const lines = text.split('\n');
       // `offset` is the LINE NUMBER to start at, matching grep's output and the numbers printed below.
       // It used to be 0-based while the display was 1-based, so feeding a grep hit straight back read
       // from the line after it. 0 and 1 both mean "the top" so older callers still behave.
@@ -122,6 +176,50 @@ export const tool: Tool = {
        * see `../window.ts` for why that is language-agnostic on purpose.
        */
       const seen = askedAround || askedOffset || tailN ? null : coverage(resolved);
+      /**
+       * WHAT THIS FILE HAS ALREADY GIVEN UP, regardless of how it was asked for.
+       *
+       * `seen` above is deliberately null when an offset was passed — that branch is about SLIDING, and
+       * a hand-picked window must not slide. But "how many times has this file been opened" is a
+       * different question, and the answer decides whether the model is paging deliberately or hunting.
+       * See the structure branch below.
+       */
+      const already = coverage(resolved);
+      /**
+       * THE MODEL IS HUNTING, NOT PAGING — hand it the map it never asked for.
+       *
+       * A windowed read says "I know where I am going". Three of them into the same large file says
+       * the opposite, and nothing in the first design noticed: the structure view waited for a
+       * param-free read that a grep-then-offset model never makes. See `HUNT_READS`.
+       *
+       * The count resets with the coverage it shadows — a file that changed underneath is a new file
+       * for this purpose, and the model deserves fresh windows into it.
+       */
+      if (!already) windowedReads.delete(resolved);
+      if (askedOffset || askedAround) {
+        const n = (windowedReads.get(resolved) ?? 0) + 1;
+        windowedReads.set(resolved, n);
+        /**
+         * EXACTLY ONCE, and `===` is the whole reason.
+         *
+         * Written as `>=` this became a trap door: every read past the third returned the map, so a
+         * model asking for a window got structure, asked again, got the same structure, and could
+         * never reach the file again. Measured on a live run — six structure replies against two
+         * `expand_method` calls, the model followed the map twice and then spent four reads being
+         * handed a 305-line document it already held. The intervention became the loop it was built
+         * to break.
+         *
+         * `read_file` is in `REPEATABLE_READS`, so the echo guard never refuses it and could not have
+         * caught this. Showing a map once is an intervention; showing it every time is a wall.
+         */
+        if (n === HUNT_READS && total > await readCap()) {
+          const skel = structureReply(resolved, params.path, text, await readCap(), total, `${n} windows`);
+          if (skel) return skel;
+        }
+        if (n > HUNT_READS && total > await readCap()) {
+          log('INFO', 'read_file_structure_already_shown', { path: params.path, reads: String(n) });
+        }
+      }
       let slidPast: string | null = null;
       let span: [number, number];
       /**
@@ -150,6 +248,23 @@ export const tool: Tool = {
           span = slid;
           slidPast = describeSpans(seen!.spans);
         } else {
+          /**
+           * STRUCTURE BEATS THE FIRST PAGE, when the file does not fit and nothing has been read yet.
+           *
+           * Returning the head plus the tail tells the model where the file starts and stops and
+           * nothing about what is in it, so the only move left is guessing an offset. Measured on
+           * A real run: 27 reads of `axis.py`, three neighbourhoods circled for 42 minutes, no
+           * edit. The skeleton answers the question those 27 reads were asking — 305 lines standing in
+           * for 2,486, every method with its exact range — and `expand_method` returns a body without
+           * a byte offset ever being computed.
+           *
+           * Falls through to the byte window when no language claims the file or it declares nothing:
+           * an empty skeleton is a worse answer than a real first page.
+           */
+          if (!seen?.spans.length && total > size) {
+            const skel = structureReply(resolved, params.path, text, size, total, 'first read');
+            if (skel) return skel;
+          }
           // Nothing read yet AND the file does not fit: spend part of the budget on the tail.
           const wantOutline = !seen?.spans.length && total > size;
           const headLines = wantOutline ? Math.max(1, size - OUTLINE_TAIL_LINES) : size;
@@ -198,10 +313,21 @@ export const tool: Tool = {
       const covered = [...(seen?.spans ?? []), span, ...(outlineTail ? [outlineTail] : [])] as [number, number][];
       const unread = unreadRanges(covered, total);
       const capNote = askedLimit && askedLimit > maxLines ? `; limit is capped at ${maxLines} lines/call by the served model's context` : '';
+      /**
+       * A TOOL THE MODEL DOES NOT KNOW APPLIES IS A TOOL THAT DOES NOT EXIST.
+       *
+       * The structure view and `expand_method` were reachable and useful and never once used, because
+       * nothing in a windowed read said they were an option. One line, only on files too big to hold,
+       * where it is the difference between paging blind and asking for the map.
+       */
+      const mapNote = total > maxLines
+        ? `\nStructure: read this file with NO offset for every class and method with its line range, `
+          + `then expand_method(path, Class.method) for one body.`
+        : '';
       const footer = unread.length
         ? `\n(unread: ${describeSpans(unread)} — ${spanLines(unread)} of ${total} lines. Read again with no `
-          + `offset to slide there, or around=<line> to centre on one${capNote})`
-        : `\n(all ${total} lines of this file have now been read${capNote})`;
+          + `offset to slide there, or around=<line> to centre on one${capNote})${mapNote}`
+        : `\n(all ${total} lines of this file have now been read${capNote})${mapNote}`;
       // What the corpus already knows about THIS file. An exact path lookup, not a similarity
       // search, so it cannot surface a plausible-but-unrelated chunk. Never fatal: a corpus that
       // fails to load must not break the read that was actually asked for.

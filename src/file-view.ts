@@ -1,7 +1,7 @@
 /**
  * file-view.ts — a file is materialized into the window ONCE, and re-reads return what changed.
  *
- * THE MEASUREMENT THIS EXISTS FOR. On pylint-4551 the agent ran 348 rounds and produced no edit. It
+ * THE MEASUREMENT THIS EXISTS FOR. On one measured run the agent used 348 rounds and produced no edit. It
  * read `inspector.py` and its siblings over and over, and every re-read landed in the window IN FULL,
  * because the only deduplication ayin had keyed on byte-equality of the whole message — and the guard
  * appended `[REPEAT 3: …]`, with an incrementing counter, to exactly the messages that were repeats. No

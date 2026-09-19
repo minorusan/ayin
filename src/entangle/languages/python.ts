@@ -4,7 +4,7 @@
  * WHY THIS FILE EXISTS, and it is not a nicety. `languageFor()` gated on `[csharp, typescript, dart]`,
  * so `languageFor('requests/models.py')` was null and every Python file in every repository classified
  * as "not source". `indulge`'s discovery drops a seed the moment that check fails — so a corpus could
- * not be built for a Python repo AT ALL. Measured: two SWE-bench repositories, six domains each, every
+ * not be built for a Python repo AT ALL. Measured: two real repositories, six domains each, every
  * seed discarded, both runs ending "Nothing matched. No questions, no chunks." Not a poor corpus — none.
  *
  * INDENTATION IS THE BRACE. The other three languages find a type's members by counting `{` and `}`;
@@ -33,6 +33,33 @@ const CLASS = /^(?<indent>\s*)class\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\((?<
 const MEMBER = /^(?<indent>\s*)(?:async\s+)?(?:def\s+(?<fn>[A-Za-z_][A-Za-z0-9_]*)|(?<attr>[A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=]+)?=)/;
 /** A module-level def — a function is a surface in Python in a way it is not in C#. */
 const FUNC = /^(?<indent>)(?:async\s+)?def\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)/;
+
+/**
+ * TRIPLE-QUOTED TEXT IS NOT CODE, and reading it as code silently truncates a class.
+ *
+ * Indentation is this parser's brace, so a line at column 0 ends the class body. Prose inside a
+ * docstring is under no such obligation: matplotlib's `_axes.py` wraps a parameter description across
+ * lines and line 4365 is the bare word `optional.` at column 0. From there the parser believed
+ * `class Axes` had ended — 32 of its 75 methods were dropped, and the last one it did record was
+ * handed the whole 3,869-line gap as its body. The skeleton for an 8,164-line file came back 93 lines
+ * long and looked entirely plausible.
+ *
+ * Returns a predicate that is true for lines that BEGAN inside a fence. The opening line is still
+ * read (it starts outside, and may carry a declaration before the quote); the closing line is not.
+ */
+function fenceSkipper(): (raw: string) => boolean {
+  let fence: string | null = null;
+  return (raw) => {
+    const wasInside = fence !== null;
+    for (const q of ['"""', "'''"]) {
+      const hits = raw.split(q).length - 1;
+      if (!hits) continue;
+      if (fence === q) { if (hits % 2 === 1) fence = null; }
+      else if (!fence && hits % 2 === 1) fence = q;
+    }
+    return wasInside;
+  };
+}
 
 /**
  * Python's own furniture. Same bias toward TRUE as the other lists: a missed violation is a bad day, a
@@ -126,8 +153,20 @@ export const python: SurfaceLanguage = {
     let current: DeclaredType | null = null;
     let classIndent = -1;
     let memberIndent = -1;
-    for (const raw of source.split('\n')) {
-      if (!raw.trim() || /^\s*#/.test(raw)) continue;
+    const rows = source.split('\n');
+    /**
+     * Every declaration in file order, so each one's END is the next one's start.
+     *
+     * Python gives no closing token to find, and re-deriving the body's extent from indentation would
+     * be a second, independently-wrong idea of where a method stops. The gap between two declarations
+     * IS the first one's body; trailing blank lines are walked back off so a range points at code.
+     */
+    const anchors: Array<{ at: number; member?: DeclaredMember }> = [];
+    let n = 0;
+    const inFence = fenceSkipper();
+    for (const raw of rows) {
+      n++;
+      if (inFence(raw) || !raw.trim() || /^\s*#/.test(raw)) continue;
       const line = raw.replace(/\s+#.*$/, '');
       const cls = CLASS.exec(line);
       if (cls?.groups) {
@@ -135,8 +174,9 @@ export const python: SurfaceLanguage = {
         // A Protocol or an ABC is an interface by any other name — the same call typescript.ts makes
         // for `type X = {...}`, and for the same reason: ignoring it leaves the biggest hole.
         const kind: TypeKind = /\b(Protocol|ABC|ABCMeta)\b/.test(bases) ? 'interface' : 'class';
-        current = { name: cls.groups.name, kind, members: [] };
+        current = { name: cls.groups.name, kind, members: [], line: n };
         types.push(current);
+        anchors.push({ at: n });
         classIndent = cls.groups.indent.length;
         memberIndent = -1;
         continue;
@@ -153,7 +193,9 @@ export const python: SurfaceLanguage = {
           if (at === memberIndent) {
             const nm = m.groups.fn ?? m.groups.attr;
             const kind: DeclaredMember['kind'] = m.groups.fn ? 'method' : 'field';
-            current.members.push({ name: nm, kind, visibility: visibilityOf(nm), sig: line.trim() });
+            const member: DeclaredMember = { name: nm, kind, visibility: visibilityOf(nm), sig: line.trim(), line: n };
+            current.members.push(member);
+            anchors.push({ at: n, member });
           }
         }
         continue;
@@ -162,10 +204,66 @@ export const python: SurfaceLanguage = {
       // surface that reported only classes would miss most of what a Python module offers.
       const fn = FUNC.exec(line);
       if (fn?.groups) {
-        types.push({ name: fn.groups.name, kind: 'class', members: [] });
+        // A module-level function is its own surface AND its own member: entangle only ever asked the
+        // first question, but a skeleton has to be able to point at the body, and a type with no members
+        // has nothing to point at.
+        const self: DeclaredMember = {
+          name: fn.groups.name, kind: 'method', visibility: visibilityOf(fn.groups.name), sig: line.trim(), line: n,
+        };
+        types.push({ name: fn.groups.name, kind: 'class', members: [self], line: n });
+        anchors.push({ at: n, member: self });
       }
     }
+    for (let i = 0; i < anchors.length; i++) {
+      const a = anchors[i];
+      if (!a.member) continue;
+      let end = (anchors[i + 1]?.at ?? rows.length + 1) - 1;
+      while (end > a.at && !rows[end - 1]?.trim()) end--;
+      a.member.endLine = end;
+    }
     return types;
+  },
+
+  /**
+   * Which fields this body writes and which calls it makes. Syntax only — see `BodyFacts`.
+   *
+   * Docstrings are skipped rather than scanned. A matplotlib method carries forty lines of prose full of
+   * parentheses, and every `Parameters(` in it would arrive looking exactly like a call.
+   */
+  bodyFactsOf(bodyLines) {
+    const assigns = new Set<string>();
+    const calls = new Set<string>();
+    let fence: string | null = null;
+    for (const raw of bodyLines) {
+      // Toggle on `"""`/`'''`. An odd count on one line opens or closes; an even count is a one-liner
+      // docstring that begins and ends where it is, and the code after it still counts.
+      for (const q of ['"""', "'''"]) {
+        const hits = raw.split(q).length - 1;
+        if (!hits) continue;
+        if (fence === q) { if (hits % 2 === 1) fence = null; }
+        else if (!fence && hits % 2 === 1) fence = q;
+      }
+      if (fence) continue;
+      const line = raw.replace(/\s+#.*$/, '');
+      /**
+       * THE WHOLE CHAIN, not its first segment.
+       *
+       * `self.axes.dataLim.intervalx = xmin, xmax` writes state that does not belong to this object at
+       * all, and reporting it as `axes` would say the opposite of what happened — `axes` is not
+       * rebound, its grandchild is. Matplotlib 14623 is that line and nothing else; a scan that
+       * collapsed it to `axes` would have pointed the model away from its own bug.
+       */
+      const set = /^\s*self\.(?<name>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*(?:\[[^\]]*\])?\s*(?:[-+*/|&^%@]|\/\/|\*\*|>>|<<)?=(?!=)/.exec(line);
+      if (set?.groups) assigns.add(set.groups.name);
+      const del = /^\s*del\s+self\.(?<name>[A-Za-z_][A-Za-z0-9_]*)/.exec(line);
+      if (del?.groups) assigns.add(del.groups.name);
+      // Dotted calls (`self.foo(`, `np.array(`, `Axes.viewLim(`) and constructor-shaped bare ones.
+      // A bare lowercase call is `len`, `sorted`, `range` — furniture, and naming it costs a line to
+      // say nothing.
+      for (const m of line.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\s*\(/g)) calls.add(m[1]);
+      for (const m of line.matchAll(/(?<![.\w])([A-Z][A-Za-z0-9_]*)\s*\(/g)) calls.add(m[1]);
+    }
+    return { assigns: [...assigns], calls: [...calls] };
   },
 
   isPlatform(ref) {

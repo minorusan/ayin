@@ -9,6 +9,7 @@
  * So the gate asserts the property that keeps the cache alive: after a trim, there is HEADROOM — the
  * next rounds can append without evicting again.
  */
+import { readFileSync } from 'node:fs';
 import { trimToContext, compressOldest, noteRanCall, renderCallLedger, resetCallLedger, resetSessionLedger } from '../dist/agent.js';
 
 const fail = (m) => { console.error(`FAIL: ${m}`); process.exit(1); };
@@ -227,7 +228,7 @@ if (big.length > 14000) fail(`300 short calls rendered ${big.length} chars — t
  * LONG PARAMETERS — the case this gate did not have, and the one that actually happened.
  *
  * Every case above used a 12-character parameter, so the unbounded `${c.params}` in the call line never
- * showed up. In the field a `bash` command is a multi-line Python heredoc: measured on pylint-4551, 379
+ * showed up. In the field a `bash` command is a multi-line Python heredoc: measured on a real run, 379
  * calls averaging 142 parameter chars put ~19,200 tokens of bare call lines into a 40,000 window, on
  * every one of 348 rounds. The detail budget was holding perfectly; the line it prefixes was not bounded
  * at all.
@@ -260,7 +261,7 @@ resetCallLedger();
 /**
  * FILE VIEWS — materialize once, then say what changed.
  *
- * The case these exist for: pylint-4551 read the same files for 348 rounds and every copy landed in
+ * The case these exist for: one run read the same files for 348 rounds and every copy landed in
  * full, because the guard appended an INCREMENTING "[REPEAT n:" to exactly the messages that were
  * repeats, so no two were byte-equal and the dedupe never fired. 101 warnings, 18 dedupes.
  */
@@ -304,7 +305,7 @@ console.log('             file views: materialize / unchanged / diff / region / 
 /**
  * ECHO REFUSAL — the same BYTES, not the same parameters.
  *
- * pylint-4551 with a healthy context: 573 rounds, zero edits, 372 `git status && git diff` calls all
+ * a run with a healthy context: 573 rounds, zero edits, 372 `git status && git diff` calls all
  * returning "(no output)". The parameters varied (`&&` vs `;`, a trailing `ls`) so a parameter key saw
  * four calls; `git status` names no path so the content witness had nothing to hash. The output was
  * identical every time.
@@ -324,8 +325,8 @@ if (tg.refuseIfEcho('bash', 'now it fails differently') !== null) fail('a second
 /**
  * INTERLEAVED — the case the first implementation got wrong, and the only case that mattered.
  *
- * Keying on the tool and comparing against the PREVIOUS result alone gave 25 refusals on requests-1142
- * and ZERO on pylint-4551, the run with 372 identical `git status` calls: one `pytest` between any two
+ * Keying on the tool and comparing against the PREVIOUS result alone gave 25 refusals on a real run
+ * and ZERO on another run, the one with 372 identical `git status` calls: one `pytest` between any two
  * of them reset the counter. Consecutiveness was never the property; recurrence is.
  */
 tg.resetOutputEchoes();
@@ -344,6 +345,66 @@ for (let i = 0; i < 5; i++) {
 }
 tg.resetOutputEchoes();
 console.log('             echo refusal: 3rd identical refused, new bytes reset, finish/edit exempt');
+
+/**
+ * SKEPTIC PASS — the exit is gated on a proof attempt, once per turn.
+ *
+ * Measured across 20 instances: computational bugs got an edit 12/13; bugs whose symptom is a rendered
+ * artefact got one 1/6 (three rendering repositories, 0/5 between them). one of them wrote the correct fix and
+ * refused to apply it — "I did not run the LaTeX build to verify the exact rendered output".
+ */
+const sk = await import('../dist/skeptic-pass.js');
+const base = { changedFiles: ['a.py'], provenSinceEdit: false, isDiagnosisOnly: false, roundsLeft: 40 };
+
+sk.resetSkepticPass();
+const skFirst = sk.skepticInjection(base);
+if (!skFirst) fail('an edit with no proof must be held for verification');
+if (!/observation/i.test(skFirst)) fail('the injection must ask for an observation');
+if (!skFirst.includes('look(')) fail('the injection must offer the visual path');
+if (!sk.inSkepticPass()) fail('the pass must be open after it fires');
+
+// ONCE PER TURN — a gate that re-triggers on its own answer is a loop.
+if (sk.skepticInjection(base) !== null) fail('the pass fired twice in one turn');
+sk.closeSkepticPass();
+if (sk.inSkepticPass()) fail('closing the pass left it open');
+
+// every skip is a case where it would spend rounds and learn nothing
+sk.resetSkepticPass();
+if (sk.skepticInjection({ ...base, changedFiles: [] }) !== null) fail('nothing changed — nothing to falsify');
+sk.resetSkepticPass();
+if (sk.skepticInjection({ ...base, provenSinceEdit: true }) !== null) fail('a clean run after the edit is already proof');
+sk.resetSkepticPass();
+if (sk.skepticInjection({ ...base, isDiagnosisOnly: true }) !== null) fail('a diagnosis-only finish makes no claim to test');
+// IT MUST FIRE EVEN WITH THE TURN BUDGET SPENT — that is the case that actually happens. Measured:
+// one run called finish once, at round 89 of 90, because the convergence ladder tells the
+// model to finish at the end. A pass funded from the same budget is always broke when it is needed.
+sk.resetSkepticPass();
+if (sk.skepticInjection({ ...base, roundsLeft: 0 }) === null) fail('the pass must fire on its own reserve even with the turn budget spent');
+
+// the budget expires on its own so a silent model cannot hold the exit open forever
+sk.resetSkepticPass();
+sk.skepticInjection({ ...base, roundsLeft: 5 });
+for (let i = 0; i < 10; i++) sk.tickSkepticPass();
+if (sk.inSkepticPass()) fail('the pass never expired — finish could be held indefinitely');
+sk.resetSkepticPass();
+console.log('             skeptic pass: fires once, skips when proven, expires on budget');
+
+/**
+ * FINISH IS THE ONLY HEADLESS EXIT — asserted against the SOURCE, because this is a control-flow
+ * property and there is nothing to import that reveals it.
+ *
+ * The `double_text` exit ended six of six empty-patch runs, each with an intention as its last words.
+ * Interactive keeps its text exit: there a reply IS the answer and someone reads it.
+ */
+const agentSrc = readFileSync(new URL('../src/agent.ts', import.meta.url), 'utf8');
+const headlessBlock = agentSrc.slice(agentSrc.indexOf('if (HEADLESS) {'), agentSrc.indexOf("reason: 'double_text'"));
+if (/if \(consecutiveText < 2\)/.test(headlessBlock)) {
+  fail('the headless text branch still exits after N prose replies — finish() must be the only way out');
+}
+if (!/headless/i.test(headlessBlock) || !/finish\(\)/.test(headlessBlock)) {
+  fail('the headless nudge must say the session is headless and name finish() as the exit');
+}
+console.log('             exits: finish() is the only headless exit; prose always continues');
 
 console.log(`check-window: OK — trimmed to ${after}/${budget} tokens, ${headroom} of headroom, prefix intact`);
 console.log(`             compression: ${quiet.count} cuts when it fits, ${cut.count} when it does not (${cut.dropped} chars)`);

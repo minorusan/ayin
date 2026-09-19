@@ -1,7 +1,7 @@
 /**
  * "I have the full picture" — the moment a turn stops being an investigation, detected mechanically.
  *
- * MEASURED, NOT GUESSED. Mined from 100 finding-statements across three recorded SWE-bench runs. The
+ * MEASURED, NOT GUESSED. Mined from 100 finding-statements across three recorded runs. The
  * model announces a diagnosis constantly and acts on it almost never: a stated finding was followed by
  * an edit SIX times in a hundred. The rest of the time it re-derives the same conclusion — verbatim,
  * 16 times in one django session, 6 in a matplotlib one — each restatement followed by re-reading the

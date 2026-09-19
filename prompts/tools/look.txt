@@ -1,0 +1,12 @@
+Look at an image and judge it yourself.
+
+The image is queued for your next turn — the reply you get back is a receipt, not the picture. Say what
+you expect to see BEFORE you look; an expectation written afterwards is not evidence.
+
+Use it whenever what you changed shows up as something rendered:
+  matplotlib / seaborn   save the figure to PNG, then look at it
+  sphinx / LaTeX         build, then `pdftoppm -png -r 100 -f 1 -l 1 out.pdf /tmp/page`, then look
+  pyreverse / graphviz   render to PNG, then look
+  a web page             screenshot it, then look
+
+Raster only (png, jpeg, webp, gif). Convert first, then look at the conversion.

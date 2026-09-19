@@ -52,6 +52,7 @@
     "check:vendor": "node tool/check-vendor.mjs",
     "check:tsindulger": "node tool/check-ts-indulger.mjs",
     "check:updater": "node tool/check-updater.mjs",
+    "check:lost": "node tool/check-lost.mjs",
     "check:window": "node tool/check-window.mjs",
     "check:connectors": "node tool/check-connector-loop.mjs",
     "check:unwatch": "node tool/check-unwatch.mjs",

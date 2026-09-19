@@ -42,7 +42,7 @@ const UI_EXT = new Set(['.html', '.htm', '.css', '.scss', '.sass', '.less', '.ts
 // kind 'other' from the review entirely — an Arduino sketch was invisible to the gate outright, not
 // merely under-reviewed.
 // `.py` was missing too, and it cost more than the sketch did: every Python edit classified as 'other'
-// and was dropped, so on a whole SWE-bench run — twelve Python repositories — the QA gate never saw a
+// and was dropped, so on a whole benchmark run — twelve Python repositories — the QA gate never saw a
 // single changed file and declined every turn with "nothing changed this turn". A gate that does not
 // fail but silently does not LOOK is the failure mode this list keeps reproducing; extensions are
 // added here whenever a language reaches the agent, not whenever someone remembers.
