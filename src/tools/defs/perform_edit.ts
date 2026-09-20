@@ -80,7 +80,7 @@ class PerformEdit extends BaseTool {
 
     // THE MODEL STOPPED EARLY AND WE WERE ABOUT TO WRITE IT.
     //
-    // Measured: `lib/matplotlib/axes/_axes.py`, 8164 lines, one line to change. The model was handed the
+    // Measured: an 8,164-line source file with one line to change. The model was handed the
     // whole file and asked for the whole file back; it returned 833 lines and this function wrote them.
     // 7331 lines of a core module deleted, a plausible-looking diff, and QA passed it. A file that
     // cannot survive the round trip must not be edited this way at all — `str_replace` exists for it.

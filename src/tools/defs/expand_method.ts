@@ -39,8 +39,8 @@ const BODY_LINES_MAX = 160;
 /**
  * 160 WAS PULLED FROM NOWHERE AND IT HID THE ANSWER.
  *
- * `Axes.hist` spans 6366-6902; the one-line fix this instance exists for is at 6689. Capped at 160
- * the reply showed 6366-6525 — the right method, the wrong half — and the model spent nine reads and
+ * A measured case: a 537-line method, and the one-line fix inside it 323 lines down. Capped at 160
+ * the reply showed only the first third — the right method, the wrong half — and the model spent nine reads and
  * four `sed` calls hunting for the rest of a body it had just asked for by name. The cap meant to stop
  * it paging through an artefact made it page through the file instead.
  *

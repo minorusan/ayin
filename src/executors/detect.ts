@@ -68,7 +68,7 @@ function hasShallowMarker(dir: string): boolean {
   return has('platformio.ini') || has('sketch.yaml') || (has('Assets') && has('ProjectSettings'))
     || has('pubspec.yaml') || has('Cargo.toml') || has('go.mod') || has('package.json')
     // setup.py PREDATES pyproject.toml and still carries much of the Python world. Leaving it out
-    // made every setup.py-era repository — matplotlib, django, scikit-learn — invisible here.
+    // made every setup.py-era repository invisible here, which is most of the established ones.
     || has('pyproject.toml') || has('requirements.txt') || has('setup.py') || has('setup.cfg');
 }
 
@@ -276,7 +276,7 @@ export function detectProject(cwd = process.cwd(), request = '', targetDir = '')
   //
   // This asked `isEmptyOfProjects(root)`, which was `fromTree(root) === null` — "I could not name a
   // type" standing in for "there is nothing here". Those are different sentences and the gap between
-  // them is somebody's repository: matplotlib carries setup.py and no pyproject.toml, so ONE missing
+  // them is somebody's repository: many established projects carry setup.py and no pyproject.toml, so ONE missing
   // marker made an 8,000-file tree read as new ground and the scaffolder wrote a pyproject.toml, a
   // src/<name>/ package and a tests/test_smoke.py into it. Twice, deterministically.
   //

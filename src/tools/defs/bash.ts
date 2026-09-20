@@ -7,10 +7,10 @@ const CWD = process.cwd();
 export const tool: Tool = {
     name: 'bash',
     icon: '💻',
-    description: 'Execute a shell command and return its output. Use for: running scripts, builds, installs, git, docker, checking system state. For LISTING a directory use list_dir, for searching use grep/find_files, for reading use read_file — they are bounded and cheaper. Pass cwd instead of `cd X && …`. Commands are killed after 120s by default — raise timeout_seconds for a build, and put anything open-ended (a server, a watcher) in the background yourself.',
+    description: 'Execute a shell command and return its output. Use for: running scripts, builds, installs, git, docker, checking system state. For LISTING a directory use list_dir, for searching use grep/find_files, for reading use read_file — they are bounded and cheaper. Pass cwd instead of `cd X && …`. A command runs until it finishes — there is NO default time limit. Pass timeout_seconds to bound one, and start anything open-ended (a server, a watcher, a script that blocks) in the background yourself: `cmd >/tmp/out.log 2>&1 &` then read the log.',
     parameters: [
       { name: 'command', type: 'string', description: 'The shell command to execute', required: true },
-      { name: 'timeout_seconds', type: 'number', description: 'Kill the command after N seconds (default 120, max 900)', required: false },
+      { name: 'timeout_seconds', type: 'number', description: 'Kill the command after N seconds (max 900). Unset means no limit.', required: false },
       { name: 'cwd', type: 'string', description: 'Run in this directory instead of the session root — use this rather than prefixing `cd X && …`', required: false },
     ],
     async execute(params, ctx) {

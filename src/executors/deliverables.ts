@@ -123,7 +123,7 @@ export const README_STUB_BANNER = 'an empty stub created by ayin at project star
  * A DELIBERATELY DETERMINISTIC CHECK, because the alternative is hoping. `scaffold()` writes a stub so
  * the file exists and has structure — but an untouched stub is in one respect WORSE than no README at
  * all: it satisfies every check that only asks whether the file is there, while saying nothing.
- * Measured on the benchmark: on the grounding-only path the stub shipped untouched, because the plan
+ * Measured: on the grounding-only path the stub shipped untouched, because the plan
  * document had been the only thing telling the agent to fill it in.
  *
  * GENERIC, AND IT HAD TO BE SPLIT TO BECOME SO. This is `qa/base`'s check, and `qa/base` serves `"*"` —

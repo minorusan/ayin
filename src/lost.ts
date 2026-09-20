@@ -130,8 +130,8 @@ export function restartDepth(): number { return depth; }
  *
  * A restart is not free and it is not a budget line — it is a WHOLE ATTEMPT. The context is wiped, so
  * the next incarnation re-reads, re-greps and re-derives from the same starting point, and a run's wall
- * clock is very nearly `(restarts + 1) x one attempt`. Measured across 28 consecutive runs of one
- * benchmark on a temperature-zero model:
+ * clock is very nearly `(restarts + 1) x one attempt`. Measured across 28 consecutive runs on a
+ * temperature-zero model:
  *
  *     restarts 0-3   13-32 min
  *     restarts 5     32 min, finished
@@ -157,7 +157,7 @@ export function restartExhausted(): boolean { return depth >= RESTART_MAX; }
  *
  * The same-call rule NUDGES before it claps. Everything else claps immediately.
  *
- * THE EVIDENCE FOR THIS IS ONE RUN, AND IT IS CONFOUNDED. An instance that had solved three times in
+ * THE EVIDENCE FOR THIS IS ONE RUN, AND IT IS CONFOUNDED. A task that had been solved three times in
  * a row — identical patch, ~18 minutes, zero claps — instead restarted three times and produced no
  * edit at all. But three things shipped between those runs: the structure footer, the hunt trigger,
  * and this rule. Blaming this one is a judgement, not a measurement, and no experiment isolated it.

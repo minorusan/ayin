@@ -43,21 +43,36 @@ export const tool: Tool = {
       const existed = existsSync(params.path);
       const before = existed ? readFileSync(params.path, 'utf-8') : '';
       mkdirSync(dirname(params.path), { recursive: true });
-      writeFileSync(params.path, params.content, 'utf-8');
+      /**
+       * A FILE THAT ENDED WITH A NEWLINE STILL DOES.
+       *
+       * POSIX text files end with one, every tool in the ecosystem assumes it, and a model reproducing
+       * a file from memory drops it roughly half the time — it is invisible in everything the model
+       * sees. The diff is not: it gains a `\ No newline at end of file` marker and the last line
+       * registers as changed when nothing about it changed. Measured over two long runs: roughly a sixth
+       * of edits on one model and half on another, several of them touching nothing but that.
+       *
+       * This restores the file's OWN convention rather than imposing one: a file that had no trailing
+       * newline keeps none, and a newly created file is written exactly as asked.
+       */
+      const content = existed && before.endsWith('\n') && params.content !== '' && !params.content.endsWith('\n')
+        ? `${params.content}\n`
+        : params.content;
+      writeFileSync(params.path, content, 'utf-8');
       // READ BACK AFTER: the diff is built from in-memory strings and cannot see a write that did not
       // land as asked. Reported on both paths — a create that produced nothing is the failure mode that
       // matters most, since there is no previous content to notice missing.
-      const back = readBackAfter(params.path, params.content);
+      const back = readBackAfter(params.path, content);
       if (!back.ok) return `Error: write_file wrote ${params.path} but the ${back.note}`;
-      const diff = buildUnifiedDiff(params.path, before, params.content);
+      const diff = buildUnifiedDiff(params.path, before, content);
       noteEdit(params.path, diff);
-      if (!existed) return `Created ${params.path} (${params.content.split('\n').length} lines, ${back.note}).\n${diff}`;
+      if (!existed) return `Created ${params.path} (${content.split('\n').length} lines, ${back.note}).\n${diff}`;
       // An overwrite is visible in the diff — but a full-rewrite diff of a large file is precisely the
       // result that overflows the window, so the fact that content was REPLACED (and how much of it
       // disappeared) is stated up front where no clip can reach it. Regenerating a file from memory and
       // silently dropping half of it is the failure write_file is warned about in its own description.
       const oldLines = before.split('\n').length;
-      const newLines = params.content.split('\n').length;
+      const newLines = content.split('\n').length;
       const shrank = oldLines >= 20 && newLines < oldLines * 0.6;
       const banner = shrank
         ? `OVERWROTE ${params.path}: ${oldLines} lines → ${newLines}. That is ${oldLines - newLines} lines GONE — ` +

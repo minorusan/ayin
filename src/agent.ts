@@ -1612,15 +1612,35 @@ export function renderCallLedger(): string {
  * `status --porcelain` rather than `diff --name-only` because a file the agent CREATED is a change
  * the report must name, and an untracked file is invisible to `diff`.
  */
-function treeChangedFiles(): string[] {
+/**
+ * THE TREE AS A DIFF — everything this run will hand over, created files included.
+ *
+ * `git diff` alone reports tracked modifications, so a file the run CREATED is absent from it. Both
+ * reports and the review at the door describe a handover, and a handover that omits what was created
+ * is a description of a different change. `--intent-to-add` stages existence only, never content, and
+ * touches nothing in the working tree.
+ */
+function treeDiff(): string {
+  try {
+    execSync('git add -AN .', { cwd: process.cwd(), stdio: 'ignore' });
+    return execSync('git diff', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
+  } catch {
+    return ''; // not a git repository
+  }
+}
+
+function treeChangedFiles(): Array<{ path: string; exists: boolean }> {
   try {
     return execSync('git status --porcelain', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
       .split('\n')
-      .map((l) => l.slice(3).trim())
-      .filter(Boolean);
+      .filter(Boolean)
+      // "XY path" — the two status columns, then a space. 'D' in either column is a deletion, and a
+      // report that calls a deleted file "changed" without saying so misdescribes the handover.
+      .map((l) => ({ path: l.slice(3).trim(), exists: !l.slice(0, 2).includes('D') }))
+      .filter((f) => f.path);
   } catch {
     // Not a git repository. The ledger is then the only account of what was touched.
-    return qaChangedFiles().map((f) => f.path).filter(Boolean);
+    return qaChangedFiles().filter((f) => f.path).map((f) => ({ path: f.path, exists: true }));
   }
 }
 
@@ -1657,8 +1677,8 @@ async function runAgentTurn(userInput: string): Promise<void> {
    * ASKED OF GIT, NOT OF THE QA LAYER. `qaChangedFiles()` is tool-tracked writes ∪ git-dirty, and its
    * baseline is established by `qaBeginTurn()` — which runs LATER in this same function. Called from
    * here it answered "nothing changed" on a tree that plainly had a modified file, so the budget never
-   * counted a single turn and could not fire. Measured: three restarts with `M lib/matplotlib/axes/
-   * _axes.py` in `git status` and the counter still at zero.
+   * counted a single turn and could not fire. Measured: three restarts with a modified file plainly
+   * listed by `git status` and the counter still at zero.
    *
    * `git diff --quiet` exits 1 when the tree is dirty. It depends on no harness state and cannot be
    * read before it is ready.
@@ -1777,7 +1797,9 @@ async function runAgentTurn(userInput: string): Promise<void> {
      * continue past `maxRounds` (see the loop condition) and it expires on its own budget.
      */
     if (Number.isFinite(maxRounds) && round === maxRounds - 1 && !inSkepticPass()) {
-      const changedAtCap = qaChangedFiles().filter((f) => f.path).map((f) => f.path);
+      // The TREE, not the turn's ledger: a restarted turn carrying a finished edit would otherwise
+      // report itself as diagnosis-only and be offered the wrong pass, or none.
+      const changedAtCap = treeChangedFiles().map((f) => f.path);
       const capInj = skepticInjection({
         changedFiles: changedAtCap,
         provenSinceEdit: succeededAtRound > mutatedAtRound,
@@ -2162,7 +2184,10 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // QA gate that would otherwise catch this is session-off by default AND declines on "nothing
       // changed this turn", which is the very condition here. See edit-truth.ts.
       if (unwrittenClaimNudges < 1
-          && claimsAnEditThatDoesNotExist(parsed.text ?? response, qaChangedFiles().length, toolsRunThisTurn)) {
+          // AGAINST THE TREE. The ledger is per-turn, so after a restart a real edit made by the
+          // previous incarnation reads as zero — and this guard would tell a model that correctly
+          // reported its own change to "apply or retract" a fix already sitting in the file.
+          && claimsAnEditThatDoesNotExist(parsed.text ?? response, treeChangedFiles().length, toolsRunThisTurn)) {
         unwrittenClaimNudges++;
         recordRaw(round, 'claimed an edit with nothing written', response);
         log('WARN', 'unwritten_claim', { round: String(round), attempts: String(editAttempts().length) });
@@ -2260,10 +2285,10 @@ async function runAgentTurn(userInput: string): Promise<void> {
          * and from outside that is indistinguishable from deciding it was done.
          *
          * This used to forgive ONE such reply and exit on the second (`reason: double_text`). Measured
-         * over a real benchmark: every empty-patch run in every mode ended exactly that way, six of six, each
+         * over many runs: every empty-handed run in every mode ended exactly that way, six of six, each
          * with an intention as its last words. The cap made it worse rather than better — with rounds
-         * bounded the model finished at round 89 of 90, and with the hook on `finish` the two matplotlib
-         * runs reached the cap having never called it at all.
+         * bounded the model finished at round 89 of 90, and with the hook on `finish` two further runs
+         * reached the cap having never called it at all.
          *
          * So the count is gone. Every text-only reply is answered with the same fact — nothing was
          * performed, nobody is reading this, say `finish()` if you are done — and the loop goes round.
@@ -2447,7 +2472,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // ── required project-type artifacts, UNCONDITIONALLY ──────────────
       // A REQUIRED DELIVERABLE MUST NOT DEPEND ON A CONDITIONAL GATE. The Arduino wiring diagram was
       // produced in two places, both optional: the agent calling `arduino_diagram` itself, and the QA
-      // executor's `prepare()`. Measured on the benchmark: blink scored 13/13 in one run and 10/13 in
+      // executor's `prepare()`. Measured: the same task scored 13/13 in one run and 10/13 in
       // the next with no diagram at all, because the first run's PLAN listed "run arduino_diagram" as a
       // step and the second run had no plan, while QA — the backstop — declined for an unrelated
       // reason. Two conditional producers, both off, and a required file simply absent.
@@ -2688,8 +2713,8 @@ async function runAgentTurn(userInput: string): Promise<void> {
          * the operator said no and the next move is theirs. Headless has no operator, so that return
          * abandons the turn: no agent_done, no finish, and whatever was in flight is lost.
          *
-         * Measured: a 130-round, 64-minute a real benchmark turn ended at the moment the model tried
-         * `git checkout -- compiler.py` to revert its own edits. The refusal was right; ending the turn
+         * Measured: a 130-round, 64-minute turn ended at the moment the model tried
+         * `git checkout -- <file>` to revert its own edits. The refusal was right; ending the turn
          * on it was not. The patch survived only because the revert was blocked.
          *
          * The read-only path immediately above already does the right thing here, with a comment saying
@@ -2994,7 +3019,19 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * write anyway, and the harness supplies the facts it already has for nothing.
        */
       if (name === 'finish' && !result.startsWith('Error:')) {
-        const changed = qaChangedFiles();
+        /**
+         * WHAT IS ON DISK, not what THIS turn changed — the same distinction as `treeChangedFiles`.
+         *
+         * `qaChangedFiles()` is the per-turn ledger and a restart clears it. Every gate below keys off
+         * this list: whether an empty-handed exit owes an account, whether the verification pass opens,
+         * and whether the diff is shown at the door at all. On a restarted turn the ledger is empty, so
+         * a turn holding a finished edit was treated as having changed nothing — the diff review never
+         * ran, and the scratch files it exists to catch went out unseen. Measured: the review fired
+         * zero times on a run that restarted once and shipped a reproduction script.
+         *
+         * Shaped as `{ path }` because that is all any consumer here reads.
+         */
+        const changed = treeChangedFiles();
         /**
          * THE EXIT IS GATED ON A PROOF ATTEMPT — once per turn. See `skeptic-pass.ts`.
          *
@@ -3062,8 +3099,23 @@ async function runAgentTurn(userInput: string): Promise<void> {
          */
         if (!diffReviewShown && changed.length > 0) {
           diffReviewShown = true;
-          let full = '';
-          try { full = execSync('git diff', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 }); } catch { /* not a repo */ }
+          /**
+           * THE DIFF MUST BE WHAT SHIPS, AND `git diff` IS NOT.
+           *
+           * `git diff` shows tracked modifications only. Anything the turn CREATED — a reproduction
+           * script, a rendered figure, a scratch .rst — is untracked and therefore invisible to it. So
+           * the model was handed a checklist saying "no scratch or reproduction script is left in the
+           * tree" beside a diff in which its scratch files did not appear, and confirmed honestly
+           * against what it had been shown.
+           *
+           * Measured over one long sweep: half the handovers carried files the author never saw —
+           * most of them named like tests, which the receiving project then collects and runs, and
+           * some of them images, which make a patch impossible to apply at all.
+           *
+           * `--intent-to-add` stages the existence of untracked files without their content, so one
+           * ordinary diff covers both kinds. It touches the index only; the working tree is untouched.
+           */
+          const full = treeDiff();
           const clipped = full.length > DIFF_REVIEW_MAX_CHARS
             ? `${full.slice(0, DIFF_REVIEW_MAX_CHARS)}\n… [diff clipped; ${full.length - DIFF_REVIEW_MAX_CHARS} more characters]`
             : full;
@@ -3180,13 +3232,13 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * THE PASS OPENS WHEN A CHANGE LANDS — not only when the model says it is done.
        *
        * Hanging verification off `finish()` alone meant it never ran: measured, one run edited
-       * at round 107 and never called finish at all, and the two matplotlib runs before it hit their
+       * at round 107 and never called finish at all, and the two before it hit their
        * round cap with finish_calls = 0. An edit is the moment a claim about the world exists and the
        * moment it is cheapest to check — 800 rounds later the model is defending a conclusion instead
        * of testing one.
        */
       if (MUTATING_TOOLS.has(name) && !result.startsWith('Error:') && !inSkepticPass()) {
-        const changedNow = qaChangedFiles().filter((f) => f.path).map((f) => f.path);
+        const changedNow = treeChangedFiles().map((f) => f.path);
         const editInj = skepticInjection({
           at: 'edit',
           changedFiles: changedNow,
@@ -3335,8 +3387,8 @@ async function runAgentTurn(userInput: string): Promise<void> {
    *
    * Headless is a RESTART IN PLACE. `runAgentTurn` already clears the window, the ledger, the file
    * views, the echo table, the skeptic state and the subagents at its top — that IS sober. Same
-   * process, so nothing depends on how ayin was launched, which matters inside a benchmark container
-   * where the parent command is not ours to re-issue. The new prompt is the original plus the report:
+   * process, so nothing depends on how ayin was launched, which matters wherever the parent
+   * command is not ours to re-issue. The new prompt is the original plus the report:
    * the next agent starts with something rather than from nothing, which was the whole point.
    *
    * THE CHAIN IS BOUNDED — see `RESTART_MAX`. This comment used to claim `clapsUsed()` capped it at
@@ -3354,9 +3406,8 @@ async function runAgentTurn(userInput: string): Promise<void> {
    * tree regardless — and what is handed back is the state of the evidence rather than a verdict.
    */
   if (verificationExhausted) {
-    const changed = treeChangedFiles();
-    let diff = '';
-    try { diff = execSync('git diff', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 }); } catch { /* not a repo */ }
+    const changed = treeChangedFiles().map((f) => f.path);
+    let diff = treeDiff();
     const report = unverifiedReport(originalGoal || userInput, changed, diff, verifyAttempts(), verificationAccount);
     try { writeFileSync(reportPath('ayin-unverified-report.md'), report); } catch { /* the report is evidence, not the mechanism */ }
     log('WARN', 'verify_exhausted_exit', { attempts: String(verifyAttempts()), changed: String(changed.length) });
@@ -3366,9 +3417,8 @@ async function runAgentTurn(userInput: string): Promise<void> {
   }
 
   if (lostAtRound >= 0) {
-    const changed = treeChangedFiles();
-    let diff = '';
-    try { diff = execSync('git diff', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 }); } catch { /* not a repo, or nothing to diff */ }
+    const changed = treeChangedFiles().map((f) => f.path);
+    let diff = treeDiff();
     /**
      * THE ORIGINAL TASK, NEVER THE COMPOSED ONE — or the report eats itself.
      *

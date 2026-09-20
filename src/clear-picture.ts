@@ -4,7 +4,7 @@
  * MEASURED, NOT GUESSED. Mined from 100 finding-statements across three recorded runs. The
  * model announces a diagnosis constantly and acts on it almost never: a stated finding was followed by
  * an edit SIX times in a hundred. The rest of the time it re-derives the same conclusion — verbatim,
- * 16 times in one django session, 6 in a matplotlib one — each restatement followed by re-reading the
+ * 16 times in one session and 6 in another — each restatement followed by re-reading the
  * file it just read, or re-running the repro it just ran. The vocabulary is small and formulaic enough
  * that a regex catches it, which is the only reason this is worth doing without a model call.
  *

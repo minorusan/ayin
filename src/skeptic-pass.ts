@@ -8,7 +8,7 @@
  *   computational / API behaviour        12/13 committed an edit
  *   symptom in RENDERED OUTPUT (PNG/PDF)  1/6
  *
- * matplotlib 0/2, seaborn 0/1, sphinx 0/2. And a real run said why, in its own words: it had the
+ * And a real run said why, in its own words: it had the
  * correct root cause AND the correct one-line fix (`hlcode.strip()` in `visit_literal`) and declined to
  * apply it — "Unconfirmed: I did not run the LaTeX build to verify the exact rendered output."
  *

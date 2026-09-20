@@ -593,7 +593,7 @@ const NEVER_STALE = new Set(['finish', 'perform_edit', 'write_file', 'str_replac
  * A STATE QUERY IS NEVER AN ECHO — "unchanged" is the answer, not a wasted call.
  *
  * Measured on a real run: it edited at round 107 and then asked
- * `git diff HEAD -- lib/matplotlib/axes/_axes.py` for the next EIGHT HUNDRED rounds, 443 of which were
+ * `git diff HEAD -- <the file it had just edited>` for the next EIGHT HUNDRED rounds, 443 of which were
  * refused because the bytes were identical. They were identical because the edit was still there,
  * which is exactly what it was asking. The rule punished the model for checking its own work and then
  * left it unable to finish, because it would not finish without confirming.

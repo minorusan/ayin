@@ -188,7 +188,7 @@ export function pathOfLine(line: string): string | null {
  * A hit on a DEFINITION beats a hit on a use — worth one extension rank, no more.
  *
  * Python states this unambiguously in a way most languages do not: `def name(` and `class Name` at the
- * start of a line are the definition and nothing else is. Searching for `hist` in matplotlib returns the
+ * start of a line are the definition and nothing else is. Searching a large library for a method returns the
  * method, every call of it, and every mention in a docstring; the question is nearly always the first.
  *
  * Deliberately SMALL. It breaks ties between files of the same kind; it must not lift a test file that

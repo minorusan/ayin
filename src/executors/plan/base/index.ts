@@ -37,7 +37,7 @@ const config: ExecutorConfig = {
  *
  * EVERY SECTION BODY IS A TODO MARKER, and that is deliberate. An empty stub is in one respect WORSE
  * than no README at all: it satisfies "the project has a README" for anything that only checks
- * existence, while containing nothing. Measured on the Arduino benchmark — on the grounding-only path
+ * existence, while containing nothing. Measured on the Arduino suite — on the grounding-only path
  * (no plan document to say "fill in the README"), the stub shipped untouched. So the stub announces
  * its own incompleteness in a form both a reader and a checker can see, and the deliverable list that
  * reaches the model says plainly that a stub counts as MISSING.

@@ -38,10 +38,10 @@ const FUNC = /^(?<indent>)(?:async\s+)?def\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)/;
  * TRIPLE-QUOTED TEXT IS NOT CODE, and reading it as code silently truncates a class.
  *
  * Indentation is this parser's brace, so a line at column 0 ends the class body. Prose inside a
- * docstring is under no such obligation: matplotlib's `_axes.py` wraps a parameter description across
- * lines and line 4365 is the bare word `optional.` at column 0. From there the parser believed
- * `class Axes` had ended — 32 of its 75 methods were dropped, and the last one it did record was
- * handed the whole 3,869-line gap as its body. The skeleton for an 8,164-line file came back 93 lines
+ * docstring is under no such obligation. A real file wraps a parameter description across lines,
+ * leaving the bare word `optional.` at column 0 — and from there the parser believed the class had
+ * ended. 32 of its 75 methods were dropped, and the last one it did record was handed the whole
+ * 3,869-line gap as its body. The skeleton for an 8,164-line file came back 93 lines
  * long and looked entirely plausible.
  *
  * Returns a predicate that is true for lines that BEGAN inside a fence. The opening line is still
@@ -227,8 +227,8 @@ export const python: SurfaceLanguage = {
   /**
    * Which fields this body writes and which calls it makes. Syntax only — see `BodyFacts`.
    *
-   * Docstrings are skipped rather than scanned. A matplotlib method carries forty lines of prose full of
-   * parentheses, and every `Parameters(` in it would arrive looking exactly like a call.
+   * Docstrings are skipped rather than scanned. A documented method carries dozens of lines of prose
+   * full of parentheses, and every `Parameters(` in it would arrive looking exactly like a call.
    */
   bodyFactsOf(bodyLines) {
     const assigns = new Set<string>();
@@ -250,7 +250,7 @@ export const python: SurfaceLanguage = {
        *
        * `self.axes.dataLim.intervalx = xmin, xmax` writes state that does not belong to this object at
        * all, and reporting it as `axes` would say the opposite of what happened — `axes` is not
-       * rebound, its grandchild is. Matplotlib 14623 is that line and nothing else; a scan that
+       * rebound, its grandchild is. A real task turned on that line and nothing else; a scan that
        * collapsed it to `axes` would have pointed the model away from its own bug.
        */
       const set = /^\s*self\.(?<name>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*(?:\[[^\]]*\])?\s*(?:[-+*/|&^%@]|\/\/|\*\*|>>|<<)?=(?!=)/.exec(line);

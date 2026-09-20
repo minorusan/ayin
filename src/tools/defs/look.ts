@@ -7,8 +7,9 @@ import { isImagePath, preprocessImage, addPendingImage } from '../../image.js';
  * EYES. The agent renders something and then actually looks at it.
  *
  * Measured across 20 real runs: bugs whose symptom is computational got an edit 12/13 times;
- * bugs whose symptom is a rendered artefact — a plot, a PDF, a UML diagram — got one 1/6. matplotlib
- * 0/2, seaborn 0/1, docs tooling 0/2. One of them had the correct root cause and the correct one-line fix
+ * bugs whose symptom is a rendered artefact — a plot, a PDF, a UML diagram — got one 1/6, and the
+ * misses were spread evenly across plotting and documentation tooling. One of them had the correct
+ * root cause and the correct one-line fix
  * written out, and refused to apply it: "Unconfirmed: I did not run the LaTeX build to verify the exact
  * rendered output."
  *
