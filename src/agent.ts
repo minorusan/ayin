@@ -38,7 +38,7 @@ import { shapeFileResult, resetFileViews } from './file-view.js';
 import { grepRewrite } from './bash-to-grep.js';
 import { skepticInjection, inSkepticPass, closeSkepticPass, resetSkepticPass, resetSkepticRun, beginVerifyTurn, tickSkepticPass, verifyAttempts, verifyBudgetSpent } from './skeptic-pass.js';
 import { refuseIfEcho, resetOutputEchoes, isStateQuery } from './tool-guard.js';
-import { ACCOUNT_REQUEST, LOST_ACCOUNT_REQUEST, beginLostTurn, lostNudge, lostReport, noteCall, resetLost, restartDepth, restartExhausted, unverifiedReport } from './lost.js';
+import { ACCOUNT_REQUEST, IDLE_CALL, LOST_ACCOUNT_REQUEST, beginLostTurn, lostNudge, lostReport, noteCall, resetLost, restartDepth, restartExhausted, unverifiedReport } from './lost.js';
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
 import { stoppedShort } from './announced.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
@@ -2205,7 +2205,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
           `You wrote a ${invented} call in a format this runtime does not parse, so NOTHING RAN and the file `
           + `is unchanged — do not assume the edit landed. Make the call again using the exact tool-call `
           + `format described in your instructions, not a bracketed function-call line.`));
-        const unparsedWhy = noteCall(round, 'reply', '', response.slice(0, 2000), true);
+        const unparsedWhy = noteCall(round, IDLE_CALL, '', response.slice(0, 2000), true);
         if (unparsedWhy) {
           lostAtRound = round;
           lostWhy = `${unparsedWhy.why} (unparsed ${invented} call)`;
@@ -2343,7 +2343,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
          * append it to, and the round is discarded, so a note would vanish with it.
          */
         lastDiscardedReply = (parsed.text ?? response ?? '').trim();
-        const idleWhy = noteCall(round, 'reply', '', response.slice(0, 2000), true);
+        const idleWhy = noteCall(round, IDLE_CALL, '', response.slice(0, 2000), true);
         if (idleWhy) {
           lostAtRound = round;
           lostWhy = `${idleWhy.why} (no tool call made)`;

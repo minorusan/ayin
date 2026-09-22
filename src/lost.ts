@@ -58,6 +58,27 @@ const SAME_CALL = 6;
 /** Refusals in a row. The productive phase of a working run never exceeded two — see the header. */
 const SAME_REFUSAL = 3;
 
+/**
+ * THE SYNTHETIC ENTRY A ROUND WITH NO TOOL CALL RECORDS — and the one entry `SAME_CALL` cannot read.
+ *
+ * A round that makes no call still has to reach the detector, so the agent loop notes one of these with
+ * the reply text as the RESULT and no params at all. That shape breaks the same-call rule, because
+ * `callKey` is `(tool, params)` and every one of these hashes to the same thing: six replies in a
+ * window count as six copies of one call however different they were.
+ *
+ * Measured, session 18-16-34: twenty-one rounds, sixteen successful tool calls, six of them prose
+ * rounds spread across the turn at rounds 2, 9, 13, 14, 20 and 21. The rule fired on round 21 and the
+ * turn ended — nineteen seconds later the model produced a correct, detailed answer, which is what a
+ * run that is "repeating itself and nothing it did told it anything new" does not do.
+ *
+ * The rule's own premise says why it cannot apply: "the same CALL, whatever it returned … output that
+ * differs might mean the world moved". A reply has no output separate from itself. Its entire content
+ * is the result, so SAME_PAIR — which hashes the result — already catches the real failure, identical
+ * narration repeated, at a STRICTER four. And consecutive narration is the refusal streak's job, at
+ * three. Nothing is lost by leaving this one out, and a progressing run stops being clapped for it.
+ */
+export const IDLE_CALL = 'reply';
+
 /** Length of an A-B-A-B oscillation. Two calls taking turns is a cycle a repeat count cannot see. */
 const ALTERNATION = 6;
 
@@ -207,7 +228,12 @@ export function noteCall(round: number, tool: string, params: string, result: st
     for (const c of window) counts.set(c.key, (counts.get(c.key) ?? 0) + 1);
     const worst = [...counts.values()].reduce((a, b) => Math.max(a, b), 0);
     const byCall = new Map<string, number>();
-    for (const c of window) byCall.set(c.callKey, (byCall.get(c.callKey) ?? 0) + 1);
+    // `IDLE_CALL` is excluded, not counted — see its header. It is the one entry whose params are empty
+    // by construction, so counting it here counts every prose round as the same call.
+    for (const c of window) {
+      if (c.tool === IDLE_CALL) continue;
+      byCall.set(c.callKey, (byCall.get(c.callKey) ?? 0) + 1);
+    }
     const sameCall = [...byCall.values()].reduce((a, b) => Math.max(a, b), 0);
     if (worst >= SAME_PAIR) {
       why = `the same call returned the same result ${worst} times within the last ${window.length}`;
