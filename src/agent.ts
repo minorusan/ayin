@@ -2837,8 +2837,16 @@ async function runAgentTurn(userInput: string): Promise<void> {
           const body = readArtifact(held);
           if (body && body !== '(artifact file not found)') {
             const served = `${body}${guard.note ?? ''}`;
-            log('INFO', 'tool_served_from_cache', { tool: name, id: held.id, bytes: String(held.bytes) });
+            log('INFO', 'tool_served_from_cache', { tool: name, params: paramPreviewOf(params), id: held.id, bytes: String(held.bytes) });
             setAgentStatus('');
+            // THE CALL CARD, which this branch was not printing: the header above promises the chat
+            // "shows a tool card", and it showed the RESULT card only — the card carrying the arguments
+            // is past this `continue`. A repeat therefore arrived as a bare body with no path on it.
+            // Observed: a model looped on read_file(IconWithTextView.cs) for five rounds while narrating
+            // that it wanted other files. The cache served the right artifact every time, but with no
+            // header the operator saw the same 21 lines under four different stated intentions and read
+            // it as ayin handing back the wrong file. See the log field added above.
+            addMessage('tool', formatToolCallForChat(name, paramPreviewOf(params), getTool(name)?.icon));
             addMessage('tool', formatToolResultForChat(name, served, 0));
             noteRanCall(name, paramPreviewOf(params), true, body);
             pushToWindow('assistant', textPrefix ? `${textPrefix}\n[${name}: ${guard.label}]` : `[${name}: ${guard.label}]`);
