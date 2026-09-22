@@ -1,8 +1,8 @@
 {
   "name": "ayin",
-  "version": "1.0.405",
+  "version": "1.0.406",
   "license": "MIT",
-  "description": "A small, model-agnostic terminal coding agent \u2014 an agentic loop in your shell against a self-hosted LLM (Ollama or any OpenAI-compatible endpoint).",
+  "description": "A small, model-agnostic terminal coding agent — an agentic loop in your shell against a self-hosted LLM (Ollama or any OpenAI-compatible endpoint).",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
