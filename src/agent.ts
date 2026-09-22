@@ -1998,7 +1998,20 @@ async function runAgentTurn(userInput: string): Promise<void> {
      * `[str_replace(path=…, old_str=…, new_str=…)]` after a refused edit. Zero parsed calls reads as a
      * finished answer, so the loop printed it as prose, said "Done.", and edited nothing.
      *
-     * Each re-ask costs a round, which is what bounds this: the round budget already terminates the turn.
+     * THE RE-ASK IS NOT SELF-LIMITING, AND THE ROUND BUDGET IS NOT A BOUND.
+     *
+     * "Each re-ask costs a round, which is what bounds this" was the original claim, and it is wrong for
+     * the same reason the idle-round branch further down is wrong without `noteCall`: the round is
+     * DISCARDED, so the next prompt rebuilds from identical history and the model answers identically.
+     * The shape it cannot spell is the shape its weights produce; being told so does not change them.
+     *
+     * Measured, session 25b32f64 on gemma4:26b: the work was done — a PDF converted at round 8 — and the
+     * model wrote its `finish` call in a shape no dialect parses. Rounds 9 through 14 are the same
+     * unparsed `finish`, the same re-ask, ~6s apart, and the only thing that stopped it was the operator.
+     *
+     * So the round joins the clap's window, exactly as an idle round does. Keyed on the reply text, so
+     * three identical unparsed calls trip the refusal streak and a restart replaces the context that
+     * cannot spell the call — the one remedy that can diverge where re-asking cannot.
      */
     if (!hasToolCalls) {
       const invented = unexecutedCallText(parsed.text ?? response, getAllTools().map((t) => t.name));
@@ -2010,6 +2023,12 @@ async function runAgentTurn(userInput: string): Promise<void> {
           `You wrote a ${invented} call in a format this runtime does not parse, so NOTHING RAN and the file `
           + `is unchanged — do not assume the edit landed. Make the call again using the exact tool-call `
           + `format described in your instructions, not a bracketed function-call line.`));
+        const unparsedWhy = noteCall(round, 'reply', '', response.slice(0, 2000), true);
+        if (unparsedWhy) {
+          lostAtRound = round;
+          lostWhy = `${unparsedWhy.why} (unparsed ${invented} call)`;
+          break roundLoop;
+        }
         continue;
       }
     }
