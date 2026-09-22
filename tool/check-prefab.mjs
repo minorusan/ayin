@@ -299,15 +299,31 @@ const inspect = (await import(`file://${join(DIST, 'tools', 'defs', 'prefab_insp
 const edit = (await import(`file://${join(DIST, 'tools', 'defs', 'prefab_edit.js')}`)).tool;
 ok(inspect.slash?.command === 'prefab' && inspect.slash?.param === 'path', '/prefab runs prefab_inspect');
 ok(inspect.slash?.overlay === true, 'and shows its answer in an overlay — a tree is a document, not a chat line');
-ok(inspect.slash?.defaults?.format === 'tree',
-  'the operator gets the readable tree while the agent gets JSON from the same tool');
 ok(!edit.slash, 'prefab_edit has NO slash: a write is the agent\'s move, made from an inspect it just read');
 const refused = await inspect.execute({ path: join(project, 'Assets', 'Scripts', 'Widget.cs') });
 ok(/not a \.prefab/.test(refused), 'inspecting a .cs is refused by the tool, not by the parser');
-const asJson = JSON.parse(await inspect.execute({ path: PREFAB, depth: '1' }));
-ok(asJson.roots[0].components.some((c) => c.type === 'Widget'), 'the tool returns the map as JSON by default');
-const asTree = await inspect.execute({ path: PREFAB, format: 'tree' });
-ok(asTree.startsWith('Assets/Widget.prefab'), 'and a tree when asked', asTree.split('\n')[0]);
+
+// THE SHAPE FIRST. The default used to be `JSON.stringify(map)` — 2.6 MB on a real 45-object popup,
+// clipped long before it reached the model, and unreadable if it had not been.
+const asTree = await inspect.execute({ path: PREFAB, depth: '1' });
+ok(asTree.startsWith('Assets/Widget.prefab'), 'the tool returns the HIERARCHY by default', asTree.split('\n')[0]);
+const asJson = JSON.parse(await inspect.execute({ path: PREFAB, depth: '1', format: 'json' }));
+ok(asJson.roots[0].components.some((c) => c.type === 'Widget'), 'and the full map as JSON when asked for it');
+
+// …THEN ONE NODE. Without this the only way to read one component's properties was `scalars=true` on
+// the whole file, which is how a model spent 69,141 characters reaching four numbers.
+const rootName = asJson.roots[0].name;
+const atComponent = await inspect.execute({ path: PREFAB, at: `${rootName}/Widget` });
+ok(!atComponent.startsWith('Error:') && /Widget/.test(atComponent),
+  'at=Object/Component opens that component', atComponent.split('\n')[1]);
+ok(!/^Error/.test(await inspect.execute({ path: PREFAB, at: rootName })),
+  'at=Object opens that subtree');
+const missed = await inspect.execute({ path: PREFAB, at: `${rootName}/NoSuchThing` });
+ok(missed.startsWith('Error:') && /Available/.test(missed),
+  'a miss NAMES the alternatives — a bare refusal costs a round and teaches nothing', missed.slice(0, 90));
+const tooDeep = await inspect.execute({ path: PREFAB, at: `${rootName}/Widget/AndThenSome` });
+ok(/component, so the address ends there/.test(tooDeep),
+  'and an address that runs past a component says so', tooDeep.slice(0, 80));
 
 rmSync(project, { recursive: true, force: true });
 

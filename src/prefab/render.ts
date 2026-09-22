@@ -117,3 +117,119 @@ export function renderPrefabTree(map: PrefabMap, opts: { everything?: boolean } 
   }
   return out.join('\n');
 }
+
+/**
+ * ONE COMPONENT, EVERY PROPERTY — references resolved, nested maps and lists expanded.
+ *
+ * The tree above deliberately prints references and hides scalars, because a person scanning a
+ * hierarchy wants the shape. This is the opposite question: "what is m_AnchorMin on THIS RectTransform",
+ * and there the scalars are the whole answer.
+ */
+function propLines(key: string, prop: PropValue, pad: string): string[] {
+  const asRef = refLine(prop);
+  if (asRef) return [`${pad}${key}: ${asRef}`];
+  if (prop.kind === 'ref') return [`${pad}${key}: ${prop.ref?.raw ?? '(unresolved reference)'}`];
+  if (prop.kind === 'scalar') return [`${pad}${key}: ${prop.value ?? ''}`];
+  if (prop.kind === 'list') {
+    const items = prop.items ?? [];
+    if (!items.length && !prop.clipped) return [`${pad}${key}: []`];
+    /**
+     * AN INLINE MAP IS NOT A LIST OF ONE.
+     *
+     * The YAML reader classifies `{x: 0.5, y: 0}` as a ref — it opens with a brace, like a fileID does
+     * — and wraps it in a one-item list. So every vector on a RectTransform printed as `m_AnchorMin:`
+     * and then `[0]: {x: 0.5, y: 0}` underneath: two lines and an index to carry one value, on the
+     * eleven properties a person opens a RectTransform to read.
+     *
+     * Collapsed only when the single item has nothing resolved behind it, which is exactly the inline
+     * case; a one-element array of real references still prints as a list, because there the index is
+     * information. Display side only — the map is untouched and `format=json` is unchanged.
+     */
+    const only = items.length === 1 && !prop.clipped ? items[0] : null;
+    if (only && (only.kind === 'scalar' || (only.kind === 'ref' && !refLine(only)))) {
+      return [`${pad}${key}: ${only.kind === 'scalar' ? only.value ?? '' : only.ref?.raw ?? ''}`];
+    }
+    const out = [`${pad}${key}:`];
+    items.forEach((item, i) => out.push(...propLines(`[${i}]`, item, pad + INDENT)));
+    if (prop.clipped) out.push(`${pad}${INDENT}(+${prop.clipped} more)`);
+    return out;
+  }
+  if (prop.kind === 'map') {
+    const fields = Object.entries(prop.fields ?? {});
+    if (!fields.length) return [`${pad}${key}: {}`];
+    const out = [`${pad}${key}:`];
+    for (const [k, v] of fields) out.push(...propLines(k, v, pad + INDENT));
+    return out;
+  }
+  return [`${pad}${key}: ${scalarLine(prop)}`];
+}
+
+/** The names a caller could have meant, so a miss teaches the address instead of just refusing it. */
+function choicesAt(objects: ObjectMap[], obj: ObjectMap | null): string {
+  const kids = objects.map((o) => o.name || '(unnamed)');
+  const comps = obj ? obj.components.map((c) => c.type) : [];
+  const parts: string[] = [];
+  if (kids.length) parts.push(`children: ${[...new Set(kids)].join(', ')}`);
+  if (comps.length) parts.push(`components: ${[...new Set(comps)].join(', ')}`);
+  return parts.join('   |   ') || '(nothing below this point)';
+}
+
+/**
+ * `GameOverLayer/Panel/RectTransform` — one address into the map.
+ *
+ * WHY THIS EXISTS. Without it the only way to see one component's properties was `scalars=true` on the
+ * whole file, and a model asked to check one icon did exactly that: 69,141 characters of every property
+ * of every component of a 45-object prefab, to read four numbers. The map already knows the shape; what
+ * was missing was a way to ask it a question.
+ *
+ * Segments are GameObject names, walked from the roots, and the LAST one may instead name a component
+ * on the object reached — which is what makes the address read the way a person says it. Ending on an
+ * object prints that subtree; ending on a component prints every property it has.
+ *
+ * A MISS NAMES THE ALTERNATIVES. A bare "not found" costs a round and teaches nothing, and the caller
+ * here is usually a model that guessed at a name it has not seen.
+ */
+export function renderPrefabAt(map: PrefabMap, at: string): string {
+  const segs = at.split('/').map((s) => s.trim()).filter(Boolean);
+  if (!segs.length) return 'Error: at is empty — use an address like GameOverLayer/Panel/RectTransform.';
+
+  const eq = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+  let level = map.roots;
+  let obj: ObjectMap | null = null;
+
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i];
+    const matches = level.filter((o) => eq(o.name, seg));
+    if (matches.length) {
+      obj = matches[0];
+      level = obj.children;
+      if (matches.length > 1 && i === segs.length - 1) {
+        return [`${matches.length} objects here are named ${seg}; showing the first.`, '',
+          ...objectLines(obj, 0, false)].join('\n');
+      }
+      continue;
+    }
+    // Not an object — the last segment may name a component instead, which is where an address ends.
+    const pool = obj ? obj.components : map.loose;
+    const comp = pool.find((c) => eq(c.type, seg) || eq(c.unityType, seg));
+    if (comp) {
+      if (i !== segs.length - 1) {
+        return `Error: ${seg} is a component, so the address ends there — `
+          + `drop "${segs.slice(i + 1).join('/')}" from the end.`;
+      }
+      const where = obj ? `${obj.path || obj.name} · ` : '';
+      const label = comp.type === comp.unityType ? comp.type : `${comp.type}  (${comp.unityType})`;
+      const head = `${map.file}\n${where}${label}${comp.enabled === '0' ? '  [disabled]' : ''}`
+        + (comp.script ? `\nscript: ${comp.script.name} at ${comp.script.dir ?? ''}` : '')
+        + `\nfileID ${comp.fileId}, line ${comp.line}`;
+      const body: string[] = [];
+      for (const [key, prop] of Object.entries(comp.properties)) body.push(...propLines(key, prop, INDENT));
+      return [head, '', ...(body.length ? body : ['  (no properties serialized)'])].join('\n');
+    }
+    return `Error: no "${seg}" under ${segs.slice(0, i).join('/') || '(the file root)'}. `
+      + `Available — ${choicesAt(level, obj)}`;
+  }
+
+  if (!obj) return `Error: ${at} did not resolve to anything in ${map.file}.`;
+  return [`${map.file}`, '', ...objectLines(obj, 0, false)].join('\n');
+}

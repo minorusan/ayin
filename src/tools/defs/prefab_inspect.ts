@@ -2,7 +2,7 @@ import type { Tool } from '../base.js';
 import { existsSync } from 'node:fs';
 import { resolveAgainstCwd } from '../lib.js';
 import { buildPrefabMap, isInspectable } from '../../prefab/map.js';
-import { renderPrefabTree } from '../../prefab/render.js';
+import { renderPrefabTree, renderPrefabAt } from '../../prefab/render.js';
 import { projectRootFor } from '../../prefab/edit.js';
 import { resolveProject } from '../explore/index.js';
 
@@ -10,23 +10,26 @@ export const tool: Tool = {
     name: 'prefab_inspect',
     icon: '🔬',
     description:
-      'READ a Unity .prefab, .unity scene or .asset as a STRUCTURED MAP instead of raw YAML: the GameObject '
-      + 'hierarchy, the components on each object with their real class names, every property, and every asset '
-      + 'reference RESOLVED from its guid to what it actually points at ("TMP_FontAsset named Montserrat-SemiBold '
-      + 'SDF.asset at Assets/TextMesh Pro/…"). Nested prefab instances are expanded with their overrides. Use this '
-      + 'instead of read_file for any Unity asset: a prefab names nothing it depends on — every edge in it is a '
-      + '32-hex guid — so reading the file text tells you the numbers and not the wiring. Read-only.',
+      'READ a Unity .prefab, .unity scene or .asset as a STRUCTURED MAP instead of raw YAML. Called with just '
+      + 'a path it returns the HIERARCHY: every GameObject, the components on each with their real class names, '
+      + 'and every asset reference RESOLVED from its guid to what it points at ("TMP_FontAsset named '
+      + 'Montserrat-SemiBold SDF.asset at Assets/TextMesh Pro/…"). Nested prefab instances are expanded with their '
+      + 'overrides. THEN PASS `at` to open ONE node in full: at="GameOverLayer/Panel/RectTransform" prints every '
+      + 'property of that RectTransform, at="GameOverLayer/Panel" prints that subtree. Read the hierarchy first, '
+      + 'then ask for the node you want — do NOT dump the whole file with scalars=true to reach one component. '
+      + 'Use this instead of read_file for any Unity asset: a prefab names nothing it depends on — every edge in '
+      + 'it is a 32-hex guid — so reading the file text tells you the numbers and not the wiring. Read-only.',
     parameters: [
       { name: 'path', type: 'string', description: 'The .prefab, .unity or .asset file. Absolute, or relative to the cwd.', required: true },
+      { name: 'at', type: 'string', description: 'A node inside the file, as a path of GameObject names ending in an optional component: "GameOverLayer/Panel/RectTransform" for that component\'s every property, "GameOverLayer/Panel" for that subtree. Omit it for the whole hierarchy.', required: false },
       { name: 'depth', type: 'string', description: 'How many nested-prefab levels to expand. Default 3, 0 keeps it to this file.', required: false },
-      { name: 'format', type: 'string', description: 'json (default — the full map) or tree (a readable hierarchy).', required: false },
-      { name: 'scalars', type: 'string', description: 'tree only: true also prints plain scalar properties, not just references.', required: false },
+      { name: 'format', type: 'string', description: 'tree (default — the hierarchy) or json (the full map, every property of every component; large).', required: false },
+      { name: 'scalars', type: 'string', description: 'tree only: true also prints plain scalars on EVERY component. Prefer `at` — this is the whole file.', required: false },
     ],
     slash: {
       command: 'prefab',
       param: 'path',
       usage: '/prefab <path to .prefab|.unity|.asset> — the hierarchy, its components and what each reference points at',
-      // The operator gets the readable tree in a pager; the agent, calling the same tool, gets JSON.
       defaults: { format: 'tree' },
       overlay: true,
     },
@@ -43,9 +46,21 @@ export const tool: Tool = {
       const depth = params.depth === undefined ? 3 : Math.max(0, Math.min(8, Number(params.depth) || 0));
       const map = await buildPrefabMap(abs, { root, depth });
 
-      if ((params.format ?? 'json').toLowerCase() === 'tree') {
-        return renderPrefabTree(map, { everything: params.scalars === 'true' });
-      }
-      return JSON.stringify(map, null, 2);
+      // `at` ANSWERS A QUESTION; the default answers "what is in here". It wins over `format` because
+      // asking for one node and being handed the file is the behaviour this parameter exists to remove.
+      if (params.at && params.at.trim()) return renderPrefabAt(map, params.at.trim());
+
+      /**
+       * THE HIERARCHY IS THE DEFAULT, and JSON is what you ask for.
+       *
+       * It was the other way round: the agent got `JSON.stringify(map)` unless it said otherwise. On a
+       * 45-object popup that is 2,586,026 characters over 45,310 lines — every property of every
+       * component, most of them Unity bookkeeping, none of it readable and all of it clipped long before
+       * it reached the model. The same file as a tree is 332 lines. A model that cannot see the shape
+       * cannot ask for a part, so it reached for `scalars=true` and got 69,141 characters instead of
+       * the four numbers it wanted. Shape first, then `at`.
+       */
+      if ((params.format ?? 'tree').toLowerCase() === 'json') return JSON.stringify(map, null, 2);
+      return renderPrefabTree(map, { everything: params.scalars === 'true' });
     },
   };
