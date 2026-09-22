@@ -280,6 +280,33 @@ export function noteCall(round: number, tool: string, params: string, result: st
  * not run in this container, an artefact nobody can see, a test that was already red. That sentence is
  * the whole value of the handoff, and it has to come from the agent while it can still answer.
  */
+/**
+ * WHAT THE CLAP ASKS FOR BEFORE IT ENDS THE TURN.
+ *
+ * The sibling of `ACCOUNT_REQUEST`, and the same argument: the one thing not derivable from the log is
+ * what the agent concluded, and it can only be got while it can still answer.
+ *
+ * The clap's commonest trigger on a read-only task is three replies in a row with no tool call, because
+ * `finish()` is the only exit and narrating is not working. But when the task was a QUESTION the
+ * narration is not a step towards the work, it IS the work — six files read and an answer forming — and
+ * the turn ended on it. Taking the last discarded reply is better than nothing and is not the same
+ * thing: it is whatever the model happened to be writing when the third discard landed, not an answer
+ * it was asked for.
+ *
+ * ONE ROUND, asked once, and the reply is kept whatever shape it has. A model that answers this with
+ * nothing has told us something too, and asking twice is the loop the clap just fired to stop.
+ */
+export const LOST_ACCOUNT_REQUEST = [
+  'This turn is ending now: the last few rounds repeated themselves without changing anything.',
+  '',
+  'Before it does, answer in plain prose — no tool calls, and do not call finish:',
+  '1. What did you ESTABLISH? Name the files, the functions, the mechanism — what you actually read.',
+  '2. What is still unresolved, and what one step would settle it?',
+  '',
+  'If the task was a question, this is where you answer it. Do not re-run anything and do not edit.',
+  'Your next reply is the last word and it is kept verbatim.',
+].join('\n');
+
 export const ACCOUNT_REQUEST = [
   'Verification has been attempted three times without settling, so this turn is ending now.',
   '',
@@ -405,7 +432,7 @@ export function lostReport(goal: string, changed: string[] | null, diff: string,
    * is how a restart re-derives the loop it was restarted to escape.
    */
   const said = audience === 'operator' && lastWord.trim()
-    ? `## What it last said — in its own words\n${lastWord.trim()}\n\n`
+    ? `## In the agent's own words\n${lastWord.trim()}\n\n`
     : '';
   const mandate = edited
     /**

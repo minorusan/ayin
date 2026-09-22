@@ -38,7 +38,7 @@ import { shapeFileResult, resetFileViews } from './file-view.js';
 import { grepRewrite } from './bash-to-grep.js';
 import { skepticInjection, inSkepticPass, closeSkepticPass, resetSkepticPass, resetSkepticRun, beginVerifyTurn, tickSkepticPass, verifyAttempts, verifyBudgetSpent } from './skeptic-pass.js';
 import { refuseIfEcho, resetOutputEchoes, isStateQuery } from './tool-guard.js';
-import { ACCOUNT_REQUEST, beginLostTurn, lostNudge, lostReport, noteCall, resetLost, restartDepth, restartExhausted, unverifiedReport } from './lost.js';
+import { ACCOUNT_REQUEST, LOST_ACCOUNT_REQUEST, beginLostTurn, lostNudge, lostReport, noteCall, resetLost, restartDepth, restartExhausted, unverifiedReport } from './lost.js';
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
 import { stoppedShort } from './announced.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
@@ -1912,6 +1912,23 @@ async function runAgentTurn(userInput: string): Promise<void> {
    * wanted. See `lostReport`.
    */
   let lastDiscardedReply = '';
+  /**
+   * THE CLAP'S LAST WORD — one round, asked once. See `LOST_ACCOUNT_REQUEST`.
+   *
+   * Only when the turn is about to END with a report a PERSON reads: interactive always exits, and
+   * headless exits only once the restarts are spent. A headless clap that is going to relaunch spends
+   * the round on the restart instead, and the successor is handed a mandate rather than the previous
+   * agent's narration — which is how a restart re-derives the loop it was restarted to escape.
+   */
+  let lostAccountAsked = false;
+  let lostAccount = '';
+  const askForLastWord = (at: number): boolean => {
+    if (lostAccountAsked || (HEADLESS && !restartExhausted())) return false;
+    lostAccountAsked = true;
+    log('INFO', 'lost_account_requested', { round: String(at) });
+    pushToWindow('user', renderToolResult(LOST_ACCOUNT_REQUEST));
+    return true;
+  };
   /** The diagnosis handover happens ONCE per turn — see the block that uses it. */
   let pictureAsked = false;
   /** Set between asking for the picture and receiving it, so the next reply is read as the brief. */
@@ -2038,6 +2055,26 @@ async function runAgentTurn(userInput: string): Promise<void> {
     setStatus({ llm: { phase: 'postprocessing', detail: 'ayin' } });
     const parsed = parseToolCalls(response);
     setStatus({ llm: null });
+    /**
+     * THE CLAP'S ACCOUNT ARRIVES HERE, AND ENDING ON IT IS UNCONDITIONAL.
+     *
+     * `askForLastWord` has already told the model "this turn is ending now", so the turn ends now,
+     * whatever comes back. That is why this sits directly on the parse rather than beside the
+     * verification account further down: every guard between the two can swallow a reply — the
+     * truncation re-ask, the unparsed-call re-ask, the diagnosis handover, the discard — and any one of
+     * them leaves the account uncaptured and the loop still running, having announced that it was over.
+     *
+     * Whatever shape the reply has is the last word, prose or tool calls, kept verbatim including
+     * nothing. A model that answers a direct question with silence has told us something, and asking
+     * twice is the loop the clap just fired to stop.
+     */
+    if (lostAccountAsked && !lostAccount) {
+      lostAccount = (parsed.text ?? response ?? '').trim() || '(the agent answered with no text)';
+      log('INFO', 'lost_account_captured', {
+        chars: String(lostAccount.length), hadToolCall: String(parsed.toolCalls.length > 0),
+      });
+      break roundLoop;
+    }
     /**
      * THE MARKER IS A SIGNAL TO THE HARNESS, NEVER TEXT FOR THE OPERATOR — so it is removed HERE, once,
      * before anything can print it.
@@ -2172,6 +2209,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
         if (unparsedWhy) {
           lostAtRound = round;
           lostWhy = `${unparsedWhy.why} (unparsed ${invented} call)`;
+          if (askForLastWord(round)) continue;
           break roundLoop;
         }
         continue;
@@ -2306,7 +2344,12 @@ async function runAgentTurn(userInput: string): Promise<void> {
          */
         lastDiscardedReply = (parsed.text ?? response ?? '').trim();
         const idleWhy = noteCall(round, 'reply', '', response.slice(0, 2000), true);
-        if (idleWhy) { lostAtRound = round; lostWhy = `${idleWhy.why} (no tool call made)`; break roundLoop; }
+        if (idleWhy) {
+          lostAtRound = round;
+          lostWhy = `${idleWhy.why} (no tool call made)`;
+          if (askForLastWord(round)) continue;
+          break roundLoop;
+        }
         continue;
       }
       // A final answer that only says WHAT TO LOOK FOR is not an answer. One nudge, then accepted
@@ -2820,7 +2863,14 @@ async function runAgentTurn(userInput: string): Promise<void> {
         noteRanCall(name, JSON.stringify(params).slice(0, 80), false, guard.label ?? 'blocked');
         pushToWindow('user', renderToolResult(guard.note ?? 'This call was blocked.'));
         const blockWhy = noteCall(round, name, JSON.stringify(params), guard.label ?? 'blocked', true);
-        if (blockWhy?.kind === 'clap') { lostAtRound = round; lostWhy = blockWhy.why; break roundLoop; }
+        if (blockWhy?.kind === 'clap') {
+          lostAtRound = round;
+          lostWhy = blockWhy.why;
+          // `continue roundLoop`, not `continue`: this sits inside the tool-dispatch loop, and a bare
+          // one would step to the next call in the batch instead of taking the extra round.
+          if (askForLastWord(round)) continue roundLoop;
+          break roundLoop;
+        }
         if (blockWhy) pushToWindow('user', renderToolResult(lostNudge(blockWhy.why)));
         continue;
       }
@@ -3475,6 +3525,9 @@ async function runAgentTurn(userInput: string): Promise<void> {
         lostAtRound = round;
         lostWhy = lostWhyNow.why;
         pushToWindow('user', renderToolResult(echo ?? clipForWindow(result)));
+        // `continue roundLoop` for the same reason as the blocked-call clap above: this is the tool
+        // loop, and the last word has to come from the model, not from the next call in the batch.
+        if (askForLastWord(round)) continue roundLoop;
         break roundLoop;
       }
       /**
@@ -3645,7 +3698,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
     // turn's prompt and carries the mandate. Interactive exits with a reply and starts no successor, so
     // the operator gets the facts and no "your job" paragraph written for a machine. Composed once:
     // `lostReport` folds this attempt's dead ends into the run's ledger as a side effect.
-    const report = lostReport(originalGoal || userInput, changed, diff, lostWhy, HEADLESS ? 'agent' : 'operator', lastDiscardedReply);
+    const report = lostReport(originalGoal || userInput, changed, diff, lostWhy, HEADLESS ? 'agent' : 'operator', lostAccount || lastDiscardedReply);
     if (!HEADLESS) {
       addMessage('assistant', report);
       log('INFO', 'agent_lost_exit', { round: String(lostAtRound), changed: changed === null ? 'unreadable' : String(changed.length) });
@@ -3669,7 +3722,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * `report` above keeps its mandate on purpose — that is the copy on disk, and a later attempt,
        * by a person or by another run, is exactly who reads `ayin-lost-report.md`.
        */
-      const final = lostReport(originalGoal || userInput, changed, diff, lostWhy, 'operator', lastDiscardedReply);
+      const final = lostReport(originalGoal || userInput, changed, diff, lostWhy, 'operator', lostAccount || lastDiscardedReply);
       addMessage('assistant', final);
       if (HEADLESS) pushToWindow('assistant', final);
       return;
