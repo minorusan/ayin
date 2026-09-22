@@ -54,6 +54,83 @@ function visibility(raw: string | undefined): Visibility {
   return 'private'; // C#'s default inside a type, which is also the safe reading for closure
 }
 
+/**
+ * NEUTRALIZE COMMENTS AND STRING BODIES BEFORE A SINGLE BRACE IS COUNTED.
+ *
+ * The trap here wears the verbatim-string costume: `@"{ \"template\": true }"` is legal C# for a
+ * literal JSON blob, spans lines freely, and a counter that does not know it is inside one reads its
+ * braces as class/member structure — the exact failure class as Python's docstring bug, just triggered
+ * by `@"` instead of `"""`. Raw string literals (`"""…"""`, C# 11) are the same hazard again, unescaped.
+ *
+ * Returns the file as an array of lines, same count as the source, every comment and string BODY
+ * replaced with blanks so brace/paren counting on the result is exact; code characters are untouched.
+ */
+function stripSource(source: string): string[] {
+  const lines: string[] = [];
+  let out = '';
+  let i = 0;
+  const n = source.length;
+  let lineComment = false;
+  let blockComment = false;
+  // A plain `"…"` uses backslash escapes and cannot legally span a line; a verbatim `@"…"` has no
+  // escapes (`""` is a literal quote) and MAY span lines — that difference is the whole reason this
+  // is two states rather than one.
+  let str: 'plain' | 'verbatim' | null = null;
+  let rawQuotes = 0; // > 0 while inside a `"""` raw string literal — its value is the opening run length.
+  while (i < n) {
+    const c = source[i];
+    if (c === '\n') {
+      // A plain string cannot legally hold a literal newline. Still thinking we are inside one means
+      // the quote was never closed — end it here rather than let it consume the rest of the file.
+      if (str === 'plain') str = null;
+      lines.push(out);
+      out = '';
+      lineComment = false;
+      i++;
+      continue;
+    }
+    if (lineComment) { i++; continue; }
+    if (blockComment) {
+      if (c === '*' && source[i + 1] === '/') { blockComment = false; out += '  '; i += 2; continue; }
+      out += ' '; i++; continue;
+    }
+    if (rawQuotes > 0) {
+      if (c === '"') {
+        let run = 0;
+        while (source[i + run] === '"') run++;
+        if (run >= rawQuotes) { rawQuotes = 0; out += ' '.repeat(run); i += run; continue; }
+      }
+      out += ' '; i++; continue;
+    }
+    if (str === 'plain') {
+      if (c === '\\') { out += '  '; i += 2; continue; }
+      if (c === '"') { str = null; out += ' '; i++; continue; }
+      out += ' '; i++; continue;
+    }
+    if (str === 'verbatim') {
+      if (c === '"') {
+        if (source[i + 1] === '"') { out += '  '; i += 2; continue; } // `""` — a literal quote, not the end
+        str = null; out += ' '; i++; continue;
+      }
+      out += ' '; i++; continue;
+    }
+    // code
+    if (c === '/' && source[i + 1] === '/') { lineComment = true; i += 2; continue; }
+    if (c === '/' && source[i + 1] === '*') { blockComment = true; i += 2; continue; }
+    if (c === '"') {
+      let run = 0;
+      while (source[i + run] === '"') run++;
+      if (run >= 3) { rawQuotes = run; out += ' '.repeat(run); i += run; continue; }
+      str = source[i - 1] === '@' ? 'verbatim' : 'plain';
+      out += ' '; i++; continue;
+    }
+    out += c;
+    i++;
+  }
+  lines.push(out);
+  return lines;
+}
+
 /** Nearest `.asmdef` walking up. Unity's own rule, so no configuration to get wrong. */
 function findAsmdef(from: string): string | null {
   let dir = dirname(from);
@@ -116,41 +193,80 @@ export const csharp: SurfaceLanguage = {
     // public fields produced two targets. K&R style (`class Foo {`) happened to work, which is why
     // this survived.
     let entered = false;
-    for (const raw of source.split('\n')) {
-      const line = raw.replace(/\/\/.*$/, '');
-      const decl = DECL.exec(line);
-      if (decl?.groups) {
-        const kind = decl.groups.mods?.includes('abstract') ? 'abstract' : KIND[decl.groups.kind];
-        current = { name: decl.groups.name, kind, members: [] };
-        types.push(current);
-        typeDepth = depth;
-        entered = false;
-      } else if (current && depth === typeDepth + 1 && current.kind === 'enum') {
-        // Enum members BEFORE the general member rule, not after it. `Klondike,` is a bare
-        // identifier: MEMBER needs `<type> <name> <tail>` and cannot match it, so the enum branch
-        // being an `else if` after MEMBER made it unreachable for any enum whose body opens on its
-        // own line — every enum in a real project. `RewardType.cs`, whose values decide a live
-        // ticket, therefore had no surface at all and indulged to zero questions.
-        const name = line.trim().replace(/[,=].*$/, '').trim();
-        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-          current.members.push({ name, kind: 'field', visibility: 'public', sig: line.trim() });
-        }
-      } else if (current && depth === typeDepth + 1) {
-        const m = MEMBER.exec(line);
-        if (m?.groups && m.groups.name !== current.name) {
-          const kind: DeclaredMember['kind'] = m.groups.ev ? 'event'
-            : m.groups.tail === '(' ? 'method'
-            : m.groups.tail === '{' ? 'property' : 'field';
-          // An interface member carries no access modifier and is public BY DEFINITION. Reading the
-          // absent modifier as C#'s `private` default made MEMBER skip every interface — which is where
-          // most of a design's contract actually lives.
-          const vis: Visibility = current.kind === 'interface' ? 'public' : visibility(m.groups.vis);
-          current.members.push({ name: m.groups.name, kind, visibility: vis, sig: line.trim() });
+    const masked = stripSource(source);
+    const rawLines = source.split('\n');
+    /**
+     * The member being measured for its END. `parenDepth` gates what counts as "the body opened": a
+     * `{` seen while a paren from the member's OWN parameter list is still open is a nested construct
+     * (an attribute argument, a collection/array initializer), never the member's body — C# has no
+     * expression-valued default parameters that could hide one there, but attributes sit exactly where
+     * this would bite if it were not gated. `entered` (below, C#'s existing Allman-style flag) is the
+     * type-level version of the same idea; this is its member-level twin.
+     */
+    let pending: { member: DeclaredMember; entered: boolean; parenDepth: number } | null = null;
+
+    for (let idx = 0; idx < masked.length; idx++) {
+      const n = idx + 1;
+      const line = masked[idx];
+      if (!pending) {
+        const decl = DECL.exec(line);
+        if (decl?.groups) {
+          const kind = decl.groups.mods?.includes('abstract') ? 'abstract' : KIND[decl.groups.kind];
+          current = { name: decl.groups.name, kind, members: [], line: n };
+          types.push(current);
+          typeDepth = depth;
+          entered = false;
+        } else if (current && depth === typeDepth + 1 && current.kind === 'enum') {
+          // Enum members BEFORE the general member rule, not after it. `Klondike,` is a bare
+          // identifier: MEMBER needs `<type> <name> <tail>` and cannot match it, so the enum branch
+          // being an `else if` after MEMBER made it unreachable for any enum whose body opens on its
+          // own line — every enum in a real project. `RewardType.cs`, whose values decide a live
+          // ticket, therefore had no surface at all and indulged to zero questions.
+          const name = line.trim().replace(/[,=].*$/, '').trim();
+          if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+            // An enum value is always exactly one line — there is no body to walk.
+            current.members.push({ name, kind: 'field', visibility: 'public', sig: rawLines[idx].trim(), line: n, endLine: n });
+          }
+        } else if (current && depth === typeDepth + 1) {
+          const m = MEMBER.exec(line);
+          if (m?.groups && m.groups.name !== current.name) {
+            const kind: DeclaredMember['kind'] = m.groups.ev ? 'event'
+              : m.groups.tail === '(' ? 'method'
+              : m.groups.tail === '{' ? 'property' : 'field';
+            // An interface member carries no access modifier and is public BY DEFINITION. Reading the
+            // absent modifier as C#'s `private` default made MEMBER skip every interface — which is
+            // where most of a design's contract actually lives.
+            const vis: Visibility = current.kind === 'interface' ? 'public' : visibility(m.groups.vis);
+            const member: DeclaredMember = { name: m.groups.name, kind, visibility: vis, sig: rawLines[idx].replace(/\/\/.*$/, '').trim(), line: n };
+            current.members.push(member);
+            pending = { member, entered: false, parenDepth: 0 };
+          }
         }
       }
-      depth += (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length;
+      for (const ch of line) {
+        if (pending) {
+          if (ch === '(') pending.parenDepth++;
+          else if (ch === ')') pending.parenDepth = Math.max(0, pending.parenDepth - 1);
+        }
+        if (ch === '{') {
+          if (pending && !pending.entered && pending.parenDepth === 0 && depth === typeDepth + 1) pending.entered = true;
+          depth++;
+        } else if (ch === '}') {
+          depth--;
+          if (pending?.entered && depth === typeDepth + 1) {
+            pending.member.endLine = n;
+            pending = null;
+          }
+        }
+      }
+      // No body ever opened and this line closed at the member's own level with `;` — a field, an
+      // auto-property with no initializer past this point, or (inside an interface) a bare signature.
+      if (pending && !pending.entered && pending.parenDepth === 0 && depth === typeDepth + 1 && /;\s*$/.test(line)) {
+        pending.member.endLine = n;
+        pending = null;
+      }
       if (current && depth > typeDepth) entered = true;
-      if (current && entered && depth <= typeDepth) { current = null; typeDepth = -1; entered = false; }
+      if (current && entered && depth <= typeDepth) { pending = null; current = null; typeDepth = -1; entered = false; }
     }
     return types;
   },

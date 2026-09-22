@@ -320,7 +320,7 @@ export const tool: Tool = {
        * nothing in a windowed read said they were an option. One line, only on files too big to hold,
        * where it is the difference between paging blind and asking for the map.
        */
-      const mapNote = total > maxLines
+      const mapNote = total > maxLines && skeletonOf(resolved, text, maxLines)
         ? `\nStructure: read this file with NO offset for every class and method with its line range, `
           + `then expand_method(path, Class.method) for one body.`
         : '';

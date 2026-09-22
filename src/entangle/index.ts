@@ -16,6 +16,11 @@ import { csharp } from './languages/csharp.js';
 import { typescript } from './languages/typescript.js';
 import { dart } from './languages/dart.js';
 import { python } from './languages/python.js';
+import { go } from './languages/go.js';
+import { rust } from './languages/rust.js';
+import { ruby } from './languages/ruby.js';
+import { java } from './languages/java.js';
+import { cpp } from './languages/cpp.js';
 import type { Design, SurfaceLanguage, Violation } from './types.js';
 
 export type { Design, Violation, SurfaceLanguage } from './types.js';
@@ -34,7 +39,7 @@ export { renderStop, checkAdoption } from './check.js';
 // was 'not source' and a corpus could not be built for one — measured on two real repositories, six
 // domains each, every seed discarded and zero chunks written. A language missing from here does not
 // degrade the corpus, it abolishes it.
-const LANGUAGES: SurfaceLanguage[] = [csharp, typescript, dart, python];
+const LANGUAGES: SurfaceLanguage[] = [csharp, typescript, dart, python, go, rust, ruby, java, cpp];
 
 export function languageFor(path: string): SurfaceLanguage | null {
   return LANGUAGES.find((l) => l.handles(path)) ?? null;

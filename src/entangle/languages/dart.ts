@@ -94,6 +94,79 @@ function visibility(name: string): Visibility {
   return name.startsWith('_') ? 'private' : 'public';
 }
 
+/**
+ * NEUTRALIZE COMMENTS AND STRING BODIES BEFORE A SINGLE BRACE IS COUNTED.
+ *
+ * The previous stripper (`'[^']*'|"[^"]*"`) matched one line at a time and knew nothing of Dart's raw
+ * strings (`r'...'`, no escaping at all — a backslash is just a backslash) or its triple-quoted strings
+ * (`'''...'''`, `"""..."""`), which are the one Dart construct built to hold literal `{`/`}` across
+ * several lines — a JSON fixture, a snippet of generated code. Either shape reads as class/member
+ * structure to a counter that has not skipped it: the same failure as Python's docstring bug, in a
+ * different quote.
+ *
+ * Block comments also NEST in Dart — an inner slash-star-star-slash pair inside an outer one is still
+ * commented out — so a depth is kept for them rather than the single flag `//` and quoted strings get
+ * away with.
+ *
+ * Returns the file as an array of lines, same count as the source, comments and string BODIES replaced
+ * with blanks; code characters pass through untouched, so brace/paren counting on the result is exact.
+ */
+function stripSource(source: string): string[] {
+  const lines: string[] = [];
+  let out = '';
+  let i = 0;
+  const n = source.length;
+  let lineComment = false;
+  let blockDepth = 0;
+  let str: { q: string; raw: boolean; triple: boolean } | null = null;
+  while (i < n) {
+    const c = source[i];
+    if (c === '\n') {
+      // A single-quoted (non-triple) string cannot legally hold a literal newline. Still thinking we
+      // are inside one means it was never closed — end it here rather than consume the rest of the file.
+      if (str && !str.triple) str = null;
+      lines.push(out);
+      out = '';
+      lineComment = false;
+      i++;
+      continue;
+    }
+    if (lineComment) { i++; continue; }
+    if (blockDepth > 0) {
+      if (c === '/' && source[i + 1] === '*') { blockDepth++; out += '  '; i += 2; continue; }
+      if (c === '*' && source[i + 1] === '/') { blockDepth--; out += '  '; i += 2; continue; }
+      out += ' '; i++; continue;
+    }
+    if (str) {
+      if (str.triple) {
+        if (c === str.q && source[i + 1] === str.q && source[i + 2] === str.q) { str = null; out += '   '; i += 3; continue; }
+        out += ' '; i++; continue;
+      }
+      if (!str.raw && c === '\\') { out += '  '; i += 2; continue; } // a raw string has no escapes at all
+      if (c === str.q) { str = null; out += ' '; i++; continue; }
+      out += ' '; i++; continue;
+    }
+    // code
+    if (c === '/' && source[i + 1] === '/') { lineComment = true; i += 2; continue; }
+    if (c === '/' && source[i + 1] === '*') { blockDepth = 1; i += 2; continue; }
+    if (c === "'" || c === '"' || ((c === 'r' || c === 'R') && (source[i + 1] === "'" || source[i + 1] === '"'))) {
+      const raw = c === 'r' || c === 'R';
+      const qi = raw ? i + 1 : i;
+      const q = source[qi];
+      const triple = source[qi + 1] === q && source[qi + 2] === q;
+      str = { q, raw, triple };
+      const skip = (raw ? 1 : 0) + (triple ? 3 : 1);
+      out += ' '.repeat(skip);
+      i = qi + (triple ? 3 : 1);
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  lines.push(out);
+  return lines;
+}
+
 /** Nearest `pubspec.yaml` walking up — the Dart package boundary. */
 function findManifest(from: string): string | null {
   let dir = dirname(from);
@@ -156,33 +229,67 @@ export const dart: SurfaceLanguage = {
 
   surfaceOf(source) {
     const types: DeclaredType[] = [];
+    const masked = stripSource(source);
+    const rawLines = source.split('\n');
     let current: DeclaredType | null = null;
     let depth = 0;
     let typeDepth = -1;
-    for (const raw of source.split('\n')) {
-      // Strip line comments and string bodies: a `//` example or a string containing `{` would move the
-      // brace depth and lose every member after it.
-      const line = raw.replace(/\/\/.*$/, '').replace(/'[^']*'|"[^"]*"/g, "''");
-      const decl = DECL.exec(line);
-      if (decl?.groups && !current) {
-        current = { name: decl.groups.name, kind: kindOf(decl.groups), members: [] };
-        types.push(current);
-        typeDepth = depth;
-      } else if (current && depth === typeDepth + 1) {
-        const m = GETTER.exec(line) ?? SETTER.exec(line) ?? METHOD.exec(line) ?? FIELD.exec(line);
-        const name = m?.groups?.name;
-        if (name && !NOT_A_MEMBER.has(name)) {
-          const isCall = GETTER.test(line) ? false : METHOD.test(line) || SETTER.test(line);
-          current.members.push({
-            name,
-            kind: isCall ? 'method' : 'field',
-            visibility: visibility(name),
-            sig: line.trim(),
-          });
+    /**
+     * The member being measured for its END. `parenDepth` gates what counts as "the body opened": a
+     * `{` seen while a paren from the member's own parameter list is still open is a default value's
+     * map/set literal (`{Map<String,int> opts = const {}}`), never the member's own body.
+     */
+    let pending: { member: DeclaredMember; entered: boolean; parenDepth: number } | null = null;
+
+    for (let idx = 0; idx < masked.length; idx++) {
+      const n = idx + 1;
+      const line = masked[idx];
+      if (!pending) {
+        const decl = DECL.exec(line);
+        if (decl?.groups && !current) {
+          current = { name: decl.groups.name, kind: kindOf(decl.groups), members: [], line: n };
+          types.push(current);
+          typeDepth = depth;
+        } else if (current && depth === typeDepth + 1) {
+          const m = GETTER.exec(line) ?? SETTER.exec(line) ?? METHOD.exec(line) ?? FIELD.exec(line);
+          const name = m?.groups?.name;
+          if (name && !NOT_A_MEMBER.has(name)) {
+            const isCall = GETTER.test(line) ? false : METHOD.test(line) || SETTER.test(line);
+            const member: DeclaredMember = {
+              name,
+              kind: isCall ? 'method' : 'field',
+              visibility: visibility(name),
+              sig: rawLines[idx].replace(/\/\/.*$/, '').trim(),
+              line: n,
+            };
+            current.members.push(member);
+            pending = { member, entered: false, parenDepth: 0 };
+          }
         }
       }
-      depth += (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length;
-      if (current && depth <= typeDepth) { current = null; typeDepth = -1; }
+      for (const ch of line) {
+        if (pending) {
+          if (ch === '(') pending.parenDepth++;
+          else if (ch === ')') pending.parenDepth = Math.max(0, pending.parenDepth - 1);
+        }
+        if (ch === '{') {
+          if (pending && !pending.entered && pending.parenDepth === 0 && depth === typeDepth + 1) pending.entered = true;
+          depth++;
+        } else if (ch === '}') {
+          depth--;
+          if (pending?.entered && depth === typeDepth + 1) {
+            pending.member.endLine = n;
+            pending = null;
+          }
+        }
+      }
+      // No body ever opened and this line closed at the member's own level with `;` — a field, an
+      // abstract/interface method signature, or a getter with no body of its own.
+      if (pending && !pending.entered && pending.parenDepth === 0 && depth === typeDepth + 1 && /;\s*$/.test(line)) {
+        pending.member.endLine = n;
+        pending = null;
+      }
+      if (current && depth <= typeDepth) { pending = null; current = null; typeDepth = -1; }
     }
     return types;
   },

@@ -79,7 +79,13 @@
     "check:dart": "node tool/check-dart.mjs",
     "check:weave": "node tool/check-weave.mjs",
     "check:announced": "node tool/check-announced.mjs",
-    "check:wrap": "node tool/check-wrap.mjs"
+    "check:wrap": "node tool/check-wrap.mjs",
+    "check:entangle-ranges": "node tool/check-entangle-ranges.mjs",
+    "check:go": "node tool/check-go.mjs",
+    "check:rust": "node tool/check-rust.mjs",
+    "check:ruby": "node tool/check-ruby.mjs",
+    "check:java": "node tool/check-java.mjs",
+    "check:cpp": "node tool/check-cpp.mjs"
   },
   "dependencies": {
     "@langchain/core": "^1.2.9",

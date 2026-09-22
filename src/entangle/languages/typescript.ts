@@ -42,6 +42,85 @@ function visibility(g: Record<string, string | undefined>): Visibility {
   return 'public'; // TS default, unlike C#
 }
 
+/**
+ * NEUTRALIZE STRINGS, COMMENTS AND TEMPLATE LITERALS BEFORE COUNTING A SINGLE BRACE.
+ *
+ * A brace counter that has not done this is Python's docstring bug wearing a different costume: a
+ * template literal used for a CSS-in-JS block or a multi-line prompt routinely contains `{` with no
+ * code meaning at all, and a `//` inside a string (`"http://x"`) is not a comment. Either one moves
+ * `depth` and desyncs every type/member boundary after it — silently, because the file still "parses"
+ * and produces a plausible-looking, wrong skeleton.
+ *
+ * Returns the file as an array of lines, same count and same line NUMBERS as the source, with every
+ * comment and string/template BODY replaced by blanks — real code characters, including the code
+ * inside a `${...}` interpolation, are passed through untouched so brace/paren counting on the result
+ * is exact. Interpolation is tracked with a stack so nesting (`` `${ `${x}` }` ``) and a string opened
+ * INSIDE an interpolation both resolve correctly.
+ */
+function stripSource(source: string): string[] {
+  const lines: string[] = [];
+  let out = '';
+  let i = 0;
+  const n = source.length;
+  let lineComment = false;
+  let blockComment = false;
+  let quote: '"' | "'" | null = null;
+  // Top of stack: 'template' means we are in template TEXT; a number means we are in the CODE of a
+  // `${...}` interpolation, counting that interpolation's OWN unmatched `{` so a nested object
+  // literal's `}` is not mistaken for the one that closes the interpolation.
+  const stack: Array<'template' | number> = [];
+  while (i < n) {
+    const c = source[i];
+    if (c === '\n') {
+      // A plain quoted string cannot legally hold a literal newline. If we still think we are
+      // inside one, the quote was never closed — treat it as ended here rather than let one
+      // unterminated string swallow the rest of the file the way the missed docstring did.
+      if (quote) quote = null;
+      lines.push(out);
+      out = '';
+      lineComment = false;
+      i++;
+      continue;
+    }
+    if (lineComment) { i++; continue; }
+    if (blockComment) {
+      if (c === '*' && source[i + 1] === '/') { blockComment = false; out += '  '; i += 2; continue; }
+      out += ' '; i++; continue;
+    }
+    if (quote) {
+      if (c === '\\') { out += '  '; i += 2; continue; }
+      if (c === quote) { quote = null; out += ' '; i++; continue; }
+      out += ' '; i++; continue;
+    }
+    const top = stack[stack.length - 1];
+    if (top === 'template') {
+      if (c === '\\') { out += '  '; i += 2; continue; }
+      if (c === '`') { stack.pop(); out += ' '; i++; continue; }
+      if (c === '$' && source[i + 1] === '{') { stack.push(0); out += '  '; i += 2; continue; }
+      out += ' '; i++; continue;
+    }
+    // Code — either top-level, or inside a `${...}` interpolation (top is a number).
+    if (c === '/' && source[i + 1] === '/') { lineComment = true; i += 2; continue; }
+    if (c === '/' && source[i + 1] === '*') { blockComment = true; i += 2; continue; }
+    if (c === '"' || c === "'") { quote = c; out += ' '; i++; continue; }
+    if (c === '`') { stack.push('template'); out += ' '; i++; continue; }
+    if (typeof top === 'number') {
+      if (c === '{') { stack[stack.length - 1] = top + 1; out += c; i++; continue; }
+      if (c === '}') {
+        if (top === 0) { stack.pop(); out += ' '; i++; continue; } // closes the interpolation itself
+        stack[stack.length - 1] = top - 1; out += c; i++; continue;
+      }
+    }
+    out += c;
+    i++;
+  }
+  lines.push(out);
+  return lines;
+}
+
+/** Statements that look like a member to a name+tail scan and are not. */
+const NOT_A_MEMBER = /^(if|for|while|switch|return|const|let|var|import|export|new|await|throw|case|else|try|catch)$/;
+
 /** Nearest `package.json` walking up — the package boundary, the same way node resolves. */
 function findManifest(from: string): string | null {
   let dir = dirname(from);
@@ -84,25 +163,79 @@ export const typescript: SurfaceLanguage = {
 
   surfaceOf(source) {
     const types: DeclaredType[] = [];
+    const masked = stripSource(source);
+    const rawLines = source.split('\n');
     let current: DeclaredType | null = null;
     let depth = 0;
     let typeDepth = -1;
-    for (const raw of source.split('\n')) {
-      const line = raw.replace(/\/\/.*$/, '');
-      const decl = DECL.exec(line);
-      if (decl?.groups) {
-        current = { name: decl.groups.name, kind: kindOf(decl.groups), members: [] };
-        types.push(current);
-        typeDepth = depth;
-      } else if (current && depth === typeDepth + 1) {
-        const m = MEMBER.exec(line);
-        if (m?.groups && !/^(if|for|while|switch|return|const|let|var|import|export|new|await|throw|case|else|try|catch)$/.test(m.groups.name)) {
-          const kind: DeclaredMember['kind'] = m.groups.tail === '(' || m.groups.tail === '<' ? 'method' : 'field';
-          current.members.push({ name: m.groups.name, kind, visibility: visibility(m.groups), sig: line.trim() });
+    /**
+     * The member currently being measured for its END, alongside the type/member scan above it.
+     * `entered` is true once we have seen the `{` that is genuinely this member's OWN body — not a
+     * brace inside a still-open parameter list, e.g. `opts: { a: number } = {}` in a signature default,
+     * which is why `parenDepth` gates it: a `{` counts as "the body opened" only while no paren from
+     * this member's own signature is still open.
+     */
+    let pending: { member: DeclaredMember; entered: boolean; parenDepth: number } | null = null;
+
+    for (let idx = 0; idx < masked.length; idx++) {
+      const n = idx + 1;
+      const line = masked[idx];
+      /**
+       * ASI RECOVERY. A field or expression-bodied member with no trailing `;` (legal — JS inserts
+       * one) leaves `pending` open forever unless something says "the next thing is new". A line that
+       * itself reads as a fresh declaration is that signal; without it, the semicolon-less member and
+       * everything textually after it in the type would never be seen again — the exact shape of the
+       * dropped-32-of-75 docstring bug, just triggered by absent punctuation instead of an accidental
+       * fence. Bounded to when no paren/brace is still open, so a genuine multi-line signature is
+       * never mistaken for two declarations.
+       */
+      if (pending && !pending.entered && pending.parenDepth === 0 && depth === typeDepth + 1
+        && (DECL.test(line) || MEMBER.test(line))) {
+        pending.member.endLine = n - 1;
+        pending = null;
+      }
+      if (!pending) {
+        const decl = DECL.exec(line);
+        if (decl?.groups) {
+          current = { name: decl.groups.name, kind: kindOf(decl.groups), members: [], line: n };
+          types.push(current);
+          typeDepth = depth;
+        } else if (current && depth === typeDepth + 1) {
+          const m = MEMBER.exec(line);
+          if (m?.groups && !NOT_A_MEMBER.test(m.groups.name)) {
+            const kind: DeclaredMember['kind'] = m.groups.tail === '(' || m.groups.tail === '<' ? 'method' : 'field';
+            // The signature shown is the lightly comment-stripped RAW line, not the masked one — a
+            // reader wants to see the string a default value actually holds, not blanks.
+            const sig = rawLines[idx].replace(/\/\/.*$/, '').trim();
+            const member: DeclaredMember = { name: m.groups.name, kind, visibility: visibility(m.groups), sig, line: n };
+            current.members.push(member);
+            pending = { member, entered: false, parenDepth: 0 };
+          }
         }
       }
-      depth += (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length;
-      if (current && depth <= typeDepth) { current = null; typeDepth = -1; }
+      for (const ch of line) {
+        if (pending) {
+          if (ch === '(') pending.parenDepth++;
+          else if (ch === ')') pending.parenDepth = Math.max(0, pending.parenDepth - 1);
+        }
+        if (ch === '{') {
+          if (pending && !pending.entered && pending.parenDepth === 0 && depth === typeDepth + 1) pending.entered = true;
+          depth++;
+        } else if (ch === '}') {
+          depth--;
+          if (pending?.entered && depth === typeDepth + 1) {
+            pending.member.endLine = n;
+            pending = null;
+          }
+        }
+      }
+      // No body ever opened, and the line just closed with `;`/`,` at the member's own level — an
+      // interface signature, an ambient declaration, or a plain field with a semicolon.
+      if (pending && !pending.entered && pending.parenDepth === 0 && depth === typeDepth + 1 && /[;,]\s*$/.test(line)) {
+        pending.member.endLine = n;
+        pending = null;
+      }
+      if (current && depth <= typeDepth) { pending = null; current = null; typeDepth = -1; }
     }
     return types;
   },
