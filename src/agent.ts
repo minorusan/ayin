@@ -1904,6 +1904,14 @@ async function runAgentTurn(userInput: string): Promise<void> {
   let continueNudges = 0;
   /** Rounds discarded in a row for running no tool while working. Reset by any tool call. */
   let workingRetries = 0;
+  /**
+   * The last reply thrown away for carrying no tool call — kept because on a question it is the answer.
+   *
+   * The discard is right: narrating is not working, and `finish()` is the only exit. But the clap that
+   * three of them trigger then ends the turn, and the agent's own words were the one thing the operator
+   * wanted. See `lostReport`.
+   */
+  let lastDiscardedReply = '';
   /** The diagnosis handover happens ONCE per turn — see the block that uses it. */
   let pictureAsked = false;
   /** Set between asking for the picture and receiving it, so the next reply is read as the brief. */
@@ -2296,6 +2304,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
          * — and this branch has no tool result, because that is the whole defect. There is nothing to
          * append it to, and the round is discarded, so a note would vanish with it.
          */
+        lastDiscardedReply = (parsed.text ?? response ?? '').trim();
         const idleWhy = noteCall(round, 'reply', '', response.slice(0, 2000), true);
         if (idleWhy) { lostAtRound = round; lostWhy = `${idleWhy.why} (no tool call made)`; break roundLoop; }
         continue;
@@ -3636,7 +3645,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
     // turn's prompt and carries the mandate. Interactive exits with a reply and starts no successor, so
     // the operator gets the facts and no "your job" paragraph written for a machine. Composed once:
     // `lostReport` folds this attempt's dead ends into the run's ledger as a side effect.
-    const report = lostReport(originalGoal || userInput, changed, diff, lostWhy, HEADLESS ? 'agent' : 'operator');
+    const report = lostReport(originalGoal || userInput, changed, diff, lostWhy, HEADLESS ? 'agent' : 'operator', lastDiscardedReply);
     if (!HEADLESS) {
       addMessage('assistant', report);
       log('INFO', 'agent_lost_exit', { round: String(lostAtRound), changed: changed === null ? 'unreadable' : String(changed.length) });
@@ -3660,7 +3669,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * `report` above keeps its mandate on purpose — that is the copy on disk, and a later attempt,
        * by a person or by another run, is exactly who reads `ayin-lost-report.md`.
        */
-      const final = lostReport(originalGoal || userInput, changed, diff, lostWhy, 'operator');
+      const final = lostReport(originalGoal || userInput, changed, diff, lostWhy, 'operator', lastDiscardedReply);
       addMessage('assistant', final);
       if (HEADLESS) pushToWindow('assistant', final);
       return;

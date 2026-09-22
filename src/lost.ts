@@ -348,7 +348,7 @@ export function lostNudge(why: string): string {
  * say, and inventing an instruction for the operator would be ayin telling a person what their job is.
  */
 export function lostReport(goal: string, changed: string[] | null, diff: string, why: string,
-                           audience: 'agent' | 'operator' = 'agent'): string {
+                           audience: 'agent' | 'operator' = 'agent', lastWord = ''): string {
   // The loop's own shape, most-repeated first — that is the evidence, not the last few calls in order.
   const counts = new Map<string, { n: number; c: Call }>();
   for (const c of window) {
@@ -377,7 +377,36 @@ export function lostReport(goal: string, changed: string[] | null, diff: string,
     : edited
     ? `## What it changed\n${changed.map((c) => `- ${c}`).join('\n')}\n\n\`\`\`diff\n${diff.slice(0, 4000)}\n\`\`\`\n\n`
     : `## What it changed\nNothing. The working tree is clean.\n\n`;
-  const dead = `## Routes already closed — by this attempt and every earlier one\n${worst || '- (none recorded)'}\n\n`;
+  /**
+   * THE SAME LIST, AND NOT THE SAME CLAIM.
+   *
+   * "Routes already closed" is true for a successor: do not walk these again. It is false for the
+   * operator, because on a diagnosis task every one of those calls SUCCEEDED — a `read_file` that
+   * returned the file is evidence, not a dead end — and the heading told them the run's entire useful
+   * output was a list of failures.
+   */
+  const dead = audience === 'operator'
+    ? `## What it looked at\n${worst || '- (nothing recorded)'}\n\n`
+    : `## Routes already closed — by this attempt and every earlier one\n${worst || '- (none recorded)'}\n\n`;
+  /**
+   * THE ANSWER IT HAD ALREADY WRITTEN, which this report was throwing away.
+   *
+   * The commonest clap on a read-only task is three replies in a row carrying no tool call. `finish()`
+   * is the only exit, so each of those rounds is DISCARDED — deliberately, because narrating is not
+   * working. But on a question ("is there any logic that dynamically sets this icon?") the narration is
+   * not a step towards the work, it IS the work: the model had read six files and was answering.
+   *
+   * Three minutes, thirteen tool calls and twenty-eight model calls then reached the operator as "it was
+   * going in circles" and a list of files. What the agent actually concluded existed, in a variable, and
+   * went nowhere. It costs nothing to carry it, and it is the only part of this document a person asked
+   * for.
+   *
+   * Operator only. A successor gets the mandate instead, and handing it the previous agent's narration
+   * is how a restart re-derives the loop it was restarted to escape.
+   */
+  const said = audience === 'operator' && lastWord.trim()
+    ? `## What it last said — in its own words\n${lastWord.trim()}\n\n`
+    : '';
   const mandate = edited
     /**
      * THREE THINGS THAT ARE TRUE IN ANY REPOSITORY.
@@ -414,5 +443,5 @@ export function lostReport(goal: string, changed: string[] | null, diff: string,
       + `different route from the dead ends above.`
     : `## Your job\nNothing has been changed yet. The calls above are dead ends — take a different route. `
       + `Make the edit the task asks for, or call finish and state why the cause resists one.`;
-  return head + work + dead + (audience === 'operator' ? '' : mandate);
+  return head + work + said + dead + (audience === 'operator' ? '' : mandate);
 }
