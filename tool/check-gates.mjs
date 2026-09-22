@@ -3102,8 +3102,8 @@ console.log('\nedit truth');
   // The wiring, which no unit can see: the ledger must be fed only where edits happen, the QA gate
   // must stop counting a FAILED edit as a changed file, and the guard must be able to fire only once.
   const agentSrc = readFileSync(join(REPO, 'src/agent.ts'), 'utf-8');
-  ok(/if \(noteEditAttempt\(name, params\.path, result\)\) qaNoteTouched\(params\.path\);/.test(agentSrc),
-    'a file is marked CHANGED only when its edit actually landed');
+  ok(/if \(noteEditAttempt\(name, params\.path, result\)\) \{ qaNoteTouched\(params\.path\); noteTreeWrite\(params\.path\); \}/.test(agentSrc),
+    'a file is marked CHANGED only when its edit actually landed — both ledgers, behind the same guard');
   ok(/unwrittenClaimNudges < 1/.test(agentSrc),
     'ONE nudge — an answer that is genuinely a proposal must be able to stand');
   ok(existsSync(join(REPO, 'prompts/ayin/unwrittenClaim.txt')),

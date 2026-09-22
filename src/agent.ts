@@ -17,7 +17,7 @@ import { formatTurnTimings, resetTurnTimings, timed } from './timing.js';
 import { waiveReadOnce } from './tools/readGuard.js';
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { execSync } from 'node:child_process';
 import { cancelActiveThinking } from './connection.js';
 import { llmChat, parseToolCalls, replyTruncated, unexecutedCallText, renderToolCall, renderToolResult, activeModelId, activeContextTokens, charsPerToken, resetUsageBaseline, toolMode } from './llm/manager.js';
@@ -1259,6 +1259,7 @@ export async function runAgent(userInput: string): Promise<void> {
   resetTurnTimings();
   resetLost();
   resetSkepticRun();
+  beginRunAttribution();
   originalGoal = userInput;
   // A new turn is not "the last prompt plus a tool result", so the growth arithmetic starts over —
   // otherwise the first call of turn two would price the whole new prompt as something a tool added.
@@ -1266,6 +1267,21 @@ export async function runAgent(userInput: string): Promise<void> {
   try {
     await runAgentTurn(userInput);
   } finally {
+    /**
+     * THE TURN IS OVER, SO SAY SO — the indicator had no way to learn that.
+     *
+     * `setAgentState` is only ever called to start something: `Running <tool>(…)` before each call,
+     * `Thinking…` by the wait narrator. Nothing set it back, and `handleInput` clears it only on the
+     * ERROR path — so a turn that ended the way turns are supposed to end left the last state painted
+     * and its clock running. `finish` is the last tool of every successful turn, so what the operator
+     * was left looking at was `◀ Running finish(summary=VERIFIED: …) 4m19s`, ticking, minutes after the
+     * answer had been printed above it. Reported as "he was working on something hard after finish()".
+     *
+     * Here rather than at the call site because this `finally` is the one funnel every ending goes
+     * through — finished, failed, interrupted — which is the same argument that already put the timing
+     * tally in it.
+     */
+    setAgentState('idle');
     const tally = formatTurnTimings();
     if (tally) addMessage('system', tally);
   }
@@ -1665,8 +1681,8 @@ function treeDiff(): string | null {
   return execSync('git diff', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
 }
 
-/** What the tree holds, or NULL when there is no repository to ask. Never [] for "unknown". */
-function treeChangedFiles(): Array<{ path: string; exists: boolean }> | null {
+/** Every dirty path git reports, whoever made it dirty. NULL when there is no repository to ask. */
+function statusRows(): Array<{ path: string; exists: boolean }> | null {
   if (!inGitRepo()) return null;
   return execSync('git status --porcelain', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
       .split('\n')
@@ -1675,6 +1691,61 @@ function treeChangedFiles(): Array<{ path: string; exists: boolean }> | null {
       // report that calls a deleted file "changed" without saying so misdescribes the handover.
       .map((l) => ({ path: l.slice(3).trim(), exists: !l.slice(0, 2).includes('D') }))
       .filter((f) => f.path);
+}
+
+/**
+ * WHAT WAS ALREADY DIRTY BEFORE AYIN STARTED — the operator's work, and never ayin's to claim.
+ *
+ * `git status --porcelain` answers "what is dirty", which is not the question any of these reports
+ * asks. On a clean checkout the two coincide and nothing showed. On a real one they do not: a Unity
+ * tree carrying 28 uncommitted asset, bundle and settings files was handed to a turn that made ZERO
+ * edits, and every consumer of this list believed all 28 were its own. The operator got a
+ * "Files changed (28)" roll-call of their own working tree; the empty-handed-exit gate never fired,
+ * because the turn did not look empty-handed; `isDiagnosisOnly` was false on a pure diagnosis; and the
+ * diff shown at the door was the operator's entire unrelated diff.
+ *
+ * RUN-SCOPED, WHICH IS THE WHOLE TRICK. This is why the QA ledger could not be used here: `qaBeginTurn`
+ * re-snapshots per TURN, so a restart re-baselined over the previous attempt's own edit and the report
+ * then said "Nothing. The working tree is clean." over a finished fix. A restart is a new turn inside
+ * the same run, so a baseline taken once per run survives it and both failures stay fixed.
+ *
+ * `writtenThisRun` is the other half. Subtraction alone would HIDE a file that was already dirty and
+ * that ayin then edited — which is the worse lie of the two, so any path a write or edit tool landed is
+ * kept whatever the baseline says. Files written through `bash` are still caught by the subtraction,
+ * which is why that half is not enough on its own either.
+ */
+let dirtyAtRunStart = new Set<string>();
+const writtenThisRun = new Set<string>();
+/** The repository top level, so a tool's path and a porcelain row can be compared as one thing. */
+let treeRoot = '';
+
+/** Called once per RUN, before the first round — see `dirtyAtRunStart`. */
+function beginRunAttribution(): void {
+  writtenThisRun.clear();
+  dirtyAtRunStart = new Set((statusRows() ?? []).map((f) => f.path));
+  try {
+    treeRoot = inGitRepo()
+      ? execSync('git rev-parse --show-toplevel', { cwd: process.cwd(), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+      : '';
+  } catch { treeRoot = ''; }
+  log('INFO', 'tree_baseline', { alreadyDirty: String(dirtyAtRunStart.size), root: treeRoot });
+}
+
+/** A path a write or edit tool actually landed. Kept in the report even if it was dirty beforehand. */
+function noteTreeWrite(path: string): void {
+  if (path && path.trim()) writtenThisRun.add(resolve(process.cwd(), path.trim()));
+}
+
+/** Did ayin write the file this porcelain row names? Rows are repo-root-relative and may be quoted. */
+function ayinWrote(row: string): boolean {
+  return treeRoot !== '' && writtenThisRun.has(join(treeRoot, row.replace(/^"(.*)"$/, '$1')));
+}
+
+/** What THIS RUN changed, or NULL when there is no repository to ask. Never [] for "unknown". */
+function treeChangedFiles(): Array<{ path: string; exists: boolean }> | null {
+  const rows = statusRows();
+  if (rows === null) return null;
+  return rows.filter((f) => !dirtyAtRunStart.has(f.path) || ayinWrote(f.path));
 }
 
 async function runAgentTurn(userInput: string): Promise<void> {
@@ -3242,7 +3313,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // where they are evidence rather than a phantom write. See edit-truth.ts.
       let editMissNote = '';
       if (!detached && (name === 'write_file' || name === 'str_replace') && params.path) {
-        if (noteEditAttempt(name, params.path, result)) qaNoteTouched(params.path);
+        if (noteEditAttempt(name, params.path, result)) { qaNoteTouched(params.path); noteTreeWrite(params.path); }
         else if (consecutiveMissesOn(params.path) >= 2) {
           // Two misses on ONE file means the model is editing text it has not read, and a third guess
           // costs another round to learn the same thing. Said at the tool result, where it can still
@@ -3252,6 +3323,11 @@ async function runAgentTurn(userInput: string): Promise<void> {
             + `copy old_str from what comes back, then edit.`;
           log('WARN', 'edit_repeated_miss', { tool: name, path: params.path, misses: String(consecutiveMissesOn(params.path)) });
         }
+      }
+      // `perform_edit` names its target `file`, not `path`, so it misses the branch above — and its own
+      // contract says when the edit landed: anything but `NO CHANGE` is a real write.
+      if (!detached && name === 'perform_edit' && params.file && !result.startsWith('Error:') && !result.startsWith('NO CHANGE')) {
+        noteTreeWrite(params.file);
       }
       if (!detached && name === 'write_file') {
         // Track CTA delivery — if the write target matches the CTA, mark as delivered
