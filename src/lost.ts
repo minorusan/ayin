@@ -293,7 +293,14 @@ export const ACCOUNT_REQUEST = [
   'anything, do not edit, do not call finish. Your next reply is the last word and it is kept verbatim.',
 ].join('\n');
 
-export function unverifiedReport(goal: string, changed: string[], diff: string, attempts: number, account = ''): string {
+/**
+ * `changed === null` means THE TREE COULD NOT BE READ — there is no repository here.
+ *
+ * Distinct from an empty list, which means a repository reported no changes. Printing "the working
+ * tree is clean" for the first case is a claim about a tree nobody looked at, and it was acted on:
+ * a turn that had written a working file was told it had written nothing.
+ */
+export function unverifiedReport(goal: string, changed: string[] | null, diff: string, attempts: number, account = ''): string {
   const tried = [...new Map(window.map((c) => [c.callKey, c])).values()]
     .filter((c) => c.tool === 'bash')
     .slice(-8)
@@ -303,7 +310,10 @@ export function unverifiedReport(goal: string, changed: string[], diff: string, 
     + `The work below is on disk. Verification was attempted ${attempts} times and did not settle, so the `
     + `turn ended rather than continuing to re-check the same things.\n\n`
     + `## The task\n${goal}\n\n`
-    + (changed.length
+    + (changed === null
+      ? `## What changed\nUNKNOWN — this directory is not a git repository, so the tree cannot be read. `
+        + `Work may well be on disk; this report cannot say what.\n\n`
+      : changed.length
       ? `## What changed\n${changed.map((c) => `- ${c}`).join('\n')}\n\n\`\`\`diff\n${diff.slice(0, 4000)}\n\`\`\`\n\n`
       : `## What changed\nNothing. The working tree is clean.\n\n`)
     + `## How verification was attempted\n${tried || '- (nothing recorded)'}\n\n`
@@ -324,7 +334,7 @@ export function lostNudge(why: string): string {
  * Two mandates, because "verify the fix" is an instruction about nothing when there is no fix. A run
  * that edited is a run with a claim to check; a run that did not is a run with dead ends to avoid.
  */
-export function lostReport(goal: string, changed: string[], diff: string, why: string): string {
+export function lostReport(goal: string, changed: string[] | null, diff: string, why: string): string {
   // The loop's own shape, most-repeated first — that is the evidence, not the last few calls in order.
   const counts = new Map<string, { n: number; c: Call }>();
   for (const c of window) {
@@ -340,13 +350,17 @@ export function lostReport(goal: string, changed: string[], diff: string, why: s
   // Oldest first: the earliest incarnations found the routes that have been closed longest.
   const worst = [...deadEnds].slice(-SHOWN * 3).map(([call, n]) => `- ${n}× \`${call}\``).join('\n');
 
-  const edited = changed.length > 0;
+  // Three states, not two. `null` is "no repository, so unreadable" — see `unverifiedReport`.
+  const unreadable = changed === null;
+  const edited = changed !== null && changed.length > 0;
   const attempt = depth > 1 ? ` This is attempt ${depth}; earlier restarts did not break the pattern.` : '';
   const head = `# Report from the previous agent\n\n`
     + `It stopped because ${why}: it was repeating itself and nothing it did changed the working tree `
     + `or told it anything new.${attempt}\n\n`
     + `## The task\n${goal}\n\n`;
-  const work = edited
+  const work = unreadable
+    ? `## What it changed\nUNKNOWN — not a git repository, so the tree cannot be read.\n\n`
+    : edited
     ? `## What it changed\n${changed.map((c) => `- ${c}`).join('\n')}\n\n\`\`\`diff\n${diff.slice(0, 4000)}\n\`\`\`\n\n`
     : `## What it changed\nNothing. The working tree is clean.\n\n`;
   const dead = `## Routes already closed — by this attempt and every earlier one\n${worst || '- (none recorded)'}\n\n`;
@@ -372,6 +386,18 @@ export function lostReport(goal: string, changed: string[], diff: string, why: s
       + `- Being unable to verify is an outcome, not a failure. Report what you changed and why.\n`
       + `Do not re-derive the fix, do not run the same command twice, and do not edit unless a test has `
       + `shown you the diff is wrong.`
+    : unreadable
+    /**
+     * NEVER ORDER AN EDIT THE TREE CANNOT VOUCH FOR.
+     *
+     * "Nothing has been changed yet" is the sentence that made a restarted turn redo work already on
+     * disk. With no repository to read, the file itself is the only witness — so the instruction is to
+     * look before writing, not to write.
+     */
+    ? `## Your job\nWhat the previous attempt changed could not be read — this is not a git repository. `
+      + `READ THE FILE the task names before you edit anything: the work may already be done, and `
+      + `redoing it is how one correct fix becomes two conflicting ones. Then either finish, or take a `
+      + `different route from the dead ends above.`
     : `## Your job\nNothing has been changed yet. The calls above are dead ends — take a different route. `
       + `Make the edit the task asks for, or call finish and state why the cause resists one.`;
   return head + work + dead + mandate;

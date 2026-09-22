@@ -59,7 +59,7 @@ import { cancelAllRuns, currentRuns, onRunsChanged, resetRuns, startRun, type Ru
 import { adoptBackgroundRun, backgroundHandoffLine, detachNotice, laneConfigured } from './background.js';
 import { notePostmortemContext } from './postmortem.js';
 import { extractSignals } from './tools/signals.js';
-import { qaBeginTurn, qaChangedFiles, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn, qaPreparedUnits } from './qa/index.js';
+import { qaBeginTurn, qaNoteTouched, qaShouldRun, qaGate, qaShowCard, shouldRunQaThisTurn, qaPreparedUnits } from './qa/index.js';
 import { shouldRunSkepticThisTurn, skepticCard, skepticPass } from './qa/skeptic.js';
 import { regenerateTouchedDiagrams } from './arduino-diagram-regen.js';
 import { gateAdoption, nextBrief, implementedCount, stopAwaitingOperator } from './entangle/index.js';
@@ -1620,28 +1620,41 @@ export function renderCallLedger(): string {
  * is a description of a different change. `--intent-to-add` stages existence only, never content, and
  * touches nothing in the working tree.
  */
-function treeDiff(): string {
+/**
+ * Is there a repository here at all? The one question whose honest answer is a boolean.
+ *
+ * Everything below distinguishes "a repo, and nothing changed" from "no repo, so I cannot know".
+ * Collapsing those two into one empty answer is what made a restarted turn report "Nothing. The
+ * working tree is clean." over a file it had written, and then be ordered to write it again.
+ */
+function inGitRepo(): boolean {
   try {
-    execSync('git add -AN .', { cwd: process.cwd(), stdio: 'ignore' });
-    return execSync('git diff', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
+    return execSync('git rev-parse --is-inside-work-tree',
+      { cwd: process.cwd(), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() === 'true';
   } catch {
-    return ''; // not a git repository
+    return false;
   }
 }
 
-function treeChangedFiles(): Array<{ path: string; exists: boolean }> {
-  try {
-    return execSync('git status --porcelain', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
+/** The whole handover as a diff, or NULL when there is no repository to ask. Never '' for "unknown". */
+function treeDiff(): string | null {
+  if (!inGitRepo()) return null;
+  // NO CATCH. Inside a repository, a git that fails is a real failure and must be seen, not smoothed
+  // into an empty diff that reads as "nothing to hand over".
+  execSync('git add -AN .', { cwd: process.cwd(), stdio: 'ignore' });
+  return execSync('git diff', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
+}
+
+/** What the tree holds, or NULL when there is no repository to ask. Never [] for "unknown". */
+function treeChangedFiles(): Array<{ path: string; exists: boolean }> | null {
+  if (!inGitRepo()) return null;
+  return execSync('git status --porcelain', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
       .split('\n')
       .filter(Boolean)
       // "XY path" — the two status columns, then a space. 'D' in either column is a deletion, and a
       // report that calls a deleted file "changed" without saying so misdescribes the handover.
       .map((l) => ({ path: l.slice(3).trim(), exists: !l.slice(0, 2).includes('D') }))
       .filter((f) => f.path);
-  } catch {
-    // Not a git repository. The ledger is then the only account of what was touched.
-    return qaChangedFiles().filter((f) => f.path).map((f) => ({ path: f.path, exists: true }));
-  }
 }
 
 async function runAgentTurn(userInput: string): Promise<void> {
@@ -1799,11 +1812,14 @@ async function runAgentTurn(userInput: string): Promise<void> {
     if (Number.isFinite(maxRounds) && round === maxRounds - 1 && !inSkepticPass()) {
       // The TREE, not the turn's ledger: a restarted turn carrying a finished edit would otherwise
       // report itself as diagnosis-only and be offered the wrong pass, or none.
-      const changedAtCap = treeChangedFiles().map((f) => f.path);
+      const atCap = treeChangedFiles();
+      const changedAtCap = (atCap ?? []).map((f) => f.path);
       const capInj = skepticInjection({
         changedFiles: changedAtCap,
         provenSinceEdit: succeededAtRound > mutatedAtRound,
-        isDiagnosisOnly: changedAtCap.length === 0,
+        // UNREADABLE IS NOT EMPTY. With no repository to ask, "it only diagnosed" is a guess, and the
+        // wrong one costs the agent the pass that would have checked a real edit.
+        isDiagnosisOnly: atCap !== null && changedAtCap.length === 0,
         roundsLeft: 0,
       });
       if (capInj) pushToWindow('user', capInj);
@@ -2183,11 +2199,14 @@ async function runAgentTurn(userInput: string): Promise<void> {
       // the operations in Dispose()" reads exactly like a result and is acted on. Unconditional — the
       // QA gate that would otherwise catch this is session-off by default AND declines on "nothing
       // changed this turn", which is the very condition here. See edit-truth.ts.
-      if (unwrittenClaimNudges < 1
-          // AGAINST THE TREE. The ledger is per-turn, so after a restart a real edit made by the
-          // previous incarnation reads as zero — and this guard would tell a model that correctly
-          // reported its own change to "apply or retract" a fix already sitting in the file.
-          && claimsAnEditThatDoesNotExist(parsed.text ?? response, treeChangedFiles().length, toolsRunThisTurn)) {
+      // AGAINST THE TREE. The ledger is per-turn, so after a restart a real edit made by the previous
+      // incarnation reads as zero — and this guard would tell a model that correctly reported its own
+      // change to "apply or retract" a fix already sitting in the file.
+      const writtenNow = unwrittenClaimNudges < 1 ? treeChangedFiles() : null;
+      // NEVER WITHOUT A TREE TO READ. Outside a repository "nothing was written" is unknowable, and
+      // accusing a model of an imaginary edit is the more expensive of the two mistakes.
+      if (writtenNow !== null
+          && claimsAnEditThatDoesNotExist(parsed.text ?? response, writtenNow.length, toolsRunThisTurn)) {
         unwrittenClaimNudges++;
         recordRaw(round, 'claimed an edit with nothing written', response);
         log('WARN', 'unwritten_claim', { round: String(round), attempts: String(editAttempts().length) });
@@ -3031,7 +3050,15 @@ async function runAgentTurn(userInput: string): Promise<void> {
          *
          * Shaped as `{ path }` because that is all any consumer here reads.
          */
-        const changed = treeChangedFiles();
+        const changedOrNull = treeChangedFiles();
+        /**
+         * NULL MEANS UNREADABLE, AND UNREADABLE IS NOT EMPTY.
+         *
+         * Every branch below asks "did this turn change anything". With no repository the honest answer
+         * is "cannot say", and each branch says so in its own way rather than taking the empty one.
+         */
+        const treeUnreadable = changedOrNull === null;
+        const changed = changedOrNull ?? [];
         /**
          * THE EXIT IS GATED ON A PROOF ATTEMPT — once per turn. See `skeptic-pass.ts`.
          *
@@ -3053,7 +3080,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
          * this asks a question, it does not gate the door. The report is written beside the run so it
          * survives the container.
          */
-        if (!noEditReportAsked && changed.length === 0 && !/\S/.test(String(params.cause ?? ''))) {
+        if (!noEditReportAsked && !treeUnreadable && changed.length === 0 && !/\S/.test(String(params.cause ?? ''))) {
           noEditReportAsked = true;
           log('INFO', 'no_edit_report_requested', { round: String(round) });
           pushToWindow('user', renderToolResult(
@@ -3068,7 +3095,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
           const inj = skepticInjection({
             changedFiles: changed.filter((f) => f.path).map((f) => f.path),
             provenSinceEdit: succeededAtRound > mutatedAtRound,
-            isDiagnosisOnly: changed.length === 0,
+            isDiagnosisOnly: !treeUnreadable && changed.length === 0,
             roundsLeft: Number.isFinite(maxRounds) ? maxRounds - round : PASS_ROUNDS_WHEN_UNBOUNDED,
           });
           if (inj) {
@@ -3115,7 +3142,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
            * `--intent-to-add` stages the existence of untracked files without their content, so one
            * ordinary diff covers both kinds. It touches the index only; the working tree is untouched.
            */
-          const full = treeDiff();
+          const full = treeDiff() ?? '';
           const clipped = full.length > DIFF_REVIEW_MAX_CHARS
             ? `${full.slice(0, DIFF_REVIEW_MAX_CHARS)}\n… [diff clipped; ${full.length - DIFF_REVIEW_MAX_CHARS} more characters]`
             : full;
@@ -3144,7 +3171,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
          * Say which files, and say when nothing survived in them.
          */
         // Written beside the run, because the container is thrown away and the transcript is not indexed.
-        if (changed.length === 0) {
+        if (!treeUnreadable && changed.length === 0) {
           try {
             const body = `# ayin — no edits made\n\nround ${round}\n\n## What the model reported\n\n${result}\n\n`
               + `## Cause given\n\n${String(params.cause ?? '(none)')}\n`;
@@ -3157,7 +3184,11 @@ async function runAgentTurn(userInput: string): Promise<void> {
         const named = changed.filter((f) => f.path);
         const evidence = named.length
           ? `\n\nFiles changed (${named.length}):\n${named.map((f) => `  - ${f.path}${f.exists ? '' : ' (deleted)'}`).join('\n')}`
-          : '\n\nNo files were changed.';
+          : treeUnreadable
+            // Saying "no files were changed" here, with no repository to read, is the lie this whole
+            // distinction exists to prevent.
+            ? '\n\n(This directory is not a git repository, so what changed could not be read.)'
+            : '\n\nNo files were changed.';
         const composed = `${result}${evidence}`;
         addMessage('assistant', composed);
         await writeHandoff('finish', currentGoal, round, maxRounds);
@@ -3238,7 +3269,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * of testing one.
        */
       if (MUTATING_TOOLS.has(name) && !result.startsWith('Error:') && !inSkepticPass()) {
-        const changedNow = treeChangedFiles().map((f) => f.path);
+        const changedNow = (treeChangedFiles() ?? []).map((f) => f.path);
         const editInj = skepticInjection({
           at: 'edit',
           changedFiles: changedNow,
@@ -3406,19 +3437,21 @@ async function runAgentTurn(userInput: string): Promise<void> {
    * tree regardless — and what is handed back is the state of the evidence rather than a verdict.
    */
   if (verificationExhausted) {
-    const changed = treeChangedFiles().map((f) => f.path);
-    let diff = treeDiff();
+    const changedRows = treeChangedFiles();
+    const changed = changedRows === null ? null : changedRows.map((f) => f.path);
+    let diff = treeDiff() ?? '';
     const report = unverifiedReport(originalGoal || userInput, changed, diff, verifyAttempts(), verificationAccount);
     try { writeFileSync(reportPath('ayin-unverified-report.md'), report); } catch { /* the report is evidence, not the mechanism */ }
-    log('WARN', 'verify_exhausted_exit', { attempts: String(verifyAttempts()), changed: String(changed.length) });
+    log('WARN', 'verify_exhausted_exit', { attempts: String(verifyAttempts()), changed: changed === null ? 'unreadable' : String(changed.length) });
     addMessage('assistant', report);
     if (HEADLESS) pushToWindow('assistant', report);
     return;
   }
 
   if (lostAtRound >= 0) {
-    const changed = treeChangedFiles().map((f) => f.path);
-    let diff = treeDiff();
+    const lostRows = treeChangedFiles();
+    const changed = lostRows === null ? null : lostRows.map((f) => f.path);
+    let diff = treeDiff() ?? '';
     /**
      * THE ORIGINAL TASK, NEVER THE COMPOSED ONE — or the report eats itself.
      *
@@ -3433,7 +3466,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
     const report = lostReport(originalGoal || userInput, changed, diff, lostWhy);
     if (!HEADLESS) {
       addMessage('assistant', report);
-      log('INFO', 'agent_lost_exit', { round: String(lostAtRound), changed: String(changed.length) });
+      log('INFO', 'agent_lost_exit', { round: String(lostAtRound), changed: changed === null ? 'unreadable' : String(changed.length) });
       return;
     }
     try { writeFileSync(reportPath('ayin-lost-report.md'), report); } catch { /* a report that cannot be written is not a reason to skip the restart */ }
@@ -3444,12 +3477,12 @@ async function runAgentTurn(userInput: string): Promise<void> {
      * is where a patch is collected from. What ends is the treadmill.
      */
     if (restartExhausted()) {
-      log('WARN', 'agent_lost_exhausted', { round: String(lostAtRound), depth: String(restartDepth()), changed: String(changed.length) });
+      log('WARN', 'agent_lost_exhausted', { round: String(lostAtRound), depth: String(restartDepth()), changed: changed === null ? 'unreadable' : String(changed.length) });
       addMessage('assistant', report);
       if (HEADLESS) pushToWindow('assistant', report);
       return;
     }
-    log('WARN', 'agent_lost_relaunch', { round: String(lostAtRound), changed: String(changed.length), depth: String(restartDepth()) });
+    log('WARN', 'agent_lost_relaunch', { round: String(lostAtRound), changed: changed === null ? 'unreadable' : String(changed.length), depth: String(restartDepth()) });
     addMessage('system', `lost at round ${lostAtRound} (${lostWhy}) — restart ${restartDepth()} with a report and a narrowed mandate`);
     lostAtRound = -1;
     await runAgentTurn(`${userInput}\n\n---\n\n${report}`);
