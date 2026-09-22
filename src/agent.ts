@@ -489,11 +489,31 @@ async function callJudge(task: string, facts: string[]): Promise<JudgeVerdict> {
         return { confidence: conf, reasoning };
       }
     }
-    // Fallback: look for keywords
-    const upper = cleaned.toUpperCase();
-    if (upper.includes('HIGH')) return { confidence: 'high', reasoning: cleaned };
-    if (upper.includes('MID')) return { confidence: 'mid', reasoning: cleaned };
-    return { confidence: 'low', reasoning: cleaned };
+    /**
+     * Fallback: look for keywords — IN THE PROSE, not in whatever markup came with it.
+     *
+     * The judge is a sub-call asking for one JSON object, and it is answered by a model that spends
+     * every other round emitting tool calls. When it answers this one the same way, no JSON matches
+     * above and the RAW reply became `reasoning` — which is printed verbatim into the progress line and
+     * fed back into the next prompt:
+     *
+     *     [progress: not there yet (4/4) — <function=read_file><parameter=path>…</parameter></function>]
+     *
+     * Reported by the operator, who read it as a tool that had failed to run. It never ran and was never
+     * going to: the judge holds no tools and is not in the loop. It is markup in a string, so it is
+     * stripped by the active dialect exactly as every other reply's markup is — this is the one reply
+     * path that never went through a parser.
+     *
+     * A reply that is NOTHING but a call leaves no prose, and saying so is the honest verdict. The
+     * keyword scan runs on the prose too, so a `MID` inside a file path no longer decides a verdict.
+     */
+    const judged = parseToolCalls(response);
+    const cleanedProse = judged.text.trim()
+      || (judged.toolCalls.length > 0 ? 'The judge replied with a tool call instead of a verdict.' : cleaned);
+    const upper = cleanedProse.toUpperCase();
+    if (upper.includes('HIGH')) return { confidence: 'high', reasoning: cleanedProse };
+    if (upper.includes('MID')) return { confidence: 'mid', reasoning: cleanedProse };
+    return { confidence: 'low', reasoning: cleanedProse };
   } catch (err) {
     log('ERROR', 'judge_error', { error: String(err) });
     return { confidence: 'mid', reasoning: 'Judge call failed.' };
