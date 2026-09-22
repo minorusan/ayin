@@ -3643,8 +3643,18 @@ async function runAgentTurn(userInput: string): Promise<void> {
      */
     if (restartExhausted()) {
       log('WARN', 'agent_lost_exhausted', { round: String(lostAtRound), depth: String(restartDepth()), changed: changed === null ? 'unreadable' : String(changed.length) });
-      addMessage('assistant', report);
-      if (HEADLESS) pushToWindow('assistant', report);
+      /**
+       * NO SUCCESSOR HERE EITHER, so the same correction as the interactive exit above. This branch
+       * exists precisely because the treadmill is over: nothing is relaunched, and the "## Your job —
+       * take a different route" paragraph is then addressed to nobody while being emitted as the run's
+       * final answer. The facts stand; the mandate goes.
+       *
+       * `report` above keeps its mandate on purpose — that is the copy on disk, and a later attempt,
+       * by a person or by another run, is exactly who reads `ayin-lost-report.md`.
+       */
+      const final = lostReport(originalGoal || userInput, changed, diff, lostWhy, 'operator');
+      addMessage('assistant', final);
+      if (HEADLESS) pushToWindow('assistant', final);
       return;
     }
     log('WARN', 'agent_lost_relaunch', { round: String(lostAtRound), changed: changed === null ? 'unreadable' : String(changed.length), depth: String(restartDepth()) });
