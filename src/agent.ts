@@ -18,7 +18,7 @@ import { waiveReadOnce } from './tools/readGuard.js';
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { cancelActiveThinking } from './connection.js';
 import { llmChat, parseToolCalls, replyTruncated, unexecutedCallText, renderToolCall, renderToolResult, activeModelId, activeContextTokens, charsPerToken, resetUsageBaseline, toolMode } from './llm/manager.js';
 import { llmCall } from './llm.js';
@@ -1672,25 +1672,71 @@ function inGitRepo(): boolean {
   }
 }
 
-/** The whole handover as a diff, or NULL when there is no repository to ask. Never '' for "unknown". */
+/**
+ * THE HANDOVER AS A DIFF — THIS RUN'S FILES ONLY. NULL when there is no repository to ask.
+ *
+ * `git diff` with no pathspec is the whole dirty tree, which on a real checkout is mostly the
+ * operator's. The door review says "everything you are about to hand over" and then showed the model
+ * 28 uncommitted Unity assets it had never touched; the lost and unverified reports pasted the same
+ * thing under "What it changed". Both are describing a different change than the one that happened,
+ * and the second one is read by a fresh agent that is about to act on it.
+ *
+ * Scoped to `treeChangedFiles()`, which is already attributed — so the two halves of every report,
+ * the file list and the diff, finally describe the same set.
+ *
+ * AN EMPTY LIST IS THE TRAP, and it is why this returns early rather than passing no paths: `git diff
+ * --` with nothing after it is `git diff`, the whole tree again, in exactly the case where ayin
+ * changed nothing at all.
+ *
+ * `execFileSync` rather than a shell string: these are the operator's filenames, with their spaces and
+ * ampersands, and a shell has opinions about those. NO CATCH, as before — inside a repository a git
+ * that fails is a real failure and must be seen, not smoothed into an empty diff that reads as
+ * "nothing to hand over".
+ */
 function treeDiff(): string | null {
-  if (!inGitRepo()) return null;
-  // NO CATCH. Inside a repository, a git that fails is a real failure and must be seen, not smoothed
-  // into an empty diff that reads as "nothing to hand over".
-  execSync('git add -AN .', { cwd: process.cwd(), stdio: 'ignore' });
-  return execSync('git diff', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
+  const changed = treeChangedFiles();
+  if (changed === null) return null;
+  if (changed.length === 0) return '';
+  const root = treeRoot || process.cwd();
+  // `--intent-to-add` stages existence only, never content, so a file the run CREATED appears in `git
+  // diff` at all. Only for paths that exist: a deletion is already in the diff, and naming a vanished
+  // path in a pathspec is an error rather than a no-op.
+  const addable = changed.filter((f) => f.exists).map((f) => f.path);
+  if (addable.length) execFileSync('git', ['add', '-AN', '--', ...addable], { cwd: root, stdio: 'ignore' });
+  return execFileSync('git', ['diff', '--', ...changed.map((f) => f.path)],
+    { cwd: root, encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 });
 }
 
 /** Every dirty path git reports, whoever made it dirty. NULL when there is no repository to ask. */
 function statusRows(): Array<{ path: string; exists: boolean }> | null {
   if (!inGitRepo()) return null;
-  return execSync('git status --porcelain', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
-      .split('\n')
-      .filter(Boolean)
-      // "XY path" — the two status columns, then a space. 'D' in either column is a deletion, and a
-      // report that calls a deleted file "changed" without saying so misdescribes the handover.
-      .map((l) => ({ path: l.slice(3).trim(), exists: !l.slice(0, 2).includes('D') }))
-      .filter((f) => f.path);
+  /**
+   * `-z`, BECAUSE A PATH HAS TO SURVIVE THE ROUND TRIP.
+   *
+   * Line-based porcelain wraps any path with a space in quotes and octal-escapes non-ASCII bytes
+   * (`core.quotePath=false` does not turn the quoting off — checked). Those rows are shown to the
+   * operator, matched against this run's baseline, and handed back to git as pathspecs by `treeDiff`,
+   * and a mangled path fails all three: the operator reads
+   * `"Assets/TextMesh Pro/Fonts & Materials/…"` with the quotes in it, and git is asked to diff a file
+   * of that literal name. `-z` is NUL-separated and never quotes or escapes anything.
+   *
+   * It also fixes renames, which the line parser read as one path called `old -> new`: with `-z` the
+   * source arrives as its own field after the destination, and it is skipped rather than reported as a
+   * second changed file.
+   */
+  const fields = execSync('git status --porcelain -z', { cwd: process.cwd(), encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
+      .split('\0')
+      .filter((f) => f.length > 0);
+  const rows: Array<{ path: string; exists: boolean }> = [];
+  for (let i = 0; i < fields.length; i++) {
+    // "XY path" — the two status columns, then a space. 'D' in either column is a deletion, and a
+    // report that calls a deleted file "changed" without saying so misdescribes the handover.
+    const xy = fields[i].slice(0, 2);
+    const path = fields[i].slice(3);
+    if (path) rows.push({ path, exists: !xy.includes('D') });
+    if (xy.includes('R') || xy.includes('C')) i++; // the source path, not a change of its own
+  }
+  return rows;
 }
 
 /**
@@ -1736,9 +1782,9 @@ function noteTreeWrite(path: string): void {
   if (path && path.trim()) writtenThisRun.add(resolve(process.cwd(), path.trim()));
 }
 
-/** Did ayin write the file this porcelain row names? Rows are repo-root-relative and may be quoted. */
+/** Did ayin write the file this porcelain row names? Rows are repo-root-relative and, with `-z`, raw. */
 function ayinWrote(row: string): boolean {
-  return treeRoot !== '' && writtenThisRun.has(join(treeRoot, row.replace(/^"(.*)"$/, '$1')));
+  return treeRoot !== '' && writtenThisRun.has(join(treeRoot, row));
 }
 
 /** What THIS RUN changed, or NULL when there is no repository to ask. Never [] for "unknown". */
