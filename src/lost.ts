@@ -333,8 +333,22 @@ export function lostNudge(why: string): string {
  *
  * Two mandates, because "verify the fix" is an instruction about nothing when there is no fix. A run
  * that edited is a run with a claim to check; a run that did not is a run with dead ends to avoid.
+ *
+ * WHO IS READING IT. Everything above assumes a successor process, because in headless there always is
+ * one: this document IS the next turn's prompt. Interactive has no successor — the clap exits with a
+ * reply instead of restarting — and it was handing the operator this same document unchanged. What a
+ * person asking "is this icon set dynamically?" got back was a briefing addressed to a machine:
+ * "# Report from the previous agent", and then "## Your job — Nothing has been changed yet… Make the
+ * edit the task asks for." Reported by the operator, who read it, correctly, as something that was
+ * never meant for them.
+ *
+ * So the audience is stated rather than assumed. The FACTS are identical either way — why it stopped,
+ * the task, what changed, which routes are closed — because they are the same facts. What changes is
+ * the mandate, which only exists to instruct a successor: with nobody to instruct, there is nothing to
+ * say, and inventing an instruction for the operator would be ayin telling a person what their job is.
  */
-export function lostReport(goal: string, changed: string[] | null, diff: string, why: string): string {
+export function lostReport(goal: string, changed: string[] | null, diff: string, why: string,
+                           audience: 'agent' | 'operator' = 'agent'): string {
   // The loop's own shape, most-repeated first — that is the evidence, not the last few calls in order.
   const counts = new Map<string, { n: number; c: Call }>();
   for (const c of window) {
@@ -354,7 +368,7 @@ export function lostReport(goal: string, changed: string[] | null, diff: string,
   const unreadable = changed === null;
   const edited = changed !== null && changed.length > 0;
   const attempt = depth > 1 ? ` This is attempt ${depth}; earlier restarts did not break the pattern.` : '';
-  const head = `# Report from the previous agent\n\n`
+  const head = `${audience === 'operator' ? '# Stopped — it was going in circles' : '# Report from the previous agent'}\n\n`
     + `It stopped because ${why}: it was repeating itself and nothing it did changed the working tree `
     + `or told it anything new.${attempt}\n\n`
     + `## The task\n${goal}\n\n`;
@@ -400,5 +414,5 @@ export function lostReport(goal: string, changed: string[] | null, diff: string,
       + `different route from the dead ends above.`
     : `## Your job\nNothing has been changed yet. The calls above are dead ends — take a different route. `
       + `Make the edit the task asks for, or call finish and state why the cause resists one.`;
-  return head + work + dead + mandate;
+  return head + work + dead + (audience === 'operator' ? '' : mandate);
 }

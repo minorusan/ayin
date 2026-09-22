@@ -3624,7 +3624,11 @@ async function runAgentTurn(userInput: string): Promise<void> {
      * Every "the mandate does not convince the model" reading of that run was wrong: the mandate was
      * never intact by the time the model saw it.
      */
-    const report = lostReport(originalGoal || userInput, changed, diff, lostWhy);
+    // AUDIENCE, NOT DECORATION — see `lostReport`. Headless restarts, so this document IS the next
+    // turn's prompt and carries the mandate. Interactive exits with a reply and starts no successor, so
+    // the operator gets the facts and no "your job" paragraph written for a machine. Composed once:
+    // `lostReport` folds this attempt's dead ends into the run's ledger as a side effect.
+    const report = lostReport(originalGoal || userInput, changed, diff, lostWhy, HEADLESS ? 'agent' : 'operator');
     if (!HEADLESS) {
       addMessage('assistant', report);
       log('INFO', 'agent_lost_exit', { round: String(lostAtRound), changed: changed === null ? 'unreadable' : String(changed.length) });
