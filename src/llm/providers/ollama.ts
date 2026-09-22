@@ -41,6 +41,7 @@
 import type {
   GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ModelEntry, ProviderStatus, TokenUsage,
 } from '../provider.js';
+import { fetch as undiciFetch, Agent } from 'undici';
 import { providerLog, providerConfig, providerPendingImages, providerLlmState } from './runtime.js';
 
 /** Loopback default: a neutral built-in that reveals nothing about any particular machine. */
@@ -48,6 +49,29 @@ const DEFAULT_URL = 'http://127.0.0.1:11434';
 
 /** Generation ceiling. A long agent turn on a big context legitimately takes minutes. */
 const GENERATE_TIMEOUT_MS = 20 * 60_000;
+
+/**
+ * THE 20 MINUTES ABOVE WERE A FICTION: undici cut every generation at 5.
+ *
+ * `/api/chat` with `stream: false` buffers the whole response and sends NOTHING — no headers, no
+ * bytes — until the model is done, so a long call is an idle connection the entire time. Node global
+ * fetch runs on its own bundled undici, whose stock `headersTimeout` is 300s, and it killed the
+ * request long before `AbortSignal.timeout(GENERATE_TIMEOUT_MS)` could. What reached the operator was
+ * a bare "LLM error: fetch failed", naming nothing.
+ *
+ * Measured: two `POST /api/chat` aborted BY THE CLIENT at exactly 5m01s with ollama still generating;
+ * the agent died at round 1 and the exercise was scored a failure on an untouched stub.
+ *
+ * `connection.ts` already carries this fix, and the reason the obvious version does not work:
+ * `setGlobalDispatcher` configures the npm package singleton, which Node global fetch never consults,
+ * and handing that Agent to global fetch fails outright on the instance mismatch. Fetch AND Agent must
+ * come from the SAME undici import, with the agent passed per call.
+ */
+const generateAgent = new Agent({
+  headersTimeout: GENERATE_TIMEOUT_MS,
+  bodyTimeout: GENERATE_TIMEOUT_MS,
+  connect: { keepAlive: true, keepAliveInitialDelay: 15_000 },
+});
 const PROBE_TIMEOUT_MS = 2_500;
 
 /**
@@ -272,11 +296,12 @@ export function createOllamaProvider(): LlmProvider {
       // a run that appears stuck, and it must be readable from outside the process.
       const started = Date.now();
       providerLlmState('issued', { url: `${baseUrl()}/api/chat` });
-      const res = await fetch(`${baseUrl()}/api/chat`, {
+      const res = await undiciFetch(`${baseUrl()}/api/chat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
+        dispatcher: generateAgent,
       }).catch((e: unknown) => {
         providerLlmState('failed', { error: e instanceof Error ? e.message : String(e), elapsedMs: Date.now() - started });
         throw e;
