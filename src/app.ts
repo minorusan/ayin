@@ -264,7 +264,7 @@ function renderArtifactsOverlay(): void {
       bg: '#111',
       border: { fg: '#7B8CDE' },
     },
-    label: ` ${a.tool} — ${artifactIdx + 1}/${total} (←/→ navigate, Esc close) `,
+    label: ` ${a.tool} — ${artifactIdx + 1}/${total} (↑/↓ PgUp/PgDn scroll · ←/→ navigate · Esc close) `,
   });
 
   const header = `{#7B8CDE-fg}${a.tool}{/} {#555-fg}${a.params}{/}\n{#555-fg}${ts}{/}\n{#555-fg}${'─'.repeat(40)}{/}\n`;
@@ -366,14 +366,26 @@ if (!HEADLESS) {
 
   // Overlays scroll by keyboard (mouse tracking is off so terminal selection stays native).
   // The chat box has its own PgUp/PgDn in the input handler; it is inert while an overlay is open.
-  const overlayScroll = (dir: 1 | -1) => {
+  const overlayScroll = (dir: 1 | -1, lines?: number) => {
     const box = artifactsOverlay ?? summaryOverlay ?? docOverlay;
     if (!box) return;
-    box.scroll(dir * Math.floor((box.height as number) / 2));
+    box.scroll(dir * (lines ?? Math.floor((box.height as number) / 2)));
     screen.render();
   };
   screen.key(['pageup'], () => overlayScroll(-1));
   screen.key(['pagedown'], () => overlayScroll(1));
+  /**
+   * ↑/↓ SCROLL AN OPEN OVERLAY, because PgUp/PgDn was the only way and on a laptop it is not a key.
+   *
+   * Reported: a tool's output opened with Ctrl+O could not be scrolled at all. The binding existed and
+   * worked — but PgDn is Fn+↓ on every Mac keyboard, the overlay's label named ←/→ and Esc and not the
+   * scroll keys, the wheel is off by default so that terminal selection survives, and ↑/↓ — the keys
+   * anyone reaches for — were bound to nothing while an overlay is open. Four ways to find it, all shut.
+   *
+   * Inert with no overlay open, exactly as ←/→ above, so plain ↑/↓ remain prompt history at the prompt.
+   */
+  screen.key(['up'], () => overlayScroll(-1, 1));
+  screen.key(['down'], () => overlayScroll(1, 1));
 }
 
 // ── Connection ──────────────────────────────────────────────────────
