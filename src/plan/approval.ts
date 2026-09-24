@@ -120,12 +120,27 @@ const CANCEL = new Set([
 export type Answer =
   | { kind: 'approve' }
   | { kind: 'cancel' }
-  | { kind: 'revise'; feedback: string };
+  | { kind: 'revise'; feedback: string }
+  | { kind: 'unclear'; said: string };
+
+/**
+ * SHORTER THAN THIS AND IT CANNOT BE A REVISION — it is an answer that missed.
+ *
+ * "Anything else is a revision" is the safe default for a sentence and a trap for a token. Measured
+ * on the first real session this shipped into: the operator replied with THREE CHARACTERS, it was
+ * read as a revision, the plan was thrown away and 117 seconds of planning were spent again. Nobody
+ * revises a fourteen-step plan in three characters; they say yes in a word this list does not happen
+ * to contain. Under this length, an unrecognised reply is a question back — the plan STAYS pending,
+ * so the wrong guess costs one line instead of two minutes.
+ */
+const SHORTEST_REVISION = 12;
 
 export function readAnswer(input: string): Answer {
-  const word = input.trim().replace(/[.!]+$/, '').toLowerCase();
+  // Trailing punctuation only. Anything that strips more is a matcher pretending to understand.
+  const word = input.trim().replace(/[.!?]+$/, '').toLowerCase();
   if (APPROVE.has(word)) return { kind: 'approve' };
   if (CANCEL.has(word)) return { kind: 'cancel' };
+  if (word.length < SHORTEST_REVISION) return { kind: 'unclear', said: input.trim() };
   return { kind: 'revise', feedback: input.trim() };
 }
 
@@ -137,4 +152,11 @@ export function approvalNotice(planPath: string, phases: number, steps: number):
   return `PLAN READY — ${shape}. Nothing has been changed on disk.\n`
     + `  ${planPath}\n`
     + '  Reply `go` to run it, `cancel` to drop it, or say what to change and it will be re-planned.';
+}
+
+/** Asked back when a short reply matched nothing. The plan is still waiting — say so, and stop. */
+export function unclearNotice(said: string): string {
+  return `I did not read ${JSON.stringify(said)} as an answer, and it is too short to be a change to make — `
+    + 'so the plan is still waiting, nothing has run.\n'
+    + '  `go` to run it · `cancel` to drop it · or a sentence saying what to change.';
 }

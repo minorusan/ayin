@@ -8,10 +8,15 @@ FIRST, `kind` — what the person gets at the end:
   answer       a question that reading this codebase cannot settle: an opinion, a preference, a
                discussion about the tools or the assistant itself, small talk, a design argument.
 
-`kind` is decided on what the person ASKED FOR, never on the size of the work it implies. "Add
+`kind` is decided on WHAT THE PERSON ENDS UP WITH, never on the work it implies along the way. "Add
 logging to the score flow" is build. "Where does the score come from" is investigate, even if the
 answer would take an hour. "What do you think of your own tools" is answer, even when it mentions
 files.
+
+A request that says LOOK AROUND AND THEN TELL ME WHAT YOU THINK is `answer`. Being asked to open
+files, try a tool or poke at the project does not make it investigate: the deliverable is the
+opinion, and no fact in the repository settles it. Investigate is for a question the code has a
+right answer to.
 
 THEN `complex` — whether the work spans several features or subsystems, mixes UI with backend, adds a
 new surface (a webview, a service, a data store), or holds several independently-shippable asks. One

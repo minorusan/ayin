@@ -1822,6 +1822,9 @@ async function runAgentTurn(rawInput: string): Promise<void> {
   const gate = resolvePlanApproval(rawInput);
   const userInput = gate.input;
   if (gate.notice) addMessage('system', gate.notice);
+  // The answer did not parse and the plan is still waiting. Nothing to run, nothing to plan — the
+  // question has been asked back and the next message answers it.
+  if (gate.stop) return;
 
   // Per TURN, not per session: a second question legitimately searches again from scratch.
   const toolUseCounts = new Map<string, number>();

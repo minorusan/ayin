@@ -593,8 +593,24 @@ for (const yes of ['go', 'GO', 'yes', 'ok', 'Approve', 'run it', 'go.']) {
 for (const no of ['no', 'cancel', 'stop', 'never mind']) {
   ok(readAnswer(no).kind === 'cancel', `"${no}" drops it`);
 }
-ok(readAnswer('go and also rename the module').kind === 'revise', 'anything longer is a REVISION, never a yes — the safe wrong answer');
+ok(readAnswer('go and also rename the module').kind === 'revise', 'a sentence is a REVISION, never a yes — the safe wrong answer');
 ok(readAnswer('use the existing logger instead').feedback === 'use the existing logger instead', '  → and their words are carried as the requirement');
+
+/**
+ * A SHORT REPLY THAT MATCHED NOTHING IS A QUESTION BACK, NOT A REVISION.
+ *
+ * Measured on the first real session this shipped into: the operator answered in THREE CHARACTERS,
+ * "anything else is a revision" took it as one, the pending plan was dropped, and 117 seconds of
+ * planning were spent again. Nobody revises a fourteen-step plan in three characters — they say yes
+ * in a word the list does not happen to contain. The plan now STAYS pending and the cost of the
+ * wrong guess is one line instead of two minutes.
+ */
+for (const short of ['yep', 'sure', 'k', 'ye', 'da', 'aye', '👍']) {
+  ok(readAnswer(short).kind === 'unclear', `"${short}" is asked back, not guessed at`, readAnswer(short).kind);
+}
+ok(readAnswer('yep').said === 'yep', '  → and it quotes what was actually typed');
+ok(readAnswer('go?').kind === 'approve', 'a question mark does not stop "go" being yes');
+ok(readAnswer('make it two phases').kind === 'revise', 'while a real instruction is long enough to be one');
 
 console.log('\n— an EXISTING unity project is planned as Unity, not as a Node/web repo —');
 inEmptyDir((dir) => {

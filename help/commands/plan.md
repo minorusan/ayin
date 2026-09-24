@@ -13,9 +13,9 @@ got. `/planthis` overrides the veto: you asked, so you get one.
 
 The plan is a **proposal**: it is written to `.ayin/plans/`, nothing else on disk is touched — no
 scaffold, no `git init`, no commit — and the turn stops there. Reply `go` to run it, `cancel` to drop
-it, or say what to change and it is re-planned with your words as the requirement. Anything that is not
-one of those exact words is read as a change, so `go and also rename the module` revises rather than
-runs. Headless (`-p`) approves itself; `planApproval: 0` under `config` in `~/.ayin-cli/prompts.json` turns
+it, or say what to change and it is re-planned with your words as the requirement. A sentence that is
+not `go` or `cancel` is read as a change, so `go and also rename the module` revises rather than runs;
+something too short to be a change ("yep", "k") is asked about instead, and the plan keeps waiting. Headless (`-p`) approves itself; `planApproval: 0` under `config` in `~/.ayin-cli/prompts.json` turns
 the gate off in the TUI.
 
 Once it runs, each phase is checked: a step can carry a shell command that must exit 0, ayin runs it

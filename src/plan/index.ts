@@ -102,7 +102,7 @@ import { ensureToolRuntime } from '../tool-wiring.js';
 import { buildActionablePlan, buildPhasedPlan, isActionablePlanEnabled, renderDeliverableList, renderPhaseIndex } from './plan.js';
 import type { PlanMode, PlanPhase } from './plan.js';
 import {
-  approvalNotice, approvalRequired, clearPending, loadPending, readAnswer, storePending,
+  approvalNotice, approvalRequired, clearPending, loadPending, readAnswer, storePending, unclearNotice,
   type PendingPhase, type PendingPlan,
 } from './approval.js';
 import { beginPlanProgress, endPlanProgress, type PhaseRuntime } from './progress.js';
@@ -253,7 +253,7 @@ let revising = false;
  *
  * Returns the input the turn should run, and a line to show for why it changed.
  */
-export function resolvePlanApproval(rawInput: string): { input: string; notice: string } {
+export function resolvePlanApproval(rawInput: string): { input: string; notice: string; stop?: boolean } {
   approvedThisTurn = null;
   revising = false;
   const cwd = process.cwd();
@@ -283,12 +283,31 @@ export function resolvePlanApproval(rawInput: string): { input: string; notice: 
     return { input: pending.request, notice: `Plan approved — working ${pending.planPath}.` };
   }
 
-  // REVISION. The plan is dropped and the request is re-planned with their words carried as the
-  // requirement; `forced` makes the next `runPlan` plan it whatever triage would have said, because
-  // an operator revising a plan has already established that this request gets one.
+  /**
+   * TOO SHORT TO BE A CHANGE — so ask, and KEEP THE PLAN WAITING.
+   *
+   * This is the branch the first real session needed and did not have. The operator answered in three
+   * characters, "anything else is a revision" took it as one, the pending plan was dropped and 117
+   * seconds of planning were spent again on a question that should never have been planned at all.
+   * A guess that costs two minutes is not a safe default; a question that costs one line is.
+   */
+  if (answer.kind === 'unclear') {
+    log('INFO', 'plan_approval', { answer: 'unclear', said: answer.said.slice(0, 40) });
+    return { input: rawInput, notice: unclearNotice(answer.said), stop: true };
+  }
+
+  /**
+   * REVISION. The plan is dropped and the request is re-planned with their words as the requirement.
+   *
+   * IT DOES NOT SET `forced`, and that was a real bug. `forced` means "/planthis" — the operator
+   * explicitly demanded a plan — and it makes triage's verdict unable to veto. Setting it here
+   * synthesised a demand nobody made: on the measured session the re-planned request came back from
+   * triage as `answer`, which is the verdict that means "do not plan this at all", and the forced
+   * flag overrode it and planned it anyway. A revision says what to change about a plan, not that a
+   * plan must exist; if triage now says this was never work, that answer is the useful one.
+   */
   clearPending(cwd);
   revising = true;
-  forced = true;
   log('INFO', 'plan_approval', { answer: 'revise', chars: String(answer.feedback.length) });
   return {
     input: planPrompts.get('planRevision', { REQUEST: pending.request, FEEDBACK: answer.feedback }),

@@ -1698,12 +1698,25 @@ message is the answer.
 |---|---|
 | `go`, `yes`, `ok`, `approve`, `run it`, `proceed`, … (exact, whole-input) | the plan runs |
 | `no`, `cancel`, `stop`, `never mind`, … (exact, whole-input) | dropped; the document stays on disk |
-| **anything else** | a **revision** — re-planned with those words as the requirement (`planRevision.txt`) |
+| a sentence (12+ chars) | a **revision** — re-planned with those words as the requirement (`planRevision.txt`) |
+| anything shorter that matched neither | **asked back**, and the plan STAYS pending |
 
-Revision is the default because it is the safe wrong answer: a request typed at the wrong moment
-becomes a new plan to look at, never work nobody approved. The two lists are exact and short — this
-repo retired a natural-language regex on plan mode once already, and a fuzzy match here misfires into
-minutes of execution. `go and also rename the module` is a revision, not a yes.
+Revision is the default for a SENTENCE because it is the safe wrong answer there: a request typed at
+the wrong moment becomes a new plan to look at, never work nobody approved. The two lists are exact
+and short — this repo retired a natural-language regex on plan mode once already, and a fuzzy match
+here misfires into minutes of execution. `go and also rename the module` is a revision, not a yes.
+
+**Below twelve characters it is neither.** Measured on the first real session this shipped into: the
+operator answered in three characters, "anything else is a revision" took it as one, the pending plan
+was dropped and 117 seconds of planning were spent again. Nobody revises a fourteen-step plan in
+three characters — they say yes in a word the list does not happen to contain. So a short
+unrecognised reply is asked back, the plan stays pending, and the wrong guess costs one line.
+
+**A revision does not set `forced`**, and that was the second half of the same bug. `forced` means
+`/planthis` — the operator explicitly demanded a plan — and it makes triage's verdict unable to veto.
+Setting it on a revision synthesised a demand nobody made: on that session the re-planned request
+came back from triage as `answer`, the verdict that means *do not plan this at all*, and the forced
+flag overrode it and planned it anyway.
 
 **Headless approves itself.** `-p` has nobody to ask, and a gate that blocks where there is no operator
 hangs a cron job — the same argument that turned plan mode on by default in headless. `planApproval: 0`
