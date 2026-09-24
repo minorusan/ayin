@@ -224,9 +224,11 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   //
   // So when the joined forms come back empty, search the individual words. It costs one extra battery
   // only on the searches that already failed, and it is what makes a concept findable at all.
+  let widenedSearch = false;
   if (findings.length === 0 && terms.words.length) {
     const wordTerms = terms.words.filter((w) => w.length >= 3).slice(0, MAX_TERMS);
     if (wordTerms.length) {
+      widenedSearch = true;
       toolReport(`explore · nothing for the joined forms — widening to ${wordTerms.join(', ')}`);
       const wide = wordTerms.flatMap((w) => explorer.plan(w, root).map((pl) => ({ ...pl, term: w })));
       const wideResults = await runAll(wide.map((pl) => ({ strategy: pl.strategy, argv: pl.argv })), root);
@@ -237,7 +239,7 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
           const relPath = (parsed?.file ?? line).replace(/^\.\//, '');
           if (!existsSync(join(root, relPath))) continue;
           if (!parsed) {
-            findings.push({ span: { file: relPath, fromLine: 1, toLine: 1, text: '' }, reason, term, score: 0 });
+            findings.push({ span: { file: relPath, fromLine: 1, toLine: 1, text: '' }, reason, term, widened: true, score: 0 });
             continue;
           }
           const got = readSpan(join(root, relPath), parsed.line - CONTEXT_BEFORE, parsed.line + CONTEXT_AFTER);
@@ -249,7 +251,7 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
               toLine: Math.max(1, parsed.line - CONTEXT_BEFORE) + got.text.split('\n').length - 1,
               text: got.text,
             },
-            reason, term, symbol: explorer.symbolAt(got.lines, parsed.line), score: 0,
+            reason, term, widened: true, symbol: explorer.symbolAt(got.lines, parsed.line), score: 0,
           });
         }
       }
@@ -272,6 +274,7 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   const result: ExploreResult = {
     question,
     project: explorer.id,
+    widenedSearch,
     findings: rankAndTrim([...findings, ...glued], 8),
     attempts,
     terms: search,

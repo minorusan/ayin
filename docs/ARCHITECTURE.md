@@ -2104,6 +2104,42 @@ see and cannot use costs a round to discover that.
 ordinary turn, and an arbiter that must spawn a child to run one shell command has made the common case
 worse to improve the rare one.
 
+### A widened explore says that it widened
+
+`explore` searches the joined forms first — `ScoreChangeIndicator` — and only when those find
+nothing does it re-run the battery on single words: `score`, `change`, `indicator`. That fallback is
+why a concept is findable at all, and it was invisible. A test asserting the word "indicator" came
+back shaped exactly like a class declaration, so an answer made entirely of coincidences read as
+confidently as one made of evidence. Measured: a specific question returned eight hits, every one a
+widened match inside test assertions, and the reader spent three further tool calls — grep,
+find_references, corpus_search — discovering for itself what explore should have said.
+
+Three changes, no re-ranking of what tests are worth (`spec: 0.9` stays; a test assertion is
+routinely the clearest statement of a rule in a repository, which is why it was raised in the first
+place):
+
+- `Finding.widened` marks a hit from the single-word pass, and the line carries it:
+  `(widened: matched "indicator" alone)`.
+- The ranker demotes it by 0.3 — weaker evidence, not worthless, because when the precise pass found
+  nothing these are the only leads there are.
+- `ExploreResult.widenedSearch` leads the whole answer with it. On the RESULT rather than counted
+  from the findings, because counting gets it wrong: `glue()` adds asset references and negative
+  results that carry no term, so an answer entirely downstream of widening could still look
+  part-precise.
+
+### `diagram` writes to `.ayin/diagrams/`, and says when it guessed
+
+Two side effects, both reported by a model that had just used it. It defaulted its output directory
+to `process.cwd()`, so `<slug>.puml` and `<slug>.svg` landed in the repository ROOT among the source,
+once per call — on a real Unity project the pair reached the operator's git index. `.ayin/diagrams/`
+is where plan mode already puts its working notes, for the same reason and with the same escape
+hatches: an explicit `dir`, then `AYIN_PUML_DIR`, then the default.
+
+And a diagram drawn from the subject's NAME alone, with no `context`, came back indistinguishable
+from one traced out of the code — a plausible, unverified `Idle → Preparing → Active → Idle` for a
+class nobody had opened. The PlantUML validation is syntactic, correctly, so the file now opens with
+a comment saying it is not grounded in code. It travels with the file and survives being reopened.
+
 ### The edit ledger, and an undo the agent can actually reach (`src/edits/`)
 
 An agent that can write had no way to unwrite. Measured twice in a week: a model made a deliberate

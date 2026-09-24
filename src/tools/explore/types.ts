@@ -79,6 +79,19 @@ export interface Finding {
   detail?: string;
   /** Which search term produced this. Used for specificity weighting — see rank.ts. */
   term?: string;
+  /**
+   * This came from the WIDENED pass — a single word out of the question, not the joined form.
+   *
+   * The difference is the difference between evidence and a coincidence. Asking "how is the score
+   * change indicator spawned" searches `ScoreChangeIndicator` first; when that finds nothing the
+   * battery is re-run on `score`, `change`, `indicator` alone, and a test asserting the word
+   * "indicator" then matches. Both arrived as findings with the same shape, so an answer built
+   * entirely out of the second kind looked exactly like one built out of the first — reported as
+   * *"matched on the word 'indicator' in test assertions, not on the actual ScoreChangeIndicator
+   * class"*, after which the reader had to run grep, find_references and corpus_search to find what
+   * explore should have surfaced.
+   */
+  widened?: boolean;
   /** Ranking score. Reported so the caller can see the ordering is mechanical. */
   score: number;
   /**
@@ -101,6 +114,16 @@ export interface Attempt {
 }
 
 export interface ExploreResult {
+  /**
+   * The joined forms found NOTHING and the battery was re-run on single words — so every finding
+   * below, including the ones `glue()` derived from them, is downstream of a broadened search.
+   *
+   * On the result rather than counted from the findings, because counting gets it wrong: `glue()`
+   * adds asset references and negative results that carry no term of their own, so an answer built
+   * entirely out of widened hits could still look part-precise.
+   */
+  widenedSearch?: boolean;
+
   question: string;
   project: string;
   findings: Finding[];

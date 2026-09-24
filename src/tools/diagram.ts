@@ -43,6 +43,7 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { ensureAyinDir } from '../ayin-dir.js';
 import { isAbsolute, join } from 'node:path';
 
 
@@ -158,7 +159,22 @@ export async function makeDiagram(
   subject: string,
   opts: { kind?: string; context?: string; dir?: string; open?: boolean; render?: 'svg' | 'png' | '0' } = {},
 ): Promise<DiagramResult> {
-  const dir = opts.dir || process.env.AYIN_PUML_DIR || process.cwd();
+  /**
+   * `.ayin/diagrams/`, NOT THE WORKING DIRECTORY — the same decision plan mode already made.
+   *
+   * A diagram is ayin's working note, not the project's file. Defaulting to `process.cwd()` dropped
+   * `<slug>.puml` and `<slug>.svg` into the repo ROOT, among the actual source, once per call.
+   * Measured on a real Unity project: the pair landed at the top level and something then staged
+   * them, so the operator's index carried two files nobody asked for. The model's own report flagged
+   * it — *"the output is left in the working tree with no cleanup, which is a side effect the
+   * operator should know about"* — and left them there because deleting an operator's files is not
+   * a tool's call to make.
+   *
+   * `dir` and `AYIN_PUML_DIR` still win, in that order: an operator who says where it goes has said
+   * so on purpose. Nothing is hidden by this — the file is rendered and opened either way, and the
+   * result states the path.
+   */
+  const dir = opts.dir || process.env.AYIN_PUML_DIR || ensureAyinDir(process.cwd(), 'diagrams');
   const render = (opts.render ?? RENDER_DEFAULT).toLowerCase();
   let source = '';
   let lastError = '';
@@ -199,7 +215,26 @@ export async function makeDiagram(
     // ── valid: write, render, open ───────────────────────────────────
     mkdirSync(dir, { recursive: true });
     const file = join(dir, `${slugify(subject)}.puml`);
-    writeFileSync(file, `${source}\n`);
+    /**
+     * A PICTURE DRAWN FROM A NAME SAYS SO, IN THE FILE.
+     *
+     * `context` is where the caller puts the facts it gathered, and the description asks for it —
+     * but nothing happened when it was missing, so a diagram inferred entirely from the subject's
+     * NAME came back looking exactly like one traced from the code. Measured: a state machine for a
+     * class the agent had never opened, `Idle → Preparing → Active → Idle`, plausible and unverified,
+     * and its own report had to be the thing that said so: *"not grounded in the actual code. For a
+     * tool that claims to be validated by plantuml, the validation is syntactic only."*
+     *
+     * The validation IS syntactic, and that is fine — it is the renderer's job. What was missing is
+     * that nothing distinguished a grounded picture from a guessed one. A comment at the top of the
+     * source travels with the file, survives being reopened tomorrow, and costs one line.
+     */
+    const grounded = (opts.context ?? '').trim().length > 0;
+    const provenance = grounded
+      ? ''
+      : "' NOT GROUNDED IN CODE: drawn from the subject name alone, with no `context` supplied.\n"
+        + "' Treat it as a sketch of what the name suggests, not as a description of what the code does.\n";
+    writeFileSync(file, `${provenance}${source}\n`);
 
     const EXT: Record<string, string> = { svg: '.svg', png: '.png' };
     const FLAG: Record<string, string> = { svg: '-tsvg', png: '-tpng' };

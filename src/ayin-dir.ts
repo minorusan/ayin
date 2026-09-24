@@ -57,7 +57,7 @@ const GITIGNORE = `# ayin's working artifacts for this repository — plan docum
  * already spent a model call on. The caller gets the path back either way and will fail on the write
  * if it truly cannot be written, which is the honest place to fail.
  */
-export function ensureAyinDir(root: string, sub: 'plans' | 'reports' | 'edits'): string {
+export function ensureAyinDir(root: string, sub: 'plans' | 'reports' | 'edits' | 'diagrams'): string {
   const base = ayinDir(root);
   const dir = join(base, sub);
   try {

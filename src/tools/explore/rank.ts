@@ -48,6 +48,18 @@ export function scoreFinding(f: Finding, termHitsInFile: number): number {
   if (LOW_VALUE.test(f.span.file)) s -= 0.6;
   if (SAMPLE.test(f.span.file)) s -= 0.25;
 
+  /**
+   * A HIT ON ONE WORD OF THE QUESTION IS WEAKER THAN A HIT ON THE THING ASKED ABOUT.
+   *
+   * The widened pass exists because a concept has to be findable at all when its joined form matches
+   * nothing — see explore/index.ts. But its hits are a different kind of evidence: `ScoreChangeIndicator`
+   * naming a class is the answer, while the bare word `indicator` inside a test assertion is a
+   * coincidence that happens to share a token. Scored the same, the coincidences filled an answer and
+   * read as confidently as the real thing. Demoted rather than dropped, because when the precise pass
+   * found nothing these ARE the only leads there are.
+   */
+  if (f.widened) s -= 0.3;
+
   // A short path is usually closer to the core than a deeply nested one.
   const depth = f.span.file.split('/').length;
   s -= Math.min(depth, 10) * 0.012;

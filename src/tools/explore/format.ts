@@ -42,13 +42,33 @@ function header(f: Finding): string {
     ? `${f.span.file}:${f.span.fromLine}${f.span.toLine > f.span.fromLine ? `-${f.span.toLine}` : ''}`
     : f.span.file;
   const sym = f.symbol ? `  ${f.symbol}` : '';
-  return `  [${f.reason}] ${where}${sym}`;
+  // The label travels with the line, because the distinction matters per finding: a widened answer
+  // often mixes one real hit in among several coincidences.
+  const wide = f.widened ? ` (widened: matched "${f.term}" alone)` : '';
+  return `  [${f.reason}] ${where}${sym}${wide}`;
 }
 
 export function formatResult(r: ExploreResult): string {
   const out: string[] = [];
   out.push(`explore · ${r.project} · ${r.elapsedMs}ms`);
   out.push(`searched for: ${r.terms.join(', ') || '(no identifiers derived from the question)'}`);
+
+  /**
+   * WHEN EVERY HIT CAME FROM THE WIDENED PASS, LEAD WITH IT.
+   *
+   * The per-line label says which findings are weak; this says the ANSWER is. They are different
+   * claims and the second is the one that changes what the reader does next: a list where nothing
+   * matched the thing asked about is a list of coincidences that share a word, and it should be read
+   * as "start here" rather than as "here it is". Measured — a specific question returned eight hits,
+   * every one a widened match on `indicator` inside test assertions, and the reader spent three more
+   * tool calls discovering that for itself.
+   */
+  if (r.widenedSearch) {
+    out.push('');
+    out.push('NOTHING MATCHED THE JOINED FORM — every hit below came from searching single words of your');
+    out.push('question separately. They share a word with what you asked about; they may not be about it.');
+    out.push('Treat them as starting points, and grep the exact identifier if you know it.');
+  }
   out.push('');
 
   if (r.findings.length === 0) {
