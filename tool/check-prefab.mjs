@@ -327,5 +327,41 @@ ok(/component, so the address ends there/.test(tooDeep),
 
 rmSync(project, { recursive: true, force: true });
 
+
+console.log('\n— a file that is only a PrefabInstance says so, instead of an empty list —');
+{
+  /**
+   * A prefab variant can be a SINGLE `!u!1001` document: it declares no GameObjects of its own, and
+   * every node a reader sees belongs to the prefab it instances. The refusal used to end with
+   * "Known paths include:" and nothing — an empty list, from which no next move follows. Measured: a
+   * model tried three hierarchy paths, burned four calls, got zero writes and could only guess why.
+   */
+  const dir = mkdtempSync(join(tmpdir(), 'ayin-prefab-inst-'));
+  const f = join(dir, 'Variant.prefab');
+  writeFileSync(f, [
+    '%YAML 1.1',
+    '--- !u!1001 &100100000',
+    'PrefabInstance:',
+    '  m_ObjectHideFlags: 0',
+    '  m_Modification:',
+    '    m_Modifications:',
+    '    - target: {fileID: 1, guid: aaaa, type: 3}',
+    '      propertyPath: m_SizeDelta.x',
+    '      value: 100',
+    '    - target: {fileID: 1, guid: aaaa, type: 3}',
+    '      propertyPath: m_SizeDelta.y',
+    '      value: 50',
+    '  m_SourcePrefab: {fileID: 100100000, guid: c198e2c4a81655244b60798fbfa9d883, type: 3}',
+    '',
+  ].join('\n'));
+  const out = await setPrefabProperty({ file: f, object: 'Toast/TextContainer/DescriptionText', component: 'RectTransform', property: 'm_SizeDelta', value: '{x: 1, y: 1}' });
+  const msg = out.error ?? JSON.stringify(out);
+  ok(/declares NO GameObjects of its own/.test(msg), 'it names the reason rather than listing nothing', msg.slice(0, 90));
+  ok(/c198e2c4a81655244b60798fbfa9d883/.test(msg), '  → and which prefab it instances, so the caller knows where to go');
+  ok(/2 override\(s\)/.test(msg), '  → with the override count read from m_Modification.m_Modifications, not the top level', msg);
+  ok(!/Known paths include:\s*$/.test(msg), '  → and never ends on an empty "Known paths include:"');
+  rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(fails ? `\nprefab check: ${fails} FAILURE(S)\n` : '\nprefab check: ok\n');
 process.exit(fails ? 1 : 0);

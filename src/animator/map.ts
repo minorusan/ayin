@@ -161,6 +161,24 @@ interface Ctx {
   timing: Map<string, { lengthSeconds?: number; loops?: boolean }>;
 }
 
+/**
+ * A NAME AS UNITY MEANT IT, not as YAML spelled it.
+ *
+ * Unity writes `m_Name: Base Layer` unquoted most of the time and `m_Name: "Base Layer"` when the
+ * value needs quoting, and the reader kept the quote characters INSIDE the value. So the same
+ * concept came back as `Base Layer` from one file and `"Base Layer"` from another, and a caller
+ * matching on the name matched one and missed the other. Reported as inconsistent quoting across
+ * files; it is worse than inconsistent, because the quoted form cannot be matched at all.
+ *
+ * Only for NAMES. A property value's quotes can be load-bearing — `prefab_edit` round-trips them —
+ * so this is not pushed down into the YAML layer where it would silently rewrite data.
+ */
+function plainName(raw: string | undefined): string {
+  const s = (raw ?? '').trim();
+  const quoted = /^(["'])([\s\S]*)\1$/.exec(s);
+  return quoted ? quoted[2] : s;
+}
+
 function motionOf(state: YDocument, ctx: Ctx): ClipInfo {
   const raw = entry(state.body, 'm_Motion')?.raw ?? '';
   const ref = parseRef(raw);
@@ -176,13 +194,13 @@ function motionOf(state: YDocument, ctx: Ctx): ClipInfo {
   // A local fileID: a BlendTree serialized inside the controller.
   const local = ctx.byId.get(ref.fileId);
   if (local?.classId === BLEND_TREE) {
-    return { blendTree: entry(local.body, 'm_Name')?.raw || '(unnamed blend tree)' };
+    return { blendTree: plainName(entry(local.body, 'm_Name')?.raw) || '(unnamed blend tree)' };
   }
   return {};
 }
 
 const nameOfState = (doc: YDocument | undefined): string =>
-  doc ? entry(doc.body, 'm_Name')?.raw || '(unnamed state)' : '(missing state)';
+  doc ? plainName(entry(doc.body, 'm_Name')?.raw) || '(unnamed state)' : '(missing state)';
 
 function conditionsOf(doc: YDocument): TransitionCondition[] {
   const conds = entry(doc.body, 'm_Conditions');
@@ -207,7 +225,7 @@ function transitionOf(doc: YDocument, from: string, sourceClip: ClipInfo, ctx: C
   const to = dstId !== '0'
     ? nameOfState(ctx.byId.get(dstId))
     : dstMachineId !== '0'
-      ? `(sub-state machine ${entry(ctx.byId.get(dstMachineId)?.body ?? [], 'm_Name')?.raw ?? '?'})`
+      ? `(sub-state machine ${plainName(entry(ctx.byId.get(dstMachineId)?.body ?? [], 'm_Name')?.raw) || '?'})`
       : isExit ? '(exit)' : '(nothing — this transition goes nowhere)';
 
   const hasExitTime = flag(entry(doc.body, 'm_HasExitTime')?.raw);
@@ -304,7 +322,7 @@ function statesOfMachine(machine: YDocument, prefix: string, ctx: Ctx): { states
     const smId = parseRef(entry(item.value.children, 'm_StateMachine')?.raw ?? '')?.fileId;
     const sm = smId ? ctx.byId.get(smId) : undefined;
     if (!sm || sm.classId !== STATE_MACHINE) continue;
-    const inner = statesOfMachine(sm, `${prefix}${entry(sm.body, 'm_Name')?.raw ?? '?'}/`, ctx);
+    const inner = statesOfMachine(sm, `${prefix}${plainName(entry(sm.body, 'm_Name')?.raw) || '?'}/`, ctx);
     states.push(...inner.states);
   }
 
@@ -379,7 +397,7 @@ export async function buildAnimatorMap(abs: string, opts: { root: string }): Pro
       Trigger: entry(item.value.children, 'm_DefaultBool')?.raw,
     };
     parameters.push({
-      name: entry(item.value.children, 'm_Name')?.raw ?? '',
+      name: plainName(entry(item.value.children, 'm_Name')?.raw),
       type: named,
       default: defaults[named] ?? '',
     });
@@ -389,7 +407,7 @@ export async function buildAnimatorMap(abs: string, opts: { root: string }): Pro
   for (const item of entry(controller?.body ?? [], 'm_AnimatorLayers')?.children ?? []) {
     const smId = parseRef(entry(item.value.children, 'm_StateMachine')?.raw ?? '')?.fileId;
     const machine = smId ? ctx.byId.get(smId) : undefined;
-    const layerName = entry(item.value.children, 'm_Name')?.raw ?? '(unnamed layer)';
+    const layerName = plainName(entry(item.value.children, 'm_Name')?.raw) || '(unnamed layer)';
     if (!machine || machine.classId !== STATE_MACHINE) {
       layers.push({
         name: layerName, defaultState: '', weight: num(entry(item.value.children, 'm_DefaultWeight')?.raw),

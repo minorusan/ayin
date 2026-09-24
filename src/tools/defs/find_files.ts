@@ -5,6 +5,24 @@ import { basename, join } from 'node:path';
 
 const CWD = process.cwd();
 
+/**
+ * GENERATED AND VENDORED TREES, PRUNED — the same set `grep`, `explore` and `find_references` prune.
+ *
+ * `find_files` pruned `node_modules` and `.git` and nothing else, which on a Unity project means the
+ * answer is `Library/PackageCache`. Measured on a real one: `*.prefab` from the repo root returned
+ * FIFTEEN results and every single one was a vendored package sample — zero project prefabs, on a
+ * project with hundreds. The caller's next move is to guess a narrower path, which is the search it
+ * was already trying to avoid doing by hand.
+ *
+ * `Library/`, `Temp/` and `obj/` are regenerable caches Unity rewrites on import; `Build`/`dist`/
+ * `out` are output. None of them is ever the answer to "where is this file", and a caller who truly
+ * wants one can say so with an explicit `path` into it — the prune is on the walk, not on the root.
+ */
+const PRUNED = [
+  'node_modules', '.git', 'Library', 'Temp', 'obj', 'bin', 'Build', 'Builds', 'dist', 'out',
+  '.venv', '__pycache__', 'coverage',
+].map((d) => `-not -path '*/${d}/*'`).join(' ');
+
 export const tool: Tool = {
     name: 'find_files',
     icon: '🔎',
@@ -17,6 +35,7 @@ export const tool: Tool = {
       { name: 'modified_since', type: 'string', description: 'Only files changed recently: "30m", "6h", "2d" — what a turn actually touched', required: false },
       { name: 'exclude', type: 'string', description: 'Skip paths matching this glob, e.g. "*/Tests/*"', required: false },
     ],
+
     async execute(params) {
       if (!params.path || !params.pattern) return 'Error: path and pattern required';
       if (!existsSync(resolveAgainstCwd(params.path))) {
@@ -42,7 +61,7 @@ export const tool: Tool = {
         : '';
       const excl = params.exclude ? ` -not -path ${shq(String(params.exclude))}` : '';
       const out = await execAsync(
-        `find ${shq(String(params.path))}${depthArg} ${flag} ${shq(pattern)}${newer}${excl} -not -path '*/node_modules/*' -not -path '*/.git/*' | head -${FIND_LIMIT + 1}`,
+        `find ${shq(String(params.path))}${depthArg} ${flag} ${shq(pattern)}${newer}${excl} ${PRUNED} | head -${FIND_LIMIT + 1}`,
         { cwd: CWD },
       );
       // find prints in TRAVERSAL order, so `head` used to hand back whatever the filesystem yielded

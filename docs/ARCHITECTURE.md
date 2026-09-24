@@ -2104,6 +2104,34 @@ see and cannot use costs a round to discover that.
 ordinary turn, and an arbiter that must spawn a child to run one shell command has made the common case
 worse to improve the rare one.
 
+### Three bugs found by driving the tools at a real project
+
+Reading a model's report finds the frictions it noticed. Driving the tools at the repository finds
+the ones it could only guess at, and all three of these were reproducible in one command each.
+
+**`prefab_edit` refused every path on a variant, with an empty list.** A prefab variant can be a
+single `!u!1001 PrefabInstance` document: it declares no GameObjects of its own, and every node the
+tree shows belongs to the prefab it instances. `objectPaths` therefore returned nothing, and the
+refusal ended `Known paths include:` with nothing after it — a dead end from which no next move
+follows. Measured on `ToastTournamentCancelled.prefab` (one document, class 1001): three paths tried,
+four calls burned, zero writes, and the report could only guess at the cause. It now names the cause,
+the guid of the prefab it instances, and the override count — and that count is read from
+`m_Modification.m_Modifications`, because read at the top level it is always absent and the first
+version of this message confidently said "0 override(s)" about a file carrying 23.
+
+**`find_files` searched `Library/`.** It pruned `node_modules` and `.git` and nothing else, which on
+a Unity project means the answer is `Library/PackageCache`. Measured: `*.prefab` from the repo root
+returned fifteen results, every one a vendored package sample, zero project prefabs — on a project
+with hundreds. It now prunes what `grep`, `explore` and `find_references` already prune. The prune is
+on the WALK, not the root, so an explicit path into `Library/` still works.
+
+**`animator_inspect` returned names with the quotes still in them.** Unity writes `m_Name: Base Layer`
+unquoted most of the time and `m_Name: "Base Layer"` when the value needs quoting, and the reader kept
+the quote characters inside the value. The same concept came back as `Base Layer` from one file and
+`"Base Layer"` from another, so a caller matching on the name matched one and missed the other. Only
+NAMES are unquoted — a property value's quotes can be load-bearing, and `prefab_edit` round-trips
+them, so this is not pushed down into the YAML layer where it would rewrite data.
+
 ### Promising the report is answered, not discarded
 
 The discard is right about narrated intentions and was wrong about one of them. On a turn whose

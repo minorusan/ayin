@@ -163,8 +163,42 @@ async function locate(req: EditRequest, docs: YDocument[]): Promise<Located | { 
       // the whole path, but two objects called "Icon" must not silently resolve to the first one.
       const byName = [...paths.entries()].filter(([p]) => p === req.object || p.endsWith(`/${req.object}`));
       if (byName.length === 0) {
-        const known = [...paths.keys()].filter(Boolean).slice(0, 10).join(', ');
-        return { error: `no GameObject at "${req.object}". Known paths include: ${known}` };
+        const known = [...paths.keys()].filter(Boolean);
+        /**
+         * AN EMPTY LIST IS NOT AN ANSWER, AND HERE IT HAD A SPECIFIC CAUSE.
+         *
+         * A prefab variant can be a SINGLE `!u!1001 PrefabInstance` document and nothing else: it
+         * declares no GameObjects of its own, and every node a reader sees in the tree belongs to the
+         * prefab it instances. `objectPaths` therefore returns nothing, and the refusal used to end
+         * with "Known paths include:" and stop — an empty list, from which no next move follows.
+         *
+         * Measured: a model tried three hierarchy paths against
+         * `ToastTournamentCancelled.prefab` (one document, class 1001), burned four calls, got zero
+         * writes, and its report could only guess at why. The file cannot be edited by object path
+         * BY CONSTRUCTION — the objects are in the nested prefab, and only the overrides live here —
+         * and saying that is the whole difference between a dead end and a next step.
+         */
+        if (known.length === 0) {
+          const instance = real.find((d) => d.classId === 1001);
+          if (instance) {
+            const source = parseRef(entry(instance.body, 'm_SourcePrefab')?.raw ?? '')?.guid;
+            // `m_Modifications` is NESTED under `m_Modification`, not a top-level key — read at the
+            // top level it is always absent, and the refusal then confidently reported "0 override(s)"
+            // about a file the inspector had just said carried 23. A number that is wrong is worse
+            // than no number: it is the one part of the message a reader would act on.
+            const mod = entry(instance.body, 'm_Modification');
+            const overrides = (entry(mod?.children ?? [], 'm_Modifications')?.children ?? []).length;
+            return {
+              error: `this file declares NO GameObjects of its own — it is a single PrefabInstance`
+                + `${source ? ` of the prefab with guid ${source}` : ''}, carrying ${overrides} override(s). `
+                + 'The objects you saw in the tree belong to the prefab it instances, so no object path '
+                + 'in this file can resolve. Edit the SOURCE prefab to change an object, or change an '
+                + 'override here by naming the property alone (no object=).',
+            };
+          }
+          return { error: `no GameObject at "${req.object}", and this file declares none at all.` };
+        }
+        return { error: `no GameObject at "${req.object}". Known paths include: ${known.slice(0, 10).join(', ')}` };
       }
       if (byName.length > 1) {
         return { error: `"${req.object}" matches ${byName.length} objects: ${byName.map(([p]) => p).slice(0, 8).join(', ')} — give the full path` };
