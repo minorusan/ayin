@@ -1617,6 +1617,16 @@ classified, so the hatch would answer "not a promise" for everything and decide 
 | a direction with no concrete anchor | discarded, as before |
 | anything else | it is the answer — shown, not thrown away |
 
+**The promise test here is STRICTER than the nudge's**, and that cost a session to learn.
+`announcedWithoutActing` bails out when the last sentence contains a colon, reading it as content
+delivered inline ("Here is the config: …"). That is right when the consequence is spending a nudge
+and a hole when the consequence is ENDING THE TURN: *"Now let me exercise the remaining tool
+categories: `explore`, `entangle`, `rename`, `chore`…"* is a promise whose colon introduces a to-do
+list, and the turn ended on it after six tool calls. So `announcesNextAction` drops the colon hatch
+and keeps only the one that means something — a concrete anchor BEFORE the promise, which is what
+separates "I found the leak at Dispose.cs:31, I'll write it up next" from a reply whose every
+concrete thing sits inside the promise.
+
 `turnRequestKind()` is null whenever triage did not run (the kill switch, the session toggle, a
 request under `planToggledMinChars`), so every turn plan mode skips behaves exactly as it did. The
 turn that WORKS an approved investigation sets it from the pending record, since triage does not run

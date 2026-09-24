@@ -225,5 +225,30 @@ export async function stoppedShort(text: string, didWork: boolean, request: stri
 export function reportsRatherThanPromises(text: string): boolean {
   const trimmed = (text ?? '').trim();
   if (!trimmed) return false;
-  return !announcedWithoutActing(trimmed, false) && !looksLikeDeferral(trimmed, false);
+  return !announcesNextAction(trimmed) && !looksLikeDeferral(trimmed, false);
+}
+
+/**
+ * Does this reply END BY SAYING WHAT IT WILL DO NEXT? Stricter than `announcedWithoutActing`, and
+ * deliberately so — the two have different costs of being wrong.
+ *
+ * `announcedWithoutActing` decides whether to spend a NUDGE, so it bails out generously: a last
+ * sentence containing a colon is read as delivering its content inline ("Here is the config: …"),
+ * which is right for the thing it guards. This decides whether a reply may END THE TURN, and there
+ * the same generosity is a hole. Measured — *"Good, prefab_inspect worked well and resolved GUIDs to
+ * named assets. Now let me exercise the remaining tool categories: `explore`, `entangle`, `rename`,
+ * `chore`, and a real `perform_edit`."* That is a promise with a LIST OF WHAT IT WILL DO, the colon
+ * made it look like delivered content, and the turn ended on it. The operator typed "Go on".
+ *
+ * So the colon escape hatch is dropped here and only the one that means something is kept: a
+ * concrete anchor BEFORE the promise. "I found the leak at Dispose.cs:31. I'll write it up next."
+ * delivered, and its closing note is a note. A reply whose every concrete thing is inside the
+ * promise has delivered nothing.
+ */
+export function announcesNextAction(text: string): boolean {
+  const trimmed = (text ?? '').trim();
+  if (!trimmed || trimmed.length > MAX_CHARS) return false;
+  const last = lastSentence(trimmed);
+  if (!last || !PROMISE.test(last)) return false;
+  return !hasConcreteAnchor(trimmed.slice(0, trimmed.length - last.length));
 }

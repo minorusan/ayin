@@ -105,6 +105,30 @@ console.log('\n— on a turn whose deliverable is prose, a report is the answer 
   // happened, and on this turn work always happened — that is the situation being classified.
   ok(!reportsRatherThanPromises('Let me go and check that file now.'),
     'the didWork hatch is not taken — it would make every reply an answer and decide nothing');
+
+  /**
+   * THE REGRESSION THIS RELAXATION CAUSED, in its own words.
+   *
+   * `announcedWithoutActing` reads a last sentence containing a colon as delivering its content
+   * inline — right when it is deciding whether to spend a nudge, a hole when it is deciding whether
+   * a reply may END THE TURN. Measured on the session after the relaxation shipped: six tool calls,
+   * then this, then the turn was over and the operator typed "Go on". The colon made a LIST OF WHAT
+   * IT WOULD DO look like delivered content.
+   */
+  const colonPromise =
+    'Good — `prefab_inspect` worked well and resolved GUIDs to named assets. Now let me exercise the '
+    + 'remaining tool categories: `explore` (semantic search), `entangle` (design binding), `rename`, '
+    + '`chore`, and a real `perform_edit` to test the write path.';
+  ok(!reportsRatherThanPromises(colonPromise), 'a promise whose colon introduces a TO-DO LIST is still a promise');
+  ok(
+    !reportsRatherThanPromises("Let me exercise the write path and the remaining tools. I'll test `perform_edit`, `prefab_edit`, `str_replace`, and `diagram` in parallel."),
+    'and so is the one it then repeated three times until the clap fired',
+  );
+  // The escape hatch that has to survive: delivered first, promised second.
+  ok(
+    reportsRatherThanPromises('The icon is baked: GameOverView.cs has no runtime assignment and GameOverLayer.prefab:219 holds a static sprite GUID. I will write that up next.'),
+    'a reply that DELIVERED before promising is still an answer — the anchor is outside the promise',
+  );
 }
 
 console.log(fails ? `\nannounced check: ${fails} FAILED` : '\nannounced check: all passed');
