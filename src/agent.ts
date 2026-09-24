@@ -69,6 +69,8 @@ import { renderHandoff, stageAndOpenForPresentation } from './presenter/handoff.
 import { clearActivity } from './activity.js';
 import { callKey, guardBeginTurn, guardCheck, guardDirective, guardNoteDenied, guardNoteMutation, guardNoteRead, TREE_SAFE } from './tool-guard.js';
 import { planContextBlock, resolvePlanApproval, runPlan, turnRequestKind } from './plan/index.js';
+import { readIfPresent, recordEdit } from './edits/ledger.js';
+import { resolveAgainstCwd } from './tools/lib.js';
 import { finishPlanProgress, planProgressBlock } from './plan/progress.js';
 import { liveTool } from './live-mirror.js';
 import { exploreCacheNoteTool } from './tools/explore/cache.js';
@@ -1314,7 +1316,7 @@ export async function runAgent(userInput: string): Promise<void> {
 const EMPTY_RESULT_CHARS = 90;
 
 /** Tools whose success means the working tree changed. */
-const MUTATING_TOOLS = new Set(['write_file', 'str_replace', 'perform_edit']);
+const MUTATING_TOOLS = new Set(['write_file', 'str_replace']);
 
 /**
  * Barren calls of ONE tool before saying so. Eight, not twelve: a barren call is a much stronger
@@ -3180,6 +3182,22 @@ async function runAgentTurn(rawInput: string): Promise<void> {
        * child had done the job. A tool that narrates does not need to be taken away from the model to
        * stop looking hung.
        */
+      /**
+       * THE BYTES BEFORE, CAPTURED AT THE ONE DOOR EVERY TOOL GOES THROUGH.
+       *
+       * Recorded here rather than inside each edit tool for two reasons. Every mutating tool would
+       * otherwise need the same six lines, and the one that forgot them would be invisible — and a
+       * tool added later would not know to. This place already knows the tool's name and its params,
+       * and it is the only place that runs before AND after the call.
+       *
+       * `path` covers every edit tool there is now. Read only for tools that can write, so an
+       * ordinary read or a grep costs nothing.
+       */
+      const editTarget = MUTATING_TOOLS.has(name) || name === 'prefab_edit'
+        ? (typeof params.path === 'string' ? params.path : '')
+        : '';
+      const bytesBefore = editTarget ? readIfPresent(resolveAgainstCwd(editTarget)) : null;
+
       const run = startRun(
         name,
         paramPreview,
@@ -3215,6 +3233,24 @@ async function runAgentTurn(rawInput: string): Promise<void> {
         const outcome = settled.o;
         result = outcome.output;
         if (outcome.cancelled) log('INFO', 'tool_cancelled', { tool: name, ms: String(outcome.ms) });
+      }
+
+      /**
+       * AND THE BYTES AFTER — the pair is one edit in the ledger (`edits/ledger.ts`).
+       *
+       * Compared rather than trusted: a tool that reported success without changing anything is not an
+       * edit, and `recordEdit` drops it. Never for a detached run, whose write lands after this line
+       * and whose before-bytes would therefore be a lie.
+       */
+      if (editTarget && !detached) {
+        const abs = resolveAgainstCwd(editTarget);
+        recordEdit({
+          path: abs,
+          tool: name,
+          before: bytesBefore,
+          after: readIfPresent(abs),
+          summary: (result ?? '').split('\n')[0] ?? '',
+        });
       }
 
       /**
@@ -3524,11 +3560,6 @@ async function runAgentTurn(rawInput: string): Promise<void> {
             + `copy old_str from what comes back, then edit.`;
           log('WARN', 'edit_repeated_miss', { tool: name, path: params.path, misses: String(consecutiveMissesOn(params.path)) });
         }
-      }
-      // `perform_edit` names its target `file`, not `path`, so it misses the branch above — and its own
-      // contract says when the edit landed: anything but `NO CHANGE` is a real write.
-      if (!detached && name === 'perform_edit' && params.file && !result.startsWith('Error:') && !result.startsWith('NO CHANGE')) {
-        noteTreeWrite(params.file);
       }
       if (!detached && name === 'write_file') {
         // Track CTA delivery — if the write target matches the CTA, mark as delivered

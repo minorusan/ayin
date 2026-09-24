@@ -2092,8 +2092,8 @@ level:
 
 | level | withheld | given |
 |---|---|---|
-| arbitrator (depth 0, `--arbiter`) | `bash` `grep` `find_files` `list_dir` `write_file` `str_replace` | `read_file` `explore` **`perform_edit`** **`find_relevant_files`** `subagent` |
-| subagent (depth ≥ 1) | `perform_edit` `find_relevant_files` `subagent` | everything else — this is where the work happens |
+| arbitrator (depth 0, `--arbiter`) | `bash` `grep` `find_files` `list_dir` `write_file` | `read_file` `explore` **`perform_edit`** **`find_relevant_files`** `subagent` |
+| subagent (depth ≥ 1) | `find_relevant_files` `subagent` | everything else — this is where the work happens |
 
 A subagent is denied the arbitration tools for the same reason it is denied `subagent`: a child that
 could delegate would delegate rather than work. One predicate, `toolWithheld(name)`, decides both, and
@@ -2104,31 +2104,62 @@ see and cannot use costs a round to discover that.
 ordinary turn, and an arbiter that must spawn a child to run one shell command has made the common case
 worse to improve the rare one.
 
-### `perform_edit` — say what to change, not where
+### The edit ledger, and an undo the agent can actually reach (`src/edits/`)
 
-`str_replace` is exact and unforgiving: the caller must already know the file's precise bytes, so it
-reads the file, holds it in context, composes an anchor, and burns a round when the anchor is off by a
-space. That is the right primitive for an agent inside the file's context and the wrong one for an
-arbitrator that is not.
+An agent that can write had no way to unwrite. Measured twice in a week: a model made a deliberate
+test edit to exercise the write path, reached for `git checkout -- <file>` to put it back, and the
+permission guard refused that automatically — correctly, since a blanket checkout discards every
+other uncommitted thing in the file. The edit stayed in the operator's tree, and the model's own
+report called it *"the single most annoying interaction this session"*. The guard was not the defect.
+The only revert on offer was.
 
-`perform_edit(file, edit)` takes the change in words. One model call — `toolLlm().ask`, which declares
-no tools, so it cannot wander off reading other files — sees the whole file and returns the whole file.
-Then the deterministic half: snapshot before, compare after, and return **the real line diff**:
+**Every write is recorded at the one door.** `agent.ts` captures the bytes before the call and
+compares them after, for any tool that can mutate — in one place rather than in each tool, because
+the tool that forgot would be invisible and a tool added later would not know to. A call that
+reported success without changing bytes records nothing.
 
-```
-Edit was made to calc.py with changes:
+| field | why |
+|---|---|
+| `beforeSha` / `blob` | the exact bytes replaced, content-addressed so ten edits reverting to the same text cost one copy |
+| `afterSha` | **the fingerprint of what the edit produced** — what an undo checks the file against |
+| `seq` | global order, which is the undo queue read backwards |
 
-@@ line 10 @@  -0 +3
-+
-+ def mul(a, b):
-+     return a * b
-```
+**The fingerprint is the whole design.** Between an edit and its reversal, anything may have written
+the file: a later agent edit, the Unity editor rewriting an asset, the operator's own editor, a
+rebase. Restoring blindly destroys all of it silently. So `stateOf` reports `current`, `superseded`
+(a later *recorded* edit explains the difference), `undone`, `gone`, or **`changed-outside`** — and
+only the last is a reason to stop. `undo_edit` refuses on it, prints both hashes, and leaves the
+other change alone; `force=true` is there for after the operator has looked.
 
-or `NO CHANGE`, which is a fact the caller must act on rather than a claim it must trust. **A model
-saying "I made the change" reads exactly like a model that did not; a diff does not** — the failure ayin
-has measured repeatedly. The answer's outer ``` fence is stripped (an unstripped one written to disk is
-a syntax error in every language ayin edits); a fence *inside* the file is left alone.
+**Newest first, one at a time.** Undoing an older edit while a newer one stands would write over the
+newer one, so that is refused too, naming what to do instead.
 
+**On disk under `.ayin/edits/`**, append-only JSONL plus content-addressed blobs — a turn that dies
+holding this in memory would leave the operator with edits and no record of them (CLAUDE.md §5). An
+`undone` flag arrives as a second line for the same seq; the later line wins.
+
+`edit_history` is the visible half, and it answers the other thing that session asked for: *"a diff
+since my last tool call view would be far more useful than raw porcelain."* That tree opened with 29
+files already dirty — Addressables, ServerData, bundles — and the model's own one-file change was a
+needle in it. `git status` cannot tell those apart. This can.
+
+### `perform_edit` was removed
+
+It took a change in words, read the file with its own model call, and wrote back what came out. The
+convenience was real and the properties were not: non-deterministic, one paid call per edit, a
+truncation guard written after it returned 833 lines of an 8,164-line file and this function wrote
+them (7,331 lines of a core module deleted, a plausible diff, QA green), and — until it was removed —
+it dropped the trailing newline of every file it touched, because a model's reply does not end with
+one and `stripFence` ate it when the reply was fenced. That last one cost a real session: an agent
+reverted its own test edit correctly, the file stayed dirty on the missing byte, it reached for
+`git checkout --` to clean up and the permission guard refused it.
+
+`str_replace` does the same job deterministically and is what the model reported preferring when both
+were offered with no guidance on which to pick. The arbiter, which withheld `str_replace` in favour of
+this, gets it back — see `subagents.ts`: the argument was that `str_replace` needs the file's exact
+bytes and an arbiter should not hold them, but the arbiter has `read_file`, so the cost is two cheap
+calls instead of one model call hidden inside a tool. `write_file` stays withheld there: creating a
+file is a stage, and a stage goes to a child.
 ### `find_relevant_files` — a search agent with a parsed contract
 
 `explore` is deterministic localization and stays that way — it answers *"where is `ScoringId`
@@ -2268,7 +2299,7 @@ generic not-found hint matched `bash` against its own shell-command regex and re
 tool. To run shell commands use the bash tool."* The model complied **28 times** and created no files.
 
 `withheldRedirect()` now names the replacement for each withheld primitive — `subagent` for anything
-needing a shell, `perform_edit` for a write, `find_relevant_files` for a search — and tells a child
+needing a shell, `str_replace` for a write, `find_relevant_files` for a search — and tells a child
 refused `subagent` the real reason (its depth), not a flag nobody set. The shell hint additionally
 refuses to suggest a tool that is not present.
 
