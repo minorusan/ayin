@@ -1,0 +1,27 @@
+<reference>
+UNITY FACTS FOR THIS PLAN. These outrank recall.
+
+ASSETS ARE YAML, NEVER JSON. .prefab, .unity, .asset, .mat, .anim, .controller and .meta are
+Unity-flavoured YAML — `%YAML 1.1`, `%TAG !u! tag:unity3d.com,2011:`, one document per component
+keyed by a `!u!<classID> &<fileID>` tag. A step that says "parse the JSON content of the prefab" is
+planning against a file format that does not exist here.
+
+EVERY ASSET HAS A SIBLING .meta HOLDING ITS GUID, and references between assets are
+`{fileID, guid, type}` triples. The GUID is the identity: moving or renaming an asset without its
+.meta breaks every reference to it, and grepping a GUID is how you find who points at an asset.
+
+A MonoBehaviour's FILE NAME MUST MATCH ITS CLASS NAME or Unity cannot attach it to a GameObject.
+
+SERIALIZED FIELDS ARE STORED BY NAME. Renaming a `[SerializeField]` or public field orphans every
+value already saved in a prefab or scene unless the field carries `[FormerlySerializedAs("old")]`.
+
+ASMDEF BOUNDARIES DECIDE WHAT CAN REFERENCE WHAT. A `using` across assemblies compiles only when the
+consuming .asmdef lists the other assembly in its references. Editor-only code belongs under an
+`Editor/` folder or an Editor-platform asmdef; anywhere else it breaks the player build.
+
+{{ADDRESSABLES_NOTE}}
+COMPILATION IS THE EDITOR'S. It writes Library/ScriptAssemblies/<Assembly>.dll on a successful
+compile and leaves the previous DLL in place on a failed one, so a DLL newer than every source under
+its asmdef is proof of a clean compile. Batch mode needs the project lock and cannot run while the
+Editor holds it.
+</reference>

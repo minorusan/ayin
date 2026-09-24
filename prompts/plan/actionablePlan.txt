@@ -32,7 +32,7 @@ HOW WORK IN THIS PROJECT TYPE IS OBSERVED:
 
 Answer with one JSON object and nothing else:
 
-{"steps":[{"id":1,"title":"","files":["src/x.ts"],"action":"","verify":"","dependsOn":[]}],"gaps":[""]}
+{"steps":[{"id":1,"title":"","files":["src/x.ts"],"action":"","verify":"","verifyCmd":"","dependsOn":[]}],"gaps":[""]}
 
 id          1-based, ascending, no gaps.
 title       one imperative line.
@@ -41,6 +41,10 @@ action      what to do, concretely enough to execute: names, signatures, values,
             file must contain; never paste the file itself. A step carrying a whole heredoc makes this
             reply run past its length and come back truncated, and a truncated plan is no plan.
 verify      the command to run or the file to read that proves this step worked, and what it must show.
+verifyCmd   the same proof as ONE shell command that exits 0 when this step is done, and non-zero when
+            it is not — ayin runs it, so it must observe rather than change: no rm, no mv, no install,
+            no git that writes, no redirect into a file. "" when the proof is reading something rather
+            than running something.
 dependsOn   ids of steps that must land first. Lower ids only.
 gaps        what is unknown or undecided, and which command or file settles it.
 

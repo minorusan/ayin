@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
-const { announcedWithoutActing, worthAsking, saysNotFinished } = await import(`file://${join(DIST, 'announced.js')}`);
+const { reportsRatherThanPromises, announcedWithoutActing, worthAsking, saysNotFinished } = await import(`file://${join(DIST, 'announced.js')}`);
 
 let fails = 0;
 const ok = (cond, label, extra = '') => {
@@ -72,6 +72,40 @@ ok(!saysNotFinished(''), 'AN EMPTY VERDICT MEANS FINISHED — a judge that canno
 ok(!saysNotFinished('I think the reply is incomplete because…'),
   'and neither does a paragraph: a false "not done" LOOPS, a false "done" costs one round the operator can ask for');
 ok(!saysNotFinished('nonsense'), 'only the whole word counts, not a prefix');
+
+console.log('\n— on a turn whose deliverable is prose, a report is the answer and a promise is not —');
+{
+  // THE REGRESSION THIS EXISTS FOR, from a real session: asked to explore a Unity project and say how
+  // the tooling felt, the model ran 38 tool calls, wrote its findings, and the round loop discarded
+  // them three times as "no tool call while working". The feedback that had been asked for only
+  // escaped twenty minutes later through finish(). `reportsRatherThanPromises` is what the loop now
+  // consults before discarding, on a turn triage called `answer` or `investigate`.
+  const realReport =
+    'The explore tool is completely broken in this repo — it is searching for literal strings like '
+    + '"ToasterOperation" instead of deriving the actual C# identifiers, and I am getting zero hits from '
+    + 'definition probes even though the file exists. I had to fall back to grep and read_file instead. '
+    + 'prefab_inspect is the gold standard: it resolves GUIDs to named assets and flags unresolved ones.';
+  ok(reportsRatherThanPromises(realReport), 'the report that was thrown away three times is kept');
+  ok(
+    reportsRatherThanPromises('The icon is baked: GameOverView.cs has no runtime assignment, and GameOverLayer.prefab:219 holds a static sprite GUID.'),
+    'and so is a findings answer with a path and a line',
+  );
+
+  // The rule being relaxed was EARNED — six of six empty-patch runs ended on a narrated intention —
+  // so the relaxation must not reach any of them.
+  ok(!reportsRatherThanPromises('Let me confirm the exact mechanism with a minimal reproduction before fixing.'),
+    'a narrated intention is still discarded — the measured 6-of-6 failure');
+  ok(!reportsRatherThanPromises('I have looked at the toaster code. I will rewrite that file now.'),
+    'so is a promise as the last sentence');
+  ok(!reportsRatherThanPromises('The fix is to locate the method that assigns the icon and change it there. You should investigate the scoring path before making any changes.'),
+    'so is a direction with no concrete anchor');
+  ok(!reportsRatherThanPromises('   '), 'and an empty reply is not an answer');
+
+  // The escape hatch must NOT be taken here: both detectors return false for any text when told work
+  // happened, and on this turn work always happened — that is the situation being classified.
+  ok(!reportsRatherThanPromises('Let me go and check that file now.'),
+    'the didWork hatch is not taken — it would make every reply an answer and decide nothing');
+}
 
 console.log(fails ? `\nannounced check: ${fails} FAILED` : '\nannounced check: all passed');
 process.exit(fails ? 1 : 0);

@@ -1,5 +1,6 @@
 import type { Tool } from '../base.js';
 import { runSubagent } from '../../subagents.js';
+import { notePhaseWorked } from '../../plan/progress.js';
 
 /**
  * Hand a WHOLE stage of the work to a fresh agent.
@@ -67,6 +68,18 @@ export const tool: Tool = {
     const warn = result.ok && result.toolCalls === 0
       ? '\n\nWARNING: it made NO tool calls, so it changed nothing. Treat its report as a proposal, not as work done, and verify before moving on.'
       : '';
-    return `${head}\n\n${result.report || '(it said nothing)'}${warn}`;
+
+    /**
+     * THE PHASE BOUNDARY, AND THE ONLY ONE THERE IS.
+     *
+     * ayin's phases are worked by the MODEL calling this tool, so there is no harness loop around
+     * them to hang a check on — the return of this call is where a phase ends. `notePhaseWorked`
+     * runs that phase's own `verifyCmd`s and, if they fail, re-plans the phases after it; the result
+     * is appended HERE rather than only logged, because this string is what the arbiter reads before
+     * deciding what to do next. Empty for any subagent that was not handed a tracked phase, which is
+     * every subagent spawned outside plan mode.
+     */
+    const checked = await notePhaseWorked(params.plan ? String(params.plan) : undefined, ctx?.signal);
+    return `${head}\n\n${result.report || '(it said nothing)'}${warn}${checked ? `\n\n${checked}` : ''}`;
   },
 };

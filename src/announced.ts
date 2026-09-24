@@ -1,3 +1,5 @@
+import { looksLikeDeferral } from './deferral.js';
+
 /**
  * announced.ts — "I'll rewrite that file now." And then the turn ended.
  *
@@ -200,4 +202,28 @@ export async function stoppedShort(text: string, didWork: boolean, request: stri
     // The check improves an answer that already exists; it never blocks one. See `saysNotFinished`.
     return false;
   }
+}
+
+/**
+ * IS THIS PROSE A REPORT, OR A PROMISE WEARING ONE?
+ *
+ * Asked on a turn whose deliverable IS prose — a question about the codebase, or about the tools —
+ * where the round loop's usual test cannot help. That test asks "did a tool run?" and reads yes as
+ * "you are mid-work, narrating is not working", which is right for a build and exactly backwards for
+ * a question: the questions are the turns that run tools first and then have nothing left to do but
+ * answer. Measured — asked to explore a Unity project and say how the tooling felt, a model spent 38
+ * tool calls, wrote its findings, and had them discarded three times as "no tool call while working".
+ *
+ * BOTH DETECTORS ARE ASKED WITH `didWork: false`, deliberately. Their escape hatch exists because the
+ * discard already owned the tools-ran case; here that case is the one being classified, so the hatch
+ * would answer "not a promise" for every reply and decide nothing.
+ *
+ * What still fails: a promise as the last sentence, and a direction with no concrete anchor. What
+ * passes is everything else — which is the point. This decides whether a reply is SEEN, never whether
+ * the turn is over: `finish()` still owns that, and headless still exits no other way.
+ */
+export function reportsRatherThanPromises(text: string): boolean {
+  const trimmed = (text ?? '').trim();
+  if (!trimmed) return false;
+  return !announcedWithoutActing(trimmed, false) && !looksLikeDeferral(trimmed, false);
 }

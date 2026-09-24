@@ -1,10 +1,22 @@
-Decide whether the request below needs a written plan before implementation starts.
+Decide what KIND of request this is, and whether it needs a written plan.
 
-It NEEDS a plan when it spans several features or subsystems, mixes UI with backend work, introduces a
-new surface (a webview, a service, a data store), or contains several independently-shippable asks.
+FIRST, `kind` — what the person gets at the end:
+  build        the repository ends up different. Code, config or assets are written, changed or deleted.
+  investigate  a QUESTION about this codebase, answered by reading it. Nothing is written. "Does X
+               happen anywhere", "trace where Y comes from", "is this value baked in or set at
+               runtime", "which files would Z touch".
+  answer       a question that reading this codebase cannot settle: an opinion, a preference, a
+               discussion about the tools or the assistant itself, small talk, a design argument.
 
-It does NOT need a plan when it is one change described at length — a detailed bug report, a long
-explanation of a single feature, a paste of logs with one question, or a request to review something.
+`kind` is decided on what the person ASKED FOR, never on the size of the work it implies. "Add
+logging to the score flow" is build. "Where does the score come from" is investigate, even if the
+answer would take an hour. "What do you think of your own tools" is answer, even when it mentions
+files.
+
+THEN `complex` — whether the work spans several features or subsystems, mixes UI with backend, adds a
+new surface (a webview, a service, a data store), or holds several independently-shippable asks. One
+change described at length is not complex: a detailed bug report, a long explanation of one feature, a
+paste of logs with one question.
 
 REQUEST:
 {{REQUEST}}
@@ -22,7 +34,8 @@ written. Empty when the request names no folder, and empty when it only names a 
 or the thing being built.
 
 Respond with exactly one JSON object and nothing else:
-{"complex": true|false,
+{"kind": "build" | "investigate" | "answer",
+ "complex": true|false,
  "features": ["one line per independently-shippable piece of work"],
  "apis": ["third-party service names, [] if none"],
  "projectDir": "the new folder named in the request, \"\" if none",

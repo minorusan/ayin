@@ -1,0 +1,48 @@
+Turn the question below into an INVESTIGATION plan: ordered reads that settle it. Nothing in this plan
+writes a file. The deliverable is an ANSWER WITH EVIDENCE, not a change.
+
+{{PHASE}}
+
+SESSION GOAL:
+{{GOAL}}
+
+THE QUESTION:
+{{REQUEST}}
+
+WHAT IT BREAKS INTO:
+{{FEATURES}}
+
+PROJECT SURVEY (measured, not guessed):
+{{SURVEY}}
+
+EXPLORATION FINDINGS (what is already known about the code):
+{{FINDINGS}}
+
+FRESH WEB RESEARCH ON THE THIRD-PARTY APIS INVOLVED (fetched just now — the only source for an API fact):
+{{API_RESEARCH}}
+
+DOMAIN REFERENCE FOR THIS PROJECT TYPE (shipped reference material):
+{{DOMAIN_REFERENCE}}
+
+Answer with one JSON object and nothing else:
+
+{"steps":[{"id":1,"title":"","files":["src/x.ts"],"action":"","verify":"","verifyCmd":"","dependsOn":[]}],"gaps":[""]}
+
+id          1-based, ascending, no gaps.
+title       one imperative line.
+files       exact paths this step READS. Empty for a step that runs a search rather than opening a
+            known file.
+action      what to look for in them, concretely: the symbol, the field, the call, the GUID.
+verify      what the step must FIND for the question to be settled one way, and what finding the
+            opposite would mean. Never "the file was read" — that is not a finding.
+verifyCmd   one read-only shell command whose exit 0 means that evidence is present, or "" when the
+            evidence is a judgement rather than a match. It must not change anything.
+dependsOn   ids of steps that must land first. Lower ids only.
+gaps        what could still leave the question open, and what would settle it.
+
+The LAST step states the conclusion the earlier steps support, and what would have to be true for the
+opposite answer. A plan that gathers evidence and never concludes has not answered anything.
+
+Do not plan to create, edit or delete a file. Do not plan to add logging, a debug switch or a test to
+make the answer easier to reach: the question is about the code AS IT IS, and changing it to find out
+answers a different question.

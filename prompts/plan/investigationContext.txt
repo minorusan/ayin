@@ -1,0 +1,19 @@
+<plan>
+This question was large enough to be worked out in writing first, and the INVESTIGATION PLAN was
+written to disk BEFORE this turn: {{PATH}}
+
+{{BODY}}
+
+When you work:
+- FOLLOW this plan. It already contains the exploration and the files worth reading.
+- WRITE NOTHING. No edit, no new file, no logging added "to find out", no test, no scratch script.
+  The question is about the code AS IT IS. If answering genuinely requires changing something, say so
+  and stop — that is a different request and it is the operator's to make.
+- Do NOT re-explore what the plan already establishes, and do NOT re-plan.
+- {{PHASE_RULE}}
+- Pass a `plan` path exactly as printed above. A path you assembled yourself is a phase that does not
+  exist, and the call is refused.
+- Work the steps in order. If a step turns out to be wrong, say which one and why, then adapt.
+- YOUR ANSWER IS THE DELIVERABLE. End with the conclusion, the evidence that supports it by file and
+  line, and what you could not settle. "I read the files" is not an answer.
+</plan>

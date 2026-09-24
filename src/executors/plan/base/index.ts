@@ -6,8 +6,8 @@
  * env switches. Anything that changed here would change planning for every project in the world that
  * is not Arduino, which is not what this refactor is for.
  *
- * The one addition is `scaffold`: a project with no README gets one, deterministically, before the
- * plan is written. "The project carries a README" has been a standing QA criterion for a long time
+ * The one addition is `scaffold`: a project with no README gets one, deterministically, once the plan
+ * is approved. "The project carries a README" has been a standing QA criterion for a long time
  * (`prompts/qa/baselineCodeReadme.txt`) and it was being enforced the expensive way — the agent
  * finishes, the judge notices the missing file, a whole fix pass is spent creating four lines of
  * markdown. A file that must exist is a `writeFileSync`, not a criterion for a model to remember.
@@ -19,7 +19,7 @@ import { log } from '../../../log.js';
 import { renderSurvey, surveyProject } from '../../../plan/survey.js';
 import { prompts, packagePath } from '../../../prompts-service.js';
 import { README_STUB_BANNER } from '../../deliverables.js';
-import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext } from '../../types.js';
+import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext, ScaffoldOpts } from '../../types.js';
 import { commitScaffold, ensureGitRepo, isEmptyProjectDir } from '../git.js';
 
 /** The `plan` namespace, shared with plan mode itself — same directory, materialized once. */
@@ -77,9 +77,10 @@ export function readmeStub(projectName: string): string {
  * Create README.md when the project root has none. Never overwrites — an existing README is the
  * operator's, exactly as a materialized prompt is (see `prompts-service.ts`). Returns what it made.
  */
-export function ensureReadme(root: string): string[] {
+export function ensureReadme(root: string, dryRun = false): string[] {
   const path = join(root, 'README.md');
   if (existsSync(path)) return [];
+  if (dryRun) return [path];
   try {
     writeFileSync(path, readmeStub(basename(root) || 'Project'));
     log('INFO', 'scaffold_readme', { path });
@@ -135,13 +136,14 @@ export const basePlanExecutor: PlanExecutor = {
    * directory holds a project, and `git.ts` refuses again on its own terms: an enclosing repository,
    * or any repository that already has history.
    */
-  scaffold(ctx: ProjectContext): string[] {
+  scaffold(ctx: ProjectContext, opts?: ScaffoldOpts): string[] {
+    const dry = opts?.dryRun === true;
     // EMPTY, not merely `greenfield`. `ctx.greenfield` also requires the REQUEST to have named a known
     // type, so "make me a brand new haskell thing here" in an empty folder detects as `unknown`, lands
     // on this executor, and used to get no repository at all. Emptiness is the honest question here and
     // also the safe one — see `isEmptyProjectDir`.
-    if (!ctx.greenfield && !isEmptyProjectDir(ctx.root)) return ensureReadme(ctx.root);
-    const made = [...ensureGitRepo(ctx.root), ...ensureReadme(ctx.root)];
-    return [...made, ...commitScaffold(ctx.root, ctx.type === 'unknown' ? 'new' : ctx.type)];
+    if (!ctx.greenfield && !isEmptyProjectDir(ctx.root)) return ensureReadme(ctx.root, dry);
+    const made = [...ensureGitRepo(ctx.root, dry), ...ensureReadme(ctx.root, dry)];
+    return [...made, ...commitScaffold(ctx.root, ctx.type === 'unknown' ? 'new' : ctx.type, dry)];
   },
 };

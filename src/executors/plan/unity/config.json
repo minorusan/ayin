@@ -1,0 +1,7 @@
+{
+  "id": "unity",
+  "kind": "plan",
+  "projectTypes": ["unity"],
+  "priority": 110,
+  "description": "Unity planning for a project that already exists — YAML assets, GUIDs and .meta files, asmdef boundaries, Console/Player.log observability. Defers to plan/greenfield for a project being created."
+}

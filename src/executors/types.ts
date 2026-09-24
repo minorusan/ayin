@@ -193,11 +193,30 @@ export interface PlanExecutor {
   /** How a feature in THIS kind of project is watched working — a logger module, or Serial Monitor. */
   observability(ctx: ProjectContext): string;
   /**
-   * Deterministic project scaffolding, run BEFORE the plan is written. Returns the paths it created.
+   * Deterministic project scaffolding. Returns the paths it created.
    * Only ever creates what is missing; never overwrites. This is where a greenfield project gets its
    * README, so "the project has a README" stops being a thing a model is asked to remember.
+   *
+   * IT RUNS AFTER THE PLAN IS APPROVED, NOT BEFORE IT. Planning used to write these files and commit
+   * them, which made the one mode whose whole promise is "look before you leap" the only gate in the
+   * system that mutates a tree nobody has agreed to yet. Planning now calls it with `dryRun` and gets
+   * the same path list back with nothing written; `applyPlanScaffold` runs it for real once the
+   * operator has said go. Every decision downstream of the scaffold — the "already on disk" deliverable
+   * check, greenfield's survey — reads the dry-run list, so the invariants those measured bugs
+   * established are unchanged.
    */
-  scaffold(ctx: ProjectContext): string[];
+  scaffold(ctx: ProjectContext, opts?: ScaffoldOpts): string[];
+}
+
+/**
+ * `dryRun` means: return exactly the paths a real call would create, write nothing, spawn nothing.
+ *
+ * Spawning is the half that is easy to forget — `plan/node` kicks off `npm install` and `plan/flutter`
+ * shells out to `flutter create`. A dry run that skipped the file writes and still ran those would be
+ * read-only in name only.
+ */
+export interface ScaffoldOpts {
+  dryRun?: boolean;
 }
 
 export interface QaExecutor {

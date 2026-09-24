@@ -48,6 +48,7 @@ import { checkDeliverables, patternMatchesPath } from '../executors/deliverables
 import type { Deliverable, PlanExecutor, ProjectContext } from '../executors/types.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { verifyCommandRefusal } from './verify.js';
 
 /** Idempotent — `index.ts` registers the same namespace, and registering twice returns one bundle. */
 const planPrompts = promptsService.register('plan', packagePath('prompts', 'plan')).bundle;
@@ -61,6 +62,20 @@ export interface PlanStep {
   action: string;
   /** The command to run or the file to read that PROVES this step worked, and what it must show. */
   verify: string;
+  /**
+   * The same proof as a SHELL COMMAND A PROGRAM CAN RUN — exit 0 means the step landed. `''` when the
+   * step has no mechanical check.
+   *
+   * WHY IT IS A SECOND FIELD. `verify` has always been prose, validated for being at least twelve
+   * characters long and then never executed by anything. So every plan carried a per-step success
+   * oracle and the harness ignored all of it: the only check that ever ran was QA's deliverable
+   * existence test, at the END of the turn, long after a wrong step had been built on. Asking the
+   * model to make `verify` itself runnable would break the field for the many steps whose proof is
+   * genuinely "open this file and read the constant" — so the runnable form is separate and optional,
+   * and `plan/verify.ts` runs the ones that exist. One line, no newline: a heredoc here is a step
+   * pasting a file into a field, which is the failure the action field's own rule exists to prevent.
+   */
+  verifyCmd: string;
   /** Ids that must land first. Lower than `id`, so the list can never describe a cycle. */
   dependsOn: number[];
 }
@@ -130,6 +145,25 @@ export interface PhasedPlan {
   attempts: number;
 }
 
+/**
+ * WHAT THE PLAN IS FOR — and therefore what shape it is allowed to have.
+ *
+ * `build` ends with the repository different. `investigate` ends with a QUESTION ANSWERED and the
+ * repository untouched.
+ *
+ * WHY THIS EXISTS AT ALL. Plan mode had one shape, and `validateSteps` enforced it: "no step names a
+ * file — a plan that writes nothing cannot be executed". A question therefore could not be planned,
+ * only converted into an implementation — and when there was nothing to implement, the planner
+ * invented something. Measured twice on this machine. *"Is the game-over icon baked in or set at
+ * runtime?"* produced four steps each declaring `files:`, one of them instructing the agent to "parse
+ * the JSON content of the prefab" (Unity prefabs are YAML). And *"what would you like me to improve
+ * in your harness?"* produced three phases, the middle one creating `HarnessDebugSwitch.cs` and an
+ * Editor script shelling out to a Python logger that belonged to an unrelated folder in the tree —
+ * because the survey named that logger and the observability rule says to log through the facility
+ * it found. The model was obeying the shape it was given.
+ */
+export type PlanMode = 'build' | 'investigate';
+
 export interface ActionablePlanInput {
   request: string;
   goal: string;
@@ -140,6 +174,8 @@ export interface ActionablePlanInput {
   grounding: string;
   ctx: ProjectContext;
   executor: PlanExecutor;
+  /** What this plan is for. Absent means `build`, which is every plan ayin wrote before this existed. */
+  mode?: PlanMode;
   /**
    * The phase this plan is FOR, when the job was decomposed. Narrows the request to one stage and
    * narrows the required deliverables to the ones that stage owns, so a phase is never asked to
@@ -258,7 +294,7 @@ const VERIFY_MIN_CHARS = 12;
  * Everything wrong with this step list, in the words the repair pass is handed. Deterministic: no model,
  * no network, no filesystem — a plan is validated before any of its files exist.
  */
-export function validateSteps(steps: PlanStep[], requiredPatterns: string[]): string[] {
+export function validateSteps(steps: PlanStep[], requiredPatterns: string[], mode: PlanMode = 'build'): string[] {
   const errors: string[] = [];
   if (steps.length === 0) return ['the plan has no steps'];
 
@@ -273,6 +309,12 @@ export function validateSteps(steps: PlanStep[], requiredPatterns: string[]): st
     if (s.verify.trim().length < VERIFY_MIN_CHARS) {
       errors.push(`${at}: verify is ${JSON.stringify(s.verify.trim())} — name the command to run or the file to read, and what it must show`);
     }
+    // A REFUSED COMMAND IS CAUGHT HERE, WHERE IT STILL COSTS ONE REPAIR PASS. `verifySteps` refuses it
+    // again at execution time, but by then the step has silently lost its only mechanical check.
+    const refusal = verifyCommandRefusal(s.verifyCmd);
+    if (refusal) {
+      errors.push(`${at}: verifyCmd ${JSON.stringify(s.verifyCmd)} cannot be run as a proof — ${refusal}. A check observes; give a read-only command, or leave verifyCmd empty`);
+    }
     for (const d of s.dependsOn) {
       if (!Number.isInteger(d)) errors.push(`${at}: dependsOn holds ${JSON.stringify(d)}, which is not a step id`);
       else if (d === s.id) errors.push(`${at}: depends on itself`);
@@ -281,15 +323,43 @@ export function validateSteps(steps: PlanStep[], requiredPatterns: string[]): st
     }
   }
 
-  if (!steps.some((s) => s.files.length > 0)) {
-    errors.push('no step names a file — a plan that writes nothing cannot be executed');
+  /**
+   * THE TWO RULES BELOW ARE ABOUT PRODUCING FILES, so an investigation is exempt from both — and the
+   * exemption is the entire point of the mode.
+   *
+   * "A plan that writes nothing cannot be executed" is true of work and false of a question, and
+   * enforcing it on a question does not produce a better plan: it produces an invented one. A
+   * deliverable is the same mistake one level up — an investigation owes no file, so a required
+   * pattern with no owner would be a demand to write something in order to answer something.
+   */
+  if (mode === 'build') {
+    if (!steps.some((s) => s.files.length > 0)) {
+      errors.push('no step names a file — a plan that writes nothing cannot be executed');
+    }
+
+    const declared = steps.flatMap((s) => s.files);
+    for (const pattern of requiredPatterns) {
+      if (!declared.some((f) => patternMatchesPath(f, pattern))) {
+        errors.push(`required deliverable \`${pattern}\` is produced by no step — name its exact path in the files of the step that writes it`);
+      }
+    }
+    return errors;
   }
 
-  const declared = steps.flatMap((s) => s.files);
-  for (const pattern of requiredPatterns) {
-    if (!declared.some((f) => patternMatchesPath(f, pattern))) {
-      errors.push(`required deliverable \`${pattern}\` is produced by no step — name its exact path in the files of the step that writes it`);
-    }
+  /**
+   * AN INVESTIGATION HAS ITS OWN ONE RULE: it must reach a conclusion.
+   *
+   * The failure mode a question-shaped plan actually has is not "it writes nothing", it is "it reads
+   * everything and decides nothing" — six steps of gathering and no step that says what the answer
+   * is. That is the investigation equivalent of a missing deliverable, and it is checkable: the last
+   * step's own text has to be about concluding rather than about opening another file.
+   */
+  const last = steps[steps.length - 1];
+  if (!/\b(conclude|conclusion|answer|decide|determine|state|report|verdict|summaris|summariz)/i.test(`${last.title} ${last.action}`)) {
+    errors.push(
+      `step ${last.id} is the last step and does not conclude — an investigation ends by stating the answer the `
+      + 'earlier steps support, and what would have to be true for the opposite one',
+    );
   }
   return errors;
 }
@@ -328,15 +398,21 @@ export function inferDependencies(steps: PlanStep[]): PlanStep[] {
 }
 
 /** The plan as markdown: numbered, each step carrying what it touches, what to do, and its proof. */
-export function renderPlan(steps: PlanStep[], gaps: string[], unresolved: string[]): string {
-  const lines: string[] = ['## Steps', ''];
+export function renderPlan(steps: PlanStep[], gaps: string[], unresolved: string[], mode: PlanMode = 'build'): string {
+  const investigating = mode === 'investigate';
+  const lines: string[] = [investigating ? '## Steps — this plan READS, it does not write' : '## Steps', ''];
   for (const s of steps) {
     const after = s.dependsOn.length ? ` · after step ${s.dependsOn.join(', ')}` : '';
-    const files = s.files.length ? s.files.map((f) => `\`${f}\``).join(', ') : '(no file — a command)';
+    const files = s.files.length
+      ? s.files.map((f) => `\`${f}\``).join(', ')
+      : investigating ? '(no fixed file — a search)' : '(no file — a command)';
     lines.push(`${s.id}. **${s.title}**${after}`);
-    lines.push(`   - files: ${files}`);
-    lines.push(`   - do: ${s.action.trim()}`);
-    lines.push(`   - proves it worked: ${s.verify.trim()}`);
+    lines.push(`   - ${investigating ? 'read' : 'files'}: ${files}`);
+    lines.push(`   - ${investigating ? 'look for' : 'do'}: ${s.action.trim()}`);
+    lines.push(`   - ${investigating ? 'settles it when' : 'proves it worked'}: ${s.verify.trim()}`);
+    // WRITTEN INTO THE DOCUMENT, not only held in the object, because the phase file on disk is what
+    // a re-run after a crash reads back — and the check is the half worth not losing.
+    if ((s.verifyCmd ?? '').trim()) lines.push(`   - check: \`${(s.verifyCmd ?? '').trim()}\` (run by ayin at the end of this phase; exit 0 means done)`);
     lines.push('');
   }
   if (gaps.length) {
@@ -438,6 +514,9 @@ export function parsePlan(raw: string): { steps: PlanStep[]; gaps: string[] } | 
       files: Array.isArray(o.files) ? o.files.map((f) => String(f).trim()).filter(Boolean) : [],
       action: String(o.action ?? ''),
       verify: String(o.verify ?? ''),
+      // Flattened, not rejected: a model that answers with two lines has still named a command, and
+      // dropping it would cost the step its only mechanical check over a whitespace character.
+      verifyCmd: String(o.verifyCmd ?? '').replace(/\s*\n\s*/g, ' ').trim(),
       dependsOn: Array.isArray(o.dependsOn)
         ? o.dependsOn.map((d) => Number(d)).filter((d) => Number.isFinite(d)).map((d) => Math.trunc(d))
         : [],
@@ -482,11 +561,16 @@ export function actionablePlanGraph(input: ActionablePlanInput) {
     // SCOPED TO THE PHASE, when there is one. A phase asked to satisfy the whole project's deliverable
     // list would draft the whole project — which is the flat plan this level exists to replace.
     const owned = input.phase ? required.filter((r) => input.phase!.deliverables.includes(r)) : required;
+    // AN INVESTIGATION OWES NO FILE. Carrying the deliverable list into a question's plan is what
+    // asks a model to answer "is this icon baked in" by producing a README.
+    const scoped = mode === 'investigate' ? [] : owned;
     return {
       survey: executor.survey(ctx),
       observability: executor.observability(ctx),
-      deliverables: renderDeliverableList(deliverables.filter((d) => !d.required || owned.includes(d.patterns[0]))),
-      requiredPatterns: owned,
+      deliverables: mode === 'investigate'
+        ? '(none — this plan answers a question and writes nothing)'
+        : renderDeliverableList(deliverables.filter((d) => !d.required || owned.includes(d.patterns[0]))),
+      requiredPatterns: scoped,
       steps: [],
       gaps: [],
       errors: [],
@@ -513,11 +597,17 @@ export function actionablePlanGraph(input: ActionablePlanInput) {
       }
     };
 
+  /** `build` unless the caller said otherwise — every plan written before the mode existed was one. */
+  const mode: PlanMode = input.mode ?? 'build';
+
   const draft = async (s: typeof PlanState.State) => {
-    setActivityDetail('drafting the actionable plan');
+    setActivityDetail(mode === 'investigate' ? 'drafting the investigation' : 'drafting the actionable plan');
     const raw = await llmChat([{
       role: 'user',
-      content: planPrompts.get('actionablePlan', {
+      // TWO PROMPTS, ONE GRAPH. The draft → validate → repair cycle, the parser, the salvage, the
+      // dependency inference and the renderer are all shape-agnostic; only what is ASKED FOR differs,
+      // so the mode picks a prompt rather than forking the machine that runs it.
+      content: planPrompts.get(mode === 'investigate' ? 'investigationPlan' : 'actionablePlan', {
         PHASE: input.phase
           ? `THIS PLAN IS ONE PHASE OF THE JOB — phase ${input.phase.id}, "${input.phase.title}".\n`
             + `It is done when: ${input.phase.goal}\n`
@@ -558,7 +648,7 @@ export function actionablePlanGraph(input: ActionablePlanInput) {
    */
   const validate = (s: typeof PlanState.State) => {
     const steps = inferDependencies(s.steps);
-    return { steps, errors: validateSteps(steps, s.requiredPatterns) };
+    return { steps, errors: validateSteps(steps, s.requiredPatterns, mode) };
   };
 
   const repair = async (s: typeof PlanState.State) => {
@@ -579,7 +669,7 @@ export function actionablePlanGraph(input: ActionablePlanInput) {
     return { steps: parsed.steps, gaps: parsed.gaps, attempts: s.attempts + 1 };
   };
 
-  const render = (s: typeof PlanState.State) => ({ markdown: renderPlan(s.steps, s.gaps, s.errors) });
+  const render = (s: typeof PlanState.State) => ({ markdown: renderPlan(s.steps, s.gaps, s.errors, mode) });
 
   /**
    * The bound. `planRepairPasses` model calls at most, then the plan ships with its faults named.
@@ -662,6 +752,7 @@ export interface PhaseProgress {
 export async function buildPhasedPlan(
   input: ActionablePlanInput,
   onPhase?: (p: PhaseProgress) => void,
+  explorePhase?: (phase: PlanPhase) => Promise<string | null>,
 ): Promise<PhasedPlan | null> {
   const deliverables = input.executor.deliverables(input.ctx);
   const projectRoot = input.ctx.targetDir ? join(input.ctx.root, input.ctx.targetDir) : input.ctx.root;
@@ -684,9 +775,11 @@ export async function buildPhasedPlan(
   const satisfied = new Set(
     checkDeliverables(projectRoot, deliverables).filter((s) => s.satisfied).map((s) => s.deliverable.patterns[0]),
   );
-  const required = deliverables
-    .filter((d) => d.required && !satisfied.has(d.patterns[0]))
-    .map((d) => d.patterns[0]);
+  const required = input.mode === 'investigate'
+    ? []
+    : deliverables
+      .filter((d) => d.required && !satisfied.has(d.patterns[0]))
+      .map((d) => d.patterns[0]);
   const rendered = renderDeliverableList(deliverables, projectRoot);
   const started = Date.now();
   let attempts = 0;
@@ -697,12 +790,20 @@ export async function buildPhasedPlan(
     return llmChat([{ role: 'user', content: prompt }], { declareTools: false });
   };
 
+  // AN INVESTIGATION HAS STAGES TOO — "establish what the popup binds to", "trace where the value is
+  // set", "conclude" — but it owes no deliverable, so the ownership rule has nothing to assign and
+  // `validatePhases` is handed an empty list rather than a list it would demand owners for.
+  const investigating = input.mode === 'investigate';
   let phases = parsePhases(await ask(planPrompts.get('planPhases', {
     GOAL: input.goal || '(none derived)',
-    REQUEST: input.request.slice(0, 8000),
+    REQUEST: investigating
+      ? `${input.request.slice(0, 8000)}\n\nTHIS IS A QUESTION, NOT WORK. Every phase is a stage of `
+        + 'ANSWERING it by reading the code — no phase writes, edits or creates anything, and the last '
+        + 'phase states the answer. A phase that implements something has misread the request.'
+      : input.request.slice(0, 8000),
     FEATURES: input.features.length ? input.features.map((f) => `- ${f}`).join('\n') : '- (not decomposed by triage)',
     SURVEY: input.executor.survey(input.ctx),
-    DELIVERABLES: rendered,
+    DELIVERABLES: investigating ? '(none — this job answers a question and writes nothing)' : rendered,
   })));
   if (!phases) {
     log('WARN', 'plan_phases_unparsed', {});
@@ -735,10 +836,40 @@ export async function buildPhasedPlan(
    */
   onPhase?.({ done: 0, total: phases.length, phases });
 
+  /**
+   * ONE EXPLORATION PER PHASE, WHERE THE ANSWER IS ALLOWED TO BE ABOUT THAT PHASE.
+   *
+   * The two global `explore` calls run once, before the breakdown exists, against a question built
+   * from the whole request — so every sub-plan was drafted from the same undifferentiated findings.
+   * A phase about the score popup and a phase about the download pipeline got the identical context,
+   * and neither got the part of the codebase it was actually going to touch. Phases fixed the
+   * altitude of the PLAN and left the altitude of the RESEARCH where it was.
+   *
+   * BUDGETED ACROSS THE BREAKDOWN, not per phase, because each call is a full agentic loop. Spent in
+   * phase order: the early phases are the ones later ones are drafted on top of, so if there is only
+   * enough for three, those three are the ones worth having. A phase past the budget is planned from
+   * the global findings exactly as before.
+   */
+  const exploreBudget = explorePhase ? getConfig('planPhaseExploreCalls', 3) : 0;
+  let explored = 0;
+
   const planned: PhasePlan[] = [];
   for (const phase of phases) {
+    let findings = input.findings;
+    if (explored < exploreBudget) {
+      explored++;
+      setActivityDetail(`exploring for phase ${phase.id}/${phases.length} — ${phase.title}`);
+      try {
+        const extra = await explorePhase?.(phase);
+        if (extra) findings = [...findings, extra];
+      } catch (err) {
+        // An exploration that fails costs this phase its own findings and nothing else — the global
+        // ones are still there, and a planner that dies because a search did is not worth having.
+        log('WARN', 'plan_phase_explore_failed', { phase: String(phase.id), error: err instanceof Error ? err.message : String(err) });
+      }
+    }
     setActivityDetail(`planning phase ${phase.id}/${phases.length} — ${phase.title}`);
-    const plan = await buildActionablePlan({ ...input, phase });
+    const plan = await buildActionablePlan({ ...input, phase, findings });
     if (plan) attempts += plan.attempts;
     planned.push({ phase, plan });
     onPhase?.({ done: planned.length, total: phases.length, phases, latest: { phase, plan } });

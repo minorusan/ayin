@@ -1,0 +1,8 @@
+### What execution just proved wrong
+Phase {{PHASE}} was worked and its checks FAILED. Its goal — {{GOAL}} — is not true.
+
+{{FAILURES}}
+
+This phase was planned before any of that was known. Plan it against the failure above: do not assume
+the earlier phase's output exists or works, and where this phase depended on it, make confirming it a
+step of its own.

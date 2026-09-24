@@ -1,0 +1,13 @@
+UNITY PROJECT — measured from the tree, not guessed.
+Root: {{ROOT}} (detected from {{DETECTED_FROM}})
+Editor version: {{VERSION}}
+Editor right now: {{EDITOR_STATE}}
+Render pipeline: {{PIPELINE}}
+Assemblies: {{ASMDEF_COUNT}} asmdef(s); test assemblies: {{TEST_ASMS}}
+Compiled output: {{COMPILED_STATE}}
+Top of Assets/: {{ASSET_DIRS}}
+Third-party packages: {{PACKAGES}}
+Addressables: {{ADDRESSABLES}}
+This project is C# plus serialized YAML assets. It has no HTTP server, no bundler and no logger
+module; do not plan for any. Code lives under Assets/ and Packages/; everything under Library/,
+Temp/, obj/, Build/ and Logs/ is generated and is never edited or committed.

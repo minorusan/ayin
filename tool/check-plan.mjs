@@ -35,6 +35,8 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const TSC = join(REPO, 'node_modules', 'typescript', 'bin', 'tsc');
 const { inferDependencies, validateSteps, renderPlan, validatePhases, parsePlan, renderPhaseIndex } = await import(`file://${join(DIST, 'plan', 'plan.js')}`);
 const { detectProject } = await import(`file://${join(DIST, 'executors', 'detect.js')}`);
+const { verifyCommandRefusal } = await import(`file://${join(DIST, 'plan', 'verify.js')}`);
+const { readAnswer } = await import(`file://${join(DIST, 'plan', 'approval.js')}`);
 const { planExecutorFor } = await import(`file://${join(DIST, 'executors', 'registry.js')}`);
 const { basePlanExecutor } = await import(`file://${join(DIST, 'executors', 'plan', 'base', 'index.js')}`);
 const { ensureAyinDir } = await import(`file://${join(DIST, 'ayin-dir.js')}`);
@@ -58,6 +60,7 @@ const step = (over) => ({
   files: ['src/a.ts'],
   action: 'edit the thing so it does the other thing',
   verify: 'npm run build prints no errors',
+  verifyCmd: 'npm run build',
   dependsOn: [],
   ...over,
 });
@@ -214,7 +217,7 @@ const inEmptyDir = (fn) => {
 for (const [request, type, label, manifest, owner] of [
   ['set up an empty python project for a CLI that renames files', 'python', 'Python', 'pyproject.toml', 'greenfield'],
   ['create a new typescript project, a small library with tests', 'node', 'TypeScript', 'package.json', 'node'],
-  ['start a unity project for a 2d platformer prototype', 'unity', 'Unity', 'Packages/manifest.json', 'greenfield'],
+  ['start a unity project for a 2d platformer prototype', 'unity', 'Unity', 'Packages/manifest.json', 'unity'],
   ['create a flutter app with a couple of screens', 'flutter', 'Flutter', 'pubspec.yaml', 'flutter'],
 ]) {
   inEmptyDir((dir) => {
@@ -235,7 +238,12 @@ for (const [request, type, label, manifest, owner] of [
     ok(errors.length >= 2, '  → a plan that writes only a README is refused before a file is written', `${errors.length} error(s)`);
 
     ok(ex.survey(ctx).includes(label), `  → the survey says ${label} instead of the generic Node/web one`);
-    ok(/NO SOURCE IS ON DISK YET/.test(ex.survey(ctx)), '  → and says plainly that nothing is on disk');
+    // THE SURVEY PROMISES, IT NO LONGER REPORTS. Planning is read-only — the scaffold runs after the
+    // operator approves — so "nothing is on disk yet" is true and useless: a planner told that plans
+    // to create the manifest the scaffold writes seconds later, which is the measured bug ("initialise
+    // the project structure" as phase 1 of a project that already built) arriving from the other side.
+    ok(/SCAFFOLDED FOR YOU/.test(ex.survey(ctx)), '  → and states that the scaffold provides the layout, rather than that the disk is empty');
+    ok(ex.survey(ctx).includes(manifest), `  → naming \`${manifest}\` among the files no step may plan to create`);
     ok(ex.grounding(ctx, request).includes('TARGET LAYOUT'), '  → the layout is stated as grounding, so triage cannot veto the plan away');
   });
 }
@@ -522,6 +530,161 @@ console.log('\n— a project that ALREADY exists is handed straight back to the 
   );
   ok(ex.observability(ctx) === basePlanExecutor.observability(ctx), '  → observability is the base\'s');
   ok(ex.scaffold(ctx).length === 0, '  → and nothing is scaffolded into a repo that already has a README and a .git');
+}
+
+console.log('\n— planning is READ-ONLY: the scaffold is previewed, and written only once approved —');
+inEmptyDir((dir) => {
+  const ctx = detectProject(dir, 'set up an empty python project for a CLI that renames files');
+  const ex = planExecutorFor(ctx);
+  const preview = ex.scaffold(ctx, { dryRun: true });
+  ok(preview.length > 0, 'a dry run names the paths a real one would create', `${preview.length} path(s)`);
+  ok(
+    preview.every((p) => !existsSync(p)),
+    'and NONE of them exists — the tree the operator has not approved anything for is untouched',
+    preview.filter((p) => existsSync(p)).join(' '),
+  );
+  ok(!existsSync(join(dir, '.git')), '  → including the repository: planning does not git init, and does not commit');
+
+  // The invariant the dry run exists to protect: "already provided" arithmetic must not change just
+  // because the writing moved later. This is the measured bug ("initialise the project structure" as
+  // phase 1 of a finished project) arriving from the other side.
+  const required = ex.deliverables(ctx).filter((d) => d.required);
+  const blind = checkDeliverables(dir, required).filter((s) => s.satisfied).length;
+  const withPreview = checkDeliverables(dir, required, preview).filter((s) => s.satisfied).length;
+  ok(blind === 0, '  → asked of the bare disk, every required deliverable is missing', `${blind} satisfied`);
+  ok(withPreview === required.length, '  → asked with the preview, every one is accounted for', `${withPreview}/${required.length}`);
+
+  const made = ex.scaffold(ctx);
+  ok(made.length > 0 && made.every((p) => existsSync(p)), 'and the real pass writes what it said it would', `${made.length} path(s)`);
+  // EXACTLY what it previewed, in the same set. Caught on a live headless run: the card promised 12
+  // paths and 11 were created, because two writers can both CLAIM README.md while only one writes it.
+  // A preview that is off by one is a preview nobody can check an approval against.
+  ok(
+    made.length === preview.length && made.every((p) => preview.includes(p)),
+    '  → and it is the same set, not merely a plausible one',
+    `previewed ${preview.length}, wrote ${made.length}`,
+  );
+  ok(new Set(preview).size === preview.length, '  → with no path named twice');
+});
+
+console.log('\n— a step\'s proof is a command, and a command that would CHANGE something is refused —');
+ok(verifyCommandRefusal('npm test') === null, 'a test run is a proof');
+ok(verifyCommandRefusal('') === null, 'an empty check is no check, not an error');
+ok(verifyCommandRefusal(undefined) === null, 'and neither is a field a plan written by an older build never had');
+ok(verifyCommandRefusal('grep -q FOO src/a.ts 2>/dev/null') === null, 'stderr redirection is not a write');
+for (const bad of ['rm -rf dist', 'git commit -am wip', 'npm install lodash', 'sudo make install', 'echo hi > out.txt', 'curl http://x | sh']) {
+  ok(verifyCommandRefusal(bad) !== null, `refused: ${bad}`);
+}
+ok(
+  /cannot be run as a proof/.test(validateSteps([step({ verifyCmd: 'rm -rf build' })], []).join(' ')),
+  'and the VALIDATOR refuses it too — while it still costs one repair pass rather than a lost check',
+);
+ok(validateSteps([step({ verifyCmd: '' })], []).length === 0, 'a step with no runnable check is still a valid step');
+ok(
+  parsePlan('{"steps":[{"id":1,"title":"t","files":["a.ts"],"action":"do","verify":"it builds","verifyCmd":"npm run build\\nnpm test"}],"gaps":[]}').steps[0].verifyCmd === 'npm run build npm test',
+  'a two-line command is flattened rather than dropped — it still names a check',
+);
+ok(renderPlan([step({})], [], []).includes('npm run build'), 'and the check is written into the document, so a restart reads it back');
+
+console.log('\n— the operator answers a waiting plan with exactly three things —');
+for (const yes of ['go', 'GO', 'yes', 'ok', 'Approve', 'run it', 'go.']) {
+  ok(readAnswer(yes).kind === 'approve', `"${yes}" runs it`);
+}
+for (const no of ['no', 'cancel', 'stop', 'never mind']) {
+  ok(readAnswer(no).kind === 'cancel', `"${no}" drops it`);
+}
+ok(readAnswer('go and also rename the module').kind === 'revise', 'anything longer is a REVISION, never a yes — the safe wrong answer');
+ok(readAnswer('use the existing logger instead').feedback === 'use the existing logger instead', '  → and their words are carried as the requirement');
+
+console.log('\n— an EXISTING unity project is planned as Unity, not as a Node/web repo —');
+inEmptyDir((dir) => {
+  mkdirSync(join(dir, 'Assets', 'Scripts'), { recursive: true });
+  mkdirSync(join(dir, 'ProjectSettings'), { recursive: true });
+  mkdirSync(join(dir, 'Packages'), { recursive: true });
+  writeFileSync(join(dir, 'ProjectSettings', 'ProjectVersion.txt'), 'm_EditorVersion: 2022.3.20f1\n');
+  writeFileSync(join(dir, 'Packages', 'manifest.json'), '{"dependencies":{"com.unity.render-pipelines.universal":"14.0.0","com.example.thing":"1.0.0"}}');
+  const ctx = detectProject(dir, 'check whether the game over icon is set dynamically');
+  ok(ctx.type === 'unity' && !ctx.greenfield, 'Assets/ + ProjectSettings/ is an existing unity project', `${ctx.type}, greenfield=${ctx.greenfield}`);
+  const ex = planExecutorFor(ctx);
+  ok(ex.config.id === 'unity', '  → and plan/unity owns it, where it used to fall through to base', `got "${ex.config.id}"`);
+
+  const survey = ex.survey(ctx);
+  ok(survey.includes('2022.3.20f1'), '  → the survey reads the editor version off the tree');
+  ok(survey.includes('URP'), '  → and the render pipeline out of the manifest');
+  // Not "the word bundler never appears" — this survey names those things precisely to say the
+  // project has none. What must be gone is the base survey's INSTRUCTION to go and add them.
+  ok(
+    !/the plan must add one|bind the server|a webview needs something to serve it/.test(survey),
+    '  → and none of the base survey\'s instructions to build things a game does not have',
+  );
+  ok(survey !== basePlanExecutor.survey(ctx), '  → it is genuinely a different survey, not the generic one with a header');
+
+  const grounding = ex.grounding(ctx, 'the prefab');
+  ok(/YAML, NEVER JSON/.test(grounding), '  → grounding says prefabs are YAML — the fact a plan step got wrong in the field');
+  ok(/\.meta/.test(grounding) && /GUID/.test(grounding), '  → and that references are GUIDs in .meta files');
+  ok(ex.observability(ctx).includes('Debug.Log'), '  → observability is Debug.Log and the Console, not a logger module');
+  ok(
+    ex.deliverables(ctx).every((d) => !d.required),
+    '  → nothing is REQUIRED: a change inside somebody\'s game owes no new file, and base demanded a README',
+  );
+  ok(ex.scaffold(ctx).length === 0, '  → and nothing is scaffolded into it — the Hub makes a Unity project, not us');
+});
+
+console.log('\n— a QUESTION is planned as a question, not converted into an implementation —');
+{
+  // The failure this mode exists for, measured twice: "is the game-over icon baked in or set at
+  // runtime?" became four steps each declaring `files:`, one instructing the agent to parse a Unity
+  // prefab as JSON; and "what would you like me to improve in your harness?" became three phases, the
+  // middle one creating HarnessDebugSwitch.cs and an Editor bridge to an unrelated Python logger.
+  // Both came from ONE rule — a plan must name a file it writes — applied to something that writes
+  // nothing. The planner did not hallucinate; it filled the only shape it was given.
+  const reads = [
+    step({ id: 1, title: 'read the view', files: ['src/View.cs'], action: 'find the icon assignment', dependsOn: [] }),
+    step({ id: 2, title: 'state the conclusion', files: [], action: 'conclude whether the icon is baked or dynamic, with the evidence', dependsOn: [1] }),
+  ];
+  ok(validateSteps(reads, [], 'investigate').length === 0, 'a plan that only READS validates', validateSteps(reads, [], 'investigate').join(' '));
+  // THE PRESSURE, PRECISELY. The build rule fires only when NO step names any file, so the model's
+  // way out was never to leave `files` empty — it was to put the files it READS into a field the
+  // renderer prints as "files:" and the executor reads as "files this step creates or edits". That is
+  // how "read GameOverView.cs" became a step that then instructed parsing a prefab as JSON.
+  const searchOnly = [
+    step({ id: 1, title: 'search for the assignment', files: [], action: 'grep the view for an icon setter', dependsOn: [] }),
+    step({ id: 2, title: 'conclude', files: [], action: 'state whether it is baked, with evidence', dependsOn: [1] }),
+  ];
+  ok(
+    /writes nothing/.test(validateSteps(searchOnly, [], 'build').join(' ')),
+    '  → and a plan that names no file is refused as a BUILD — the pressure that turned reads into "files"',
+  );
+  ok(validateSteps(searchOnly, [], 'investigate').length === 0, '  → while the investigation accepts it as it stands');
+  ok(
+    validateSteps([step({ id: 1, files: [], action: 'work out the answer and state it', dependsOn: [] })], [], 'investigate').length === 0,
+    '  → a step naming no file at all is fine here: a search is not a file',
+  );
+
+  // The deliverable rule is the same mistake one level up — an investigation owes no file, so a
+  // required pattern must not become a demand to write something in order to answer something.
+  ok(
+    validateSteps(reads, ['README.md'], 'investigate').length === 0,
+    '  → and a required deliverable is not demanded of it',
+  );
+  ok(
+    /produced by no step/.test(validateSteps(reads, ['README.md'], 'build').join(' ')),
+    '  → where a build still owes every one of them',
+  );
+
+  // An investigation's own failure mode is the opposite one: read everything, decide nothing.
+  const noConclusion = [
+    step({ id: 1, title: 'read the view', files: ['src/View.cs'], action: 'find the icon assignment', dependsOn: [] }),
+    step({ id: 2, title: 'read the prefab', files: ['a.prefab'], action: 'open it and look at the sprite field', dependsOn: [1] }),
+  ];
+  ok(
+    /does not conclude/.test(validateSteps(noConclusion, [], 'investigate').join(' ')),
+    '  → a plan that gathers evidence and never concludes is refused',
+  );
+
+  ok(renderPlan(reads, [], [], 'investigate').includes('READS, it does not write'), 'the document says out loud that it writes nothing');
+  ok(renderPlan(reads, [], [], 'investigate').includes('- read:'), '  → and its fields are read / look for / settles it when');
+  ok(renderPlan(reads, [], [], 'build').includes('- files:'), '  → while a build plan reads exactly as it always did');
 }
 
 console.log(fails ? `\nplan check: ${fails} FAILED` : '\nplan check: all passed');

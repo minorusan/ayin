@@ -1,0 +1,8 @@
+{{REQUEST}}
+
+REVISION OF A PLAN THE OPERATOR REJECTED. A plan for the request above was written and shown to them,
+and they asked for this instead:
+
+{{FEEDBACK}}
+
+Their words are the requirement. Where they contradict the earlier plan, they win.

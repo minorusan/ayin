@@ -22,7 +22,7 @@ import { prompts, packagePath } from '../../../prompts-service.js';
 import { retrieveCatalog } from '../../../tools/arduino-db.js';
 import { findSketches } from '../../../tools/arduino-explain.js';
 import { boardFromFqbn, projectFqbn, pwmPins } from '../../../tools/arduino-toolchain.js';
-import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext } from '../../types.js';
+import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext, ScaffoldOpts } from '../../types.js';
 import { ensureReadme } from '../base/index.js';
 import { ensureToolRuntime } from '../../../tool-wiring.js';
 
@@ -164,9 +164,9 @@ export const arduinoPlanExecutor: PlanExecutor = {
     return arduinoPrompts.get('planObservability', { FQBN: projectFqbn(ctx.root).fqbn });
   },
 
-  scaffold(ctx: ProjectContext): string[] {
+  scaffold(ctx: ProjectContext, opts?: ScaffoldOpts): string[] {
     // Same deterministic README the base executor writes — an Arduino project needs one at least as
     // much as any other, since the parts list and the pin map have nowhere else to live.
-    return ensureReadme(ctx.root);
+    return ensureReadme(ctx.root, opts?.dryRun === true);
   },
 };

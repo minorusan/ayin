@@ -1,0 +1,7 @@
+<plan-progress>
+Where the job actually is — measured, not recalled. ayin ran each phase's checks itself.
+
+{{ROWS}}
+
+{{NEXT}}
+</plan-progress>

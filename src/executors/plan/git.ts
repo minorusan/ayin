@@ -126,7 +126,7 @@ export function repoState(dir: string): { repo: boolean; own: boolean; commits: 
  * about to use is what refuses to nest a repository inside one that already exists — whether that
  * directory is the enclosing repo's root or a new folder made inside it.
  */
-export function ensureGitRepo(root: string): string[] {
+export function ensureGitRepo(root: string, dryRun = false): string[] {
   const dotGit = join(root, '.git');
   if (existsSync(dotGit)) return [];
   const enclosing = projectRoot(root);
@@ -134,6 +134,9 @@ export function ensureGitRepo(root: string): string[] {
     log('INFO', 'scaffold_git_init_skipped', { root, enclosing });
     return [];
   }
+  // The refusals above are READS, so a dry run answers them exactly as the real call does — which is
+  // the point: the preview has to be wrong in the same places, or it is not a preview.
+  if (dryRun) return [dotGit];
   if (git(root, ['init']) === null) {
     log('WARN', 'scaffold_git_init_failed', { root });
     return [];
@@ -150,7 +153,10 @@ export function ensureGitRepo(root: string): string[] {
  * made it, and this is a brand-new repository either way. Where the operator HAS an identity, theirs is
  * used, because the commit really is being made on their behalf.
  */
-export function commitScaffold(root: string, what: string): string[] {
+export function commitScaffold(root: string, what: string, dryRun = false): string[] {
+  // Returns paths, and a commit is not one — so a dry run has nothing to preview and only has to
+  // refuse to commit. Checked first, before `repoState` shells out for a question nobody asked.
+  if (dryRun) return [];
   const state = repoState(root);
   if (!state.own) return [];
   if (state.commits > 0) {

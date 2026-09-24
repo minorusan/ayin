@@ -193,11 +193,31 @@ export function arduinoReadmeSubstance(root: string): { ok: boolean; detail: str
   return { ok: true, detail: `README.md is present and filled in (${text.length} chars, no stub markers, has a pin map and build instructions)` };
 }
 
-export function checkDeliverables(root: string, deliverables: Deliverable[]): DeliverableStatus[] {
+export function checkDeliverables(root: string, deliverables: Deliverable[], pending: string[] = []): DeliverableStatus[] {
   return deliverables.map((d) => {
     const matches = [...new Set(d.patterns.flatMap((p) => resolvePattern(root, p)))].sort();
-    return { deliverable: d, matches, satisfied: matches.length > 0 };
+    /**
+     * `pending` IS WHAT THE SCAFFOLD IS ABOUT TO WRITE, and it counts.
+     *
+     * Planning is read-only now — the scaffold runs once the plan is approved, not before it — so at
+     * plan time every file the scaffold provides is legitimately absent from disk. Asking the disk
+     * alone would reintroduce, from the other side, the measured bug that put "initialise the project
+     * structure" first in a project that already built: a required deliverable reported missing, a
+     * phase created to produce it, and the scaffold then writing it anyway seconds later.
+     *
+     * Empty everywhere else, so QA — which asks this question AFTER the work, about what is really
+     * there — is unchanged. A promise is only evidence before the moment it comes due.
+     */
+    const promised = pending.filter((p) => d.patterns.some((pattern) => patternMatchesPath(relativeTo(root, p), pattern)));
+    const all = [...new Set([...matches, ...promised])].sort();
+    return { deliverable: d, matches: all, satisfied: all.length > 0 };
   });
+}
+
+/** An absolute path as the deliverable patterns state it — relative to the project root. */
+function relativeTo(root: string, path: string): string {
+  if (!path.startsWith(root)) return path;
+  return path.slice(root.length).replace(/^[/\\]/, '');
 }
 
 /**

@@ -1,0 +1,17 @@
+HOW UNITY WORK IS WATCHED WORKING. Use these BY NAME; do not propose a logger module, an env switch
+or an HTTP debug route — this project has none.
+
+Debug.Log / LogWarning / LogError, from any MonoBehaviour or plain C# class, reach the Editor
+Console. Prefix every line a task adds with one bracketed tag, the same tag on every line, so the
+whole flow is one Console filter and one `grep` over the log: `Debug.Log("[TAG] …")`.
+
+The logs on disk: the Editor's is `~/Library/Logs/Unity/Editor.log` on macOS and
+`%LOCALAPPDATA%\Unity\Editor\Editor.log` on Windows; a player build writes
+`~/Library/Logs/<Company>/<Product>/Player.log`. `Application.logMessageReceived` is the hook that
+captures the same stream inside the game.
+
+That the code COMPILES is the floor and it is deterministic: Library/ScriptAssemblies/<Assembly>.dll
+newer than every .cs under that assembly's asmdef directory. Tests run through the Unity Test Runner
+against the EditMode and PlayMode test assemblies.
+
+Assemblies that carry tests here: {{TEST_ASMS}}

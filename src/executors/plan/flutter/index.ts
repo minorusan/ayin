@@ -37,7 +37,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { log } from '../../../log.js';
-import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext } from '../../types.js';
+import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext, ScaffoldOpts } from '../../types.js';
 import { dartName } from '../greenfield/files.js';
 import { greenfieldPlanExecutor } from '../greenfield/index.js';
 
@@ -221,28 +221,36 @@ export const flutterPlanExecutor: PlanExecutor = {
    * runs `git init`, writes the file table over nothing that collides, and commits. Only after that
    * does anything touch the network.
    */
-  scaffold(ctx: ProjectContext): string[] {
-    if (!ctx.greenfield || ctx.type !== 'flutter') return greenfieldPlanExecutor.scaffold(ctx);
+  scaffold(ctx: ProjectContext, opts?: ScaffoldOpts): string[] {
+    const dry = opts?.dryRun === true;
+    if (!ctx.greenfield || ctx.type !== 'flutter') return greenfieldPlanExecutor.scaffold(ctx, opts);
     const dir = targetRoot(ctx);
     const flutter = sdkBin('flutter');
     const made: string[] = [];
     if (flutter) {
       // greenfield makes this itself, but the platform folders have to land inside it first.
       if (!existsSync(dir)) {
-        try {
-          mkdirSync(dir, { recursive: true });
-          made.push(dir);
-        } catch (err) {
-          log('WARN', 'scaffold_project_dir_failed', { dir, error: err instanceof Error ? err.message : String(err) });
-          return greenfieldPlanExecutor.scaffold(ctx);
+        if (dry) made.push(dir);
+        else {
+          try {
+            mkdirSync(dir, { recursive: true });
+            made.push(dir);
+          } catch (err) {
+            log('WARN', 'scaffold_project_dir_failed', { dir, error: err instanceof Error ? err.message : String(err) });
+            return greenfieldPlanExecutor.scaffold(ctx, opts);
+          }
         }
       }
-      made.push(...generatePlatforms(dir, flutter));
+      // A dry run names the folders without running `flutter create` — the SDK templating is the
+      // expensive, side-effectful half, and the folder set it produces is this fixed list.
+      made.push(...(dry
+        ? [...PLATFORM_DIRS, '.metadata'].map((e) => join(dir, e)).filter((p) => !existsSync(p))
+        : generatePlatforms(dir, flutter)));
     } else {
       log('WARN', 'scaffold_flutter_sdk_missing', { dir, effect: 'no platform folders and no codegen — the README says what to run' });
     }
-    made.push(...greenfieldPlanExecutor.scaffold(ctx));
-    if (flutter) startCodegen(dir, flutter, sdkBin('dart'));
+    made.push(...greenfieldPlanExecutor.scaffold(ctx, opts));
+    if (flutter && !dry) startCodegen(dir, flutter, sdkBin('dart'));
     return made;
   },
 };

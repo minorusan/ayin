@@ -1,0 +1,5 @@
+One stage of a larger job: {{TITLE}}. It is done when: {{GOAL}}
+
+Which files does THIS stage touch, and what do they currently do? Name the concrete paths, the
+functions or blocks inside them, who calls them, and what they assume today. Ignore anything the
+other stages of the job would touch instead.

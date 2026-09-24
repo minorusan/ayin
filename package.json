@@ -46,7 +46,7 @@
     "check:prompts": "node tool/check-prompts.mjs",
     "audit:prompts": "node tool/dump-prompts.mjs",
     "bench:arduino": "node tool/arduino-bench.mjs",
-    "postbuild": "node tool/copy-executor-configs.mjs && node tool/check-prompts.mjs && node tool/check-orphans.mjs && node tool/check-tool-icons.mjs",
+    "postbuild": "node tool/copy-executor-configs.mjs && node tool/check-prompts.mjs && node tool/check-orphans.mjs && node tool/check-tool-icons.mjs && node tool/mark-bin-exec.mjs",
     "release": "npm publish --registry ${AYIN_REGISTRY:?set AYIN_REGISTRY to your private registry}",
     "check:sentinaile": "node tool/check-sentinaile.mjs",
     "check:vendor": "node tool/check-vendor.mjs",

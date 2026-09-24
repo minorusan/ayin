@@ -7,8 +7,8 @@
  * model remembers about half of it. The result is a file that cannot run, in a directory that is not
  * a project, and the operator finds out when they type `npm run dev`.
  *
- * `scaffold()` is the hook the executor contract already reserved for this: deterministic, run BEFORE
- * the plan is written, creates only what is missing. Deterministic is the important word — a
+ * `scaffold()` is the hook the executor contract already reserved for this: deterministic, run once
+ * the plan is approved, creates only what is missing. Deterministic is the important word — a
  * bootstrap is the least creative part of any task and the most annoying to get wrong, so no model
  * call is involved. The plan that follows then describes the FEATURE, because the project already
  * exists.
@@ -24,7 +24,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { log } from '../../../log.js';
-import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext } from '../../types.js';
+import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext, ScaffoldOpts } from '../../types.js';
 import { greenfieldPlanExecutor } from '../greenfield/index.js';
 import { isNaamah } from '../../../modes.js';
 
@@ -186,11 +186,12 @@ export const nodePlanExecutor: PlanExecutor = {
    * they disagreed already (the table wrote no test; the deliverables required one). One table now,
    * in `greenfield/files.ts`, checked against the deliverables by `check-plan.mjs`.
    */
-  scaffold(ctx: ProjectContext): string[] {
-    const made = greenfieldPlanExecutor.scaffold(ctx);
+  scaffold(ctx: ProjectContext, opts?: ScaffoldOpts): string[] {
+    const made = greenfieldPlanExecutor.scaffold(ctx, opts);
     if (!ctx.greenfield || ctx.type !== 'node') return made;
-    // The one thing greenfield cannot do for a language it does not own the toolchain of.
-    startBootstrapInstall(targetRoot(ctx));
+    // The one thing greenfield cannot do for a language it does not own the toolchain of. Never on a
+    // dry run: a preview that reaches the npm registry is not a preview.
+    if (opts?.dryRun !== true) startBootstrapInstall(targetRoot(ctx));
     return made;
   },
 };

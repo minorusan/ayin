@@ -40,9 +40,9 @@ import { join } from 'node:path';
 import { log } from '../../../log.js';
 import { prompts, packagePath } from '../../../prompts-service.js';
 import { projectRoot } from '../../../qa/probes.js';
-import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext, ProjectType } from '../../types.js';
+import type { Deliverable, ExecutorConfig, PlanExecutor, ProjectContext, ProjectType, ScaffoldOpts } from '../../types.js';
 import { basePlanExecutor, ensureReadme } from '../base/index.js';
-import { existingBranchFiles, writeBranchFiles } from './files.js';
+import { branchFiles, writeBranchFiles } from './files.js';
 import { commitScaffold, ensureGitRepo } from '../git.js';
 
 const greenfieldPrompts = prompts.register('greenfield', packagePath('prompts', 'greenfield')).bundle;
@@ -290,30 +290,32 @@ export const greenfieldPlanExecutor: PlanExecutor = {
     const dir = targetRoot(ctx);
     const entries = rootEntries(dir);
     /**
-     * THE SURVEY IS TAKEN AFTER `scaffold()`, SO IT MUST NOT SAY THE DISK IS EMPTY.
+     * THE SURVEY MUST NOT SAY THE DISK IS EMPTY, EVEN WHILE IT IS.
      *
      * It used to open with "NO SOURCE IS ON DISK YET. This plan CREATES a project" and close with "the
-     * earliest steps create the directory layout and the manifest" — measured in `plan/index.ts`, both
-     * are read AFTER the scaffold has written the whole working project. The planner did as it was
-     * told: four phases to initialise, implement, test and document a project that already installed,
-     * tested 4/4, typechecked, built and served a page. Forty minutes of subagents re-doing two
-     * seconds of deterministic work, and the run never finished.
+     * earliest steps create the directory layout and the manifest", read AFTER the scaffold had written
+     * the whole working project. The planner did as it was told: four phases to initialise, implement,
+     * test and document a project that already installed, tested 4/4, typechecked, built and served a
+     * page. Forty minutes of subagents re-doing two seconds of deterministic work, and the run never
+     * finished.
+     *
+     * NOW THE PLAN IS WRITTEN BEFORE THE SCAFFOLD RUNS — planning is read-only, and the scaffold is the
+     * first act after the operator approves. So "is it there yet" is the wrong question and asking it
+     * would reintroduce the same bug from the other side. The right one is WHAT WILL BE THERE when the
+     * agent starts, and that is knowable exactly: the branch's file set is deterministic, and
+     * `applyPlanScaffold` writes all of it between approval and the first round.
      */
-    const already = existingBranchFiles(BRANCH_OF[ctx.type]!, dir);
+    const provided = Object.keys(branchFiles(BRANCH_OF[ctx.type]!, dir));
     return greenfieldPrompts.get('survey', {
       ROOT: dir,
       LABEL: facts.label,
       DETECTED_FROM: ctx.evidence,
-      SCAFFOLD_STATE: already.length
-        ? `THE PROJECT ALREADY EXISTS. ayin scaffolded it deterministically before this plan was `
-          + `written, and it is known good: it installs, builds and its test suite passes as it stands. `
-          + `These files are DONE — do not plan to create, rewrite or "initialise" any of them:\n`
-          + `${already.map((f: string) => `  ${f}`).join('\n')}\n\n`
-          + `Plan only what the request asks for BEYOND this. If the request is fully satisfied by what `
-          + `is listed above, say so in a single phase that verifies it rather than inventing work.`
-        : `NO SOURCE IS ON DISK YET. This plan CREATES a ${facts.label} project; detected from `
-          + `${ctx.evidence}. There is no existing code to extend and no survey finding to react to — `
-          + `do not describe any. The earliest steps create the directory layout and the manifest.`,
+      SCAFFOLD_STATE: `THE ${facts.label.toUpperCase()} PROJECT IS SCAFFOLDED FOR YOU. ayin writes these `
+        + `${facts.label} files deterministically before the first round, and the result is known good: `
+        + `it installs, builds and its test suite passes as it stands. They are DONE — do not plan to `
+        + `create, rewrite or "initialise" any of them:\n${provided.map((f: string) => `  ${f}`).join('\n')}\n\n`
+        + `Plan only what the request asks for BEYOND this. If the request is fully satisfied by what `
+        + `is listed above, say so in a single phase that verifies it rather than inventing work.`,
       // The one instruction the model cannot derive: the agent's cwd is NOT the project directory, so
       // every path it writes has to carry the prefix. Stated as the paths themselves, not as a rule.
       PATH_RULE: ctx.targetDir
@@ -362,31 +364,44 @@ export const greenfieldPlanExecutor: PlanExecutor = {
    * somebody's existing repository. Every writer under it is additionally write-if-missing, because the
    * cost of being wrong here is editing a stranger's work.
    */
-  scaffold(ctx: ProjectContext): string[] {
+  scaffold(ctx: ProjectContext, opts?: ScaffoldOpts): string[] {
+    const dry = opts?.dryRun === true;
     const branch = BRANCH_OF[ctx.type];
-    if (!branch) return basePlanExecutor.scaffold(ctx);
+    if (!branch) return basePlanExecutor.scaffold(ctx, opts);
     const dir = targetRoot(ctx);
     const made: string[] = [];
     if (ctx.targetDir && !existsSync(dir)) {
-      try {
-        mkdirSync(dir, { recursive: true });
-        log('INFO', 'scaffold_project_dir', { dir });
-        made.push(dir);
-      } catch (err) {
-        // Nothing below can work without it, and a plan is still worth writing — so report and stop.
-        log('WARN', 'scaffold_project_dir_failed', { dir, error: err instanceof Error ? err.message : String(err) });
-        return made;
+      if (dry) made.push(dir);
+      else {
+        try {
+          mkdirSync(dir, { recursive: true });
+          log('INFO', 'scaffold_project_dir', { dir });
+          made.push(dir);
+        } catch (err) {
+          // Nothing below can work without it, and a plan is still worth writing — so report and stop.
+          log('WARN', 'scaffold_project_dir_failed', { dir, error: err instanceof Error ? err.message : String(err) });
+          return made;
+        }
       }
     }
-    made.push(...ensureGitRepo(dir));
+    made.push(...ensureGitRepo(dir, dry));
     // The branch's README is the real one — it names this project's own commands. `ensureReadme` only
     // fills in when the branch shipped none, and both are write-if-missing, so whichever lands first
     // stands and the generic stub can never overwrite a specific page.
-    made.push(...(ctx.greenfield ? writeBranchFiles(branch, dir) : []));
-    made.push(...ensureReadme(dir));
+    made.push(...(ctx.greenfield ? writeBranchFiles(branch, dir, dry) : []));
+    made.push(...ensureReadme(dir, dry));
     // LAST, so the commit contains everything above it. Only ever into a repo we just created with no
     // history of its own — see `git.ts` for the guards.
-    if (ctx.greenfield) made.push(...commitScaffold(dir, FACTS[branch].label));
-    return made;
+    if (ctx.greenfield) made.push(...commitScaffold(dir, FACTS[branch].label, dry));
+    /**
+     * DEDUPED, BECAUSE A DRY RUN CAN NAME A PATH TWICE AND A REAL ONE CANNOT.
+     *
+     * Two writers here can produce README.md: the branch's own (which names this project's commands)
+     * and `ensureReadme`'s generic stub. Really running them, whichever lands first makes the second
+     * a no-op — so the real list has one entry. Previewing them, neither writes, so both report it.
+     * Measured on a live headless run: the card promised 12 paths and the scaffold created 11, which
+     * is a preview that lies about the one thing it exists to state.
+     */
+    return [...new Set(made)];
   },
 };

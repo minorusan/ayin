@@ -33,6 +33,7 @@ import { arduinoPlanExecutor } from './plan/arduino/index.js';
 import { greenfieldPlanExecutor } from './plan/greenfield/index.js';
 import { nodePlanExecutor } from './plan/node/index.js';
 import { flutterPlanExecutor } from './plan/flutter/index.js';
+import { unityPlanExecutor } from './plan/unity/index.js';
 import { baseQaExecutor } from './qa/base/index.js';
 import { arduinoQaExecutor } from './qa/arduino/index.js';
 import { unityQaExecutor } from './qa/unity/index.js';
@@ -57,6 +58,13 @@ const INSTANCES: Record<string, AnyExecutor> = {
   // stops at the file table hands over a project that does not compile. Its planning surfaces are
   // greenfield's flutter branch — the layout, the deliverables and the survey live there.
   'plan/flutter': flutterPlanExecutor,
+  // FOUR OWNERS NOW, AND THE UNITY PAIR IS THE ONE THAT OVERLAPS ON PURPOSE. `plan/greenfield` claims
+  // `unity` for the project being CREATED; `plan/unity` claims it at a higher priority for the project
+  // that already exists, which greenfield handed back to `base` — and `base` surveyed a C# game as a
+  // Node/web repo. Not a tie: 110 beats 100, so the selection rule still reads straight out of the
+  // configs, and `plan/unity` delegates every surface back to greenfield on a greenfield context so
+  // there is still exactly one owner of project creation.
+  'plan/unity': unityPlanExecutor,
   'qa/base': baseQaExecutor,
   'qa/arduino': arduinoQaExecutor,
   'qa/unity': unityQaExecutor,

@@ -1,0 +1,5 @@
+ADDRESSABLES ARE IN THIS PROJECT. Content served from an existing build is whatever was bundled when
+that build was made: a changed prefab does not reach a Play-mode run using "Use Existing Build" until
+the content is rebuilt, and the symptom is a component that looks missing at runtime while being
+present in the asset. Any plan touching an addressable asset says which Play-mode script is assumed.
+

@@ -2132,12 +2132,12 @@ console.log('\nexecutors: detection + registry');
   // Every shipped config parses and cross-checks against an imported instance. loadRegistry THROWS
   // on any mismatch, so simply getting a list back is the assertion.
   const configs = reg.listExecutors();
-  // TWELVE: base + arduino for plan/qa/present, plus qa/unity, qa/node, qa/flutter,
-  // plan/greenfield, plan/node and plan/flutter. The count is asserted rather than the names because
-  // `loadRegistry` already THROWS on a config with no imported instance (or the reverse) — this line
-  // is what notices an executor added to neither list.
-  ok(configs.length === 12,
-    'twelve executors are declared and wired (base + arduino for plan/qa/present, plus qa/{unity,node,flutter} and plan/{greenfield,node,flutter})',
+  // THIRTEEN: base + arduino for plan/qa/present, plus qa/unity, qa/node, qa/flutter,
+  // plan/greenfield, plan/node, plan/flutter and plan/unity. The count is asserted rather than the
+  // names because `loadRegistry` already THROWS on a config with no imported instance (or the
+  // reverse) — this line is what notices an executor added to neither list.
+  ok(configs.length === 13,
+    'thirteen executors are declared and wired (base + arduino for plan/qa/present, plus qa/{unity,node,flutter} and plan/{greenfield,node,flutter,unity})',
     String(configs.length));
   // THE TWO THAT BOOTSTRAP, AND THE FACT THAT THEY DO NOT COLLIDE.
   //

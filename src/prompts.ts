@@ -44,6 +44,18 @@ const DEFAULT_CONFIG: Record<string, number> = {
   // How many times the actionable plan (plan/plan.ts) may be sent back to the model after its
   // validator rejects it. 0 ships the first draft with its faults named instead of repairing it.
   planRepairPasses: 1,
+  // The approval gate (plan/approval.ts) — the plan is shown and the turn ends until the operator
+  // answers. 0 runs an approved-by-default plan the way it did before the gate existed. Headless
+  // approves itself whatever this says: there is nobody there to ask.
+  planApproval: 1,
+  // One `explore` call per phase, budgeted across the whole breakdown rather than per phase — each
+  // one is a full agentic loop. 0 leaves every sub-plan on the two global explorations.
+  planPhaseExploreCalls: 3,
+  // How long one step's `verifyCmd` may run before it is reported unverified rather than failed.
+  planVerifyTimeoutMs: 120_000,
+  // How many times a failed phase may re-draft the phases after it (plan/progress.ts). Same bound,
+  // and the same reason, as planRepairPasses: a replan that can loop is worse than the drift it fixes.
+  planReplans: 1,
   // The spell-check in front of `!<command>` (bang-check.ts) — how long it may take before the line
   // the operator typed runs unchecked. 0 disables the call entirely, the same shape as `qaMaxPasses`.
   bangCheckMs: 3000,

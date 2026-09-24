@@ -1173,11 +1173,18 @@ export function existingBranchFiles(branch: Branch, dir: string): string[] {
   return Object.keys(branchFiles(branch, dir)).filter((rel) => existsSync(join(dir, rel)));
 }
 
-/** Write a branch's whole file set into `dir`, skipping anything already there. */
-export function writeBranchFiles(branch: Branch, dir: string): string[] {
+/**
+ * Write a branch's whole file set into `dir`, skipping anything already there.
+ *
+ * `dryRun` returns the same list without writing — the paths a real call WOULD create, which is what
+ * a plan awaiting approval has to be able to state.
+ */
+export function writeBranchFiles(branch: Branch, dir: string, dryRun = false): string[] {
   const made: string[] = [];
   for (const [rel, body] of Object.entries(branchFiles(branch, dir))) {
-    made.push(...writeIfMissing(join(dir, rel), body));
+    const path = join(dir, rel);
+    if (dryRun) { if (!existsSync(path)) made.push(path); continue; }
+    made.push(...writeIfMissing(path, body));
   }
   if (made.length) log('INFO', 'scaffold_branch', { branch, dir, files: String(made.length) });
   return made;

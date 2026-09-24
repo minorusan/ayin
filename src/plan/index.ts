@@ -31,9 +31,11 @@
  *      request itself. That choice selects the PLAN EXECUTOR for every step below; see
  *      `executors/detect.ts` and `executors/plan/`. It is recomputed every turn, because the working
  *      directory changes and a stale answer would plan a Unity project with Arduino rules.
- *   1. SCAFFOLD — deterministic file creation for the chosen project type. A README the project must
- *      have is written NOW, as a file operation, rather than left as a criterion the agent is asked
- *      to remember and the QA gate spends a whole fix pass enforcing.
+ *   1. SCAFFOLD (PREVIEWED) — deterministic file creation for the chosen project type, asked with
+ *      `dryRun` so planning writes nothing. A README the project must have is a file operation rather
+ *      than a criterion the agent is asked to remember and the QA gate spends a fix pass enforcing —
+ *      but it lands when the operator approves, not while they are still reading. See
+ *      `applyPlanScaffold` and `plan/approval.ts`.
  *   2. SURVEY   — what this project is, what it can serve, how it can be observed — IN ITS OWN TERMS.
  *      The generic survey talks about HTTP servers, bundlers and logger modules; on an Arduino sketch
  *      every one of those is wrong in a way that steers the plan toward work the project does not
@@ -47,7 +49,9 @@
  *      exist, so grounding was withheld on exactly the turn that needed it most.
  *   5. EXPLORE  — the context around the problem: what already exists, who calls it, what it assumes.
  *      Skipped entirely for a greenfield project: two agentic loops over an empty directory can only
- *      report "nothing found".
+ *      report "nothing found". Once the job has PHASES, one further call per phase is spent from a
+ *      shared budget (`planPhaseExploreCalls`) so each stage is planned against its own part of the
+ *      codebase rather than all of them against the same undifferentiated findings.
  *   6. DELIVERABLES — what must exist ON DISK when the work is done, stated by the executor and later
  *      checked by QA as files rather than as claims.
  *   7. GAPS     — what is still unknown or undecided, named rather than guessed at.
@@ -57,7 +61,14 @@
  *
  * The document is written to `.ayin/plans/ayin-plan-<timestamp>.md` (or `AYIN_PLAN_DIR`) — on disk BEFORE
  * the agent starts, so a machine that dies mid-implementation leaves the thinking behind rather than
- * only half a feature. Then the user's prompt goes to the model with the plan already in context.
+ * only half a feature.
+ *
+ * THEN THE OPERATOR IS ASKED. Nothing outside `.ayin/` has been touched at that point, and the turn
+ * ENDS: `runPlan` returns `kind: 'awaiting'` and their next message is `go`, `cancel`, or the change to
+ * make. `plan/approval.ts` owns that, including the pending record that survives a power cut. Headless
+ * approves itself — there is nobody to ask. Once approved, the scaffold runs, the plan goes into the
+ * turn's context, and `plan/progress.ts` tracks it: each phase's `verifyCmd`s are RUN at the phase
+ * boundary, and a phase that fails its checks re-plans the phases after it.
  *
  * `AYIN_PLAN=0` is an absolute operator kill switch — it beats the session toggle AND `/planthis`.
  * `planMinChars: 0` (from `prompts.json`) disables just the size door once the session toggle is on.
@@ -82,7 +93,6 @@ import { webSearch } from '../tools/web-search.js';
 import { pushActivity, setActivityDetail } from '../activity.js';
 import { addMessage, setAgentStatus, formatToolCallForChat, formatToolResultForChat } from '../ui.js';
 import { PLAN_CARD, PLAN_GLYPH, columns, phaseBody, shortPath } from './present.js';
-import { repoState } from '../executors/plan/git.js';
 import { checkDeliverables } from '../executors/deliverables.js';
 import { classifyProjectType, requestNeedsMoreThanScaffold } from '../executors/classify.js';
 import { detectProject, describeProject, isFreshDirectory } from '../executors/detect.js';
@@ -90,6 +100,13 @@ import { planExecutorFor } from '../executors/registry.js';
 import type { ProjectContext } from '../executors/types.js';
 import { ensureToolRuntime } from '../tool-wiring.js';
 import { buildActionablePlan, buildPhasedPlan, isActionablePlanEnabled, renderDeliverableList, renderPhaseIndex } from './plan.js';
+import type { PlanMode, PlanPhase } from './plan.js';
+import {
+  approvalNotice, approvalRequired, clearPending, loadPending, readAnswer, storePending,
+  type PendingPhase, type PendingPlan,
+} from './approval.js';
+import { beginPlanProgress, endPlanProgress, type PhaseRuntime } from './progress.js';
+import type { PlanExecutor } from '../executors/types.js';
 
 // This module imports tool implementations directly, so it must not depend on the registry having
 // been loaded by someone else first. Idempotent.
@@ -105,7 +122,8 @@ const planPrompts = promptsService.register('plan', packagePath('prompts', 'plan
 export interface PlanResult {
   /**
    * `plan` — the full written document. `grounding` — the project type's reference material only, no
-   * document, no file on disk.
+   * document, no file on disk. `awaiting` — the document exists and is on disk, and the operator has
+   * been asked; the turn ENDS here and their next message answers (see `plan/approval.ts`).
    *
    * THE SECOND MODE EXISTS BECAUSE THE FIRST ONE IS EXPENSIVE AND WAS BEING SPENT ON BLINK. Making a
    * triage veto yield to domain grounding fixed a real hole (a single-feature Arduino request got no
@@ -118,7 +136,9 @@ export interface PlanResult {
    * So the two purposes are separated. Triage says complex, or the user said `/planthis` → a plan.
    * Triage says simple but the project type has reference material → grounding alone, no document.
    */
-  kind: 'plan' | 'grounding';
+  kind: 'plan' | 'grounding' | 'awaiting';
+  /** `investigate` when this plan answers a question rather than changing the repository. */
+  mode?: PlanMode;
   /** Where the document was written. Empty for `grounding` — there is no document. */
   path: string;
   body: string;
@@ -196,6 +216,100 @@ export function forcePlanNextTurn(): void {
   forced = true;
 }
 
+/**
+ * WHAT THIS TURN IS FOR, as triage read it — or null when triage never ran.
+ *
+ * Read by the round loop, which has one decision that genuinely depends on it: whether a prose reply
+ * arriving AFTER some tools have run is a report or a narrated intention. See `agent.ts`. Null is the
+ * honest answer for every turn plan mode returns from early (kill switch, session toggle off, or a
+ * request under `planToggledMinChars`), and it means "behave exactly as before".
+ */
+let turnKind: RequestKind | null = null;
+
+export function turnRequestKind(): RequestKind | null {
+  return turnKind;
+}
+
+/**
+ * A plan the operator approved on THIS turn — `runPlan` returns it instead of planning again.
+ *
+ * Held here rather than passed through `runAgentTurn` because the approval is resolved before the
+ * turn has started (the input has to be rewritten to the original request first) and consumed in the
+ * middle of it, and threading a second parameter through for that would put plan mode's state machine
+ * in `agent.ts`.
+ */
+let approvedThisTurn: { plan: PlanResult; pending: PendingPlan } | null = null;
+/** The revision the operator asked for, folded into the request `runPlan` is about to plan. */
+let revising = false;
+
+/**
+ * Read the operator's answer to a plan that is waiting, and say what this turn is actually about.
+ *
+ * Called at the very top of the turn, before anything has been pushed to the window, because an
+ * approval turn does not work the word "go" — it works the request the plan was written FOR. That
+ * substitution has to happen before `currentGoal`, the CTA extraction and the transcript see the
+ * input, which is why this is a separate entry point rather than something `runPlan` could do on its
+ * own two hundred lines later.
+ *
+ * Returns the input the turn should run, and a line to show for why it changed.
+ */
+export function resolvePlanApproval(rawInput: string): { input: string; notice: string } {
+  approvedThisTurn = null;
+  revising = false;
+  const cwd = process.cwd();
+  const pending = loadPending(cwd);
+  if (!pending) return { input: rawInput, notice: '' };
+
+  const answer = readAnswer(rawInput);
+  if (answer.kind === 'cancel') {
+    clearPending(cwd);
+    log('INFO', 'plan_approval', { answer: 'cancel', plan: pending.planPath });
+    return { input: rawInput, notice: `Plan dropped — ${pending.planPath} stays on disk, nothing ran.` };
+  }
+  if (answer.kind === 'approve') {
+    clearPending(cwd);
+    log('INFO', 'plan_approval', { answer: 'approve', plan: pending.planPath, phases: String(pending.phases.length) });
+    approvedThisTurn = {
+      pending,
+      plan: {
+        kind: 'plan',
+        path: pending.planPath,
+        body: pending.contextBody,
+        features: [],
+        phaseCount: pending.phases.length,
+        mode: pending.mode,
+      },
+    };
+    return { input: pending.request, notice: `Plan approved — working ${pending.planPath}.` };
+  }
+
+  // REVISION. The plan is dropped and the request is re-planned with their words carried as the
+  // requirement; `forced` makes the next `runPlan` plan it whatever triage would have said, because
+  // an operator revising a plan has already established that this request gets one.
+  clearPending(cwd);
+  revising = true;
+  forced = true;
+  log('INFO', 'plan_approval', { answer: 'revise', chars: String(answer.feedback.length) });
+  return {
+    input: planPrompts.get('planRevision', { REQUEST: pending.request, FEEDBACK: answer.feedback }),
+    notice: 'Re-planning with your changes.',
+  };
+}
+
+/**
+ * Run the scaffold FOR REAL — the first act of execution, once there is something to execute.
+ *
+ * Planning calls `executor.scaffold(ctx, { dryRun: true })` and gets the same path list with nothing
+ * written, so the deliverable arithmetic and the greenfield survey are unchanged while the tree is
+ * not touched. This is the other half, and it is deliberately the only place in plan mode that
+ * writes anything outside `.ayin/`.
+ */
+function applyPlanScaffold(ctx: ProjectContext, executor: PlanExecutor): string[] {
+  const made = executor.scaffold(ctx);
+  if (made.length) log('INFO', 'plan_scaffold_applied', { files: String(made.length), project: ctx.type });
+  return made;
+}
+
 /** `ayin-plan-20260728-143012.md` — sortable, unique enough for a session, readable in a listing. */
 function planFilename(now = new Date()): string {
   const p = (n: number) => String(n).padStart(2, '0');
@@ -203,33 +317,61 @@ function planFilename(now = new Date()): string {
 }
 
 /**
- * Is this big request actually multi-feature, whose APIs does it touch, and — when it is setting a
- * project up — WHICH FOLDER does it name? One cheap call, which already had to read the request.
+ * What the person gets at the end of this turn.
+ *
+ * `answer` is the one that was missing, and its absence had a cost. Plan mode's only shape was a list
+ * of files to write, and `validateSteps` refused a plan without one — so a QUESTION could not be
+ * planned, only converted into work, and when there was no work the planner invented some. Measured:
+ * *"what would you like me to improve in your harness?"* became three phases whose middle one created
+ * `HarnessDebugSwitch.cs` and an Editor script shelling out to a Python logger from an unrelated
+ * folder the survey had found. Nothing in that plan was asked for and none of it could be.
+ */
+export type RequestKind = 'build' | 'investigate' | 'answer';
+
+interface Triage {
+  kind: RequestKind;
+  complex: boolean;
+  features: string[];
+  apis: string[];
+  projectDir: string;
+  reason: string;
+}
+
+/** The model's `kind`, or `build` — the reading that is never a refusal to plan real work. */
+function readKind(raw: unknown): RequestKind {
+  const k = String(raw ?? '').trim().toLowerCase();
+  return k === 'investigate' || k === 'answer' ? k : 'build';
+}
+
+/**
+ * What KIND of request this is, is it actually multi-feature, whose APIs does it touch, and — when it
+ * is setting a project up — WHICH FOLDER does it name? One cheap call, which already had to read the
+ * request.
  *
  * `projectDir` rides along here rather than being pattern-matched out of the prose because the thing
  * being extracted is a name in a sentence, and this repo has retired one natural-language regex on
  * plan mode already. Nothing trusts the answer: `resolveTargetDir` refuses anything that is not a
  * single safe path segment naming a directory that is empty or absent (`executors/detect.ts`).
  */
-async function triage(userInput: string): Promise<{ complex: boolean; features: string[]; apis: string[]; projectDir: string; reason: string }> {
+async function triage(userInput: string): Promise<Triage> {
   try {
     const raw = await llmCall(getPrompt('planTriage', { REQUEST: userInput.slice(0, 6000) }));
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     if (start >= 0 && end > start) {
-      const obj = JSON.parse(raw.slice(start, end + 1)) as { complex?: unknown; features?: unknown; apis?: unknown; projectDir?: unknown; reason?: unknown };
+      const obj = JSON.parse(raw.slice(start, end + 1)) as { kind?: unknown; complex?: unknown; features?: unknown; apis?: unknown; projectDir?: unknown; reason?: unknown };
       const features = Array.isArray(obj.features) ? obj.features.map((f) => String(f)).filter(Boolean).slice(0, 12) : [];
       const apis = Array.isArray(obj.apis) ? obj.apis.map((a) => String(a).trim()).filter(Boolean).slice(0, 6) : [];
       const complex = obj.complex === true || String(obj.complex).toLowerCase() === 'true' || features.length > 1;
-      return { complex, features, apis, projectDir: String(obj.projectDir ?? '').trim().slice(0, 120), reason: String(obj.reason ?? '').slice(0, 300) };
+      return { kind: readKind(obj.kind), complex, features, apis, projectDir: String(obj.projectDir ?? '').trim().slice(0, 120), reason: String(obj.reason ?? '').slice(0, 300) };
     }
     // No JSON — read it conservatively. Planning a simple request wastes minutes; skipping a plan
     // for a complex one only costs what we have today, so an unparseable answer means "no".
     const yes = /\b(complex|multi-?feature|cross-?feature|yes)\b/i.test(raw) && !/\bnot\s+complex\b/i.test(raw);
-    return { complex: yes, features: [], apis: [], projectDir: '', reason: raw.trim().slice(0, 200) };
+    return { kind: 'build', complex: yes, features: [], apis: [], projectDir: '', reason: raw.trim().slice(0, 200) };
   } catch (err) {
     log('WARN', 'plan_triage_failed', { error: err instanceof Error ? err.message : String(err) });
-    return { complex: false, features: [], apis: [], projectDir: '', reason: 'triage call failed' };
+    return { kind: 'build', complex: false, features: [], apis: [], projectDir: '', reason: 'triage call failed' };
   }
 }
 
@@ -310,11 +452,75 @@ async function exploreContext(userInput: string, features: string[], ctx: Projec
 }
 
 /**
+ * One `explore` call for ONE phase — the research at the same altitude as the plan.
+ *
+ * Bounded by `buildPhasedPlan`, which owns the budget because it is the thing that knows how many
+ * phases there are. Returns null rather than throwing: the caller falls back to the global findings.
+ */
+async function explorePhase(phase: PlanPhase, ctx: ProjectContext): Promise<string | null> {
+  // Nothing on disk to explore, and two full agentic loops over an empty directory are exactly the
+  // cost the global skip already refuses to pay. Same reason, one level down.
+  if (ctx.greenfield) return null;
+  const r = await exploreExecute({
+    question: planPrompts.get('explorePhase', { TITLE: phase.title, GOAL: phase.goal }),
+    context: `Project: ${ctx.type} at ${ctx.root}`,
+  });
+  return r && r.length > 40 ? r.slice(0, 8000) : null;
+}
+
+/**
  * Build the plan and write it down. Returns null when planning does not apply or fails — the caller
  * then proceeds exactly as it does today, because a failed planner must never block a request.
  */
 export async function runPlan(userInput: string, goal: string): Promise<PlanResult | null> {
+  // Every turn starts with no progress and no verdict — including one that is about to establish
+  // both, and including one that was never planned at all.
+  endPlanProgress();
+  turnKind = null;
   if (process.env.AYIN_PLAN === '0') return null;
+
+  /**
+   * THE APPROVED PLAN SHORT-CIRCUITS EVERYTHING BELOW. It was drafted, validated and written on the
+   * previous turn; re-entering triage, research and exploration for it would spend the whole gate
+   * again to arrive at a document that is already on disk and already agreed to.
+   *
+   * This is also where the scaffold finally runs — see `applyPlanScaffold`. Approval is the boundary
+   * between looking and touching, and it is one line of code wide.
+   */
+  if (approvedThisTurn) {
+    const { plan, pending } = approvedThisTurn;
+    approvedThisTurn = null;
+    // The turn that WORKS an investigation is an investigating turn, and triage does not run on it —
+    // the plan was drafted last turn. Without this the relaxation in the round loop would apply to
+    // the turn that planned the reading and not to the turn that does it.
+    turnKind = pending.mode === 'investigate' ? 'investigate' : 'build';
+    const ctx = pending.projectDir
+      ? detectProject(pending.cwd, pending.request, pending.projectDir)
+      : detectProject(pending.cwd, pending.request);
+    const executor = planExecutorFor(ctx);
+    const projectRoot = ctx.targetDir ? join(ctx.root, ctx.targetDir) : ctx.root;
+    const made = pending.mode === 'build' ? applyPlanScaffold(ctx, executor) : [];
+    if (made.length) addMessage('system', `Scaffolded ${made.length} path(s) — ${made.map((f) => shortPath(f, projectRoot)).join(', ')}`);
+    if (pending.phases.length) {
+      beginPlanProgress({
+        planPath: pending.planPath,
+        cwd: projectRoot,
+        phases: pending.phases.map((p): PhaseRuntime => ({
+          phase: p.phase, steps: p.steps, file: p.file,
+          state: 'pending', verification: null, replanned: false,
+        })),
+        // RESTORED PLANS REPLAN WITH LESS. `findings` and the API research are the expensive half of
+        // the gate and are not carried across the approval boundary; grounding and the survey are
+        // deterministic and are recomputed here. A replan after a failed phase is therefore grounded
+        // in the project but not in the original exploration, which is stated rather than hidden.
+        input: {
+          request: pending.request, goal: pending.goal, features: [], apiResearch: '',
+          findings: [], grounding: executor.grounding(ctx, pending.request), ctx, executor,
+        },
+      });
+    }
+    return plan;
+  }
 
   // `/planthis` bypasses the session toggle entirely — consumed here whatever happens next, so a
   // flag that survives a failed/no-op attempt never silently plans the NEXT unrelated prompt.
@@ -368,10 +574,42 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     // to NAME THE APIS the mandatory research step needs. What changes is that its `complex` verdict
     // no longer decides anything: a model must not be able to veto a user who said "plan it".
     const t = await triage(userInput);
+    turnKind = t.kind;
     log('INFO', 'plan_triage', {
+      kind: t.kind,
       complex: String(t.complex), explicit: String(explicit), features: String(t.features.length),
       chars: String(userInput.length), reason: t.reason.slice(0, 160),
     });
+
+    /**
+     * A QUESTION THE CODEBASE CANNOT ANSWER GETS NO PLAN. Not a shorter one — none.
+     *
+     * This is the gate's cheapest correct answer and it was missing entirely. "What do you think of
+     * your tools", "should we use X or Y", "why is this annoying" — there is nothing on disk to
+     * survey, nothing to deliver and nothing to verify, and plan mode's one shape is a list of files
+     * to write. Asked to fill it anyway, the planner fills it: measured on *"what would you like me
+     * to improve in your harness for unity?"*, which produced three phases whose middle one created
+     * `HarnessDebugSwitch.cs` and an Editor script shelling out to a Python logger belonging to an
+     * unrelated folder in the tree. The agent read the plan, said it was garbage, and ignored it —
+     * which is the good outcome. The bad one is the agent that follows it.
+     *
+     * Costs one triage call, which had already been spent. `/planthis` still wins: an operator who
+     * explicitly asked for a plan gets one, as an INVESTIGATION — the shape a question can actually
+     * take — because a proxy must never overrule the person who can simply say so.
+     */
+    if (t.kind === 'answer' && !explicit) {
+      log('INFO', 'plan_skipped_conversational', { reason: t.reason.slice(0, 160) });
+      addMessage('system', `Plan mode: this is a question, not work — no plan. ${t.reason}`.trim());
+      return null;
+    }
+
+    /**
+     * A QUESTION ABOUT THE CODE GETS A PLAN THAT READS. See `PlanMode` in plan.ts for the two
+     * measured failures this exists for; the short version is that `validateSteps` demanded a step
+     * that names a file, so "is this icon baked in or set at runtime" was planned as four steps each
+     * declaring `files:` — one of them instructing the agent to parse a Unity prefab as JSON.
+     */
+    const mode: PlanMode = t.kind === 'build' ? 'build' : 'investigate';
 
     // Detected before the floor above (a greenfield request must not be filtered out by length) and
     // REUSED here — one regex pass, not two.
@@ -454,9 +692,14 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       addMessage('system', hasDomainGrounding
         ? `Plan mode: single-feature — skipping the plan document, but injecting the ${ctx.type} reference material so nothing is answered from recall.`
         : `Plan mode: single-feature on a greenfield ${ctx.type} project — skipping the plan document, but bootstrapping the project first.`);
-      // Scaffolding still happens: a README that must exist is a file operation either way, and it is
-      // the thing the QA gate would otherwise spend a whole fix pass creating.
-      const scaffoldedNow = executor.scaffold(ctx);
+      // Scaffolding still happens, and FOR REAL here: a README that must exist is a file operation
+      // either way, and it is the thing the QA gate would otherwise spend a whole fix pass creating.
+      //
+      // NOT A HOLE IN THE READ-ONLY RULE. What that rule protects is "a plan nobody has agreed to does
+      // not touch the tree"; this branch writes no plan and asks for no approval — the turn proceeds
+      // to the work immediately on the operator's own request, so the scaffold IS the first act of
+      // execution, which is exactly where it belongs.
+      const scaffoldedNow = applyPlanScaffold(ctx, executor);
       if (scaffoldedNow.length) addMessage('system', `Created ${scaffoldedNow.join(', ')}`);
       return { kind: 'grounding', path: '', body: grounding, features: t.features, deliverables: renderDeliverableList(executor.deliverables(ctx)) };
     }
@@ -495,18 +738,19 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     log('INFO', 'plan_executor', { project: describeProject(ctx), executor: executor.config.id });
     card(PLAN_CARD.survey, PLAN_GLYPH.survey, `${describeProject(ctx)} → ${executor.config.id}`);
 
-    // Deterministic scaffolding, BEFORE the plan is written: a project that must have a README gets
-    // one now, as a file operation, instead of being a criterion the agent is asked to remember and
-    // the QA gate spends a whole fix pass enforcing.
-    const scaffolded = executor.scaffold(ctx);
+    /**
+     * WHAT THE SCAFFOLD WILL WRITE — computed now, written after approval.
+     *
+     * Planning is read-only: the operator is about to be shown a plan and asked whether to run it,
+     * and a gate that has already created files and made a commit has answered that question on
+     * their behalf. `dryRun` returns exactly the paths a real call would create, spawning nothing —
+     * so everything downstream (the deliverable arithmetic, the greenfield survey, this card) sees
+     * the same list it always did, and `applyPlanScaffold` writes it once there is a yes.
+     */
+    const scaffolded = executor.scaffold(ctx, { dryRun: true });
     if (scaffolded.length) {
-      // The commit is read back from the repository rather than reported by `scaffold()`, whose
-      // contract is PATHS — see `commitScaffold`. Reading it also means the card states what is
-      // actually true on disk, not what a function said it did.
-      const repo = repoState(projectRoot);
-      const committed = repo.own && repo.commits > 0 ? ` · committed ${repo.head}` : '';
       card(PLAN_CARD.scaffold, PLAN_GLYPH.scaffold,
-        `${scaffolded.length} file${scaffolded.length === 1 ? '' : 's'} created${committed}`,
+        `${scaffolded.length} file${scaffolded.length === 1 ? '' : 's'} to create — written when you approve`,
         columns(scaffolded.map((f) => shortPath(f, projectRoot))));
     }
 
@@ -533,7 +777,11 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
       // `checkDeliverables` is the same disk check QA runs at the END of a turn. Asking it here, before
       // planning, is the whole trick: the question "is this already done" has one answer and one
       // implementation, and it was only ever being asked too late to save anything.
-      const statuses = checkDeliverables(projectRoot, executor.deliverables(ctx)).filter((s) => s.deliverable.required);
+      // `scaffolded` is the dry run, so the paths it names are counted as present — they are written
+      // between this plan being approved and the first round, which is before anything could read
+      // them. Asking the bare disk here would report every one of them missing and put the phase
+      // this short-circuit exists to delete back into the plan.
+      const statuses = checkDeliverables(projectRoot, executor.deliverables(ctx), scaffolded).filter((s) => s.deliverable.required);
       const required = statuses.map((s) => s.deliverable);
       const outstanding = statuses.filter((s) => !s.satisfied);
       // AND THE REQUEST ITSELF HAS TO BE DONE, which the deliverables cannot tell us. They describe
@@ -543,6 +791,10 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
         ? await requestNeedsMoreThanScaffold(userInput)
         : true;
       if (statuses.length > 0 && outstanding.length === 0 && !needsMore) {
+        // NO PLAN IS WRITTEN HERE AND NOTHING IS ASKED, so the turn goes straight to the work — which
+        // makes this the first act of execution and the right place for the real scaffold. Same
+        // argument as the grounding-only branch above.
+        applyPlanScaffold(ctx, executor);
         const done = `The project already exists — `
           + `${scaffolded.length} path(s) were scaffolded deterministically before this turn, and every `
           + `required deliverable is on disk:\n`
@@ -585,7 +837,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     // repair cycle producing typed steps a program has already checked (see plan/plan.ts), instead of
     // nine sections of prose in which a step with no verification is indistinguishable from a step with
     // one. Null when nothing usable came back, and then the prose document below runs as it always has.
-    const planInput = { request: userInput, goal, features: t.features, apiResearch, findings, grounding, ctx, executor };
+    const planInput = { request: userInput, goal, features: t.features, apiResearch, findings, grounding, ctx, executor, mode };
 
     // TWO LEVELS: the stages of the job, then the steps of each stage. See `PlanPhase` — a flat step
     // list is written at one altitude and the model picks files, so "run it on a free port" and "send
@@ -609,7 +861,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
         card(PLAN_CARD.steps, PLAN_GLYPH.steps,
           `${p.done}/${p.total} · ${ph?.title ?? 'phase'} · ${steps === undefined ? '⚠️ could not be planned' : `${steps} step${steps === 1 ? '' : 's'}`}`,
           ph?.goal?.trim() ? `✓ done when: ${ph.goal.trim()}` : '');
-      })
+      }, (phase) => explorePhase(phase, ctx))
       : null;
     // The phase layer failing must not cost the plan: a flat plan is what ayin produced before it
     // existed, and it is still better than no plan.
@@ -671,9 +923,11 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     let planBody = body;
     /** What the turn's `<plan>` block carries — the index plus every phase inline. */
     let contextBody = body;
+    /** Where each phase's file landed, positionally. Hoisted: the approval record needs it too. */
+    const phaseFilesWritten: string[] = [];
     if (phased) {
       const stem = path.replace(/\.md$/, '');
-      const phaseFiles: string[] = [];
+      const phaseFiles = phaseFilesWritten;
       for (const p of phased.phases) {
         if (!p.plan) { phaseFiles.push(''); continue; }
         const slug = p.phase.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'phase';
@@ -732,7 +986,52 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
     notePostmortemContext({ plan: path });
     log('INFO', 'plan_written', { path, chars: String(planBody.length), phases: String(phased?.phases.length ?? 0), explorations: String(findings.length), trigger: explicit ? 'explicit' : 'size' });
     card(PLAN_CARD.write, PLAN_GLYPH.write, shortPath(path, projectRoot));
-    return { kind: 'plan', path, body: contextBody.trim(), features: t.features, phaseCount: phased?.phases.length ?? 0 };
+
+    /** The phases as the approval record and the progress tracker both need them. */
+    const runtime: PendingPhase[] = phased
+      ? phased.phases.flatMap((p, i) => (p.plan && phaseFilesWritten[i]
+        ? [{ phase: p.phase, steps: p.plan.steps, file: phaseFilesWritten[i] }]
+        : []))
+      : actionable
+        ? [{
+          // A FLAT PLAN IS TRACKED AS ONE PHASE. It has steps and therefore checks, and a progress
+          // mechanism that only works on the phased path would leave the fallback — the path taken
+          // whenever the breakdown fails — with no verification at all.
+          phase: { id: 1, title: 'the plan', goal: 'every step has landed', deliverables: [], dependsOn: [] },
+          steps: actionable.steps,
+          file: path,
+        }]
+        : [];
+    const stepCount = runtime.reduce((n, p) => n + p.steps.length, 0);
+
+    /**
+     * THE GATE. Nothing has been written outside `.ayin/` at this point — not the scaffold, not a
+     * commit — so the operator is being shown a proposal, which is the only thing a plan was ever
+     * supposed to be before somebody said yes.
+     *
+     * The turn ENDS here. `agent.ts` returns on an `awaiting` result, and the next message is the
+     * answer: `go`, `cancel`, or the change to make. See `plan/approval.ts` for why those three and
+     * why anything else is read as a revision.
+     */
+    if (approvalRequired()) {
+      storePending({
+        request: userInput, goal, projectDir: t.projectDir, planPath: path, mode,
+        contextBody: contextBody.trim(), phases: runtime, cwd: process.cwd(),
+        createdAt: new Date().toISOString(),
+      });
+      addMessage('system', approvalNotice(shortPath(path, projectRoot), phased?.phases.length ?? 0, stepCount));
+      return { kind: 'awaiting', path, body: '', features: t.features, phaseCount: phased?.phases.length ?? 0, mode };
+    }
+
+    // HEADLESS, OR THE GATE SWITCHED OFF — the plan runs now, so this is where the scaffold lands.
+    // Never for an investigation: answering a question about a repository does not entitle us to
+    // write a README into it.
+    const made = mode === 'build' ? applyPlanScaffold(ctx, executor) : [];
+    if (made.length) card(PLAN_CARD.scaffold, PLAN_GLYPH.scaffold, `${made.length} path(s) scaffolded`, columns(made.map((f) => shortPath(f, projectRoot))));
+    if (runtime.length) {
+      beginPlanProgress({ planPath: path, cwd: projectRoot, phases: runtime.map((p): PhaseRuntime => ({ ...p, state: 'pending', verification: null, replanned: false })), input: planInput });
+    }
+    return { kind: 'plan', path, body: contextBody.trim(), features: t.features, phaseCount: phased?.phases.length ?? 0, mode };
   } catch (err) {
     log('WARN', 'plan_failed', { error: err instanceof Error ? err.message : String(err) });
     return null;
@@ -755,7 +1054,10 @@ export function planContextBlock(plan: PlanResult): string {
     });
   }
   const n = plan.phaseCount ?? 0;
-  return planPrompts.get('planContext', {
+  // AN INVESTIGATION IS TOLD SOMETHING ELSE. `planContext.txt` closes with "implement the
+  // logging/debug step too; it is part of the deliverable" — handed to an agent answering a question,
+  // that is an instruction to start editing.
+  return planPrompts.get(plan.mode === 'investigate' ? 'investigationContext' : 'planContext', {
     PATH: plan.path,
     BODY: plan.body.slice(0, 12_000),
     // The count, in words the model cannot round up. "Every phase is part of the job" was the only

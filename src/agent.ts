@@ -40,7 +40,7 @@ import { skepticInjection, inSkepticPass, closeSkepticPass, resetSkepticPass, re
 import { refuseIfEcho, resetOutputEchoes, isStateQuery } from './tool-guard.js';
 import { ACCOUNT_REQUEST, IDLE_CALL, LOST_ACCOUNT_REQUEST, beginLostTurn, lostNudge, lostReport, noteCall, resetLost, restartDepth, restartExhausted, unverifiedReport } from './lost.js';
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
-import { stoppedShort } from './announced.js';
+import { reportsRatherThanPromises, stoppedShort } from './announced.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
 import { checkPermission } from './permissions.js';
 import { artifactFor, artifactSessionDir, hasArtifacts, humanBytes, saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
@@ -68,7 +68,8 @@ import { presenterPass, shouldRunPresenterThisTurn } from './presenter/index.js'
 import { renderHandoff, stageAndOpenForPresentation } from './presenter/handoff.js';
 import { clearActivity } from './activity.js';
 import { callKey, guardBeginTurn, guardCheck, guardDirective, guardNoteDenied, guardNoteMutation, guardNoteRead, TREE_SAFE } from './tool-guard.js';
-import { planContextBlock, runPlan } from './plan/index.js';
+import { planContextBlock, resolvePlanApproval, runPlan, turnRequestKind } from './plan/index.js';
+import { finishPlanProgress, planProgressBlock } from './plan/progress.js';
 import { liveTool } from './live-mirror.js';
 import { exploreCacheNoteTool } from './tools/explore/cache.js';
 import { setLlmPurpose } from './timing.js';
@@ -722,6 +723,20 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
   // A plan produced before this turn (plan mode) — the agent's marching orders for a big request.
   if (planContext) {
     volatile += `\n\n${planContext}`;
+  }
+
+  /**
+   * AND WHERE THE PLAN ACTUALLY IS — measured, not recalled.
+   *
+   * The block above is the same bytes in every round of the turn, which is right for a plan and
+   * wrong for progress against it: the model was left to remember which phase it had finished and to
+   * take its own word for whether it worked. This carries what ayin CHECKED (see `plan/verify.ts`),
+   * and it is empty until something has happened, so a turn that has not started a phase pays
+   * nothing for it.
+   */
+  const progress = planProgressBlock();
+  if (progress) {
+    volatile += `\n\n${progress}`;
   }
 
   if (diagramContext) {
@@ -1794,7 +1809,20 @@ function treeChangedFiles(): Array<{ path: string; exists: boolean }> | null {
   return rows.filter((f) => !dirtyAtRunStart.has(f.path) || ayinWrote(f.path));
 }
 
-async function runAgentTurn(userInput: string): Promise<void> {
+async function runAgentTurn(rawInput: string): Promise<void> {
+  /**
+   * A PLAN WAITING FOR AN ANSWER IS ANSWERED FIRST, BEFORE THE TURN EXISTS.
+   *
+   * `go` does not mean "work on the word go" — it means "work the request the plan was written for",
+   * so the input is substituted here, ahead of `currentGoal`, the CTA extraction, the transcript and
+   * the conversation window. Doing it later would leave every one of those describing the
+   * acknowledgement instead of the job. `resolvePlanApproval` is a no-op (and costs a file check)
+   * when nothing is pending, which is every ordinary turn.
+   */
+  const gate = resolvePlanApproval(rawInput);
+  const userInput = gate.input;
+  if (gate.notice) addMessage('system', gate.notice);
+
   // Per TURN, not per session: a second question legitimately searches again from scratch.
   const toolUseCounts = new Map<string, number>();
   /** Calls of a tool that returned NOTHING NEW this turn — an error, or bytes already seen. */
@@ -1891,6 +1919,15 @@ async function runAgentTurn(userInput: string): Promise<void> {
   // written plan BEFORE any work starts, and the plan goes into this turn's context.
   planContext = '';
   const plan = await runPlan(userInput, getGoal());
+  /**
+   * THE PLAN IS WAITING ON THE OPERATOR, SO THE TURN IS OVER.
+   *
+   * Nothing outside `.ayin/` has been touched — the scaffold is deferred and no round has run — and
+   * the document is on disk with the question printed above. Their next message is the answer, and
+   * `resolvePlanApproval` at the top of this function reads it. Returning is the whole mechanism:
+   * there is no modal, no second input loop, and nothing to restore if the process dies here.
+   */
+  if (plan?.kind === 'awaiting') return;
   if (plan) planContext = planContextBlock(plan);
 
   // Auto-research grounding (deterministic trigger) — web search BEFORE the base call, pre-prompted.
@@ -1941,6 +1978,38 @@ async function runAgentTurn(userInput: string): Promise<void> {
   // did not have; its closing "you should also check X" is a caveat, not a dodge.
   let toolsRunThisTurn = 0;
   const touchedAnythingThisTurn = (): boolean => toolsRunThisTurn > 0;
+
+  /**
+   * ON A TURN WHOSE DELIVERABLE IS PROSE, PROSE IS NOT A FAILURE TO ACT.
+   *
+   * The discard below asks "did a tool run?" and reads yes as "you are mid-work, narrating is not
+   * working". That proxy is right for a build and wrong for a question — and the questions are
+   * exactly the turns that run tools first and then have nothing left to do but answer. Measured on a
+   * real session: asked to explore this project and say how the tooling felt, the model spent 38 tool
+   * calls, wrote its report, and the loop threw it away THREE TIMES with "no tool call while working
+   * — round discarded". The feedback that had been asked for only escaped twenty minutes later,
+   * through `finish()`.
+   *
+   * THE RELAXATION IS NOT "ACCEPT ANY PROSE". The rule it loosens was earned: six of six empty-patch
+   * runs ended on a narrated intention, and that failure mode does not disappear because the request
+   * was a question — an investigation can just as easily stop at "let me now check the prefab". So
+   * the two detectors that already know the difference decide it, and they are asked about the TEXT
+   * with `didWork: false` on purpose: their `didWork` escape hatch exists because this discard used
+   * to own the tools-ran case, and here that case is precisely what is being classified.
+   *
+   *   a promise as the last sentence  → `announcedWithoutActing` → still discarded
+   *   a direction with no anchor      → `looksLikeDeferral`      → still discarded
+   *   anything else                   → a report. It is the answer, and it is shown.
+   *
+   * `turnRequestKind()` is null whenever triage did not run, so every turn plan mode skips behaves
+   * exactly as it did before. Headless is unchanged either way: prose is never an exit there, and
+   * this only decides whether the reply is SEEN on its way back round to `finish()`.
+   */
+  const answeringTurn = (): boolean => {
+    const kind = turnRequestKind();
+    return kind === 'answer' || kind === 'investigate';
+  };
+  const replyIsTheAnswer = (text: string): boolean => answeringTurn() && reportsRatherThanPromises(text);
   /** How much the design had absorbed at the last nudge, so progress can clear the stall counter. */
   let lastImplemented = -1;
   // THE SKEPTIC PASS RUNS PAST THE ROUND CAP, on purpose and only while it is open.
@@ -2302,7 +2371,7 @@ async function runAgentTurn(userInput: string): Promise<void> {
        * count, and the count rides to the end of the turn: how often this fires, and whether retrying
        * ever breaks the loop, is a measurement rather than an assumption.
        */
-      if (touchedAnythingThisTurn() && !stopAwaitingOperator()) {
+      if (touchedAnythingThisTurn() && !stopAwaitingOperator() && !replyIsTheAnswer(parsed.text ?? response)) {
         workingRetries++;
         // The transcript keeps it; the model's context does not. "Why did it stop there" stays
         // answerable tomorrow without the failed round shaping the next one.
@@ -3603,6 +3672,19 @@ async function runAgentTurn(userInput: string): Promise<void> {
       return;
     }
   }
+
+  /**
+   * ANY PHASE THE TURN NEVER CHECKED, CHECKED NOW.
+   *
+   * The primary seam is the return of a `subagent` call, which is where a phase actually ends — but
+   * `planContext.txt` tells an agent without that tool to work the phases itself, and a turn that
+   * took that path would reach here with every check unrun. So the last thing before the turn wraps
+   * up is the one honest question the plan can still answer: did the commands it said would prove
+   * this work, work. After the loop, so nothing here can extend it; before the answer is presented,
+   * so a failure is reported rather than discovered tomorrow.
+   */
+  const unchecked = await finishPlanProgress(turnAbort?.signal);
+  if (unchecked) addMessage('system', unchecked);
 
   // CTA last chance — if we hit max rounds without delivering, force one final write
   if (HEADLESS && ctaTarget && !ctaDelivered && gatheredFacts.length > 0) {

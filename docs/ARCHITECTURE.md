@@ -1089,6 +1089,8 @@ src/executors/
   plan/arduino/       index.ts + config.json
   plan/greenfield/    index.ts + config.json     ← an EMPTY directory: python / typescript / unity
   plan/flutter/       index.ts + config.json     ← flutter: greenfield's branch + the toolchain
+  plan/node/          index.ts + config.json     ← node: greenfield's branch + the bootstrap install
+  plan/unity/         index.ts + config.json     ← an EXISTING unity project: YAML assets, GUIDs, asmdefs
   qa/base/            index.ts + config.json
   qa/arduino/         index.ts + config.json
   qa/unity/           index.ts + config.json     ← factsOnly: does the C# compile
@@ -1097,6 +1099,35 @@ src/executors/
   present/base/       index.ts + config.json
   present/arduino/    index.ts + config.json
 ```
+
+#### `plan/unity` — the project that already exists
+
+`plan/greenfield` claims `unity`, and every one of its methods hands straight back to `base` unless
+`ctx.greenfield` — so an established Unity repo was planned with the generic Node/web survey. Measured
+on a real one: *"no HTTP server or dev server present"*, *"no bundler and no existing HTML"* and *"NO
+logging facility found — the plan must add one"* about a C# game, a single REQUIRED root README as the
+whole deliverable list, and a plan step instructing the agent to **"parse the JSON content of the
+prefab"**. A Unity prefab is YAML. The plan was steering the work at a file format the project does not
+contain.
+
+`plan/unity` claims `unity` at priority **110** — not a tie, so the selection rule still reads straight
+out of the configs — and delegates every surface back to `greenfield` when the context IS greenfield, so
+there is still exactly one owner of project creation. It contributes three things and nothing else:
+
+| | |
+|---|---|
+| **survey** | editor version, whether the Editor holds the lock right now (which decides if batch-mode compiling is even available), render pipeline, asmdef and test-assembly counts, whether anything has been compiled, the top of `Assets/`, third-party packages, Addressables |
+| **grounding** | assets are YAML not JSON · `.meta` GUIDs are the identity of a reference · filename must match the MonoBehaviour class · serialized fields are stored by NAME · asmdef references decide what can `using` what · Editor-only code placement · Addressables serve stale content from an existing build |
+| **observability** | `Debug.Log` with one bracketed tag, the Console, `Editor.log` / `Player.log`, `Application.logMessageReceived`, and the DLL-newer-than-source compile check |
+
+**Nothing is required.** `base` demands a root README on pain of failing the gate; on a game repo that
+is an invented requirement, and `qa/unity` already recorded the cost (a 56-byte README failing every
+pass of every turn, whatever the work was). README stays on the list as optional. `scaffold()` is a
+no-op — the Hub creates a Unity project and the Editor generates the rest.
+
+The grounding matters more than the survey, because `runPlan` injects grounding on the **cheap
+single-feature path** too: a Unity request that triage vetoes still gets the YAML/GUID/asmdef facts, for
+zero extra LLM calls.
 
 ### Declaration lives in data
 
@@ -1555,8 +1586,201 @@ for a sketch with two calls in it. So `runPlan` has two outcomes:
 
 `planContextBlock` switches on `kind`: a grounding result gets `plan/groundingContext.txt`, never the
 `<plan>` wrapper, which would otherwise instruct the model to "follow the plan" and "work the steps in
-order" for a file that does not exist. Scaffolding (the README) happens on both paths — a file that must
-exist is a `writeFileSync` either way.
+order" for a file that does not exist.
+
+There is a **third** outcome, `kind: 'awaiting'` — the plan is written and the operator has been asked.
+See "The plan is shown and agreed to before anything acts on it" below. Scaffolding happens on the
+grounding path immediately (no plan is written and no question is asked, so the turn goes straight to
+the work and the scaffold IS its first act) and on the plan path only **after** approval.
+
+#### A question's answer is not "no tool call while working"
+
+The round loop discards a text-only reply when a tool has already run this turn, on the grounds that
+narrating is not working. That rule was earned — six of six empty-patch runs ended on a narrated
+intention — and its proxy is "did a tool run?".
+
+The proxy is backwards for a question. Questions are precisely the turns that run tools first and
+then have nothing left to do but answer. Measured: asked to explore this Unity project and say how
+the tooling felt, the model made 38 tool calls, wrote its findings, and **the loop threw them away
+three times** (`no tool call while working — round discarded, step retried`). The feedback that had
+been asked for escaped twenty minutes later only because it eventually went through `finish()`.
+
+So on a turn triage called `answer` or `investigate`, the discard consults
+`reportsRatherThanPromises()` first. It asks the two detectors that already know the difference —
+`announcedWithoutActing` and `looksLikeDeferral` — with `didWork: false` on purpose: their escape
+hatch exists *because* this discard owned the tools-ran case, and here that case is what is being
+classified, so the hatch would answer "not a promise" for everything and decide nothing.
+
+| the reply | what happens |
+|---|---|
+| a promise as its last sentence | discarded, as before |
+| a direction with no concrete anchor | discarded, as before |
+| anything else | it is the answer — shown, not thrown away |
+
+`turnRequestKind()` is null whenever triage did not run (the kill switch, the session toggle, a
+request under `planToggledMinChars`), so every turn plan mode skips behaves exactly as it did. The
+turn that WORKS an approved investigation sets it from the pending record, since triage does not run
+on that turn. **Headless is unchanged**: prose is never an exit there, and this only decides whether
+the reply is seen on its way back round to `finish()`.
+
+### Three kinds of request, because a question is not work
+
+Plan mode had ONE output shape — a list of files to create or edit — and `validateSteps` enforced it:
+*"no step names a file — a plan that writes nothing cannot be executed."* So a QUESTION could not be
+planned, only converted into an implementation, and when there was nothing to implement the planner
+invented something. Measured twice on real sessions:
+
+- *"Is the game-over icon baked in or set at runtime? Trace from GameOverView.cs, check the guids."*
+  → four steps, every one declaring `files:`, one instructing the agent to **"parse the JSON content
+  of the prefab"**. A Unity prefab is YAML.
+- *"What would you like me to improve in your harness for unity?"* → **three phases**, the middle one
+  *"Implement harness improvements and integrate external services"*: create
+  `Assets/Scripts/Utils/Logging/HarnessDebugSwitch.cs`, create `Assets/Editor/HarnessLoggerBridge.cs`
+  shelling out to `python3 ./auto-qa/src/utils/logger.py`. The word "harness" meant ayin; the planner
+  only knows "this project". The logger is real — an unrelated Python folder in the Unity tree — and
+  `baseObservability.txt` says *"log through this, not console. If the survey found no facility, the
+  plan's first step is to add one."* The model obeyed every instruction it was given.
+
+**The planner was not hallucinating. It was filling the only shape it had.** Note the second-order
+effect too: the file rule fires only when NO step names a file, so the way out was never to leave
+`files` empty — it was to put the files being READ into a field the renderer prints as `files:` and
+the executor reads as "files this step creates or edits".
+
+So triage answers one more question, in the call it was already making:
+
+| `kind` | what it means | what plan mode does |
+|---|---|---|
+| `build` | the repository ends up different | exactly what it always did |
+| `investigate` | a question about this codebase, answered by reading it | an **investigation plan** — `investigationPlan.txt` |
+| `answer` | a question reading the codebase cannot settle — an opinion, the tools, a design argument | **no plan at all** |
+
+`kind` is decided on what was ASKED FOR, never on the size of the work implied: *"where does the score
+come from"* is investigate even if answering takes an hour. An unparseable triage reply reads as
+`build`, which is the answer that never refuses to plan real work. `/planthis` still wins over a
+veto — an explicit ask gets a plan, as an investigation, because a proxy must not overrule the person
+who can simply say so.
+
+**What changes for an investigation.** One prompt, one graph — the parser, the salvage, the dependency
+inference, the repair cycle, verification and progress are all shape-agnostic, so only what is ASKED
+FOR differs:
+
+- `validateSteps(steps, required, 'investigate')` drops both file rules — an investigation owes no
+  file, so neither "name a file you write" nor "produce every required deliverable" applies.
+- It gains the rule it actually needs: **the last step must conclude.** An investigation's real
+  failure mode is reading everything and deciding nothing, and that is checkable.
+- `requiredPatterns` is empty at both levels, so no phase is created to own a deliverable.
+- `renderPlan` relabels: `read:` / `look for:` / `settles it when:`, under a heading that says the plan
+  writes nothing.
+- The scaffold does not run. Answering a question about a repository does not entitle us to write a
+  README into it — guarded at both call sites, including the one behind approval.
+- `investigationContext.txt` replaces `planContext.txt`, whose closing line is *"implement the
+  logging/debug step too; it is part of the deliverable"* — handed to an agent answering a question,
+  that is an instruction to start editing. The replacement says write nothing, and that the ANSWER is
+  the deliverable.
+
+Verified live against the same local 27B that produced the garbage plan: the harness question
+classifies `answer`, the GameOverLayer question `investigate`, and *"add [MSR] Debug.Log
+instrumentation around the MissionScoreIcon flow"* `build`.
+
+### The plan is shown and agreed to before anything acts on it (`plan/approval.ts`)
+
+Plan mode wrote a plan and handed it to the agent in the same turn. The one artifact whose entire value
+is that it is cheap to correct before execution was never offered for correction: `actionablePlan.txt`
+asks for "ordered steps a coding agent executes without asking a question", `gaps` was rendered and
+blocked nothing, and by the time the operator read any of it the subagents were running. Every shipping
+plan mode is the same shape for the same reason — plan, show, approve, then act.
+
+So `runPlan` ends by writing `.ayin/plans/pending.json` and returning `kind: 'awaiting'`, and
+`runAgentTurn` **returns**. There is no modal and no second input loop: the turn is over, and the next
+message is the answer.
+
+| The next message | What happens |
+|---|---|
+| `go`, `yes`, `ok`, `approve`, `run it`, `proceed`, … (exact, whole-input) | the plan runs |
+| `no`, `cancel`, `stop`, `never mind`, … (exact, whole-input) | dropped; the document stays on disk |
+| **anything else** | a **revision** — re-planned with those words as the requirement (`planRevision.txt`) |
+
+Revision is the default because it is the safe wrong answer: a request typed at the wrong moment
+becomes a new plan to look at, never work nobody approved. The two lists are exact and short — this
+repo retired a natural-language regex on plan mode once already, and a fuzzy match here misfires into
+minutes of execution. `go and also rename the module` is a revision, not a yes.
+
+**Headless approves itself.** `-p` has nobody to ask, and a gate that blocks where there is no operator
+hangs a cron job — the same argument that turned plan mode on by default in headless. `planApproval: 0`
+restores the old behaviour in the TUI.
+
+**It survives the power cut.** The pending record is written before the question is asked, so a machine
+that dies between the plan and the answer comes back with the plan still offered. What cannot be
+serialized is recomputed on approval: `detectProject` + `planExecutorFor` are a regex and a directory
+read. The exploration findings and the API research are **not** carried across — a replan after a
+restored approval is grounded in the project but not in the original exploration.
+
+#### Planning is read-only, so the scaffold moved (`ScaffoldOpts.dryRun`)
+
+A gate that has already created files and made a commit has answered "shall I run this?" on the
+operator's behalf. `PlanExecutor.scaffold(ctx, opts?)` now takes `{ dryRun: true }`: it returns exactly
+the paths a real call would create, writes nothing, and — the half that is easy to forget — spawns
+nothing, so `plan/node`'s `npm install` and `plan/flutter`'s `flutter create` do not run either.
+`applyPlanScaffold` does it for real once there is a yes.
+
+Two things read the scaffold's output and had to keep reading the same list:
+
+- `checkDeliverables(root, deliverables, pending)` counts the previewed paths as present. Asking the
+  bare disk at plan time would report every scaffolded deliverable missing and put "initialise the
+  project structure" back at the front of a project that was about to build — the measured bug, arriving
+  from the other side.
+- `greenfield/survey.txt`'s `SCAFFOLD_STATE` no longer asks whether the files are there. It names the
+  branch's whole file set and says ayin writes it before the first round, so the honest answer to "what
+  will be on disk when you start" is stated once and does not depend on when the survey is taken.
+
+#### The proof each step carries is RUN (`plan/verify.ts`, `plan/progress.ts`)
+
+Every step has always had a `verify` field — "the command to run or the file to read that proves this
+step worked" — validated for being at least twelve characters and then executed by nothing. The plan's
+strongest asset, a per-step success oracle written while the context was fresh, was decoration; the only
+check that ran was QA's deliverable existence test, at the end of the turn, three steps after a wrong one.
+
+`PlanStep.verifyCmd` carries the same proof as one shell command that exits 0 when the step landed.
+Separate from `verify` rather than replacing it, because many steps' proof is genuinely "open this file
+and read the constant"; empty is a valid answer and a step without one is still a valid step.
+
+**A verification is an observation.** These commands are model-written and run without anyone being
+asked, which is different from the `bash` tool the model calls deliberately — so `verifyCommandRefusal`
+rejects deletion, `mv`, installs, `sudo`, git that writes, `curl | sh` and redirects into a file. It runs
+at draft time inside `validateSteps`, where a refusal costs one repair pass, and again at execution time,
+where a plan drafted by an older build or edited on disk arrives anyway.
+
+**Where it runs.** ayin's phases are worked by the MODEL calling `subagent`, so there is no harness loop
+around them — the return of that call is the only phase boundary there is. `notePhaseWorked` runs that
+phase's checks and appends the result to the tool result, because that string is what the arbiter reads
+before deciding what to do next. `finishPlanProgress`, after the round loop, checks anything still
+unchecked: `planContext.txt` tells an agent without `subagent` to work the phases itself, and that path
+would otherwise reach the end with every check unrun.
+
+**The plan stops being a static document.** `planProgressBlock()` puts what was measured — phase state,
+checks passed, failed, unverified — into the turn's volatile block beside the plan, and it is empty
+until something has happened, so a turn that has not started a phase pays nothing for it.
+
+#### A failed phase re-plans the phases after it
+
+Plan-then-execute with no back-edge: `planContext.txt` said "if a step turns out to be wrong, say which
+one and why, then adapt", delegating adaptation to prose that nothing reads, verifies or writes down.
+Now a phase whose checks FAIL re-drafts every later phase with the failure carried as a finding
+(`replanFinding.txt`) and rewrites their files in place — the subagent reads the file, so the same path
+hands over the new version. Bounded by `planReplans` (1), the same bound and the same reason as
+`planRepairPasses`. The **breakdown** is not re-decided: the stages of the job did not change, only the
+ground the later ones were planned against, and renumbering phases mid-run would orphan the files on
+disk and the operator watching them.
+
+#### Research at the same altitude as the plan (`planPhaseExploreCalls`)
+
+Phases fixed the altitude of the plan and left the altitude of the research where it was: two global
+`explore` calls, run once before the breakdown existed, against a question built from the whole request
+— so every sub-plan was drafted from the same undifferentiated findings, and no phase got the part of
+the codebase it was actually going to touch. `buildPhasedPlan` now takes an explorer and spends one call
+per phase from a budget shared across the breakdown (3), in phase order: each call is a full agentic
+loop, and if there is only enough for three, the early phases are the ones later ones are built on.
+Skipped entirely on greenfield, for the same reason the global pair is.
 
 ### Plan mode is ON by default; QA is not
 
@@ -2109,14 +2333,14 @@ is not turned into a repo, and a repo with history keeps its commit AND its stag
 
 #### The planner is told what the scaffold already did — worth 40 minutes
 
-`executor.scaffold()` runs BEFORE the plan is drafted and writes the whole working project in about two
-seconds. Three separate places then told the planner none of it existed, and the planner believed all
-three:
+`executor.scaffold()` writes the whole working project in about two seconds — before the first round,
+though no longer before the plan is drafted (see "Planning is read-only" above). Three separate places
+told the planner none of it existed, and the planner believed all three:
 
 - `greenfield/survey.txt` opened with *"NO SOURCE IS ON DISK YET. This plan CREATES a project"* and
   closed with *"the earliest steps create the directory layout and the manifest"* — both read **after**
-  the scaffold. `SCAFFOLD_STATE` now reports what is on disk, from `existingBranchFiles()`, i.e. the
-  same table that wrote it, and says those files are done.
+  the scaffold. `SCAFFOLD_STATE` now names the branch's whole file set, from `branchFiles()`, i.e. the
+  same table that writes it, and says those files are done.
 - Every required deliverable had to be assigned to exactly one phase, including the six just written —
   so the planner had to invent a phase to produce each. `renderDeliverableList` takes the project root
   and marks what exists; `planPhases.txt` says an **ALREADY ON DISK** deliverable goes to the phase that
