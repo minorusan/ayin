@@ -377,6 +377,26 @@ console.log('\nperform_edit + find_relevant_files');
   ok(pe.stripFence('x = 1') === 'x = 1', 'and an unfenced answer is untouched');
   ok(pe.stripFence('a\n```\nb\n```\nc') === 'a\n```\nb\n```\nc', 'a fence INSIDE the file is left alone');
 
+  /**
+   * THE FILE KEEPS THE TRAILING NEWLINE IT CAME WITH.
+   *
+   * A model's reply does not end with one, and `stripFence`'s own `\n?```$` eats it when the reply
+   * was fenced — so `perform_edit` wrote every file it touched one byte short of how it found it.
+   * Measured on a real session: an agent reverted its own test edit to a Unity prefab, the value went
+   * back correctly, and the file stayed dirty on one stripped newline. It then tried `git checkout --`
+   * to clean up, was refused by the permission guard, and the operator was left with a modified asset.
+   */
+  ok(pe.matchTrailingNewline('a\nb\n', 'a\nb') === 'a\nb\n', 'a dropped trailing newline is restored');
+  ok(pe.matchTrailingNewline('a\nb\n', 'a\nb\n') === 'a\nb\n', 'one that survived is left alone');
+  // BOTH DIRECTIONS, because a file that never ended with a newline must not gain one either — the
+  // next edit would then report a change nobody made, which is this same bug wearing the other sign.
+  ok(pe.matchTrailingNewline('a\nb', 'a\nb\n') === 'a\nb', 'and one the file never had is removed');
+  ok(pe.matchTrailingNewline('a\nb', 'a\nb') === 'a\nb', 'a file with no trailing newline keeps none');
+  // NOT a whitespace normaliser: trailing blank lines the model actually wrote are its EDIT, and
+  // deleting them here would be the same overreach in the other direction.
+  ok(pe.matchTrailingNewline('a\nb\n', 'a\nb\n\n\n') === 'a\nb\n\n\n', 'extra blank lines are an edit, not a byte to drop');
+  ok(pe.matchTrailingNewline('', '') === '', 'and an empty file is not given one');
+
   // THE DIFF IS EVIDENCE, NOT A CLAIM. "I made the change" reads exactly like "I did not"; a diff does
   // not. This is the failure ayin has measured repeatedly.
   const d = pe.lineDiff('a\nb\nc\n', 'a\nB2\nc\n');
@@ -2930,8 +2950,26 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
     const skipAt = perm.indexOf('if (skipPermissions || HEADLESS) {');
     ok(dangerAt > 0 && skipAt > dangerAt,
       'the push/pull/checkout guard runs BEFORE the skip flag is consulted');
-    ok(/if \(HEADLESS \|\| skipPermissions \|\| READONLY\) \{[\s\S]{0,300}?return 'deny';/.test(perm),
+    ok(/export function deniedWithoutAsking\(\): boolean \{\s*return HEADLESS \|\| skipPermissions \|\| READONLY;/.test(perm),
+      'all three unattended modes are ONE named expression — headless, bypass, read-only');
+    ok(/if \(deniedWithoutAsking\(\)\) \{[\s\S]{0,300}?return 'deny';/.test(perm),
       '…and with prompts off those ops are DENIED, never waved through');
+
+    /**
+     * THE RECOVERY MUST COVER EVERY MODE THE DENIAL COVERS, and three times it did not.
+     *
+     * A refusal nobody was asked for is not an operator saying no: the interactive path explains
+     * itself and RETURNS, which is right when a person declined and fatal when nobody was consulted.
+     * That was fixed for headless, then for read-only, and was still live in bypass mode — measured
+     * on a 21-tool-call session that ended silently the moment the model tried `git checkout --` to
+     * revert its own edit, leaving a modified asset and no report. Pinned here so the guard and its
+     * recovery cannot drift apart a fourth time.
+     */
+    const ag = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
+    ok(/if \(deniedWithoutAsking\(\)\) \{[\s\S]{0,1200}?continue roundLoop;/.test(ag),
+      'and the agent RECOVERS from every one of them, rather than ending the turn on a question nobody was asked');
+    ok(!/if \(HEADLESS\) \{[\s\S]{0,400}?tool_denied_headless_continue/.test(ag),
+      '  → and not by checking HEADLESS alone, which is how bypass mode kept the bug');
 
     // Session-scoped on purpose: a gate that silently stayed off after a restart is one nobody
     // remembers turning off, and the first they learn of it is the thing it would have stopped.

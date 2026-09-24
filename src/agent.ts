@@ -42,7 +42,7 @@ import { ACCOUNT_REQUEST, IDLE_CALL, LOST_ACCOUNT_REQUEST, beginLostTurn, lostNu
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
 import { reportsRatherThanPromises, stoppedShort } from './announced.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
-import { checkPermission } from './permissions.js';
+import { deniedWithoutAsking, checkPermission } from './permissions.js';
 import { artifactFor, artifactSessionDir, hasArtifacts, humanBytes, saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
 import { recordPrompt, recordRaw, recordTool, recordAnswer } from './session-record.js';
 // The FULL record (opt-in, unclipped) runs alongside the clipped operating record above — see
@@ -3036,15 +3036,31 @@ async function runAgentTurn(rawInput: string): Promise<void> {
          * A refusal the model can read is a refusal it can work around, which is the whole point of
          * `withheldRedirect` and of the denial explanation itself.
          */
-        if (HEADLESS) {
+        /**
+         * …AND "NOBODY CAN ANSWER" IS NOT THE SAME AS "HEADLESS". That was the third time.
+         *
+         * `checkPermission` refuses a dangerous op without asking in THREE modes — headless,
+         * read-only, and `--dangerously-skip-permissions` — and this recovery checked one of them.
+         * Bypass mode is interactive, so a refusal fell through to the branch below, which explains
+         * itself to the operator and RETURNS because an operator's "no" means the next move is
+         * theirs. Nobody had said no. Nobody had been asked.
+         *
+         * Measured, on the session that prompted this: 21 tool calls in, the model tried
+         * `git checkout -- <prefab>` to revert its own test edit, the guard refused automatically,
+         * and the turn ended right there — no finish, no report, and the operator left with a
+         * modified asset and nothing to read. `deniedWithoutAsking()` is now the single expression
+         * both sides consult, so the guard and its recovery cannot drift apart a fourth time.
+         */
+        if (deniedWithoutAsking()) {
           const denyCall = renderToolCall({ name, params });
           pushToWindow('assistant', textPrefix ? `${textPrefix}\n\n${denyCall}` : denyCall);
           noteRanCall(name, JSON.stringify(params).slice(0, 80), false, 'denied');
           pushToWindow('user', renderToolResult(
-            `${name} was DENIED and did not run. Nobody is watching this session, so asking which `
-            + `alternative to approve will not be answered. Work around it with what you are allowed to `
-            + `do, or call finish() stating what you could not do and why.`));
-          log('INFO', 'tool_denied_headless_continue', { tool: name });
+            `${name} was DENIED and did not run — automatically, by a guard that asks nobody. No one `
+            + `was consulted, so nothing is waiting on an answer and repeating the call will be refused `
+            + `the same way. Work around it with what you are allowed to do, or call finish() stating `
+            + `what you could not do and why.`));
+          log('INFO', 'tool_denied_unattended_continue', { tool: name });
           continue roundLoop;
         }
 

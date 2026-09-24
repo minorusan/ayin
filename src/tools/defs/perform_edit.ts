@@ -70,8 +70,27 @@ class PerformEdit extends BaseTool {
 
     // A FENCE IS THE ONE THING IT RELIABLY ADDS. Stripping it is not "cleaning up the model's output"
     // — an unstripped ``` written to disk is a syntax error in every language ayin edits.
-    const after = stripFence(answer);
-    if (!after.trim()) return `NO CHANGE to ${file} — the model returned nothing. The file is untouched.`;
+    const stripped = stripFence(answer);
+    if (!stripped.trim()) return `NO CHANGE to ${file} — the model returned nothing. The file is untouched.`;
+
+    /**
+     * THE FILE KEEPS THE TRAILING NEWLINE IT CAME WITH.
+     *
+     * A model's reply does not end with one, and `stripFence`'s own `\n?```$` eats it when the reply
+     * was fenced — so this wrote every edited file one byte short of how it found it. Silent, and
+     * permanent: git renders it as `\ No newline at end of file` on a line nobody touched, POSIX says
+     * a text file ends with a newline, and an editor that reformats later produces a SECOND spurious
+     * diff putting it back.
+     *
+     * Measured on a real session: an agent asked to revert its own test edit to a Unity prefab did
+     * revert the value, and left the file dirty anyway — one stripped newline — then tried
+     * `git checkout --` to clean up and was refused by the permission guard. The operator was left
+     * with a modified asset nobody had asked to change.
+     *
+     * Normalised BEFORE the equality check below, so an edit whose only difference was this byte now
+     * correctly reports NO CHANGE instead of writing one.
+     */
+    const after = matchTrailingNewline(before, stripped);
 
     if (after === before) {
       return `NO CHANGE to ${file}. The edit was not applied: it is either already present, or it names `
@@ -143,6 +162,21 @@ const MIN_LINES_TO_GUARD = 200;
 const MAX_SHRINK = 0.6;
 
 /** ```lang … ``` around the whole answer, and nothing else. A fence INSIDE the file is left alone. */
+/**
+ * Give `after` the same trailing-newline state as `before`.
+ *
+ * Exported for the gate: this is a round-trip invariant, not a formatting preference, and the whole
+ * point is that it holds in both directions — a file that did NOT end with a newline must not gain
+ * one either, or the next edit reports a change nobody made.
+ */
+export function matchTrailingNewline(before: string, after: string): string {
+  const had = /\n$/.test(before);
+  const has = /\n$/.test(after);
+  if (had && !has) return `${after}\n`;
+  if (!had && has) return after.replace(/\n+$/, '');
+  return after;
+}
+
 export function stripFence(text: string): string {
   const t = text.replace(/^﻿/, '');
   const m = /^\s*```[a-zA-Z0-9_-]*\n([\s\S]*?)\n?```\s*$/.exec(t);

@@ -130,6 +130,25 @@ function addToWhitelist(tool: string, prefix?: string): void {
 export type PermissionResult = 'allow' | 'deny';
 
 /**
+ * Was there anybody to ASK? The one expression the guard and the recovery must agree on.
+ *
+ * `checkPermission` refuses a dangerous op outright in exactly these modes, because there is no
+ * dialog to show — and the caller then has to know that the refusal was AUTOMATIC rather than a
+ * person saying no. Those are different events with opposite correct responses: an operator's "no"
+ * ends the turn because the next move is theirs, and a refusal nobody was asked for must not, or the
+ * turn dies on a question that was never put to anyone.
+ *
+ * Exported as a function rather than duplicated at the call site, because it was duplicated: the
+ * denial listed all three modes and the recovery in `agent.ts` checked only `HEADLESS`. Measured
+ * twice — the same bug, found and fixed for headless, then for read-only, and still live in bypass
+ * mode. A 21-tool-call session ended silently the moment the model tried `git checkout --` to revert
+ * its own edit, with no report and nothing for the operator to read.
+ */
+export function deniedWithoutAsking(): boolean {
+  return HEADLESS || skipPermissions || READONLY;
+}
+
+/**
  * Check permission for a tool call. Shows dialog if not whitelisted.
  * Returns 'allow' or 'deny'.
  */
@@ -146,7 +165,7 @@ export async function checkPermission(
   if (danger) {
     // Nobody is watching a headless run, and there is no popup to show. The only safe answer to
     // "may I push?" with no human present is no.
-    if (HEADLESS || skipPermissions || READONLY) {
+    if (deniedWithoutAsking()) {
       log('WARN', 'permission_dangerous_denied_unattended', { tool, op: danger, param: primaryValue.slice(0, 200) });
       return 'deny';
     }
