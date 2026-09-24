@@ -25,6 +25,7 @@ export const tool: Tool = {
       { name: 'depth', type: 'string', description: 'How many nested-prefab levels to expand. Default 3, 0 keeps it to this file.', required: false },
       { name: 'format', type: 'string', description: 'tree (default — the hierarchy) or json (the full map, every property of every component; large).', required: false },
       { name: 'scalars', type: 'string', description: 'tree only: true also prints plain scalars on EVERY component. Prefer `at` — this is the whole file.', required: false },
+      { name: 'properties', type: 'string', description: 'With `at` on a component: only these properties, comma-separated. Matched as substrings, so "fontSize" finds m_fontSize and m_fontSizeBase. Omit for all of them.', required: false },
     ],
     slash: {
       command: 'prefab',
@@ -48,7 +49,10 @@ export const tool: Tool = {
 
       // `at` ANSWERS A QUESTION; the default answers "what is in here". It wins over `format` because
       // asking for one node and being handed the file is the behaviour this parameter exists to remove.
-      if (params.at && params.at.trim()) return renderPrefabAt(map, params.at.trim());
+      if (params.at && params.at.trim()) {
+        const only = String(params.properties ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+        return renderPrefabAt(map, params.at.trim(), only);
+      }
 
       /**
        * THE HIERARCHY IS THE DEFAULT, and JSON is what you ask for.

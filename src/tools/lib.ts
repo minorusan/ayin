@@ -294,11 +294,31 @@ export function suggestSimilarPaths(missing: string, maxSuggestions = 3): string
     .sort((a, b) => a.d - b.d)
     .slice(0, maxSuggestions);
 
-  if (ranked.length === 0) return '';
+  /**
+   * NOTHING NEAR-NAMED — SO SAY WHAT IS ACTUALLY THERE, rather than nothing at all.
+   *
+   * The edit-distance filter answers "did you typo it" and stays silent on the other, commoner miss:
+   * a path assembled from the right pieces in the wrong shape, where no sibling resembles the segment
+   * at all. Reported verbatim — a grep at `…/GameModes/Rewards` returned "path not found" with no
+   * hint, and the reader had to go and list the directory by hand to find `Rewards/Tests/` and
+   * `Rewards/Handlers/`. The deepest EXISTING ancestor is already computed above; printing its
+   * contents costs one readdir that has already happened.
+   *
+   * Bounded hard, because a listing is only a hint while it is short — a directory of four hundred
+   * entries pasted into an error is the distraction it was meant to prevent.
+   */
+  if (ranked.length === 0) {
+    const shown = entries.slice(0, LISTED_ON_MISS);
+    const more = entries.length > shown.length ? ` … and ${entries.length - shown.length} more` : '';
+    return ` Nothing named like "${firstMissing}" in ${ancestor}, which holds: ${shown.join(', ')}${more}.`;
+  }
 
   const suggestions = ranked.map(r => join(ancestor, r.name)).join(', ');
   return ` Did you mean: ${suggestions}?`;
 }
+
+/** How many real entries an error may list when nothing resembles what was asked for. */
+const LISTED_ON_MISS = 8;
 
 /**
  * Why an exact-match edit missed. "old_str not found" is almost never a wrong location — it is CRLF, or

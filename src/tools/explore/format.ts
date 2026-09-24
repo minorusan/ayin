@@ -79,10 +79,24 @@ export function formatResult(r: ExploreResult): string {
     out.push('');
   }
 
-  // What was searched, always — so a thin answer is visibly thin rather than looking complete.
+  /**
+   * What was searched, always — so a thin answer is visibly thin rather than looking complete. But
+   * COUNTED, not enumerated.
+   *
+   * Every probe that missed used to print its own strategy AND the term it missed on, which on a real
+   * call is ~1 KB of "no hits from: definition(scoreMultiplier), mentions(scoreMultiplier), …" under
+   * a 5.4 KB answer. The reader reported skipping it, and this repo's own prompt rule says why that is
+   * worse than wasted space: a distractor measurably degrades what the model does with everything
+   * else in the window. The FACT that probes missed is the information; twenty repetitions of the
+   * search term is not.
+   *
+   * The kinds are de-duplicated and named, because "no hits from 20 probes" alone cannot tell a
+   * reader whether the thing they care about was even looked for.
+   */
   const zero = r.attempts.filter((a) => a.hits === 0);
   if (zero.length) {
-    out.push(`no hits from: ${zero.map((a) => a.strategy).join(', ')}`);
+    const kinds = [...new Set(zero.map((a) => a.strategy.replace(/\(.*$/, '').trim()))].filter(Boolean);
+    out.push(`no hits from ${zero.length} probe(s) (${kinds.join(', ')})`);
   }
   out.push(`${r.findings.length} finding(s) from ${r.attempts.length} probe(s). Every line above is`);
   out.push('verbatim from the file at the stated line — nothing here is summarised or inferred.');

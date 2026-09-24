@@ -315,16 +315,37 @@ function render(
     `${chunks.length} of ${store.totals().chunks} chunk(s) match "${query}" [${how}]`
     + (why ? ` — ${why}` : '') + (matchedNames ? ` (matched on: ${matchedNames})` : '') + ':',
   ];
-  for (const chunk of chunks) {
-    const state = assessChunk(repoPath, chunk);
+  /**
+   * A CHUNK ABOUT A DELETED FILE GOES LAST AND SAYS SO FIRST.
+   *
+   * The injection path above already refuses these outright — `state !== 'missing'`, twice — because
+   * an answer describing code that no longer exists is not evidence. The TOOL never applied the same
+   * judgement, so a search could open with a confident answer citing a file that has been gone for
+   * weeks. Reported verbatim: *"The first hit cited ScoreEdit.cs which no longer exists."*
+   *
+   * Not filtered, because this tool is driven by someone who asked, and silently dropping the only
+   * hit makes "why does it find nothing" unanswerable. Demoted and marked instead: it cannot lead,
+   * and the reason arrives before the answer rather than inside a label that reads like the other
+   * four staleness labels.
+   */
+  const assessed = chunks.map((chunk) => ({ chunk, state: assessChunk(repoPath, chunk) }));
+  const gone = assessed.filter((a) => a.state.state === 'missing');
+  for (const { chunk, state } of [...assessed.filter((a) => a.state.state !== 'missing'), ...gone]) {
     out.push('');
+    if (state.state === 'missing') {
+      out.push(`!! THE CODE THIS DESCRIBES IS GONE — ${state.changed.join(', ')} `
+        + 'no longer exist(s) in this checkout. Read it as history, never as a description of the '
+        + 'current code, and do not cite it.');
+    }
     out.push(state.label);
     out.push(`Q. ${chunk.question}`);
     out.push(chunk.answer.length > MAX_ANSWER_CHARS ? `${chunk.answer.slice(0, MAX_ANSWER_CHARS)}\u2026` : chunk.answer);
     out.push(`cited: ${chunk.citations.map((c) => `${citeLabel(c)}`).join(' \u00b7 ')}`);
   }
   out.push('');
-  out.push('Notes from an earlier pass, not the code. Verify anything you act on.');
+  out.push(gone.length
+    ? `Notes from an earlier pass, not the code — and ${gone.length} of them describe files that are gone. Verify anything you act on.`
+    : 'Notes from an earlier pass, not the code. Verify anything you act on.');
   return out.join('\n');
 }
 

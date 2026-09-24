@@ -189,7 +189,7 @@ function choicesAt(objects: ObjectMap[], obj: ObjectMap | null): string {
  * A MISS NAMES THE ALTERNATIVES. A bare "not found" costs a round and teaches nothing, and the caller
  * here is usually a model that guessed at a name it has not seen.
  */
-export function renderPrefabAt(map: PrefabMap, at: string): string {
+export function renderPrefabAt(map: PrefabMap, at: string, only: string[] = []): string {
   const segs = at.split('/').map((s) => s.trim()).filter(Boolean);
   if (!segs.length) return 'Error: at is empty — use an address like GameOverLayer/Panel/RectTransform.';
 
@@ -222,9 +222,48 @@ export function renderPrefabAt(map: PrefabMap, at: string): string {
       const head = `${map.file}\n${where}${label}${comp.enabled === '0' ? '  [disabled]' : ''}`
         + (comp.script ? `\nscript: ${comp.script.name} at ${comp.script.dir ?? ''}` : '')
         + `\nfileID ${comp.fileId}, line ${comp.line}`;
+      /**
+       * ASK FOR THE PROPERTIES YOU WANTED, not the eighty this component has.
+       *
+       * Opening a TextMeshProUGUI to change one number printed ~80 serialized properties, and a reader
+       * iterating on two or three of them re-read that blob every time. Reported verbatim: *"I wanted
+       * just m_fontSize, but the tool dumped ~80 properties."*
+       *
+       * Matched as a case-insensitive SUBSTRING, so `fontSize` finds `m_fontSizeBase` and nobody has to
+       * know Unity's `m_` convention to ask. A filter that matches nothing says so and lists what IS
+       * there — the same rule as every other miss in this file: never answer a wrong guess with silence.
+       */
+      const entries = Object.entries(comp.properties);
+      const wanted = only.map((s) => s.toLowerCase()).filter(Boolean);
+      const picked = wanted.length
+        ? entries.filter(([key]) => wanted.some((w) => key.toLowerCase().includes(w)))
+        : entries;
+      if (wanted.length && picked.length === 0) {
+        return `${head}\n\nError: no property matching ${only.map((s) => JSON.stringify(s)).join(', ')} on this component. `
+          + `It has: ${entries.map(([k]) => k).join(', ')}`;
+      }
       const body: string[] = [];
-      for (const [key, prop] of Object.entries(comp.properties)) body.push(...propLines(key, prop, INDENT));
-      return [head, '', ...(body.length ? body : ['  (no properties serialized)'])].join('\n');
+      for (const [key, prop] of picked) body.push(...propLines(key, prop, INDENT));
+      const note = wanted.length ? [`  (${picked.length} of ${entries.length} properties — filtered)`] : [];
+      return [head, '', ...(body.length ? body : ['  (no properties serialized)']), ...note].join('\n');
+    }
+    /**
+     * AT THE ROOT, SAY WHAT THE PATH MUST START WITH — the miss is almost always the same one.
+     *
+     * `at=` is relative to the file, and a prefab's file root is its single top GameObject, so
+     * `at=ScoreIndicatorValue/TextMeshProUGUI` fails on a node that really exists three levels down.
+     * The old message was correct and unhelpful: it listed the available children and left the reader
+     * to infer the rule from the shape of the list. Reported verbatim — "I had to guess that the path
+     * is relative to the file's single root GameObject". Naming the missing prefix turns a guess into
+     * a correction, and it only fires at depth 0, where the answer is unambiguous.
+     */
+    if (i === 0) {
+      const roots = level.map((o) => o.name).filter(Boolean);
+      const lead = roots.length === 1
+        ? `Error: no "${seg}" at the file root — the path starts at "${roots[0]}", `
+          + `so try "${roots[0]}/${segs.join('/')}". `
+        : `Error: no "${seg}" at the file root. A path starts at one of the roots below, not at a node inside it. `;
+      return `${lead}Available — ${choicesAt(level, obj)}`;
     }
     return `Error: no "${seg}" under ${segs.slice(0, i).join('/') || '(the file root)'}. `
       + `Available — ${choicesAt(level, obj)}`;

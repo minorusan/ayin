@@ -80,8 +80,21 @@ export const unityAttributor: Attributor = {
     if (lower.endsWith('.meta')) {
       return 'Unity .meta sidecar — a GUID and import settings for the file beside it. No behaviour.';
     }
+    /**
+     * NAME THE TOOL THAT ALREADY DOES THE WORK THIS NOTE DESCRIBES.
+     *
+     * The note said a m_Script guid names the class it instantiates — true, and it leaves the reader
+     * to resolve guids by hand out of raw YAML. `prefab_inspect` resolves them, and `animator_inspect`
+     * does the same for a controller. Reported verbatim: *"useful, but I still have to manually
+     * resolve guids. prefab_inspect already does this."* One clause, on exactly the file types where
+     * a better tool exists, so it is a pointer rather than a standing lecture.
+     */
+    const structured = /\.(prefab|unity|asset|mat)$/.test(lower) ? 'prefab_inspect'
+      : /\.(controller)$/.test(lower) ? 'animator_inspect'
+        : '';
     if (/\.(asset|prefab|unity|mat|anim|controller)$/.test(lower)) {
-      return `Unity serialized data (${lower.split('.').pop()}), not code. Its m_Script guid names the class it instantiates.`;
+      return `Unity serialized data (${lower.split('.').pop()}), not code. Its m_Script guid names the class it instantiates.`
+        + (structured ? ` \`${structured}\` reads this file structurally and resolves those guids to names — prefer it over parsing the YAML.` : '');
     }
     if (!lower.endsWith('.cs') || !ctx.source) return null;
 
