@@ -348,10 +348,26 @@ console.log('\narbiter tier');
   // needs to decide and to VERIFY a child's report.
   set(null, '1');
   ok(sa.arbiterMode(), 'and on when asked for');
-  for (const t of ['bash', 'str_replace', 'write_file', 'grep', 'find_files', 'list_dir']) {
+  for (const t of ['bash', 'write_file', 'grep', 'find_files', 'list_dir']) {
     ok(sa.toolWithheld(t), `  → ${t} is withheld from the arbitrator`);
   }
-  for (const t of ['read_file', 'explore', 'perform_edit', 'find_relevant_files', 'subagent']) {
+  /**
+   * `str_replace` IS KEPT, and it used to be withheld in favour of `perform_edit`.
+   *
+   * The argument for withholding it was that it needs the file's exact current bytes, so an arbiter
+   * using it must hold them — and holding twenty files' bytes is what this mode exists to prevent.
+   * It was thinner than it looked: the arbiter has `read_file`, so the cost is two cheap calls rather
+   * than one model call hidden inside a tool, and `perform_edit` paid for the convenience by being
+   * non-deterministic, by needing a truncation guard written after it silently deleted 7,331 lines
+   * of a core module, and by dropping the trailing newline of every file it touched.
+   *
+   * Pinned as its own assertion because the arbiter must be able to CHANGE A FILE. With
+   * `perform_edit` gone and this still withheld, every write path redirects to a tool that no longer
+   * exists — which is the loop `withheldRedirect` was written for after a model complied with an
+   * impossible instruction 28 times and created nothing.
+   */
+  ok(!sa.toolWithheld('str_replace'), '  → but str_replace is KEPT: the arbiter must be able to correct a file');
+  for (const t of ['read_file', 'explore', 'str_replace', 'find_relevant_files', 'subagent']) {
     ok(!sa.toolWithheld(t), `  → ${t} is kept — deciding and verifying still need it`);
   }
 
@@ -360,67 +376,15 @@ console.log('\narbiter tier');
   set('1', '1');
   ok(!sa.arbiterMode(), 'a subagent is never in arbiter mode, whatever the parent was');
   for (const t of ['bash', 'str_replace', 'grep']) ok(!sa.toolWithheld(t), `  → a subagent keeps ${t}`);
-  for (const t of ['perform_edit', 'find_relevant_files', 'subagent']) {
+  for (const t of ['find_relevant_files', 'subagent']) {
     ok(sa.toolWithheld(t), `  → and is denied ${t}`);
   }
   set(keep.d, keep.a);
 }
 
-// ── perform_edit / find_relevant_files: the deterministic halves ─────
-console.log('\nperform_edit + find_relevant_files');
+// ── find_relevant_files: the deterministic half ─────
+console.log('\nfind_relevant_files');
 {
-  const pe = await import(`file://${join(DIST, 'tools/defs/perform_edit.js')}`);
-
-  // A FENCE WRITTEN TO DISK IS A SYNTAX ERROR in every language ayin edits, and it is the one thing a
-  // model reliably adds.
-  ok(pe.stripFence('```python\nx = 1\n```') === 'x = 1', 'a fence around the whole answer is stripped');
-  ok(pe.stripFence('x = 1') === 'x = 1', 'and an unfenced answer is untouched');
-  ok(pe.stripFence('a\n```\nb\n```\nc') === 'a\n```\nb\n```\nc', 'a fence INSIDE the file is left alone');
-
-  /**
-   * THE FILE KEEPS THE TRAILING NEWLINE IT CAME WITH.
-   *
-   * A model's reply does not end with one, and `stripFence`'s own `\n?```$` eats it when the reply
-   * was fenced — so `perform_edit` wrote every file it touched one byte short of how it found it.
-   * Measured on a real session: an agent reverted its own test edit to a Unity prefab, the value went
-   * back correctly, and the file stayed dirty on one stripped newline. It then tried `git checkout --`
-   * to clean up, was refused by the permission guard, and the operator was left with a modified asset.
-   */
-  ok(pe.matchTrailingNewline('a\nb\n', 'a\nb') === 'a\nb\n', 'a dropped trailing newline is restored');
-  ok(pe.matchTrailingNewline('a\nb\n', 'a\nb\n') === 'a\nb\n', 'one that survived is left alone');
-  // BOTH DIRECTIONS, because a file that never ended with a newline must not gain one either — the
-  // next edit would then report a change nobody made, which is this same bug wearing the other sign.
-  ok(pe.matchTrailingNewline('a\nb', 'a\nb\n') === 'a\nb', 'and one the file never had is removed');
-  ok(pe.matchTrailingNewline('a\nb', 'a\nb') === 'a\nb', 'a file with no trailing newline keeps none');
-  // NOT a whitespace normaliser: trailing blank lines the model actually wrote are its EDIT, and
-  // deleting them here would be the same overreach in the other direction.
-  ok(pe.matchTrailingNewline('a\nb\n', 'a\nb\n\n\n') === 'a\nb\n\n\n', 'extra blank lines are an edit, not a byte to drop');
-  ok(pe.matchTrailingNewline('', '') === '', 'and an empty file is not given one');
-
-  /**
-   * A CHANGE WITHOUT ITS SURROUNDINGS DOES NOT SAY WHERE IT LANDED.
-   *
-   * `@@ line 198 @@ -0 +1` and one `+` line is true and answers the wrong question: the caller wants
-   * to know whether the insert went inside the right method. Reported verbatim — "I had to do a
-   * follow-up read_file to verify placement" — and that follow-up is the whole-file re-send the edit
-   * notes in readGuard exist to avoid.
-   */
-  {
-    const before = ['using System;', '', 'class Foo {', '  int a = 1;', '  int b = 2;', '}'].join('\n');
-    const after = ['using System;', '', 'class Foo {', '  int a = 1;', '  int c = 9;', '  int b = 2;', '}'].join('\n');
-    const d = pe.lineDiff(before, after);
-    ok(/^@@ line 5 @@/.test(d), 'the diff still leads with the line it starts at', d.split('\n')[0]);
-    ok(d.includes('+   int c = 9;'), 'and the added line is marked');
-    ok(d.includes('    int a = 1;') && d.includes('    int b = 2;'), '  → with the lines either side of it, unmarked');
-    ok(!/^[+-]\s+int [ab]/m.test(d), '  → and context is never mistakable for part of the change');
-  }
-
-  // THE DIFF IS EVIDENCE, NOT A CLAIM. "I made the change" reads exactly like "I did not"; a diff does
-  // not. This is the failure ayin has measured repeatedly.
-  const d = pe.lineDiff('a\nb\nc\n', 'a\nB2\nc\n');
-  ok(/@@ line 2 @@/.test(d) && /^- b$/m.test(d) && /^\+ B2$/m.test(d), 'the diff names the line and both sides', d.split('\n')[0]);
-  ok(pe.lineDiff('x\n', 'x\n').includes('-0 +0'), 'an unchanged file diffs to nothing');
-
   const fr = await import(`file://${join(DIST, 'tools/defs/find_relevant_files.js')}`);
   // EVERY PATH IS VERIFIED. A confident list of files that do not exist is worse than no list: the
   // caller acts on it and the first failure looks like an unrelated bug three tools later.
@@ -430,8 +394,25 @@ console.log('\nperform_edit + find_relevant_files');
   ok(fr.parseFileReport('NONE', REPO).none, '"NONE" is an answer, not an empty result');
   ok(fr.parseFileReport('I think you should look at the uploader.', REPO).files.length === 0,
     'prose instead of the format yields nothing — the caller asked for files');
-}
 
+  /**
+   * THE FORMAT FAILED, THE WORK DID NOT.
+   *
+   * Measured: a search agent made FIFTEEN tool calls, found the files, wrote them in sentences, and
+   * this tool answered "NO USABLE LIST — search yourself". Everything it had learned was thrown away
+   * over a shape. `plan.ts` salvages truncated JSON for the same reason: a deterministic second pass
+   * costs nothing and turns a total loss into leads. Every candidate is still verified on disk,
+   * which is what keeps a path scraped out of a sentence honest.
+   */
+  const prose = 'I looked around. The entry point is src/agent.ts and permissions live in\n'
+    + 'src/permissions.ts. I also considered src/does-not-exist.ts but it is irrelevant.\n';
+  const salvaged = fr.salvagePaths(prose, REPO);
+  ok(salvaged.some((f) => f.path === 'src/agent.ts'), 'the real paths in a prose answer are salvaged', JSON.stringify(salvaged.map((f) => f.path)));
+  ok(salvaged.some((f) => f.path === 'src/permissions.ts'), '  → all of them, not just the first');
+  ok(!salvaged.some((f) => f.path.includes('does-not-exist')), '  → and one that does not exist is still dropped');
+  ok(salvaged.every((f) => f.why.length > 0), '  → each carrying the sentence it appeared in, since no per-file reason exists');
+  ok(fr.salvagePaths('nothing here but words and more words.', REPO).length === 0, 'and text naming no real file salvages nothing');
+}
 // ── postmortem: a run that dies unexpectedly says where it got to ────
 console.log('\npostmortem');
 {

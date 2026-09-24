@@ -227,7 +227,7 @@ export function getAllTools(): Tool[] {
  * diagram and ayin must know it can draw one.
  */
 const WORK_TOOLS = new Set([
-  'read_file', 'read_files', 'write_file', 'perform_edit', 'str_replace',
+  'read_file', 'read_files', 'write_file', 'str_replace',
   'bash', 'explore', 'corpus_search', 'subagent', 'finish',
   // EYES. Without this the skeptic pass can render a figure and still not look at it, which is the
   // exact gap it exists to close — rendered-output bugs got an edit 1/6 against 12/13 elsewhere.

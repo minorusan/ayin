@@ -341,7 +341,7 @@ if (refusedInterleaved < 3) fail(`only ${refusedInterleaved} of 6 interleaved re
 tg.resetOutputEchoes();
 for (let i = 0; i < 5; i++) {
   if (tg.refuseIfEcho('finish', 'done') !== null) fail('finish must never be refused');
-  if (tg.refuseIfEcho('perform_edit', 'ok') !== null) fail('an edit must never be refused');
+  if (tg.refuseIfEcho('str_replace', 'ok') !== null) fail('an edit must never be refused');
 }
 tg.resetOutputEchoes();
 console.log('             echo refusal: 3rd identical refused, new bytes reset, finish/edit exempt');

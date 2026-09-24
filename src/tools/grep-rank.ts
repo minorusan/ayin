@@ -28,7 +28,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { candidateDirs, isUnderVendorRoot, knownVendorRoots, loadCachedVendorRoots } from '../indulge/vendor.js';
 import { openStore } from '../indulge/store.js';
 
@@ -282,10 +282,20 @@ export function guidBlock(repoPath: string, files: string[]): string {
   if (!scripts.length) return '';
   const rows: string[] = [];
   for (const f of scripts) {
-    const guid = guidOf(join(repoPath, `${f}.meta`));
-    // A script with no .meta is a real state — not yet imported by the editor — and saying so beats
-    // omitting the row, because "no GUID" is why an asset search for it will find nothing.
-    rows.push(`  ${f}  ${guid ?? '(no .meta — not imported yet)'}`);
+    /**
+     * `resolve`, NOT `join` — and the difference was a factual lie on every absolute-path grep.
+     *
+     * `join('/repo', '/abs/x.cs.meta')` CONCATENATES to `/repo/abs/x.cs.meta`, which cannot exist, so
+     * the lookup missed and the row claimed the file was "not imported yet". Reported verbatim about
+     * a Unity project whose every asset the editor had imported years ago: *"wrong for a Unity repo
+     * (they ARE imported; the footer is a heuristic that misfires)"*. `resolve` ignores the base when
+     * the second argument is already absolute, which is exactly the rule wanted here: grep is called
+     * with both relative and absolute paths and its results follow whichever it was given.
+     */
+    const guid = guidOf(resolve(repoPath, `${f}.meta`));
+    // A script with no .meta beside it is a real state — the editor has not imported it — and saying
+    // so beats omitting the row, because "no GUID" is why an asset search for it will find nothing.
+    rows.push(`  ${f}  ${guid ?? '(no .meta beside it — the editor has not imported it)'}`);
   }
   return `\nguids (search the asset tree for these):\n${rows.join('\n')}`;
 }

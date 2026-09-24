@@ -87,16 +87,28 @@ export function parallelSubagentsAllowed(): boolean {
  * arbitrate.
  *
  * So in arbiter mode the top level keeps only what it needs to decide and verify — `read_file`,
- * `explore`, `perform_edit`, `find_relevant_files`, `subagent` — and the primitives that invite it to
+ * `str_replace`, `explore`, `find_relevant_files`, `subagent` — and the primitives that invite it to
  * do the work itself are withheld. Subagents are unaffected: at depth ≥ 1 the full set is present,
  * which is where the work actually happens.
+ *
+ * `str_replace` IS THE ARBITER'S EDIT NOW, and it used to be withheld in favour of `perform_edit`.
+ * The argument was that `str_replace` demands the file's exact current bytes, so an arbiter using it
+ * must hold them — and holding twenty files' bytes is the thing this mode exists to prevent. That
+ * argument was thinner than it looked: the arbiter has `read_file`, so the cost is two cheap calls
+ * rather than one model call hidden inside a tool, and `perform_edit` paid for the convenience by
+ * being non-deterministic, by needing a truncation guard written after it silently deleted 7,331
+ * lines of a core module, and by dropping the trailing newline of every file it touched. Those are
+ * bad properties anywhere and worst at the level whose job is verifying rather than typing.
+ *
+ * `write_file` STAYS WITHHELD. Creating a file is a stage, not a correction, and a stage goes to a
+ * child — which is the distinction the mode is built on.
  *
  * OFF BY DEFAULT, because ayin is not only a builder. "Read src/log.ts and tell me what it does" is an
  * ordinary turn, and an arbiter that must spawn a child to run one shell command has made the common
  * case worse to improve the rare one. `--arbiter` opts in; measurement decides whether it becomes the
  * default.
  */
-const ARBITER_WITHHELD = new Set(['write_file', 'str_replace', 'bash', 'grep', 'find_files', 'list_dir']);
+const ARBITER_WITHHELD = new Set(['write_file', 'bash', 'grep', 'find_files', 'list_dir']);
 
 export function arbiterMode(): boolean {
   if (isSubagent()) return false;              // a child does the work; it keeps its hands
@@ -106,10 +118,10 @@ export function arbiterMode(): boolean {
 /** True when this tool is hidden from THIS process. Consulted by `loadTools`. */
 export function toolWithheld(name: string): boolean {
   if (name === 'subagent' && !subagentsAllowed()) return true;
-  // `perform_edit` and `find_relevant_files` are the arbiter's replacements for what it gives up, and
-  // a subagent that had them would delegate rather than work — which is the recursion rule again,
-  // wearing a different hat.
-  if (isSubagent() && (name === 'perform_edit' || name === 'find_relevant_files')) return true;
+  // `find_relevant_files` is the arbiter's replacement for the search primitives it gives up, and a
+  // subagent that had it would delegate rather than work — the recursion rule again, wearing a
+  // different hat.
+  if (isSubagent() && name === 'find_relevant_files') return true;
   return arbiterMode() && ARBITER_WITHHELD.has(name);
 }
 
@@ -137,19 +149,17 @@ export function withheldRedirect(name: string): string | null {
         + 'still plan it.'
       : 'subagent is switched off for this run (--disallow-subagents). Work every phase yourself.';
   }
-  if (name === 'perform_edit' || name === 'find_relevant_files') {
+  if (name === 'find_relevant_files') {
     return `${name} belongs to the arbitration level, and you are the agent doing the work. `
-      + 'Use write_file / str_replace to change a file, and grep / find_files / explore to locate one.';
+      + 'Use grep / find_files / explore to locate a file.';
   }
   // Arbiter mode. Name the one replacement that actually covers this primitive — a list of five
   // alternatives is another way of saying "guess".
   const instead: Record<string, string> = {
     bash: 'you have no shell at this level. Anything that runs a command — npm, git, a build, a test — '
       + 'goes to a child: subagent(task="…"), which has the full primitive set including bash.',
-    write_file: 'describe the change instead: perform_edit(file="…", edit="…"). To create a file that '
-      + 'does not exist yet, hand the whole stage to subagent(task="…").',
-    str_replace: 'describe the change instead: perform_edit(file="…", edit="…") — it reads the file and '
-      + 'places the edit, so you do not need its exact current bytes.',
+    write_file: 'creating a file is a STAGE, not a correction — hand it to subagent(task="…"). To '
+      + 'change a file that already exists, read it and use str_replace.',
     grep: 'use explore, or find_relevant_files(task="…") for the files a task touches.',
     find_files: 'use find_relevant_files(task="…"), which verifies every path it returns against disk.',
     list_dir: 'use explore, or find_relevant_files(task="…").',

@@ -285,8 +285,8 @@ export const HELP: HelpEntry[] = [
   },
   {
     name: 'ayin --arbiter', kind: 'cli', section: 'From your shell',
-    short: 'The top level decides and delegates: bash, grep and the edit primitives are withheld from it, and it works through perform_edit, find_relevant_files and subagent instead',
-    tip: '`--arbiter` takes the edit primitives off the top level so it delegates instead of typing.',
+    short: 'The top level decides and delegates: bash, grep and file creation are withheld from it, and it works through str_replace, find_relevant_files and subagent instead',
+    tip: '`--arbiter` takes the shell and the search primitives off the top level so it delegates instead of typing.',
   },
   { name: 'ayin --disallow-subagents', kind: 'cli', section: 'From your shell', short: 'No delegation this session: the `subagent` tool is withheld, so the agent works every phase itself' },
   { name: 'ayin --allow-parallel-subagents', kind: 'cli', section: 'From your shell', short: 'Let several subagents run at once. OFF by default — two agents editing one tree lose each other\'s writes' },

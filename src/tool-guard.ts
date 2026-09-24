@@ -361,7 +361,7 @@ export function guardCheck(name: string, params: Record<string, string>): GuardD
      *
      * Measured on a real run: 27 reads of one 2,300-line file across 42 minutes, returning to
      * the same three neighbourhoods, with 29 `guard_repeat_allowed_stale` and not one read note. The
-     * edit case this was built for is untouched — `perform_edit` is not a repeatable read.
+     * edit case this was built for is untouched — an edit is not a repeatable read.
      */
     const readSince = !REPEATABLE_READS.has(name)
       && targetsOf(params).some((p) => (readsAt.get(p) ?? 0) > prior.readEpoch);
@@ -587,7 +587,7 @@ const outputSeen = new Map<string, { run: number; epoch: number }>();
 const IDENTICAL_OUTPUT_MAX = 2;
 
 /** Never refused: the exit, and anything whose whole job is to change the world. */
-const NEVER_STALE = new Set(['finish', 'perform_edit', 'write_file', 'str_replace', 'subagent']);
+const NEVER_STALE = new Set(['finish', 'write_file', 'str_replace', 'subagent']);
 
 /**
  * A STATE QUERY IS NEVER AN ECHO — "unchanged" is the answer, not a wasted call.

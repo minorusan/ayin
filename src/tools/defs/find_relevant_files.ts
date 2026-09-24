@@ -103,9 +103,21 @@ not list directories. If nothing is relevant, answer with the single word NONE.`
 
     if (parsed.none) return `No files are relevant to "${task}" — the search agent looked and found nothing.`;
     if (parsed.files.length === 0) {
-      return `find_relevant_files produced NO USABLE LIST for "${task}" (the agent made ${result.toolCalls} tool call(s) `
-        + 'and answered in prose rather than the required format). Nothing here is verified — search yourself '
-        + 'rather than acting on a guess.';
+      /**
+       * THE FORMAT FAILED, THE WORK DID NOT. See `salvagePaths` — fifteen tool calls of real
+       * searching used to be discarded because the answer arrived as sentences.
+       */
+      const salvaged = salvagePaths(result.report, cwd);
+      toolLog().info('find_relevant_files_salvaged', { found: String(salvaged.length), toolCalls: String(result.toolCalls) });
+      if (salvaged.length) {
+        ctx?.onStatus(`format missed — salvaged ${salvaged.length} real path(s) from the prose`);
+        return `The search agent answered in prose rather than the required format, so these were SALVAGED from `
+          + `its text and verified on disk — read them as leads, not as findings (${result.toolCalls} tool call(s)):\n\n`
+          + `${salvaged.map((f) => `- ${f.path}\n    mentioned: ${f.why}`).join('\n')}`;
+      }
+      return `find_relevant_files produced NO USABLE LIST for "${task}" (the agent made ${result.toolCalls} tool call(s), `
+        + 'answered in prose rather than the required format, and named no path that exists). Nothing here is '
+        + 'verified — search yourself rather than acting on a guess.';
     }
 
     const lines = parsed.files.map((f) => `- ${f.path} — ${f.why}`);
@@ -122,6 +134,43 @@ export interface FileReport {
   /** Paths the agent named that are not files on disk. Reported, never silently dropped. */
   invented: string[];
   none: boolean;
+}
+
+/**
+ * PATHS OUT OF PROSE, when the strict format did not arrive.
+ *
+ * WHY SALVAGE RATHER THAN REFUSE. The contract is mechanically checkable, which is right, and a
+ * model that ignores it used to cost the caller everything: measured, a search agent made FIFTEEN
+ * tool calls, found the files, wrote them in sentences, and this tool answered "NO USABLE LIST —
+ * search yourself". The work existed; only its shape was wrong. `plan.ts` learned the same lesson
+ * about truncated JSON and salvages it (`salvageSteps`), and the argument transfers: a deterministic
+ * second pass over the text costs nothing and turns a total loss into a partial answer.
+ *
+ * EVERY CANDIDATE IS STILL VERIFIED ON DISK, which is what keeps this honest. A path scraped out of
+ * a sentence is a guess about what the agent meant; a path that also exists is a file. The caller is
+ * told the list was salvaged, because a list assembled this way has no per-file reason attached and
+ * should be read as leads rather than as findings.
+ */
+export function salvagePaths(report: string, cwd: string): Array<{ path: string; why: string }> {
+  // A path-shaped token: at least one separator or a known source extension, no whitespace, and
+  // ending in an extension — which is what stops it matching prose like "the Assets directory".
+  const TOKEN = /[\w./-]*[\w-]+\.[A-Za-z0-9]{1,10}\b/g;
+  const out: Array<{ path: string; why: string }> = [];
+  const seen = new Set<string>();
+  for (const line of report.split('\n')) {
+    for (const raw of line.match(TOKEN) ?? []) {
+      const path = raw.replace(/^["'`(<]+|["'`).,>]+$/g, '').trim();
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      const full = path.startsWith('/') ? path : `${cwd.replace(/\/$/, '')}/${path}`;
+      try {
+        if (!existsSync(full) || !statSync(full).isFile()) continue;
+      } catch { continue; }
+      // The sentence it appeared in is the only "why" available, and it is usually the right one.
+      out.push({ path, why: line.trim().slice(0, 200) });
+    }
+  }
+  return out;
 }
 
 /** Parse the strict format, and verify every path. Deterministic — no model, no network. */

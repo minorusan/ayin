@@ -23,6 +23,9 @@ import { recordRead } from '../readGuard.js';
 /** Calls listed under a body. The body itself is right there, so this is an index, not the content. */
 const CALLS_SHOWN = 12;
 
+/** Members named in a refusal before the list stops being readable and becomes a wall. */
+const DECLARED_SHOWN = 40;
+
 /**
  * Lines of a body returned whole before it is windowed like any other long read.
  *
@@ -75,9 +78,31 @@ export const tool: Tool = {
 
     if (!hits.length) {
       const near = locate(source, abs, method.includes('.') ? method.slice(method.lastIndexOf('.') + 1) : method);
-      return near.length
-        ? `Error: ${method} is not declared in ${path}. Declared as: ${near.map((h) => `${h.type.name}.${h.member.name}`).join(', ')}.`
-        : `Error: ${method} is not declared in ${path}. Read the file to see its structure.`;
+      if (near.length) {
+        return `Error: ${method} is not declared in ${path}. Declared as: ${near.map((h) => `${h.type.name}.${h.member.name}`).join(', ')}.`;
+      }
+      /**
+       * SAY WHAT IS DECLARED. "Read the file to see its structure" was the answer to a question the
+       * reader asked in order to AVOID reading the file — this tool's entire purpose — and it costs a
+       * whole round to learn something already parsed and sitting in memory.
+       *
+       * Reported verbatim: *"expand_method returned 'Show is not declared' for a file I hadn't read —
+       * no structure listing in the error. The error tells you to read the file, which defeats the
+       * purpose; it should have listed the methods that ARE declared."*
+       *
+       * Bounded, because a 200-member file turns a refusal into a wall. Beyond the cap it says how
+       * many were withheld and points at the structure view, which is the right tool for that size.
+       */
+      const declared = toolStructure().of(abs, source)
+        .flatMap((ty) => ty.members.map((m) => `${ty.name}.${m.name}`));
+      if (declared.length === 0) {
+        return `Error: ${path} declares nothing this parser can see, so no method can be expanded from it. `
+          + 'Read it with read_file.';
+      }
+      const shown = declared.slice(0, DECLARED_SHOWN);
+      const rest = declared.length - shown.length;
+      return `Error: ${method} is not declared in ${path}. It declares: ${shown.join(', ')}`
+        + `${rest > 0 ? `, and ${rest} more — read_file ${path} structure=true for all of them` : ''}.`;
     }
     /**
      * AMBIGUITY IS REFUSED, NEVER RESOLVED BY ORDER.
