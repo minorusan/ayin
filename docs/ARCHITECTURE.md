@@ -4947,6 +4947,61 @@ landed and RUNNABLE.** `ayin indulge` builds a corpus end to end, gated by
 designed yet — Phase 1's chunks get read and judged by hand first, because a RAG is worth exactly
 what its chunks are worth.
 
+### `find_references` — who points AT this, and the third hook kind (`indulge/finders/`)
+
+Every other read tool goes one way: `explore` finds a file from a description, `read_file` opens it,
+`prefab_inspect` resolves what it references. The question an engineer asks before touching
+anything — *what breaks if I change this* — had no tool at all, and the model working in a real Unity
+project reported it as friction twice.
+
+**The Unity half is the case no text search reaches.** A script is instantiated from a prefab by a
+guid that appears nowhere in the script: the prefab carries `m_Script: {fileID: 11500000, guid: 7b1c…}`
+and the only place that guid is written down is the `.meta` sidecar. Grep the class name and you find
+the C# and miss the prefab. `finders/unity.ts` resolves the sidecar and searches the serialized
+formats for the guid — for any asset with a `.meta`, not only scripts — and reports the YAML key that
+owns each hit, because "this prefab contains the guid" is barely better than the grep while
+"`m_Script` IS this class" answers whether it can be deleted. A bare 32-hex guid is a valid target
+too, which folds the reverse lookup ("what IS this guid") into the same call.
+
+**The source half is multilingual by reuse.** `languageFor()` already decides which of
+csharp/typescript/dart/python/go/rust/ruby/java/cpp claims a path, and `surfaceOf()` already returns
+what it declares. `finders/code.ts` asks that pair and greps the answers, so a tenth language arrives
+here the moment it arrives there rather than needing a case. It is a TEXT search and says so in its
+own `describe()` — no compiler here resolves imports, so a hit is a mention and a comment counts.
+
+#### Why a third hook kind rather than a method on `SurfaceLanguage`
+
+That contract is entangle's — declarations, domains, platform types, nine implementations that exist
+to answer "what does this file DECLARE". Reference finding runs the other way and has a different
+natural unit: a Unity script is referenced from YAML by a guid that parsing the C# can never produce.
+Adding `referencesTo` there would make nine modules carry a method eight of them return `[]` from. So
+`Finder` joins `Attributor` and `Indulger` in `indulge/hooks/`, with the same loader: built-ins ship,
+a pack in `~/.ayin-cli/finders/` overrides one by id, and a broken pack degrades the tool instead of
+breaking it. Order is the answer's order — Unity is asked first, so a script's prefabs come before
+the code that merely names it.
+
+#### Three ways it lied before the gate existed
+
+All three were found the first time it ran against a real project, and all three return the same
+shape of wrong answer — a short list or an empty one, from a tool whose whole job is to be trusted
+before a delete.
+
+- **`projectRoot` was handed a file.** It shells out to `git -C <path> rev-parse`, which fails on a
+  file path; the fallback root was not the repository, so every finder searched the wrong tree and
+  answered "no references" about a class with dozens.
+- **The grep timed out.** Searching a whole Unity tree for a C# type name reads every `.bundle` and
+  every serialized asset; at 25 seconds it was killed, and a killed search produces no output. The
+  include set now comes from the language itself — `handles()` is by extension, so asking it about
+  each candidate gives the file types for free.
+- **macOS grep prints no `./`.** GNU grep prints `./Assets/x.cs:9:…` when told to search `.`; BSD
+  grep prints `Assets/x.cs:9:…`. A parser anchored on the prefix dropped every hit.
+
+And one way it was merely useless: falling back to the FILE NAME when the parser found no
+declaration turned `unity.ts` into a search for "unity", which matched prose in three gate scripts
+and labelled it as references. A stem is only searched for when it reads as a symbol — a capital, an
+underscore or a digit — and when it is used, `describe()` says it was guessed.
+
+
 ### `indulge` — the per-repo corpus (`src/indulge/`)
 
     ayin indulge --repoPath <path> --domains "rendering,checkout-flow"

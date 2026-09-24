@@ -115,3 +115,49 @@ export interface Indulger {
    */
   evidenceFor?(ctx: IndulgeContext): string | null;
 }
+
+// ── finders: who references this? ────────────────────────────────────────────
+
+/** One place that refers to the target. `line` is 1-based; absent when the finder cannot place it. */
+export interface ReferenceHit {
+  /** Repo-relative, so two finders' answers can be read as one list. */
+  path: string;
+  line?: number;
+  /**
+   * HOW it refers, in the finder's own vocabulary — `m_Script`, `using`, `_iconSprite`, `extends`.
+   *
+   * The single most useful column and the one a grep cannot give you: "this prefab mentions the guid"
+   * is nearly worthless, and "this prefab's m_Script IS this class" is the answer. Kept short; the
+   * path and line carry the rest.
+   */
+  how: string;
+}
+
+/**
+ * Who references a file — asked per language, per project type, by whoever knows how.
+ *
+ * WHY THIS IS NOT ON `SurfaceLanguage`. That contract is entangle's: declarations, domains, platform
+ * types, nine implementations that all exist to answer "what does this file DECLARE". Reference
+ * finding is the opposite direction and has a different natural unit — a Unity script is referenced
+ * from YAML by a GUID that appears nowhere in the C#, and no amount of parsing the declaration finds
+ * it. Bolting it on would make nine modules carry a method eight of them would return `[]` from.
+ *
+ * So it is its own hook kind, loaded and overridable exactly like the other two: a pack in
+ * `~/.ayin-cli/finders/` replaces a built-in by id, and a broken one degrades the tool instead of
+ * breaking it.
+ */
+export interface Finder {
+  /** Stable id. A local file with the same id REPLACES the built-in. */
+  id: string;
+  /** Does this finder apply to this repo at all? Asked once, cached. */
+  applies(repoPath: string): boolean;
+  /**
+   * Can it say anything about references to THIS target? A target is a path, or a bare identifier a
+   * finder chooses to understand (the Unity finder takes a 32-hex GUID).
+   */
+  handles(target: string, repoPath: string): boolean;
+  /** One line naming what it searched — so a thin answer is visibly thin rather than looking complete. */
+  describe(target: string, repoPath: string): string;
+  /** The hits. Bounded by `limit`; returning fewer is normal and returning none is a real answer. */
+  find(target: string, repoPath: string, limit: number): ReferenceHit[];
+}

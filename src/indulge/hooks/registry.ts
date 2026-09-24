@@ -16,15 +16,21 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { log } from '../../log.js';
-import type { Attributor, Indulger } from './types.js';
+import type { Attributor, Finder, Indulger } from './types.js';
 import { unityAttributor } from '../attributors/unity.js';
 import { unityIndulger } from '../indulgers/unity.js';
 import { typescriptIndulger } from '../indulgers/typescript.js';
+import { unityFinder } from '../finders/unity.js';
+import { codeFinder } from '../finders/code.js';
 
 const BUILTIN_ATTRIBUTORS: Attributor[] = [unityAttributor];
 const BUILTIN_INDULGERS: Indulger[] = [unityIndulger, typescriptIndulger];
+// ORDER IS THE ANSWER'S ORDER. The Unity finder resolves a reference nothing else can see —
+// a guid in YAML that appears nowhere in the source — so it is asked first, and a script's
+// prefabs and scenes come before the code that merely names it.
+const BUILTIN_FINDERS: Finder[] = [unityFinder, codeFinder];
 
-const localDir = (kind: 'attributors' | 'indulgers'): string =>
+const localDir = (kind: 'attributors' | 'indulgers' | 'finders'): string =>
   process.env.AYIN_HOOKS_DIR
     ? join(process.env.AYIN_HOOKS_DIR, kind)
     : join(homedir(), '.ayin-cli', kind);
@@ -32,8 +38,9 @@ const localDir = (kind: 'attributors' | 'indulgers'): string =>
 /** Loaded once per process — a hook directory is not re-scanned mid-session. */
 let attributors: Attributor[] | null = null;
 let indulgers: Indulger[] | null = null;
+let finders: Finder[] | null = null;
 
-async function loadLocal<T extends { id: string }>(kind: 'attributors' | 'indulgers', builtins: T[]): Promise<T[]> {
+async function loadLocal<T extends { id: string }>(kind: 'attributors' | 'indulgers' | 'finders', builtins: T[]): Promise<T[]> {
   const dir = localDir(kind);
   const out = [...builtins];
   if (!existsSync(dir)) return out;
@@ -64,6 +71,7 @@ async function loadLocal<T extends { id: string }>(kind: 'attributors' | 'indulg
 export async function loadHooks(): Promise<void> {
   if (!attributors) attributors = await loadLocal('attributors', BUILTIN_ATTRIBUTORS);
   if (!indulgers) indulgers = await loadLocal('indulgers', BUILTIN_INDULGERS);
+  if (!finders) finders = await loadLocal('finders', BUILTIN_FINDERS);
 }
 
 /** Synchronous accessors — the tool path cannot await a directory scan. Call `loadHooks()` at boot. */
@@ -79,8 +87,16 @@ export function indulgersFor(repoPath: string): Indulger[] {
   });
 }
 
+/** The finders that apply to this repo, in declaration order — see BUILTIN_FINDERS. */
+export function findersFor(repoPath: string): Finder[] {
+  return (finders ?? BUILTIN_FINDERS).filter((f) => {
+    try { return f.applies(repoPath); } catch { return false; }
+  });
+}
+
 /** Test seam: replace the loaded set. */
-export function setHooksForTest(a: Attributor[], i: Indulger[]): void {
+export function setHooksForTest(a: Attributor[], i: Indulger[], f?: Finder[]): void {
   attributors = a;
   indulgers = i;
+  if (f) finders = f;
 }
