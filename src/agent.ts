@@ -40,7 +40,7 @@ import { skepticInjection, inSkepticPass, closeSkepticPass, resetSkepticPass, re
 import { refuseIfEcho, resetOutputEchoes, isStateQuery } from './tool-guard.js';
 import { ACCOUNT_REQUEST, IDLE_CALL, LOST_ACCOUNT_REQUEST, beginLostTurn, lostNudge, lostReport, noteCall, resetLost, restartDepth, restartExhausted, unverifiedReport } from './lost.js';
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
-import { reportsRatherThanPromises, stoppedShort } from './announced.js';
+import { promisesTheReportItself, reportsRatherThanPromises, stoppedShort } from './announced.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
 import { deniedWithoutAsking, checkPermission } from './permissions.js';
 import { artifactFor, artifactSessionDir, hasArtifacts, humanBytes, saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
@@ -1319,6 +1319,15 @@ const EMPTY_RESULT_CHARS = 90;
 const MUTATING_TOOLS = new Set(['write_file', 'str_replace']);
 
 /**
+ * How many times a turn may be told to write the report instead of promising it.
+ *
+ * Two, not one: the first correction lands mid-turn and the model sometimes spends a round finishing
+ * a check it had already started. Past two it is not a misunderstanding, and the ordinary discard —
+ * with its clap behind it — is the honest remedy.
+ */
+const REPORT_NUDGE_MAX = 2;
+
+/**
  * Barren calls of ONE tool before saying so. Eight, not twelve: a barren call is a much stronger
  * signal than a call, so the bar to speak is lower while the thing being counted is rarer. On the
  * measured runs no instance reached eight barren calls of any tool; the 30-empty-glob
@@ -1979,6 +1988,8 @@ async function runAgentTurn(rawInput: string): Promise<void> {
   let unwrittenClaimNudges = 0;
   /** "I'll rewrite that now." — announced, never acted. One nudge; see src/announced.ts. */
   let announcedNudges = 0;
+  /** "Let me write the report." — answered once, then let through. See the discard branch below. */
+  let reportNudges = 0;
   // Did this turn actually DO anything? A turn that ran a tool has produced something the operator
   // did not have; its closing "you should also check X" is a caveat, not a dodge.
   let toolsRunThisTurn = 0;
@@ -2376,6 +2387,32 @@ async function runAgentTurn(rawInput: string): Promise<void> {
        * count, and the count rides to the end of the turn: how often this fires, and whether retrying
        * ever breaks the loop, is a measurement rather than an assumption.
        */
+      /**
+       * A PROMISE TO WRITE THE REPORT IS ANSWERED, NOT DISCARDED.
+       *
+       * The discard below is right about narrated intentions and wrong about this one: on a turn whose
+       * deliverable is prose, "let me write the report" promises the DELIVERABLE, and a silent discard
+       * rebuilds identical context and gets the identical sentence. Measured — twenty-two tool calls,
+       * then rounds 12, 13 and 14 were all "let me write the report", each worded slightly differently
+       * so the identical-refusal clap never tripped, and the turn span until the operator typed
+       * "go on" seventy-five minutes later.
+       *
+       * Pushing a message is what breaks it: the next round is built from different history, which is
+       * the only thing that can change a temperature-zero answer. Bounded hard, and after the bound the
+       * ordinary discard resumes — a nudge that can repeat is the loop it replaced.
+       */
+      if (answeringTurn() && reportNudges < REPORT_NUDGE_MAX && promisesTheReportItself(parsed.text ?? response)) {
+        reportNudges++;
+        recordRaw(round, 'promised the report instead of writing it', response);
+        log('INFO', 'report_promise_nudged', { round: String(round), attempt: String(reportNudges) });
+        pushToWindow('assistant', parsed.text ?? response);
+        pushToWindow('user', renderToolResult(
+          'That said you WILL write it; it did not write it. Nothing was performed and nobody can read a '
+          + 'preamble. You have the material — write the report itself NOW, in full, in your next reply, '
+          + 'with no sentence about being about to.'));
+        continue roundLoop;
+      }
+
       if (touchedAnythingThisTurn() && !stopAwaitingOperator() && !replyIsTheAnswer(parsed.text ?? response)) {
         workingRetries++;
         // The transcript keeps it; the model's context does not. "Why did it stop there" stays

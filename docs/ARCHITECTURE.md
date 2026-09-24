@@ -2104,6 +2104,31 @@ see and cannot use costs a round to discover that.
 ordinary turn, and an arbiter that must spawn a child to run one shell command has made the common case
 worse to improve the rare one.
 
+### Promising the report is answered, not discarded
+
+The discard is right about narrated intentions and was wrong about one of them. On a turn whose
+deliverable is prose, *"let me write the report"* promises the **deliverable**, and a silent discard
+rebuilds identical history and gets the identical sentence back.
+
+Measured on the session after `announcesNextAction` shipped: twenty-two tool calls, the work done,
+and then rounds 12, 13 and 14 were each a promise to write the report. Every one was correctly
+identified as a promise and thrown away. The wording drifted just enough between them —
+*"…then write the report"*, *"Let me write the report."*, *"…two final checks, then write the
+report"* — that the three-identical-refusals clap never tripped, so nothing ended it. The turn span
+until the operator gave up and typed "go on" seventy-five minutes later.
+
+The distinction is checkable. *"Let me check the prefab"* promises a TOOL CALL, and a discard costs
+one round and gets the call. *"Let me write the report"* promises TEXT, and a discard can only ever
+produce the sentence again. `promisesTheReportItself` requires both a first-person future promise as
+the last sentence AND an object that is prose — report, summary, findings, answer, write-up — none of
+which names a tool.
+
+It does not accept the reply: a preamble delivers nothing. It answers it, with one pushed message
+saying to write it now, in full, with no sentence about being about to. **Pushing is the point** —
+the next round is built from different history, which is the only thing that can change a
+temperature-zero answer. Bounded at two, after which the ordinary discard resumes with the clap
+behind it, because a nudge that can repeat is the loop it replaced.
+
 ### A widened explore says that it widened
 
 `explore` searches the joined forms first — `ScoreChangeIndicator` — and only when those find

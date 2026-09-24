@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
-const { reportsRatherThanPromises, announcedWithoutActing, worthAsking, saysNotFinished } = await import(`file://${join(DIST, 'announced.js')}`);
+const { promisesTheReportItself, reportsRatherThanPromises, announcedWithoutActing, worthAsking, saysNotFinished } = await import(`file://${join(DIST, 'announced.js')}`);
 
 let fails = 0;
 const ok = (cond, label, extra = '') => {
@@ -129,6 +129,34 @@ console.log('\n— on a turn whose deliverable is prose, a report is the answer 
     reportsRatherThanPromises('The icon is baked: GameOverView.cs has no runtime assignment and GameOverLayer.prefab:219 holds a static sprite GUID. I will write that up next.'),
     'a reply that DELIVERED before promising is still an answer — the anchor is outside the promise',
   );
+}
+
+console.log('\n— promising the REPORT is answered, not discarded: discarding it loops forever —');
+{
+  /**
+   * The three real replies, from the session after the discard shipped. Twenty-two tool calls, the
+   * work done, and then rounds 12, 13 and 14 were each a promise to write the report. Correctly
+   * identified as promises and discarded; the discard leaves no trace, so identical history produced
+   * the sentence again. The wording drifted just enough that the three-identical-refusals clap never
+   * tripped, and the turn span until the operator typed "go on" seventy-five minutes later.
+   *
+   * "Let me check the prefab" promises a TOOL CALL and a discard gets the call. "Let me write the
+   * report" promises TEXT — what the caller asked for — and a discard can only produce it again.
+   */
+  ok(promisesTheReportItself("I've now exercised the full tool surface. Let me confirm the tree is clean after my test edits, then write the report."),
+    'round 12, verbatim');
+  ok(promisesTheReportItself('I have a full picture of the tool surface now. Let me write the report.'),
+    'round 13, verbatim');
+  ok(promisesTheReportItself("I've exercised the full tool surface. Let me do two final checks — whether this tree has a README and confirm my test edits are fully reverted — then write the report."),
+    'round 14, verbatim — the drift that stopped the clap firing');
+
+  // A promise to ACT keeps the discard. That rule was earned by six of six empty-patch runs.
+  ok(!promisesTheReportItself('Let me confirm the exact mechanism with a minimal reproduction before fixing.'),
+    'a promise to run something is NOT a promise to report — it keeps the discard');
+  ok(!promisesTheReportItself('I have looked at the toaster code. I will rewrite that file now.'),
+    'and neither is a promise to edit a file');
+  ok(!promisesTheReportItself('The explore probes returned zero hits even though the file exists, so I fell back to grep.'),
+    'and a reply that IS the report needs no nudge');
 }
 
 console.log(fails ? `\nannounced check: ${fails} FAILED` : '\nannounced check: all passed');

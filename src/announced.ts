@@ -222,6 +222,36 @@ export async function stoppedShort(text: string, didWork: boolean, request: stri
  * passes is everything else — which is the point. This decides whether a reply is SEEN, never whether
  * the turn is over: `finish()` still owns that, and headless still exits no other way.
  */
+/**
+ * A PROMISE TO WRITE THE REPORT IS NOT A PROMISE TO ACT — and on an answering turn the report IS the
+ * act, so discarding it silently is how a turn goes round in a circle.
+ *
+ * Measured, on the session after `announcesNextAction` shipped: twenty-two tool calls, the work done,
+ * and then rounds 12, 13 and 14 were *"Let me write the report"*, *"Let me do two final checks, then
+ * write the report"*, *"I have a full picture now. Let me write the report."* Every one was correctly
+ * identified as a promise and discarded; the discard leaves no trace, so the next round rebuilt from
+ * identical history and the model said it again. The wording drifted just enough that the
+ * three-identical-refusals clap never tripped, and the turn span until the operator gave up and typed
+ * "go on" seventy-five minutes later.
+ *
+ * The distinction is real and checkable: "let me check the prefab" promises a TOOL CALL, and
+ * discarding it costs one round and gets the call. "Let me write the report" promises TEXT — the
+ * thing the caller asked for — and discarding it can only ever produce the same sentence again.
+ *
+ * So this is not used to accept the reply (a reply that is only a preamble delivers nothing). It is
+ * used to answer it: see `agent.ts`, which pushes one corrective saying to write it NOW, in this
+ * reply. That changes the context, which is the only thing that can break a deterministic loop.
+ */
+export function promisesTheReportItself(text: string): boolean {
+  const trimmed = (text ?? '').trim();
+  if (!trimmed || trimmed.length > MAX_CHARS) return false;
+  const last = lastSentence(trimmed);
+  if (!last || !PROMISE.test(last)) return false;
+  // The OBJECT of the promise is prose, not an inspection. Deliberately narrow: these are the words
+  // for handing over an answer, and none of them names a tool.
+  return /\b(report|write\s+(?:it|this|that|them)?\s*up|summar(?:y|ise|ize)|findings|answer|conclusion|verdict|assessment|feedback|write-?up)\b/i.test(last);
+}
+
 export function reportsRatherThanPromises(text: string): boolean {
   const trimmed = (text ?? '').trim();
   if (!trimmed) return false;
