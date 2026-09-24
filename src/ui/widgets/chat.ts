@@ -7,7 +7,7 @@
  */
 
 import blessed from 'blessed';
-import { inlineFormat, renderMarkdownWrapped } from '../../markdown.js';
+import { inlineFormat, renderMarkdown, renderMarkdownWrapped } from '../../markdown.js';
 import { wrapPlain } from '../../dialog.js';
 import { HEADLESS, noopBox } from '../headless.js';
 import { screen, render } from '../screen.js';
@@ -681,6 +681,31 @@ const PREVIEW_LINES: Record<string, number> = {
   'plan:grounding': 2, 'plan:phases': 20, 'plan:steps': 20, 'plan:write': 2,
 };
 const DEFAULT_PREVIEW_LINES = 2;
+
+/**
+ * Tools whose output is PROSE FOR A PERSON, so its markdown is rendered rather than painted raw.
+ *
+ * A subagent's report, an explore answer, a finish summary: these are written in markdown because a
+ * model writes in markdown, and the card showed them as literal `**`, `###` and `-`. The operator
+ * reading a harness report in a card was reading the source of a document, not the document.
+ *
+ * MOST TOOL OUTPUT IS NOT PROSE, and rendering it would be worse than leaving it alone: a shell
+ * script's `#` comments become headings, a diff's `*` become italics, YAML stays YAML. So this is a
+ * list of the ones that are, not a default — the same shape and the same reasoning as PREVIEW_LINES
+ * above, which is also a per-tool DISPLAY decision living with the renderer rather than a capability
+ * the tool declares.
+ *
+ * Brace escaping happens either way: `renderMarkdown` escapes `{`/`}` itself, so a prose tool that
+ * prints JSON cannot inject a blessed tag any more than `escapeBlessedTags` would have let it.
+ */
+const PROSE_TOOLS = new Set([
+  'subagent', 'explore', 'finish', 'corpus_search', 'web_search', 'ayin_help',
+]);
+
+/** Shared with the Ctrl+O browser, so a card and its full output never disagree about what they are. */
+export function toolOutputIsProse(tool: string): boolean {
+  return PROSE_TOOLS.has(tool);
+}
 /** Lines of a write_file diff worth showing before the card starts drowning the transcript. */
 const DIFF_PREVIEW_LINES = 34;
 /** Lines kept from the END of a truncated diff — a diff's tail is where the interesting part often is. */
@@ -903,10 +928,17 @@ export function formatToolResultForChat(tool: string, content: string, elapsedMs
     }
     const max = PREVIEW_LINES[tool] ?? DEFAULT_PREVIEW_LINES;
     const { shown, hiddenLines, hiddenChars } = budgeted(lines, max);
-    const rendered = shown.map(l => {
-      const cut = l.length > 200 ? `${l.slice(0, 200)}…` : l;
-      return `{${theme.faint}-fg}│{/} {${theme.diffCtx}-fg}${escapeBlessedTags(cut)}{/}`;
-    });
+    const clipped = shown.map(l => (l.length > 200 ? `${l.slice(0, 200)}…` : l));
+    /**
+     * CUT FIRST, THEN STYLE. The 200-char clip is applied to the raw line, so it can never land in the
+     * middle of a `{tag}` this function is about to add — which would corrupt every line after it.
+     *
+     * Rendered as ONE block rather than line by line, because a fenced code block is state that spans
+     * lines: markdown asked about a single line cannot know it is inside one.
+     */
+    const rendered = toolOutputIsProse(tool)
+      ? renderMarkdown(clipped.join('\n')).split('\n').map(l => `{${theme.faint}-fg}│{/} ${l}`)
+      : clipped.map(l => `{${theme.faint}-fg}│{/} {${theme.diffCtx}-fg}${escapeBlessedTags(l)}{/}`);
     const more = hiddenLines > 0 || hiddenChars > 0 ? `\n${omissionNote(hiddenLines, hiddenChars)}` : '';
     return rendered.join('\n') + more + toolFooter(tool, content, elapsedMs);
   }

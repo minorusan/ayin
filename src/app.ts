@@ -23,6 +23,8 @@ import {
   onInput, onGlobalKey, focusInput, blurInput, shutdown, getTokensDisplay,
   showAlert, setStickyAlert, clearStickyAlert, registerCommand, formatShellForChat, clearInput,
   lastAssistantMessage, onAssistantMessage, toggleToolOutputFold,
+  escapeBlessedTags,
+  toolOutputIsProse,
 } from './ui.js';
 import { isTranscribing, startTranscript, stopTranscript, transcriptPath, transcriptSize, flush as flushTranscript } from './transcript.js';
 import { executeWipe, humanBytes, planWipe, wipeOverview, type WipeScope } from './wipe.js';
@@ -268,7 +270,17 @@ function renderArtifactsOverlay(): void {
   });
 
   const header = `{#7B8CDE-fg}${a.tool}{/} {#555-fg}${a.params}{/}\n{#555-fg}${ts}{/}\n{#555-fg}${'─'.repeat(40)}{/}\n`;
-  artifactsOverlay.setContent(header + content);
+  /**
+   * THE SAME DECISION THE CARD MADE, so a tool's preview and its full output never disagree about
+   * whether they are a document or a dump. A subagent's report is markdown and was painted here as
+   * literal `**` and `###`; a diff or a YAML tree is not and must stay untouched.
+   *
+   * It also closes a hole this box has had all along: it is built with `tags: true`, so a raw `{` in
+   * ANY tool output was already being read as the start of a blessed tag. `renderMarkdown` escapes
+   * braces; `escapeBlessedTags` does the same for everything else.
+   */
+  const body = toolOutputIsProse(a.tool) ? renderMarkdown(content) : escapeBlessedTags(content);
+  artifactsOverlay.setContent(header + body);
   screen.render();
 }
 
