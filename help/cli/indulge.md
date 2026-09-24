@@ -48,6 +48,20 @@ them searchable.
     --jira <EPIC-KEY>        read that epic and its tickets into the corpus's "jira" domain
     --per-ticket <n>         questions asked of each ticket (default 4)
 
+`ayin indulge --update` refreshes a corpus that has gone out of date instead of rebuilding it. It is
+deterministic first: every chunk records the git blob sha of each file it cited, so comparing those
+against the bytes on disk says exactly which answers describe code that has changed — no model, no
+network. Then only those questions are re-asked. `--update --dry-run` prints the plan and spends
+nothing; `--max-questions N` caps a run.
+
+A file that is not where the corpus left it has usually MOVED, so git is asked before anything is
+judged dead: a rename is followed and the chunk's paths are repaired, which for an identical move
+costs no model call at all. Measured on a real corpus — 943 chunks, of which 254 had moved and 123
+were genuinely deleted. A chunk whose file is really gone is retired (`qa: reject`, which search and
+injection already skip, and `--fix` can reverse), never deleted. Chunks answered on a commit that is
+not in your history are left alone, and so are files with uncommitted changes — a note written
+against a dirty tree describes a moment, not the code.
+
 ## Examples
 
     ayin indulge --domains "rendering,checkout" --depth 2

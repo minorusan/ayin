@@ -333,7 +333,7 @@ function render(
   for (const { chunk, state } of [...assessed.filter((a) => a.state.state !== 'missing'), ...gone]) {
     out.push('');
     if (state.state === 'missing') {
-      out.push(`!! THE CODE THIS DESCRIBES IS GONE — ${state.changed.join(', ')} `
+      out.push(`!! THE CODE THIS DESCRIBES IS GONE — ${state.gone.join(', ')} `
         + 'no longer exist(s) in this checkout. Read it as history, never as a description of the '
         + 'current code, and do not cite it.');
     }

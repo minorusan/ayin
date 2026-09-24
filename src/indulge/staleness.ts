@@ -37,8 +37,18 @@ export interface Staleness {
   state: Freshness;
   /** The one line an agent reads. Branch-led, short, no sha. */
   label: string;
-  /** Cited files whose bytes have moved since the chunk was written. */
+  /** Cited files whose bytes have moved since the chunk was written — INCLUDING the ones that are gone. */
   changed: string[];
+  /**
+   * The subset of `changed` that could not be READ at all — absent, not merely different.
+   *
+   * Separated because the two need opposite treatment and `changed` alone cannot tell them apart: an
+   * edited file is re-answered, an absent one is followed to wherever git says it moved and only
+   * retired if it went nowhere. Measured on the first `--update` run: a chunk citing one moved file
+   * and one edited file was reported wholly `missing`, and every path in `changed` read as deleted —
+   * two of which were sitting on disk.
+   */
+  gone: string[];
   /** True when the change is only in the working tree — very often the agent's own edit. */
   uncommitted: boolean;
 }
@@ -100,12 +110,18 @@ export function assessChunk(repoPath: string, chunk: Chunk): Staleness {
   const when = `answered ${day(chunk.createdAt)}${where}`;
 
   const changed: string[] = [];
+  const gone: string[] = [];
   let missing = false;
   for (const c of chunk.citations) {
     let body: Buffer;
     // `changed` holds PATHS: everything below asks git about them (uncommitted?, how big a delta?), and
     // a label with line numbers in it is not a path git can be asked about.
-    try { body = readFileSync(join(citationBase(repoPath, c), c.path)); } catch { missing = true; changed.push(c.path); continue; }
+    try { body = readFileSync(join(citationBase(repoPath, c), c.path)); } catch {
+      missing = true;
+      if (!gone.includes(c.path)) gone.push(c.path);
+      if (!changed.includes(c.path)) changed.push(c.path);
+      continue;
+    }
     if (blobSha(body) !== c.sha && !changed.includes(c.path)) changed.push(c.path);
   }
 
@@ -118,18 +134,18 @@ export function assessChunk(repoPath: string, chunk: Chunk): Staleness {
     const named = [...new Set(tickets.map((c) => `${c.ticket}${c.at ? ` as of ${c.at}` : ''}`))].join(', ');
     return missing
       ? {
-        state: 'missing', changed, uncommitted: false,
+        state: 'missing', changed, gone, uncommitted: false,
         label: `[corpus · STALE] ${when} · the corpus copy of ${named} is gone — re-run indulge --jira`,
       }
       : {
-        state: 'fresh', changed: [], uncommitted: false,
+        state: 'fresh', changed: [], gone: [], uncommitted: false,
         label: `[corpus] from ${named} · read ${day(chunk.createdAt)} — Jira may have moved since`,
       };
   }
 
   if (missing) {
     return {
-      state: 'missing', changed, uncommitted: false,
+      state: 'missing', changed, gone, uncommitted: false,
       label: `[corpus · STALE] ${when} · ${changed.join(', ')} no longer exists · line refs as of then`,
     };
   }
@@ -138,11 +154,11 @@ export function assessChunk(repoPath: string, chunk: Chunk): Staleness {
     // Fresh bytes, but the chunk may still come from a line of development you are not on.
     if (chunk.commit && isAncestor(repoPath, chunk.commit) === false) {
       return {
-        state: 'divergent', changed: [], uncommitted: false,
+        state: 'divergent', changed: [], gone: [], uncommitted: false,
         label: `[corpus · DIVERGENT] ${when}, which is not in your current history`,
       };
     }
-    return { state: 'fresh', changed: [], uncommitted: false, label: `[corpus] ${when} — cited files unchanged` };
+    return { state: 'fresh', changed: [], gone: [], uncommitted: false, label: `[corpus] ${when} — cited files unchanged` };
   }
 
   const uncommitted = changed.some((f) => hasUncommittedChange(repoPath, f));
@@ -156,5 +172,5 @@ export function assessChunk(repoPath: string, chunk: Chunk): Staleness {
   if (divergent) parts.push('not in your current history');
   parts.push('line refs as of then');
 
-  return { state: divergent ? 'divergent' : 'stale', changed, uncommitted, label: parts.join(' · ') };
+  return { state: divergent ? 'divergent' : 'stale', changed, gone, uncommitted, label: parts.join(' · ') };
 }

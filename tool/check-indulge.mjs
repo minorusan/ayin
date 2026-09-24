@@ -766,6 +766,7 @@ repStore.endRun('r1');
 // citation attached, and the citation makes it MORE believable. Chunks are never silently dropped
 // (a chunk written on dev is usually still broadly true) and never silently trusted either.
 
+const RN = await import(join(ROOT, 'dist/indulge/renames.js'));
 const ST = await import(join(ROOT, 'dist/indulge/staleness.js'));
 const AN2 = await import(join(ROOT, 'dist/indulge/answer.js'));
 
@@ -823,6 +824,58 @@ ok(divergent.state === 'divergent' && /not in your current history/.test(diverge
 
 rmSync(join(G2, 'src/a.ts'));
 ok(ST.assessChunk(G2, base).state === 'missing', 'a cited file that no longer exists is its own state');
+
+console.log('\n— absent is not the same as merely changed, and a moved file is not a dead one —');
+{
+  /**
+   * BOTH HALVES OF THE FIRST REAL `--update` RUN. On a live corpus it reported 377 of 943 chunks as
+   * `missing` and offered to retire every one. They were a single `R100` refactor commit — the files
+   * still existed, one directory over — and the retire list even named two files that were sitting on
+   * disk, because `changed` holds the absent paths AND the merely-edited ones and nothing told them
+   * apart. 377 answers were one keystroke from being thrown away.
+   */
+  const G3 = join(TMP, 'rename-repo');
+  mkdirSync(join(G3, 'old'), { recursive: true });
+  const rsh = (cmd) => execFileSync('bash', ['-c', cmd], { cwd: G3, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  writeFileSync(join(G3, 'old/Service.cs'), 'class Service { void Go() {} }\n');
+  writeFileSync(join(G3, 'old/Edited.cs'), 'class Edited { int n = 1; }\n');
+  rsh('git init -q . && git config user.email t@t && git config user.name t && git add -A && git commit -qm first');
+  const shaService = S.blobSha(readFileSync(join(G3, 'old/Service.cs')));
+  const shaEdited = S.blobSha(readFileSync(join(G3, 'old/Edited.cs')));
+
+  // One file MOVES untouched; the other stays put and is edited. The chunk cites both.
+  mkdirSync(join(G3, 'new'), { recursive: true });
+  rsh('git mv old/Service.cs new/Service.cs');
+  writeFileSync(join(G3, 'old/Edited.cs'), 'class Edited { int n = 2; }\n');
+  rsh('git add -A && git commit -qm "fold old into new"');
+
+  const chunk = {
+    chunkId: 'c2', questionId: 'q2', repoKey: 'k', domain: 'd', question: 'what?', answer: 'a',
+    files: ['old/Service.cs', 'old/Edited.cs'],
+    citations: [
+      { path: 'old/Service.cs', startLine: 1, endLine: 1, sha: shaService },
+      { path: 'old/Edited.cs', startLine: 1, endLine: 1, sha: shaEdited },
+    ],
+    entity: null, category: 'functionality', model: 'm', createdAt: '2026-08-14T10:00:00Z', sourceSha: 'x',
+  };
+  const st = ST.assessChunk(G3, chunk);
+  ok(st.state === 'missing', 'a chunk citing one absent file is missing overall', st.state);
+  ok(st.gone.join(',') === 'old/Service.cs', 'but only the UNREADABLE path is `gone`', JSON.stringify(st.gone));
+  ok(
+    st.changed.includes('old/Edited.cs') && !st.gone.includes('old/Edited.cs'),
+    'the edited file is changed and NOT gone — retiring on `changed` named a file that exists',
+    JSON.stringify(st.changed),
+  );
+
+  ok(RN.followRename(G3, 'old/Service.cs') === 'new/Service.cs', 'git resolves the rename, so the chunk is re-pathed rather than retired');
+  ok(RN.followRename(G3, 'old/Edited.cs') === null, 'a file that never moved follows nowhere');
+  ok(RN.followRename(G3, 'old/NeverExisted.cs') === null, 'and neither does one git has never heard of');
+
+  // A real delete has to stay a real delete, or --update never retires anything.
+  rsh('git rm -q new/Service.cs && git commit -qm "really delete it"');
+  RN.clearRenameCache();
+  ok(RN.followRename(G3, 'new/Service.cs') === null, 'a genuine deletion follows nowhere — this is what may be retired');
+}
 
 const noProv = ST.assessChunk(G2, { ...base, branch: undefined, commit: undefined });
 ok(/branch unknown/.test(noProv.label), 'a chunk predating provenance says so instead of claiming a branch', noProv.label);

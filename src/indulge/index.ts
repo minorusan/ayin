@@ -30,10 +30,11 @@ import { writeReport } from './report.js';
 import { recordAnswer, recordPrompt, recordTool } from '../session-record.js';
 import { initSession } from '../session-store.js';
 import { assessChunk } from './staleness.js';
+import { followRename } from './renames.js';
 import { JIRA_DOMAIN, runJiraIndulge } from './jira.js';
 import { MAX_EPIC_CHILDREN } from '../tools/connectors/jira/client.js';
 import { detectVendorRoots } from './vendor.js';
-import { CATEGORIES, openStore, StoreLockedError, type Category, type Manifest, type Stage, sameProject, repoKey, repoIdentity } from './store.js';
+import { CATEGORIES, openStore, StoreLockedError, type Category, type Chunk, type Manifest, type Stage, sameProject, repoKey, repoIdentity } from './store.js';
 
 const out = (line = ''): void => { process.stdout.write(`${line}\n`); };
 
@@ -53,6 +54,17 @@ export interface IndulgeArgs {
   qa?: boolean;
   qaRules?: boolean;
   fix?: boolean;
+  /**
+   * `--update` — re-answer the chunks whose code has changed since they were written.
+   *
+   * A corpus is a set of claims about a tree, and the tree moves. Until this existed the only
+   * remedies were to keep the stale chunks (labelled, and still retrieved) or rebuild from scratch,
+   * which is the whole overnight job for the handful of files that actually moved. The staleness
+   * itself was already computed and already exact — `assessChunk` hashes every citation's bytes
+   * against the blob sha recorded when the answer was written — so the missing half was only the
+   * refresh. Composes with `--dry-run`, which costs nothing and changes nothing.
+   */
+  update?: boolean;
   embedOnly: boolean;
   deep: boolean;
   importFrom?: string;
@@ -147,6 +159,7 @@ export function parseArgs(argv: string[]): { args: IndulgeArgs; errors: string[]
       case '--qa': args.qa = true; break;
       case '--qa-rules': args.qa = true; args.qaRules = true; break;
       case '--fix': case '--fixembed': args.fix = true; break;
+      case '--update': case '--refresh': args.update = true; break;
       case '--dry-run': args.dryRun = true; break;
       case '--restart': args.restart = true; break;
       case '--import': args.importFrom = optionalValue(); break;
@@ -198,6 +211,7 @@ const USAGE = [
   '  ayin indulge --status        what it is doing now, and how far along',
   '  ayin indulge --report        write the audit markdown and stop',
   '  ayin indulge --dry-run       discover only — file list + question estimate, spends nothing',
+  '  ayin indulge --update        re-answer the chunks whose code has changed (--dry-run to see the plan)',
   '',
   '  ayin indulge --embed         vectorise the corpus for semantic search (CPU, no GPU needed)',
   '  ayin indulge --search "<q>"  ask the corpus what it knows — exactly what the agent would be handed',
@@ -327,6 +341,211 @@ async function runQaPass(repoPath: string, args: IndulgeArgs): Promise<number> {
  * Embedding runs last and only over what is missing a vector, so a fix costs one embed per repaired
  * chunk rather than a re-embed of the corpus.
  */
+/**
+ * `--update` — the corpus is a set of claims about a tree, and the tree moved.
+ *
+ * WHAT WAS MISSING, AND WHAT WAS NOT. The staleness itself has always been exact and deterministic:
+ * `assessChunk` hashes every citation's current bytes against the blob sha recorded when the answer
+ * was written, with no model and no network. That is strictly better than asking git — `git show
+ * HEAD:file` describes the commit, and the file in front of you may differ from both. What did not
+ * exist was the other half: until now a stale chunk could only be labelled (and still retrieved), or
+ * the whole corpus rebuilt, which is an overnight job for the handful of files that actually changed.
+ *
+ * THE UNIT OF REFRESH IS THE QUESTION. "How does the bundle loader handle a 404" is still the right
+ * question about a file that changed this morning; only the answer aged. Re-answering it costs one
+ * model call, keeps the questionId, the domains and the category, and leaves discovery and question
+ * generation — the expensive stages — untouched. Re-discovering would be the whole job again to
+ * arrive at almost the same questions.
+ *
+ * FOUR STATES, THREE OF THEM LEFT ALONE:
+ *
+ *   stale      the citations' bytes changed → re-answer. This is the feature.
+ *   missing    the file is GONE → nothing to re-answer, so the chunk is RETIRED rather than deleted:
+ *              `qa: reject`, which search and injection already skip, and which `--fix` can reverse.
+ *              Deleting would destroy the only record that the question was ever asked.
+ *   divergent  answered on a commit that is not in your history → left, and counted. It is not wrong,
+ *              it is from somewhere else, and re-answering it here would silently rebind somebody
+ *              else's note to your branch.
+ *   fresh      nothing to do.
+ *
+ * AND A FILE WITH UNCOMMITTED CHANGES IS SKIPPED. A chunk written against a dirty tree describes a
+ * moment rather than the code: it carries a commit it does not match, and it goes stale again the
+ * instant the edit is committed or reverted. Named in the report, so the skip is a fact rather than
+ * a silence.
+ */
+async function runUpdatePass(repoPath: string, args: IndulgeArgs): Promise<number> {
+  const store = openStore(repoPath);
+  if (!store.exists()) { out(`No corpus for ${resolve(repoPath)} yet.`); return 2; }
+  const root = resolve(repoPath);
+
+  const assessed = store.chunks()
+    .filter((c) => c.qa?.verdict !== 'reject')      // already retired; an audit's verdict stands
+    .map((chunk) => ({ chunk, state: assessChunk(root, chunk) }));
+
+  /**
+   * A MISSING FILE HAS USUALLY MOVED. Resolved before anything is judged stale or dead.
+   *
+   * See `renames.ts` for the measurement that forced this: on the first real run, 377 of 943 chunks
+   * came back `missing` and every one was a single `R100` refactor commit. Following the rename
+   * repairs the chunk's paths; whether it then needs a model call is decided by re-assessing it,
+   * exactly as if it had never moved — an R100 move leaves the bytes identical, so it comes back
+   * FRESH and costs nothing.
+   */
+  const moved: Array<{ chunk: Chunk; from: string; to: string }> = [];
+  for (const row of assessed) {
+    if (row.state.state !== 'missing') continue;
+    const map = new Map<string, string>();
+    for (const absent of row.state.gone) {
+      const to = followRename(root, absent);
+      if (to && existsSync(join(root, to))) map.set(absent, to);
+    }
+    /**
+     * EVERY ABSENT PATH OR NONE — and absent is not the same as changed.
+     *
+     * Keyed on `gone`, which is only the citations that could not be READ. Keying it on `changed`
+     * (which also holds the ones that merely differ) meant a chunk citing one moved file and one
+     * edited file could never be re-pathed, and was then reported as deleted — with the edited file,
+     * sitting on disk, named in the retire list. A chunk half re-pointed would cite two versions of
+     * the same code, so it is still all-or-nothing; it is just the right set now. Anything that
+     * merely CHANGED is handled by the re-assess below, as stale, like every other edit.
+     */
+    if (map.size === 0 || map.size !== row.state.gone.length) continue;
+    const repathed: Chunk = {
+      ...row.chunk,
+      files: row.chunk.files.map((f) => map.get(f) ?? f),
+      citations: row.chunk.citations.map((c) => (map.has(c.path) ? { ...c, path: map.get(c.path) as string } : c)),
+      entity: row.chunk.entity && map.has(row.chunk.entity.file)
+        ? { ...row.chunk.entity, file: map.get(row.chunk.entity.file) as string }
+        : row.chunk.entity,
+    };
+    const [from, to] = [...map.entries()][0];
+    moved.push({ chunk: repathed, from, to });
+    // Re-assessed at the NEW path, so an identical move lands in `fresh` and a move-plus-edit lands
+    // in `stale` and is re-answered with everything else.
+    row.chunk = repathed;
+    row.state = assessChunk(root, repathed);
+  }
+
+  const missing = assessed.filter((a) => a.state.state === 'missing');
+  const divergent = assessed.filter((a) => a.state.state === 'divergent');
+  const staleAll = assessed.filter((a) => a.state.state === 'stale');
+  const dirty = staleAll.filter((a) => a.state.uncommitted);
+  const stale = staleAll.filter((a) => !a.state.uncommitted);
+  const fresh = assessed.length - missing.length - divergent.length - staleAll.length;
+
+  /** Every file behind a set of chunks, deduplicated — what the operator recognises. */
+  const filesOf = (rows: typeof assessed): string[] =>
+    [...new Set(rows.flatMap((a) => a.state.changed.length ? a.state.changed : a.chunk.files))].sort();
+  /** Only the ones that are actually ABSENT — what a retire is really about. */
+  const goneIn = (rows: typeof assessed): string[] =>
+    [...new Set(rows.flatMap((a) => a.state.gone))].sort();
+
+  out(`${assessed.length} live chunk(s) in ${root}`);
+  out(`  fresh      ${fresh}`);
+  out(`  stale      ${stale.length}${stale.length ? ` — ${filesOf(stale).length} file(s) changed` : ''}`);
+  out(`  uncommitted ${dirty.length}${dirty.length ? ' — skipped, their files have working-tree changes' : ''}`);
+  out(`  divergent  ${divergent.length}${divergent.length ? ' — answered off your history, left alone' : ''}`);
+  out(`  moved      ${moved.length}${moved.length ? ' — git found the rename; paths repaired' : ''}`);
+  out(`  deleted    ${missing.length}${missing.length ? ' — the cited file is gone, and git knows of no rename' : ''}`);
+
+  const budget = args.maxQuestions ?? Infinity;
+  const todo = stale.slice(0, budget === Infinity ? undefined : budget);
+
+  if (args.dryRun) {
+    out('');
+    out('--dry-run: nothing was changed and nothing was spent.');
+    if (todo.length) {
+      out(`would re-answer ${todo.length} question(s) across:`);
+      for (const f of filesOf(todo).slice(0, 40)) out(`  ${f}`);
+      const rest = filesOf(todo).length - 40;
+      if (rest > 0) out(`  … and ${rest} more file(s)`);
+    }
+    if (moved.length) {
+      out(`would re-path ${moved.length} chunk(s) whose file moved, for no model calls:`);
+      for (const m of moved.slice(0, 6)) out(`  ${m.from}  ->  ${m.to}`);
+      if (moved.length > 6) out(`  … and ${moved.length - 6} more`);
+    }
+    if (missing.length) {
+      out(`would retire ${missing.length} chunk(s), citing ${goneIn(missing).length} file(s) git cannot follow:`);
+      for (const f of goneIn(missing).slice(0, 10)) out(`  ${f}`);
+    }
+    if (dirty.length) out(`would SKIP ${dirty.length} chunk(s): ${filesOf(dirty).slice(0, 10).join(', ')} — commit or revert first`);
+    return 0;
+  }
+
+  if (!todo.length && !missing.length && !moved.length) { out(''); out('Nothing to update.'); return 0; }
+
+  // The same unconditional snapshot `--fix` takes, for the same reason: a corpus is a night on a
+  // shared card, and this pass rewrites chunks in place.
+  const backup = store.snapshot('update');
+  out(backup ? `backup: ${backup}` : 'WARNING: could not write a backup — nothing will be retired this run');
+
+  let stopping = false;
+  process.on('SIGINT', () => { stopping = true; out('\nstopping after the current chunk — everything refreshed so far is kept'); });
+  await initSession();
+  recordPrompt(`ayin indulge --update --repoPath ${repoPath}`);
+
+  /**
+   * THE MOVES LAND FIRST, because they are deterministic, free, and they shrink everything after
+   * them: a chunk re-pathed out of `missing` is one fewer chunk to retire, and a chunk whose bytes
+   * did not change with the move needs no answer at all.
+   */
+  let repathed = 0;
+  for (const m of moved) {
+    store.saveChunk(m.chunk);
+    store.setQuestionFile(m.chunk.questionId, m.to, `moved: ${m.from} -> ${m.to}`);
+    repathed++;
+  }
+  if (repathed) out(`re-pathed ${repathed} chunk(s) to where git says their file moved`);
+
+  // RETIRED next, because it is deterministic and free: a chunk about a deleted file is wrong in a
+  // way no model call can fix, and leaving it retrievable while the slow half runs is the one outcome
+  // this pass exists to prevent. Refused without a backup, like `--fix`.
+  let retired = 0;
+  if (backup) {
+    for (const { chunk, state } of missing) {
+      store.setChunkQa(chunk.chunkId, {
+        verdict: 'reject',
+        why: `cited file gone: ${state.gone.join(', ')}`,
+        by: 'rule',
+      });
+      retired++;
+    }
+    if (retired) out(`retired ${retired} chunk(s) whose file no longer exists`);
+  }
+
+  let refreshed = 0, failed = 0, done = 0;
+  const started = Date.now();
+  let lastLine = 0;
+  for (const { chunk } of todo) {
+    if (stopping) break;
+    done++;
+    // DELETE THEN RE-QUEUE, in that order: `answerQuestions` skips a question whose chunk already
+    // exists (answer.ts), so a re-queue alone would be a no-op that looked like success.
+    store.deleteChunk(chunk.chunkId);
+    store.setQuestionStatus(chunk.questionId, 'pending', 'stale — re-queued by --update');
+    const a = await answerQuestions({
+      store, repoPath: root, questionIds: [chunk.questionId], limit: 1, shouldStop: () => stopping,
+    });
+    if (a.answered > 0) refreshed++; else failed++;
+
+    const nowMs = Date.now();
+    if (nowMs - lastLine > 3000 || done === todo.length) {
+      lastLine = nowMs;
+      const el = (nowMs - started) / 1000;
+      const left = todo.length - done;
+      const eta = done > 0 ? Math.round((el / done) * left) : 0;
+      out(`  ${done}/${todo.length} · ${refreshed} refreshed · ${failed} unanswered · ${Math.round(el)}s elapsed`
+        + (left > 0 ? ` · ~${eta}s left` : ''));
+    }
+  }
+
+  out('');
+  out(`${repathed} re-pathed · ${refreshed} refreshed · ${retired} retired · ${failed} unanswered${stopping ? ' · stopped early' : ''}`);
+  if (refreshed > 0) out('Vectors for the new answers: ayin indulge --embed');
+  return 0;
+}
+
 async function runFixPass(repoPath: string, args: IndulgeArgs): Promise<number> {
   const store = openStore(repoPath);
   if (!store.exists()) { out(`No corpus for ${resolve(repoPath)} yet.`); return 2; }
@@ -882,6 +1101,7 @@ export async function runIndulge(argv: string[]): Promise<number> {
   if (args.retryFailed) return runRetryFailed(repoPath, args);
   if (args.qa) return runQaPass(repoPath, args);
   if (args.fix) return runFixPass(repoPath, args);
+  if (args.update) return runUpdatePass(repoPath, args);
   // `--server` IMPLIES an import: `ayin indulge --import --server host:port` is what the operator types,
   // and `--import` there carries no path. Checked first so a bare `--import` with no value cannot be
   // read as a directory called "--server".

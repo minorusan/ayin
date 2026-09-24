@@ -5544,6 +5544,50 @@ configured registry **only when that is a private one** — a checkout pointed a
 no passive check, since `ayin` is a plausible public name and that would both phone home uninvited
 and risk advertising a stranger's package as your update. `AYIN_UPDATE_CHECK=0` disables it.
 
+#### `--update` — refresh the chunks whose code moved, not the whole corpus
+
+A corpus is a set of claims about a tree, and the tree moves. The staleness was always exact —
+`assessChunk` hashes every citation's current bytes against the blob sha recorded when the answer was
+written, no model and no network, and it beats asking git because `git show HEAD:file` describes the
+commit while the file in front of you may differ from both. What did not exist was the other half: a
+stale chunk could only be labelled and still retrieved, or the whole corpus rebuilt overnight for the
+handful of files that actually changed.
+
+**The unit of refresh is the question.** "How does the bundle loader handle a 404" is still the right
+question about a file that changed this morning; only the answer aged. Re-answering costs one model
+call and keeps the questionId, the domains and the category — discovery and question generation, the
+expensive stages, are untouched. It reuses `--fix`'s dance exactly: delete the chunk, flip its
+question to `pending`, `answerQuestions({questionIds:[id]})`. Delete FIRST, because `answer.ts` skips
+a question whose chunk already exists, so a re-queue alone is a no-op that looks like success.
+
+**A missing file has usually MOVED.** This is the finding that shaped the feature. The first
+`--update --dry-run` ever run, against a real 943-chunk corpus, reported **377 chunks missing and
+offered to retire every one** — and they were a single refactor commit, *"Fold Games/Shared/Codebase
+into Scripts/GameShared"*, which git records as `R100`: a hundred-percent identical rename. So
+`renames.ts` asks git before anything is judged dead, caching the rename map per COMMIT — one
+refactor moves hundreds of files, and 377 `git show` calls over the same commit is not a cache miss,
+it is a design error. Following the rename repairs the chunk's paths, and because an R100 move leaves
+the bytes identical the chunk re-assesses as FRESH: repaired for zero model calls. On that corpus,
+254 moved and 123 were genuinely deleted.
+
+**`gone` is not `changed`.** The same dry run named two files in its retire list that were sitting on
+disk. `Staleness.changed` holds every citation that differs, which includes the absent ones AND the
+merely-edited ones, and the two need opposite treatment. `Staleness.gone` is now the subset that
+could not be READ, and the re-path guard keys on it — so a chunk citing one moved file and one edited
+file is re-pathed for the first and re-answered for the second, where before it was reported deleted.
+
+| state | what `--update` does | why |
+|---|---|---|
+| `stale` | re-answer the question | the answer aged, the question did not |
+| moved (was `missing`) | repair the paths, then re-assess | git resolved the rename; an identical move needs no model call |
+| still `missing` after that | retire via `qa: reject` | nothing to re-answer; reversible, and search/injection already skip rejects |
+| `divergent` | leave it, count it | it is not wrong, it is from another line of history |
+| uncommitted | skip, and name the files | a chunk written against a dirty tree describes a moment |
+
+`--dry-run` composes with it and spends nothing, `--max-questions` caps a run, and an unconditional
+snapshot is taken before anything is written, like `--fix`.
+
+
 ### `ayin update` on a linked checkout: the two ways it used to hurt
 
 The registry path is not what runs on a machine whose `ayin` resolves to a git checkout, so

@@ -767,6 +767,20 @@ export class IndulgeStore {
     appendFileSync(this.questionsFile, JSON.stringify({ id, status, note, updatedAt: now() }) + '\n');
   }
 
+  /**
+   * Re-point a question at a file that MOVED, without touching anything else about it.
+   *
+   * Appended as a delta like every other change to a question, so the history of the record stays
+   * readable — `questions()` merges `{...prev, ...row}` in order, and a row carrying `file` replaces
+   * only that field. Used by `--update` when git reports the citation's path as a rename: the
+   * question is still exactly the right question, it is simply about a file that is now somewhere
+   * else, and leaving the old path would make the re-answer fail as "file no longer readable".
+   */
+  setQuestionFile(id: string, file: string, note?: string): void {
+    this.ensure();
+    appendFileSync(this.questionsFile, JSON.stringify({ id, file, note, updatedAt: now() }) + '\n');
+  }
+
   /** Every question, with each id's lines merged in order. */
   questions(): QuestionRecord[] {
     const byId = new Map<string, QuestionRecord>();
