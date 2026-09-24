@@ -397,6 +397,24 @@ console.log('\nperform_edit + find_relevant_files');
   ok(pe.matchTrailingNewline('a\nb\n', 'a\nb\n\n\n') === 'a\nb\n\n\n', 'extra blank lines are an edit, not a byte to drop');
   ok(pe.matchTrailingNewline('', '') === '', 'and an empty file is not given one');
 
+  /**
+   * A CHANGE WITHOUT ITS SURROUNDINGS DOES NOT SAY WHERE IT LANDED.
+   *
+   * `@@ line 198 @@ -0 +1` and one `+` line is true and answers the wrong question: the caller wants
+   * to know whether the insert went inside the right method. Reported verbatim — "I had to do a
+   * follow-up read_file to verify placement" — and that follow-up is the whole-file re-send the edit
+   * notes in readGuard exist to avoid.
+   */
+  {
+    const before = ['using System;', '', 'class Foo {', '  int a = 1;', '  int b = 2;', '}'].join('\n');
+    const after = ['using System;', '', 'class Foo {', '  int a = 1;', '  int c = 9;', '  int b = 2;', '}'].join('\n');
+    const d = pe.lineDiff(before, after);
+    ok(/^@@ line 5 @@/.test(d), 'the diff still leads with the line it starts at', d.split('\n')[0]);
+    ok(d.includes('+   int c = 9;'), 'and the added line is marked');
+    ok(d.includes('    int a = 1;') && d.includes('    int b = 2;'), '  → with the lines either side of it, unmarked');
+    ok(!/^[+-]\s+int [ab]/m.test(d), '  → and context is never mistakable for part of the change');
+  }
+
   // THE DIFF IS EVIDENCE, NOT A CLAIM. "I made the change" reads exactly like "I did not"; a diff does
   // not. This is the failure ayin has measured repeatedly.
   const d = pe.lineDiff('a\nb\nc\n', 'a\nB2\nc\n');

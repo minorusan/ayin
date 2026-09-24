@@ -323,8 +323,35 @@ export async function setPrefabProperty(req: EditRequest): Promise<EditResult> {
       error: `${located.label} has no property "${req.property}". It has: ${keys.slice(0, 24).join(', ')}${keys.length > 24 ? `, +${keys.length - 24} more` : ''}`,
     };
   }
-  if (value.kind === 'map' || value.kind === 'seq') {
-    return { ok: false, error: `"${req.property}" is a ${value.kind}, not a single value — name a leaf inside it (e.g. ${req.property}.x)` };
+  /**
+   * A CONTAINER IS REFUSED WITH WHAT IS ACTUALLY ADDRESSABLE IN IT, per kind.
+   *
+   * The old message said `name a leaf inside it (e.g. <property>.x)` for a map AND for a list, and
+   * `.x` is the FLOW-MAP form — the one that works on `m_Pivot`. Pointed at a list it is advice that
+   * cannot succeed: reported verbatim, a reader tried `_scriptableObjectInstallers[1]` and then
+   * `_scriptableObjectInstallers.x`, had both refused, and was left guessing "the actual leaf naming
+   * convention for a list element", which does not exist. A refusal that suggests a syntax the tool
+   * does not implement costs more than one that says plainly what it cannot do.
+   */
+  if (value.kind === 'map') {
+    const keys = value.children.map((c) => c.key).filter(Boolean);
+    return {
+      ok: false,
+      error: `"${req.property}" is a map, not a single value — name one of its keys: `
+        + `${keys.slice(0, 16).map((k) => `${req.property}.${k}`).join(', ')}`
+        + `${keys.length > 16 ? `, +${keys.length - 16} more` : ''}`,
+    };
+  }
+  if (value.kind === 'seq') {
+    const items = value.children.map((c) => (c.value.raw || '(nested)').trim());
+    return {
+      ok: false,
+      error: `"${req.property}" is a LIST of ${items.length} item(s), and this tool writes single `
+        + `values — it has no index syntax and cannot add or remove entries. Its items are: `
+        + `${items.slice(0, 8).join(' · ')}${items.length > 8 ? ` · +${items.length - 8} more` : ''}. `
+        + `To change the list itself, edit the YAML with str_replace after reading the lines `
+        + `prefab_inspect reports for it.`,
+    };
   }
 
   let replacement: string;

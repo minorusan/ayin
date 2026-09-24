@@ -200,13 +200,31 @@ export function lineDiff(before: string, after: string, maxLines = 60): string {
   const removed = a.slice(head, a.length - tail);
   const added = b.slice(head, b.length - tail);
   const out: string[] = [`@@ line ${head + 1} @@  -${removed.length} +${added.length}`];
+  /**
+   * A FEW LINES EITHER SIDE, because a changed line alone does not say WHERE it landed.
+   *
+   * `@@ line 198 @@ -0 +1` and one `+` line is a true statement that answers the wrong question: the
+   * caller wants to know whether the insert went inside the right method, above the right field,
+   * after the right brace. Reported verbatim — *"doesn't show surrounding lines. I had to do a
+   * follow-up read_file to verify placement"* — and that follow-up read is the exact re-send the
+   * edit-note mechanism in `readGuard.ts` exists to avoid. Three lines here are cheaper than a whole
+   * file there.
+   *
+   * Taken from BEFORE, so the context is the file as it was in the caller's head, and marked with a
+   * space like a unified diff so it cannot be mistaken for part of the change.
+   */
+  const CONTEXT = 3;
+  const context = (from: number, to: number): string[] =>
+    a.slice(Math.max(0, from), Math.max(0, to)).map((l) => `  ${l}`);
   const show = (lines: string[], sign: string): void => {
     if (lines.length <= maxLines) { out.push(...lines.map((l) => `${sign} ${l}`)); return; }
     out.push(...lines.slice(0, maxLines).map((l) => `${sign} ${l}`));
     out.push(`${sign} … ${lines.length - maxLines} more line(s)`);
   };
+  out.push(...context(head - CONTEXT, head));
   show(removed, '-');
   show(added, '+');
+  out.push(...context(a.length - tail, a.length - tail + CONTEXT));
   return out.join('\n');
 }
 

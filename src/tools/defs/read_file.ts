@@ -58,7 +58,9 @@ function structureReply(
     lines: String(total), why,
   });
   const partial = skel.tier === 'full' ? '' : ` (${skel.tier} form — the full one did not fit)`;
-  const lead = why === 'first read'
+  const lead = why === 'asked for'
+    ? `${shown} — ${total} lines. Structure only, no bodies${partial}. \`expand_method\` returns one body:`
+    : why === 'first read'
     ? `${shown} — ${total} lines, too big for one window. Structure only, no bodies${partial}:`
     : `${shown} — ${total} lines. You have read ${why} of this file without finding what you are after, `
       + `so here is its structure instead of another window${partial}:`;
@@ -78,6 +80,7 @@ export const tool: Tool = {
       { name: 'limit', type: 'number', description: 'Max lines to return (text only; capped per call, the reply says how to continue)', required: false },
       { name: 'tail', type: 'number', description: 'Return the LAST n lines instead — what a log is read for; no need to learn the length first', required: false },
       { name: 'around', type: 'number', description: 'Centre a focused window on this line, with context on BOTH sides — paste a grep hit here rather than computing an offset. Widen it with limit=', required: false },
+      { name: 'structure', type: 'string', description: 'true returns the file\'s SHAPE instead of its lines: every type, every member, each with its exact line range, no bodies. Ask for it when you want the API surface — the fields, the methods, the lifecycle hooks — rather than the code. Then `expand_method` for one body.', required: false },
     ],
     async execute(params) {
       if (!params.path) return 'Error: path required';
@@ -147,6 +150,24 @@ export const tool: Tool = {
       // window and, on a hosted million-token one, turned every real file into three calls.
       const maxLines = await readCap();
       const size = Number.isFinite(askedLimit) && askedLimit > 0 ? Math.min(askedLimit, maxLines) : maxLines;
+
+      /**
+       * THE SHAPE, ON REQUEST — not only when the file is too big to send.
+       *
+       * `structureReply` already existed and was reachable two ways, both of them the harness's
+       * decision: the first read of a file that does not fit, and the read that shows the model has
+       * started hunting. A file that DOES fit could not be asked for as structure at all, so "what
+       * are this MonoBehaviour's serialized fields and public methods" had no cheaper answer than
+       * reading the whole class. Reported verbatim: *"there's no 'show me the class skeleton' view."*
+       * There was; it just could not be asked for.
+       *
+       * Falls through to the ordinary window when no language claims the file or it declares nothing,
+       * for the same reason the automatic path does: an empty skeleton is a worse answer than lines.
+       */
+      if (String(params.structure ?? '').toLowerCase() === 'true') {
+        const asked = structureReply(resolved, params.path, text, maxLines, total, 'asked for');
+        if (asked) return asked;
+      }
       /**
        * `tail` — the LAST n lines, which is what a log is ever read for.
        *
