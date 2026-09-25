@@ -27,8 +27,9 @@
  * putting on a diagram.
  *
  * WHAT IS BORROWED RATHER THAN REBUILT: `languageFor` picks the parser, `surfaceOf` gives types and
- * members with comments and verbatim strings already stripped, `domainOf` gives the assembly, and
- * `toPuml` turns the result into PlantUML. Nothing here re-parses anything that module already parses.
+ * members with comments and verbatim strings already stripped, and `domainOf` gives the assembly.
+ * Nothing here re-parses anything those already parse. The graph leaves as a naamah design directory
+ * (`design.ts`) and `naamah build` draws it — no PlantUML in the path.
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';

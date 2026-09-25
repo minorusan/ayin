@@ -449,6 +449,29 @@ export function naamahAvailable(): boolean {
  * whatever directory it was started in, leaving the page nowhere near the design it draws. A caller
  * that is not a person should say where it wants the file.
  */
+/**
+ * `naamah build <dir>` — a DIRECTORY of design files to one page, with no PlantUML in the path.
+ *
+ * The sibling of `renderDesign`, and the one to prefer when ayin is producing the design itself:
+ * `weave` renders a `.puml` because that is the format an operator may already have written, while
+ * anything ayin GENERATES goes straight in as design files. `verify` is off by default here because
+ * the caller for it is `map_dependencies`, whose every type was read out of source that already
+ * compiles — a typecheck there can only fail on signatures copied verbatim from real code.
+ */
+export async function buildDesign(dir: string, opts: { verify?: boolean } = {}): Promise<string> {
+  if (!naamahAvailable()) {
+    return `Cannot build: the naamah submodule is not present (${NAAMAH}). `
+      + 'Run `git submodule update --init` to fetch it.';
+  }
+  const args = ['build', resolve(dir), ...(opts.verify ? [] : ['--no-verify'])];
+  return new Promise((done) => {
+    execFile(process.execPath, [NAAMAH, ...args], { timeout: 120_000 }, (err, stdout, stderr) => {
+      const out = `${stdout}${stderr}`.trim();
+      done(err ? `naamah failed: ${out.slice(0, 400)}` : out || 'built.');
+    });
+  });
+}
+
 export async function renderDesign(pumlPath: string, outPath?: string): Promise<string> {
   if (!naamahAvailable()) {
     return `Cannot render: the naamah submodule is not present (${NAAMAH}). `

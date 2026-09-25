@@ -741,10 +741,6 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     volatile += `\n\n${progress}`;
   }
 
-  if (diagramContext) {
-    volatile += `\n\n${diagramContext}`;
-  }
-
   if (researchContext) {
     volatile += `\n\n${researchContext}`;
   }
@@ -1196,73 +1192,8 @@ async function runResearch(userInput: string): Promise<void> {
   }
 }
 
-// ── auto-diagram ("explain it with a picture") ─────────────────────────
-// Same shape as auto-research above, and for the same reason: some intents should not depend on the
-// model remembering it has a tool. "I don't understand", "explain better", "give me a diagram" →
-// build a VALIDATED PlantUML diagram BEFORE the base call and pre-prompt its path + source, so the
-// answer is written around the picture instead of promising one.
-//
-// The user's words go to the diagram tool VERBATIM as the subject — no extra LLM call to "formulate
-// a subject". Every call queues on one shared GPU slot, and a turn that already costs 1-4 draft
-// rounds should not also pay for a paraphrase.
-//
-// Opt out with AYIN_DIAGRAM=0.
-// Word boundaries are load-bearing here. A false fire costs a whole extra generation on a shared,
-// often-starved GPU, so the loose version was measurably wrong: bare `diagram` matched
-// "diagrammatic", and bare `schema` matched "add a database schema migration file" — a phrase that
-// comes up constantly in ordinary DB work and has nothing to do with wanting a picture. `schema`
-// now only counts when someone asks to be SHOWN one.
-const DIAGRAM_TRIGGER = new RegExp([
-  '\\bdiagrams?\\b', 'plant ?uml', '\\bpuml\\b', 'visuali[sz]e', '\\bschematic\\b',
-  '(show|draw|give|need|want|make)\\s+(me\\s+)?(a\\s+|the\\s+)?schema\\b',
-  'flow ?charts?\\b', 'sequence chart',
-  'explain (it |this |that )?better', "don'?t (understand|get it)", 'do not understand',
-  'not clear', '\\bunclear\\b', 'confus(ed|ing)', '\\bdraw\\b',
-].join('|'), 'i');
-
-let diagramContext = ''; // pre-prompted into the base call for this turn
 let turnAbort = new AbortController();  // aborted on interrupt; every run is chained to it
 let planContext = '';    // a plan produced before the turn (plan/index.ts), pre-prompted the same way
-
-/**
- * A GENERATED DIRECTIVE IS NOT A REQUEST FOR A PICTURE.
- *
- * `<naamah-comment>` and `<comment-response>` are prompts AYIN ITSELF writes to hand a review comment
- * to a run, and they necessarily talk about diagrams and designs — so they matched
- * `DIAGRAM_TRIGGER` and every one of them burned a full model call drawing a .puml of its own
- * instructions. Observed: a naamah thread whose entire first round went to
- * `naamah-comment-dir-tmp-claude-1000-….puml` before the agent had read anything.
- *
- * Matched on the OPENING TAG, not on a keyword: these prompts have a contract of their own, and
- * nothing that arrives inside one is a human asking to be shown a picture.
- */
-const GENERATED_DIRECTIVE = /^\s*<(naamah-comment|comment-response)\b/;
-
-async function runDiagram(userInput: string): Promise<void> {
-  diagramContext = '';
-  if (GENERATED_DIRECTIVE.test(userInput)) return;
-  if (process.env.AYIN_DIAGRAM === '0' || !DIAGRAM_TRIGGER.test(userInput)) return;
-  try {
-    setAgentStatus('Drawing a diagram...');
-    const { makeDiagram, formatDiagramResult } = await import('./tools/diagram.js');
-    // Ground it in whatever this session already established — without facts the picture is generic.
-    const context = [getGoal() ? `Session goal: ${getGoal()}` : '', gatheredFacts.slice(-3).join('\n\n')]
-      .filter(Boolean).join('\n\n').slice(0, 4000);
-    const r = await makeDiagram(userInput, { context: context || undefined });
-    if (!r.ok) { log('WARN', 'auto_diagram_failed', { error: (r.error ?? '').slice(0, 120) }); return; }
-    diagramContext = getPrompt('diagramGrounding', {
-      DIAGRAM: formatDiagramResult(r),
-      FILE: String(r.file),
-    });
-    addMessage('system', `Diagram: ${r.file}${r.image ? ` (rendered ${r.image})` : ''}`);
-    log('INFO', 'auto_diagram', { file: r.file ?? '', kind: r.kind ?? '', rounds: String(r.rounds) });
-  } catch (err) {
-    log('WARN', 'auto_diagram_error', { error: err instanceof Error ? err.message : String(err) });
-    diagramContext = '';
-  } finally {
-    setAgentStatus('');
-  }
-}
 
 /**
  * One turn, with its phases measured.
@@ -1946,8 +1877,6 @@ async function runAgentTurn(rawInput: string): Promise<void> {
 
   // Auto-research grounding (deterministic trigger) — web search BEFORE the base call, pre-prompted.
   await runResearch(userInput);
-  // Auto-diagram (deterministic trigger) — a validated .puml BEFORE the base call, pre-prompted.
-  await runDiagram(userInput);
 
   const maxRounds = getMaxRounds();
   /** How many times a text-only turn may be refused because the entangled design is unsatisfied. */

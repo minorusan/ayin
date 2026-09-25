@@ -1,9 +1,10 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { Tool } from '../base.js';
 import { toolLog, toolOpenInEditor, toolReport, toolWorkDir } from '../runtime.js';
 import { buildDepMap, DEFAULT_DEPTH } from '../../depmap/index.js';
-import { naamahAvailable, renderDesign, toPuml } from '../../naama/index.js';
+import { writeDesign } from '../../depmap/design.js';
+import { buildDesign, naamahAvailable } from '../../naama/index.js';
 
 /** `RewardService.cs, IRewardService.cs` and `["a.cs","b.cs"]` are both what a model sends. */
 function splitPaths(raw: string): string[] {
@@ -24,7 +25,7 @@ export const tool: Tool = {
   parameters: [
     { name: 'files', type: 'string', description: 'The start file(s) — one path, or several separated by commas. All must be the same language.', required: true },
     { name: 'depth', type: 'string', description: `How many hops OUT from the start files to follow, default ${DEFAULT_DEPTH}. Base classes and interfaces ignore this and are always followed to the end.`, required: false },
-    { name: 'render', type: 'string', description: 'Set to 0 to write the .puml without rendering the page.', required: false },
+    { name: 'render', type: 'string', description: 'Set to 0 to write the design files without building the page.', required: false },
   ],
   async execute(params) {
     if (!params.files) return 'Error: files required — the path(s) to start from';
@@ -40,18 +41,25 @@ export const tool: Tool = {
     }
     toolReport(`map_dependencies · ${result.language} · ${result.doc.types.length} type(s) across ${result.doc.domains.length} assembly(ies)`);
 
-    const dir = toolWorkDir('diagrams');
+    /**
+     * A DESIGN DIRECTORY, NOT A .puml. `naamah build` reads the design files straight, so the graph
+     * ayin already has never passes through PlantUML — which also keeps the assembly name intact:
+     * PlantUML nests a package on its dots, and `…Rewards.SolitaireStreak` and `…GameModes
+     * .SolitaireStreak` both came out as a leaf box labelled "SolitaireStreak".
+     */
+    const dir = join(toolWorkDir('diagrams'), `${
+      seeds.map((s) => basename(s).replace(/\.[^.]+$/, '')).join('-').toLowerCase().replace(/[^a-z0-9-]+/g, '-').slice(0, 48) || 'depmap'
+    }-deps`);
     mkdirSync(dir, { recursive: true });
-    const slug = seeds.map((s) => basename(s).replace(/\.[^.]+$/, '')).join('-').toLowerCase().replace(/[^a-z0-9-]+/g, '-').slice(0, 48) || 'depmap';
-    const puml = join(dir, `${slug}-deps.puml`);
-    writeFileSync(puml, toPuml(result.doc));
+    const lang = result.language === 'csharp' ? 'cs' : 'ts';
+    writeDesign(result.doc, dir, lang);
 
     let page = '';
-    let rendered = '';
+    let built = '';
     if (params.render !== '0' && naamahAvailable()) {
-      page = join(dir, `${slug}-deps.html`);
-      rendered = await renderDesign(puml, page);
-      if (/^Cannot render|^naamah failed/.test(rendered)) page = '';
+      built = await buildDesign(dir);
+      const candidate = join(dir, `${basename(dir)}.html`);
+      if (!/^Cannot build|^naamah failed/.test(built) && existsSync(candidate)) page = candidate;
     }
     const opened = page ? await toolOpenInEditor(page) : false;
     toolLog().info('depmap_built', {
@@ -81,8 +89,8 @@ export const tool: Tool = {
     if (result.capped) {
       lines.push('', 'The node cap stopped the walk: this graph is a SUBSET, not the whole picture. Lower depth or pick a narrower start file.');
     }
-    lines.push('', `puml:  ${puml}`);
-    lines.push(page ? `page:  ${page}${opened ? ' (opened)' : ''}` : 'page:  not rendered');
+    lines.push('', `design: ${dir}/  (${result.doc.types.length} file(s), one per type)`);
+    lines.push(page ? `page:   ${page}${opened ? ' (opened)' : ''}` : `page:   not built${built ? ` — ${built}` : ''}`);
     lines.push('', 'Every type, member and assembly above was read from the files — nothing here was inferred.');
     return lines.join('\n');
   },
