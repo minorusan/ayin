@@ -334,7 +334,9 @@ export async function setPrefabProperty(req: EditRequest): Promise<EditResult> {
       value = { ...parent, raw: parent.raw };
       const lines0 = before.split('\n');
       const head0 = lines0[parent.line - 1].slice(0, parent.column);
-      const after0 = [...lines0.slice(0, parent.line - 1), `${head0}${rewrittenFlow}`, ...lines0.slice(parent.endLine)].join('\n');
+      // Same rule as the scalar path below: carry the line's own ending across the rewrite.
+      const eol0 = lines0[parent.endLine - 1].endsWith('\r') ? '\r' : '';
+      const after0 = [...lines0.slice(0, parent.line - 1), `${head0}${rewrittenFlow}${eol0}`, ...lines0.slice(parent.endLine)].join('\n');
       const stop0 = gateWrite(req.file, after0);
       if (stop0) return { ok: false, error: stop0 };
       writeFileSync(req.file, after0, 'utf-8');
@@ -403,7 +405,10 @@ export async function setPrefabProperty(req: EditRequest): Promise<EditResult> {
   const lines = before.split('\n');
   const first = value.line - 1;
   const head = lines[first].slice(0, value.column);
-  const rewritten = [...lines.slice(0, first), `${head}${replacement}`, ...lines.slice(value.endLine)];
+  // The old value carried this line's ending; the new one has to carry it too, or a single edit turns
+  // one line of a CRLF file into LF and the diff shows a change nobody asked for.
+  const eol = lines[value.endLine - 1].endsWith('\r') ? '\r' : '';
+  const rewritten = [...lines.slice(0, first), `${head}${replacement}${eol}`, ...lines.slice(value.endLine)];
   const after = rewritten.join('\n');
   if (after === before) return { ok: false, error: `${req.property} already reads ${replacement} — nothing to change` };
 

@@ -39,6 +39,20 @@ export const tool: Tool = {
       const abs = resolveAgainstCwd(params.path.trim());
       if (!existsSync(abs)) return `Error: file not found: ${abs}`;
       if (!isInspectable(abs)) {
+        /**
+         * A .controller IS INSPECTABLE, just not by this reader — so hand it over rather than refuse.
+         *
+         * Reported as a pair of misses in one session: prefab_inspect turned a `.controller` away by
+         * extension, the caller went to animator_inspect, and that failed too (the CRLF parse bug, now
+         * fixed). Two tools that between them read every Unity asset, and neither passed the file to
+         * the other. Refusing by extension is right; ending there is not, when the tool that does read
+         * it is one call away and the caller has no way to know that from the error.
+         */
+        if (abs.toLowerCase().endsWith('.controller')) {
+          const { tool: animator } = await import('./animator_inspect.js');
+          return `${params.path} is an AnimatorController — animator_inspect reads it, and this is that:\n\n`
+            + `${await animator.execute({ path: abs })}`;
+        }
         return `Error: ${abs} is not a .prefab, .unity or .asset. Those three share Unity's YAML dialect; anything else is a different format.`;
       }
       // The project root decides where guids are looked up, so a wrong root means every reference reads as

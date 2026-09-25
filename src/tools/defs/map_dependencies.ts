@@ -104,8 +104,21 @@ export const tool: Tool = {
     if (result.capped) {
       lines.push('', 'The node cap stopped the walk: this graph is a SUBSET, not the whole picture. Lower depth or pick a narrower start file.');
     }
+    /**
+     * NAME THE PAGE EVEN WHEN IT WAS NOT BUILT, and name it exactly.
+     *
+     * With `render=0` the reply said "not built" and stopped, so the caller went looking for the page
+     * by guessing — `Toaster.html`, `page.html` — and `look` refused both, twice, after the same reply
+     * had just confirmed the design directory exists with seven files in it. The path is known either
+     * way: it is derived from the directory, not discovered by building. A tool that knows an address
+     * and withholds it is asking the caller to guess at something it could have said.
+     */
+    const target = join(dir, `${basename(dir)}.html`);
     lines.push('', `design: ${dir}/  (${result.doc.types.length} file(s), one per type)`);
-    lines.push(page ? `page:   ${page}${opened ? ' (opened)' : ''}` : `page:   not built${built ? ` — ${built}` : ''}`);
+    lines.push(page
+      ? `page:   ${page}${opened ? ' (opened)' : ''}`
+      : `page:   ${target} — NOT built${built ? ` (${built})` : ' (render=0)'}. `
+        + `Call again without render=0 to build it.`);
     lines.push('', 'Every type, member and assembly above was read from the files — nothing here was inferred.');
     return lines.join('\n');
   },

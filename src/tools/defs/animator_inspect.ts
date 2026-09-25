@@ -44,8 +44,8 @@ export const tool: Tool = {
           note: 'No layers parsed. Either this controller really is empty — a fresh asset, or an override '
             + 'controller whose states live in its parent — or its layout is one this reader does not '
             + 'handle. The raw file settles it — `read_file <path> offset=1`, which is the one form '
-            + 'that is not routed back here: a real state machine has `m_AnimatorStateMachine` blocks '
-            + 'in the YAML.',
+            + 'that is not routed back here: a real state machine has `AnimatorStateMachine:` '
+            + 'documents in the YAML, each under its own `--- !u!1107` header.',
         }, null, 2);
       }
       return JSON.stringify(map, null, 2);

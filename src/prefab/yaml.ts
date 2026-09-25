@@ -243,27 +243,46 @@ function parseSeqItem(lines: string[], cur: Cursor, indent: number): YValue {
 /** Parse a `.prefab`, `.unity` or `.asset` — one dialect, three extensions. */
 export function parseUnityYaml(path: string, text: string): YFile {
   const lines = text.split('\n');
+  /**
+   * A CR-FREE VIEW TO PARSE FROM, while `lines` keeps the file's own endings.
+   *
+   * Splitting on `\n` alone leaves a `\r` on the end of every line of a CRLF file — and Unity assets
+   * are CRLF whenever the machine that last wrote them was Windows, which on a mixed team is most of
+   * them. `HEADER` ends in `\s*$` and so matched anyway, which is exactly what made this so hard to
+   * see: every document was found, with its right classId and fileId, and every BODY came back empty.
+   * A 404-line AnimatorController with nine states parsed as sixteen documents holding nothing, and
+   * `animator_inspect` reported "No layers parsed. Either this controller really is empty …" — a
+   * sentence about the asset, for a fault in the reader. Reported as the biggest gap in the toolkit.
+   *
+   * The two arrays are the same LENGTH and differ only in that trailing character, so every `line`,
+   * `endLine` and `column` recorded here indexes both identically. Handing the raw array back is what
+   * lets `prefab_edit` splice a line and rejoin without rewriting a CRLF file to LF — which would be a
+   * one-property edit arriving as a diff against every line in the file.
+   */
+  const view = lines.some((l) => l.endsWith('\r'))
+    ? lines.map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l))
+    : lines;
   const documents: YDocument[] = [];
   const cur: Cursor = { i: 0 };
 
-  while (cur.i < lines.length) {
-    const h = HEADER.exec(lines[cur.i]);
+  while (cur.i < view.length) {
+    const h = HEADER.exec(view[cur.i]);
     if (!h) { cur.i++; continue; }
     const headerLine = cur.i;
     cur.i++;
     // The type line: `GameObject:` with the block indented under it.
     let typeName = '';
     let body: YEntry[] = [];
-    const t = firstStructuralLine(lines, cur.i);
+    const t = firstStructuralLine(view, cur.i);
     if (t !== -1) {
-      const tm = KEY.exec(lines[t]);
+      const tm = KEY.exec(view[t]);
       if (tm && tm[3].trim() === '') {
         typeName = tm[2];
         cur.i = t + 1;
-        const next = firstStructuralLine(lines, cur.i);
-        if (next !== -1 && indentOf(lines[next]) > indentOf(lines[t])) {
+        const next = firstStructuralLine(view, cur.i);
+        if (next !== -1 && indentOf(view[next]) > indentOf(view[t])) {
           cur.i = next;
-          body = parseBlock(lines, cur, indentOf(lines[next]), 'map');
+          body = parseBlock(view, cur, indentOf(view[next]), 'map');
         }
       }
     }

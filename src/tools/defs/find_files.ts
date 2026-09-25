@@ -126,7 +126,12 @@ export const tool: Tool = {
         );
       }
       if (lines.length > FIND_LIMIT) {
-        return `${lines.slice(0, FIND_LIMIT).join('\n')}\n(showing the first ${FIND_LIMIT} — there are MORE; narrow the pattern)`;
+        // SAY WHAT "FIRST" MEANS. The list is ranked, not chronological, and a caller who passed
+        // `modified_since` reasonably reads a truncated list as "the most recent ones" — it is not,
+        // and acting on that gets the wrong files. Reported as ambiguous for exactly that case.
+        return `${lines.slice(0, FIND_LIMIT).join('\n')}\n(showing ${FIND_LIMIT} of ${lines.length}+ — `
+          + `ordered by name match then shallowest path, NOT by date. Narrow the pattern, or use bash `
+          + `\`ls -t\` if you need them by time.)`;
       }
       return `${lines.join('\n')}\n(${lines.length} file${lines.length === 1 ? '' : 's'})`;
     },

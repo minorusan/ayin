@@ -299,15 +299,23 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
            * QUESTIONS, never as answers: they did not clear the floor, and printing their answers
            * here would be the laundering this branch exists to prevent.
            */
-          const near = scored.slice(0, 3)
+          /**
+           * A CANDIDATE THAT SCORED ZERO IS NOT A NEAR MISS. Listing the three "closest" questions
+           * helps when the query nearly landed; on a query the corpus has no purchase on at all they
+           * are arbitrary, and reported as such — *"so far off they add nothing"*. Under this the
+           * coverage note is the honest answer on its own: not what is nearby, but what is here.
+           */
+          const near = scored.slice(0, 3).filter((h) => h.score > 0)
             .map((h) => `    ${h.score.toFixed(2)}  ${ordered[h.index].question}`)
             .join('\n');
           return `Nothing in the corpus answers "${query}".`
             + ` ${scored.length} candidate(s) were considered and the closest scored`
             + ` ${scored[0].score.toFixed(2)} against a floor of ${floor}.`
             + ` The corpus holds ${store.totals().chunks} answered question(s) for this repo.\n`
-            + `The nearest it has — none of them an answer to yours, and their answers are NOT shown `
-            + `for that reason. Rephrase toward one of these if it is what you meant:\n${near}\n`
+            + (near
+              ? `The nearest it has — none of them an answer to yours, and their answers are NOT shown `
+                + `for that reason. Rephrase toward one of these if it is what you meant:\n${near}\n`
+              : 'Nothing scored above zero, so there is no near miss to rephrase toward.\n')
             + coverageNote(all);
         }
         return render(repoPath, store, kept.map((h) => ordered[h.index]), query, named, 'semantic');

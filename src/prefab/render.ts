@@ -218,6 +218,35 @@ export function renderPrefabAt(map: PrefabMap, at: string, only: string[] = []):
       }
     };
     seek(map.roots);
+    /**
+     * AND THE FIRST SEGMENT MAY NAME A COMPONENT, not an object.
+     *
+     * `at=ToasterOperation` is how a caller asks for the one component it came for, having just read
+     * a hierarchy that showed the type and not the path to it. The object walk above cannot resolve
+     * it — a component is not a child — so it fell through to "the path starts at Toast, try
+     * Toast/ToasterOperation", which is the same round trip the descendant search exists to remove,
+     * one level further in.
+     *
+     * Same rule as above: exactly one object must carry it, or the address is genuinely ambiguous and
+     * the error below lists what was found.
+     */
+    if (!found.length && segs.length === 1) {
+      const carriers: ObjectMap[] = [];
+      const sweep = (nodes: ObjectMap[]): void => {
+        for (const n of nodes) {
+          if (n.components.some((c) => eq(c.type, segs[0]) || eq(c.unityType, segs[0]))) carriers.push(n);
+          sweep(n.children);
+        }
+      };
+      sweep(map.roots);
+      if (carriers.length === 1) {
+        return renderPrefabAt({ ...map, roots: [carriers[0]] }, `${carriers[0].name}/${segs[0]}`, only);
+      }
+      if (carriers.length > 1) {
+        return `Error: ${carriers.length} objects carry a ${segs[0]} — say which: `
+          + `${carriers.map((c) => `${c.name}/${segs[0]}`).join(', ')}`;
+      }
+    }
     if (found.length === 1) {
       const rest = segs.slice(1);
       const inner = rest.length ? renderPrefabAt({ ...map, roots: [found[0]] }, [found[0].name, ...rest].join('/'), only) : '';
