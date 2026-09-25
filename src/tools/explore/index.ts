@@ -27,7 +27,7 @@ import { dirname, join, relative, sep } from 'node:path';
 import { toolLog, toolReport } from '../runtime.js';
 import { cap, extractTerms } from './terms.js';
 import { parseGrepLine, readSpan, runAll } from './search.js';
-import { rankAndTrim } from './rank.js';
+import { TEST_PATH, rankAndTrim } from './rank.js';
 import { formatResult } from './format.js';
 import { unity } from './projects/unity.js';
 import { typescript } from './projects/typescript.js';
@@ -122,6 +122,12 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   const question = (params.question ?? '').trim();
   if (!question) return 'Error: question required';
   const started = Date.now();
+  /**
+   * DROPPED, NOT DEMOTED. A test file that shares the term is still a real hit, so ranking it down
+   * would leave it in the answer taking a slot — which is the thing being complained about. The
+   * caller asking for no tests is asking for the space back.
+   */
+  const noTests = /^(true|1|yes|on)$/i.test((params.no_tests ?? '').trim());
 
   // WHERE to search, decided from everything the caller gave us rather than from the cwd alone:
   // an explicit cwd, then any real path in `context`, then the process cwd — each walked UP to the
@@ -158,7 +164,10 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   // ALREADY ASKED, THIS SESSION, AND NOTHING HAS CHANGED SINCE. Keyed on the derived TERMS: an agent
   // that has not found what it wants rephrases rather than changes tack, and the rephrasings collapse
   // to the same search. Saying so is the point — a repeat handed back silently reads as new evidence.
-  const cacheKey = exploreCacheKey(explorer.id, root, search);
+  // `no_tests` CHANGES THE ANSWER, so it has to change the key. Without it the second call — the one
+  // that asked for the tests to be dropped — was served the first call's result and appeared to do
+  // nothing at all.
+  const cacheKey = exploreCacheKey(explorer.id, root, noTests ? [...search, 'no_tests'] : search);
   const cached = exploreCacheGet(cacheKey);
   if (cached) {
     toolReport(`explore · already searched ${search.join(', ')} this session — same answer, no re-run`);
@@ -292,10 +301,12 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     }
   }
 
+  const kept = noTests ? findings.filter((f) => !TEST_PATH.test(f.span.file)) : findings;
+
   // The non-textual edges — the reason this tool exists rather than being a grep wrapper.
   let glued: Finding[] = [];
   try {
-    glued = await explorer.glue(rankAndTrim(findings, 6), root);
+    glued = await explorer.glue(rankAndTrim(kept, 6), root);
   } catch (e) {
     toolLog().warn('explore_glue_failed', { error: e instanceof Error ? e.message : String(e) });
   }
@@ -304,7 +315,7 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
     question,
     project: explorer.id,
     widenedSearch,
-    findings: rankAndTrim([...findings, ...glued], 8),
+    findings: rankAndTrim([...kept, ...glued], 8),
     attempts,
     terms: search,
     elapsedMs: Date.now() - started,

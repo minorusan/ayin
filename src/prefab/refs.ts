@@ -227,8 +227,49 @@ export async function resolveGuids(root: string, guids: Iterable<string>): Promi
  * candidate is returned so the caller can say which ones it found.
  */
 export async function findAssetByName(root: string, name: string): Promise<{ matches: AssetRef[] }> {
-  const wanted = basename(name.trim());
-  if (!wanted) return { matches: [] };
+  const raw = name.trim();
+  if (!raw) return { matches: [] };
+
+  /**
+   * A PATH IS AN ANSWER, NOT ANOTHER NAME — and taking `basename` of it made the refusal unescapable.
+   *
+   * Two sprites are called `PopupBG.png`, so the ambiguity check fired and said *"pass the one you
+   * mean by its full name: Assets/Art/NewSprites/Popups/PopupBG.png,
+   * Assets/Art/NewSprites/Popups/Seasonal/PopupBG.png"*. Doing exactly that came back with the same
+   * message, because the first line of this function threw the path away and searched the basename
+   * again. Measured: three attempts in one session, the last two quoting the tool's own suggestion
+   * verbatim, and not a single asset-reference edit completed — *"the most common prefab edit"* —
+   * against a tool that plainly supports them. An error that cannot be satisfied by following it is
+   * worse than no error, because it costs a round every time it is believed.
+   *
+   * Duplicate basenames are normal in art folders (`Popups/` beside `Popups/Seasonal/`), so this is
+   * the common case and not an edge.
+   */
+  if (raw.includes('/')) {
+    const rel = raw.replace(/^\.\//, '').replace(new RegExp(`^${root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?`), '');
+    const abs = join(root, rel);
+    if (!existsSync(abs) || !existsSync(`${abs}.meta`)) return { matches: [] };
+    const g = /^guid:\s*([0-9a-f]{32})\s*$/m.exec(readFileSync(`${abs}.meta`, 'utf-8'));
+    if (!g) return { matches: [] };
+    const hit = (await resolveGuids(root, [g[1]])).get(g[1].toLowerCase());
+    return {
+      matches: [hit ?? {
+        guid: g[1], path: rel, name: basename(rel), dir: `${dirname(rel)}/`, type: BY_EXT[extOf(rel)] ?? 'unknown',
+      }],
+    };
+  }
+
+  /**
+   * AND A GUID NAMES IT OUTRIGHT. The last escape hatch, for the case where two assets share a name
+   * AND the caller has the hex in hand — from `prefab_inspect`, which prints it. Asked for by name:
+   * *"no escape hatch (no `guid=`, no `fileID=`, no exact-path flag)"*.
+   */
+  if (/^[0-9a-f]{32}$/i.test(raw)) {
+    const hit = (await resolveGuids(root, [raw.toLowerCase()])).get(raw.toLowerCase());
+    return { matches: hit ? [hit] : [] };
+  }
+
+  const wanted = basename(raw);
   const argv = ['find', '.', '-name', wanted, '-not', '-path', '*/Library/*', '-not', '-path', '*/Temp/*'];
   const r = await runProbe(argv, root);
   const files = r.lines.map((l) => l.replace(/^\.\//, '')).filter((l) => !l.endsWith('.meta'));

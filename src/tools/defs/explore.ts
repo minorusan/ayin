@@ -8,6 +8,7 @@ export const tool: Tool = {
     parameters: [
       { name: 'question', type: 'string', description: 'What you are looking for, in plain words — "how is the score multiplier applied", "where is the time bonus calculated", "where is chat:send handled". You do not need the exact name; it derives identifiers (scoreMultiplier, GetTimeBonus) itself. Quote anything that must match literally. Asks WHERE/WHAT, not WHY — it locates code, it does not explain behaviour.', required: true },
       { name: 'context', type: 'string', description: 'Optional extra context — file paths, class names, error messages, stack frames', required: false },
+      { name: 'no_tests', type: 'string', description: 'true drops hits in test files entirely. Tests rank high by default because an assertion is often the clearest statement of a rule — set this when you want the implementation and a test class exercising the same name is taking the slots.', required: false },
     ],
     async execute(params) {
       return exploreExecute(params);

@@ -243,9 +243,16 @@ async function locate(req: EditRequest, docs: YDocument[]): Promise<Located | { 
 /** The replacement text for a reference property, and the rule that produced it. */
 async function refText(req: EditRequest, existing: YValue | null): Promise<{ text: string; rule: string } | { error: string }> {
   const found = await findAssetByName(req.root, req.asset!);
-  if (found.matches.length === 0) return { error: `no asset named "${req.asset}" under ${relToRoot(req.root, req.root)}` };
+  if (found.matches.length === 0) {
+    return { error: req.asset!.includes('/')
+      ? `no asset at "${req.asset}" — that path does not exist under the project, or it has no .meta beside it`
+      : `no asset named "${req.asset}" under ${relToRoot(req.root, req.root)}` };
+  }
   if (found.matches.length > 1) {
-    return { error: `"${req.asset}" matches ${found.matches.length} files — pass the one you mean by its full name: ${found.matches.map((m) => m.path).join(', ')}` };
+    // "Its full name" used to mean the basename this already tried. Say PATH, because a path now
+    // resolves — see findAssetByName. A guid works too, for a caller holding one from prefab_inspect.
+    return { error: `"${req.asset}" matches ${found.matches.length} files. Pass one of these PATHS `
+      + `exactly (or the asset's 32-character guid):\n  ${found.matches.map((m) => m.path).join('\n  ')}` };
   }
   const target = found.matches[0];
   const old = existing ? parseRef(existing.raw) : null;

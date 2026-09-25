@@ -23,7 +23,7 @@ export const tool: Tool = {
       { name: 'object', type: 'string', description: 'The GameObject: a hierarchy path (Canvas/Progress/Slot0) or a unique name. Omit for a single-document .asset.', required: false },
       { name: 'component', type: 'string', description: 'The component class (SkeletonGraphic, RectTransform) or #<fileID>.', required: false },
       { name: 'value', type: 'string', description: 'A scalar, written as-is. Mutually exclusive with asset.', required: false },
-      { name: 'asset', type: 'string', description: 'An asset FILE NAME to reference. Resolved to a guid; ambiguity is refused.', required: false },
+      { name: 'asset', type: 'string', description: 'The asset to reference: its file name, its project-relative PATH when two files share a name (Assets/Art/Popups/Seasonal/PopupBG.png), or its 32-character guid. Resolved to a guid; an ambiguous bare name is refused and lists the paths to pass instead.', required: false },
     ],
     async execute(params) {
       if (!params.path || !params.property) return 'Error: path and property required';

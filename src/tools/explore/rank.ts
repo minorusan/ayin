@@ -32,6 +32,15 @@ const REASON_WEIGHT: Record<Reason, number> = {
 const LOW_VALUE = /(^|\/)(Library|Temp|obj|Build|Builds|dist|node_modules|\.git)\//;
 /** Serialized data, not source — a path IS the whole answer these files can give. */
 const NOT_SOURCE = /\.(prefab|unity|asset|anim|controller|mat|playable|asmdef|shader)$/i;
+/**
+ * A TEST, by the conventions every language in scope actually uses.
+ *
+ * Tests rank HIGH here on purpose — see the header — because a test assertion is often the clearest
+ * statement of a rule in the repository. That is a good default and a bad one for "where does this
+ * live", where a test class that exercises the type crowds out the type. `no_tests` is the way to
+ * say which question is being asked; nothing is demoted without it.
+ */
+export const TEST_PATH = /(^|\/)(Tests?|__tests__|spec)\/|[._-](test|tests|spec)\.[a-z]+$|Tests?\.(cs|java|kt|swift)$|_test\.(go|py|rb)$/i;
 /** A path that reads like a sample rather than the system. */
 const SAMPLE = /(^|\/)(Samples?|Examples?|Demos?|Third-?Party|Plugins)\//i;
 
