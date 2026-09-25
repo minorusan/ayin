@@ -184,10 +184,43 @@ export function corpusBlockFor(repoPath: string, file: string, range?: LineRange
  *
  * Staleness is labelled here too. A pulled chunk is exactly as dangerous as a pushed one.
  */
+/**
+ * WHAT THIS CORPUS ACTUALLY COVERS — the half a miss was never reporting.
+ *
+ * A corpus is built by pointing `indulge` at named DOMAINS, and it holds those and nothing else.
+ * Nothing in a miss said so, so "nothing answers this" read as a fact about the subject rather than
+ * about what was indexed — and a model acted on it exactly that way, asking a game repository's
+ * corpus *"what tools does ayin have for unity projects"* and taking the empty answer as evidence.
+ * Two different mistakes at once: the corpus is about the repo, never about ayin, and its silence
+ * only ever means "not baked", never "not so".
+ *
+ * Counted from the chunks rather than from the run manifest: a domain that was asked for and yielded
+ * nothing is not coverage, and re-runs accumulate manifests that no longer describe what is stored.
+ */
+function coverageNote(chunks: Array<{ domains?: string[]; domain?: string }>): string {
+  const counts = new Map<string, number>();
+  for (const c of chunks) {
+    for (const d of (c.domains?.length ? c.domains : [c.domain ?? ''])) {
+      if (d) counts.set(d, (counts.get(d) ?? 0) + 1);
+    }
+  }
+  if (!counts.size) return '';
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const shown = top.slice(0, 10).map(([d, n]) => `${d} (${n})`).join(' · ');
+  return `\nThis corpus was built for THIS REPOSITORY, over these domains and nothing else`
+    + `${top.length > 10 ? ` (${top.length} in all, commonest first)` : ''}:\n  ${shown}\n`
+    + `A question outside them is unanswered here because it was never indexed — that is not evidence `
+    + `about the answer. Ask ayin_help about ayin's own tools; this holds only what indulge read in `
+    + `this repository.`;
+}
+
 export async function corpusSearch(repoPath: string, query: string, limit = 3): Promise<string> {
   const store = openStore(repoPath);
   if (!store.exists()) {
-    return 'No corpus for this repo yet. Build one with: ayin indulge --domains "<what you are working on>"';
+    return 'No corpus for this repo yet — nothing has been indexed, which says nothing about the '
+      + 'subject you asked about. This tool only ever answers from what a previous `ayin indulge` run '
+      + 'read IN THIS REPOSITORY; it is not documentation about ayin or its tools (ask ayin_help for '
+      + 'that).\nBuild one with: ayin indulge --domains "<what you are working on>"';
   }
   const terms = query.toLowerCase().split(/[^\p{L}\p{N}_.]+/u).filter((t) => t.length > 2);
   if (terms.length === 0) return 'Query too short to search on.';
@@ -274,7 +307,8 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
             + ` ${scored[0].score.toFixed(2)} against a floor of ${floor}.`
             + ` The corpus holds ${store.totals().chunks} answered question(s) for this repo.\n`
             + `The nearest it has — none of them an answer to yours, and their answers are NOT shown `
-            + `for that reason. Rephrase toward one of these if it is what you meant:\n${near}`;
+            + `for that reason. Rephrase toward one of these if it is what you meant:\n${near}\n`
+            + coverageNote(all);
         }
         return render(repoPath, store, kept.map((h) => ordered[h.index]), query, named, 'semantic');
       }
@@ -309,7 +343,8 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
   }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
 
   if (scored.length === 0) {
-    return `Nothing in the corpus matches "${query}". It holds ${store.totals().chunks} answered question(s) for this repo.`;
+    return `Nothing in the corpus matches "${query}". It holds ${store.totals().chunks} answered `
+      + `question(s) for this repo.\n${coverageNote(all)}`;
   }
 
   return render(repoPath, store, scored.map((s2) => s2.chunk), query, named, 'keyword', vectorNote);
