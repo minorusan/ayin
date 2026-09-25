@@ -19,6 +19,7 @@ import { prompts, packagePath } from './prompts-service.js';
 import { llmBaseUrl } from './connection.js';
 import { languageFor } from './entangle/index.js';
 import { initToolRuntime, toolRuntimeReady, type ToolProcess } from './tools/runtime.js';
+import { ensureAyinDir } from './ayin-dir.js';
 import { initProviderRuntime, providerRuntimeReady } from './llm/providers/runtime.js';
 import { takePendingImages } from './image.js';
 import { noKeyMessage, readOpenAiKey, readOpenAiModel } from './tools/credentials/openai.js';
@@ -105,6 +106,9 @@ export function ensureToolRuntime(): void {
     // eagerly drags the blessed screen in behind it.
     openInEditor: async (path) => (await import('./editor.js')).openInEditor(path),
     config: (key) => getConfigString(key),
+    // Core owns where ayin's own artefacts live and that the directory is git-ignored; the tool
+    // names the kind. See `ToolServices.workDir`.
+    workDir: (kind) => ensureAyinDir(process.cwd(), kind),
     // The tool names its namespace; core owns where the shipped files live and materializes them into
     // the operator's editable copy. This is the import a tool package must not have.
     prompts: (namespace) => prompts.register(namespace, packagePath('prompts', namespace)).bundle,

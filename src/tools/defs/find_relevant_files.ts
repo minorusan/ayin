@@ -196,4 +196,15 @@ export function parseFileReport(report: string, cwd: string): FileReport {
   return out;
 }
 
-export const tool = new FindRelevantFiles();
+/**
+ * WITHDRAWN — deliberately not registered. `loadTools` registers what a def exports as `tool`, so
+ * exporting it under another name takes it out of circulation without deleting the work. Restoring
+ * it is renaming this identifier back.
+ *
+ * WHY. It spawns a whole search agent to answer "which files does this task touch", and the caller
+ * already has `explore`, `grep`, `find_files` and `find_references` — each of which answers a
+ * sharper question, deterministically, in one call. What the wrapper added was a contract the child
+ * routinely broke: measured, fifteen tool calls and an answer in prose. The salvage below rescues
+ * paths from that prose, which made the failure survivable without making the tool worth its cost.
+ */
+export const disabledTool = new FindRelevantFiles();

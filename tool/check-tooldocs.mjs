@@ -48,6 +48,7 @@ const ACRONYMS = new Set([
 ]);
 
 const names = [];
+const withdrawn = [];
 for (const f of readdirSync(DEFS).filter((x) => x.endsWith('.ts'))) {
   const src = readFileSync(join(DEFS, f), 'utf-8');
   // TWO DEF SHAPES, AND THE CLASS ONE MUST BE READ FIRST.
@@ -60,8 +61,16 @@ for (const f of readdirSync(DEFS).filter((x) => x.endsWith('.ts'))) {
   const m = src.match(/readonly\s+name\s*=\s*'([a-z][a-z0-9_]*)'/)
     ?? src.match(/^\s*name:\s*'([a-z][a-z0-9_]*)'/m);
   if (!m) { fail(`${f} declares no tool name this gate can read`); continue; }
+  /**
+   * A WITHDRAWN TOOL OWES NO DESCRIPTION. It is not registered, nothing loads its prompt, and a
+   * shipped .txt for a tool the model can never call is a file that will rot unread. The withdrawal
+   * is explicit — `export const disabledTool` — so this is a deliberate skip, not a hole: a def that
+   * merely forgot to export would still be caught by check-gates, which asks the live registry.
+   */
+  if (/export const disabledTool\b/.test(src)) { withdrawn.push(m[1]); continue; }
   names.push(m[1]);
 }
+if (withdrawn.length) console.log(`  note  skipped ${withdrawn.length} withdrawn tool(s): ${withdrawn.join(', ')}`);
 ok(`${names.length} tools found in src/tools/defs`);
 
 for (const name of names) {

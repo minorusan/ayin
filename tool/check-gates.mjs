@@ -272,15 +272,30 @@ ok(!/read_file/.test(g.guardDirective()), 'a new turn starts with a clean slate'
   const shipped = rd(defsDir).filter((f) => f.endsWith('.ts')).map((f) => f.replace(/\.ts$/, '')).sort();
   const tl = await import(`file://${join(DIST, 'tools.js')}`);
   await tl.loadTools();
+  /**
+   * A WITHDRAWN TOOL IS DELIBERATE AND MUST SAY SO IN THE CODE.
+   *
+   * The check above exists because a def that silently fails to register is invisible. Taking a tool
+   * OUT of circulation looks identical from here — it exports nothing called `tool` — so the two are
+   * told apart by an explicit `disabledTool` export, which is a sentence a reader can find and a
+   * one-identifier rename to undo. Without this the only way to withdraw a tool would be to delete
+   * its source, which throws away the work and its reasons together.
+   */
+  const { readFileSync: rf } = await import('node:fs');
+  const withdrawn = shipped.filter((name) => /export const disabledTool\b/.test(rf(join(defsDir, `${name}.ts`), 'utf8')));
   const missing = shipped.filter((name) => {
     // A file may export several tools under other names, so ask the module rather than assuming the
     // filename is the tool name.
-    return !tl.getTool(name);
+    return !tl.getTool(name) && !withdrawn.includes(name);
   });
   ok(shipped.length > 20, `the scan found the def directory — ${shipped.length} files`);
   ok(missing.length === 0,
     'every shipped tool definition actually registers — a def that exports nothing fails SILENTLY',
     missing.join(', '));
+  ok(withdrawn.every((name) => !tl.getTool(name)),
+    'and a withdrawn tool is really gone from the registry, not merely renamed in place',
+    withdrawn.filter((name) => tl.getTool(name)).join(', '));
+  if (withdrawn.length) console.log(`  note  ${withdrawn.length} tool(s) deliberately withdrawn: ${withdrawn.join(', ')}`);
 }
 
 // ── does it compile? asked deterministically, for the ordinary languages ──
@@ -367,7 +382,7 @@ console.log('\narbiter tier');
    * impossible instruction 28 times and created nothing.
    */
   ok(!sa.toolWithheld('str_replace'), '  → but str_replace is KEPT: the arbiter must be able to correct a file');
-  for (const t of ['read_file', 'explore', 'str_replace', 'find_relevant_files', 'subagent']) {
+  for (const t of ['read_file', 'explore', 'str_replace', 'subagent']) {
     ok(!sa.toolWithheld(t), `  → ${t} is kept — deciding and verifying still need it`);
   }
 
@@ -376,9 +391,7 @@ console.log('\narbiter tier');
   set('1', '1');
   ok(!sa.arbiterMode(), 'a subagent is never in arbiter mode, whatever the parent was');
   for (const t of ['bash', 'str_replace', 'grep']) ok(!sa.toolWithheld(t), `  → a subagent keeps ${t}`);
-  for (const t of ['find_relevant_files', 'subagent']) {
-    ok(sa.toolWithheld(t), `  → and is denied ${t}`);
-  }
+  ok(sa.toolWithheld('subagent'), '  → and is denied subagent — one level of arbitration, not a tree');
   set(keep.d, keep.a);
 }
 

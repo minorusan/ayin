@@ -86,12 +86,7 @@ export const HELP: HelpEntry[] = [
     short: 'Working tree — staged, unstaged AND untracked — as a reviewable HTML page · /diff <rev> to compare against one',
     tip: '/diff opens your working tree as a real review page — filters, per-file triage, changed tokens marked.',
   },
-  {
-    name: '/chore', kind: 'command', section: 'Code',
-    short: 'Members added in the last commits that nothing uses — with the commit that added each · also opens a page',
-    tip: '/chore finds code you added this week and nobody calls, naming the commit it came in on.',
-  },
-  {
+    {
     name: '/unity-test', kind: 'command', section: 'Code',
     short: 'Run Unity tests for assemblies you name (comma-separated) · bare /unity-test lists them and which are PlayMode',
   },
@@ -285,7 +280,7 @@ export const HELP: HelpEntry[] = [
   },
   {
     name: 'ayin --arbiter', kind: 'cli', section: 'From your shell',
-    short: 'The top level decides and delegates: bash, grep and file creation are withheld from it, and it works through str_replace, find_relevant_files and subagent instead',
+    short: 'The top level decides and delegates: bash, grep and file creation are withheld from it, and it works through read_file, explore, str_replace and subagent instead',
     tip: '`--arbiter` takes the shell and the search primitives off the top level so it delegates instead of typing.',
   },
   { name: 'ayin --disallow-subagents', kind: 'cli', section: 'From your shell', short: 'No delegation this session: the `subagent` tool is withheld, so the agent works every phase itself' },

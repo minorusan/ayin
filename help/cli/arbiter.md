@@ -2,7 +2,7 @@
 
 Takes the primitives that invite the top-level agent to do the work itself — `bash`, `grep`, `find_files`, `list_dir`, `write_file`, `str_replace` — and withholds them, leaving it `read_file`, `explore`, and three tools pitched one level up:
 
-    find_relevant_files(task)       which files this touches, verified against disk
+    explore(question)               which files this touches, quoted verbatim with file and line
     subagent(task, plan)            hand over a whole stage of the work
 
 **Subagents are unaffected.** At depth ≥ 1 the full primitive set is present, and the three arbitration tools above are withheld instead — a child that could delegate would delegate rather than work.

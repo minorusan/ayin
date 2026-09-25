@@ -2,7 +2,28 @@ import type { Tool } from '../base.js';
 import { chore } from '../../chore/cli.js';
 import { DEFAULT_COMMITS } from '../../chore/index.js';
 
-export const tool: Tool = {
+/**
+ * WITHDRAWN — this tool is deliberately NOT registered. See `disabledTool` below.
+ *
+ * `loadTools` registers whatever a def exports as `tool` (or `tools`); exporting it under another
+ * name is how a tool is taken out of circulation without deleting the work. Restoring it is renaming
+ * this one identifier back.
+ *
+ * WHY. It answers "which members added recently does nothing reference" — and the honest name for
+ * that answer is a WEAK SIGNAL, which the tool itself admits: every item it returns carries caveats
+ * like `public — may be used outside this repository` and `in a test or editor path`. On the Unity
+ * project it was run against, both of its two hits were public methods in an Editor assembly, exactly
+ * the case where "no reference in this tree" says nothing about whether anything calls them. A model
+ * reading that list reported the signal as weak on its own initiative.
+ *
+ * The tool never deletes anything, and that is not the point. Its OUTPUT is a list of things to
+ * delete, produced on evidence that cannot support the deletion, handed to an agent that can delete.
+ * Read-only is a property of the tool; destructive is a property of the loop it sits in.
+ *
+ * The `ayin chore` CLI is untouched. An operator running it on purpose reads the caveats, decides,
+ * and is not going to remove a MenuItem because a grep missed it.
+ */
+export const disabledTool: Tool = {
     name: 'chore',
     icon: '🧹',
     description:

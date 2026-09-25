@@ -87,7 +87,7 @@ export function parallelSubagentsAllowed(): boolean {
  * arbitrate.
  *
  * So in arbiter mode the top level keeps only what it needs to decide and verify — `read_file`,
- * `str_replace`, `explore`, `find_relevant_files`, `subagent` — and the primitives that invite it to
+ * `str_replace`, `explore`, `subagent` — and the primitives that invite it to
  * do the work itself are withheld. Subagents are unaffected: at depth ≥ 1 the full set is present,
  * which is where the work actually happens.
  *
@@ -118,10 +118,9 @@ export function arbiterMode(): boolean {
 /** True when this tool is hidden from THIS process. Consulted by `loadTools`. */
 export function toolWithheld(name: string): boolean {
   if (name === 'subagent' && !subagentsAllowed()) return true;
-  // `find_relevant_files` is the arbiter's replacement for the search primitives it gives up, and a
-  // subagent that had it would delegate rather than work — the recursion rule again, wearing a
-  // different hat.
-  if (isSubagent() && name === 'find_relevant_files') return true;
+  // `find_relevant_files` was the arbiter's replacement for the search primitives it gives up, and it
+  // has been withdrawn — see its def. `explore` is what the arbitration level searches with now, and
+  // a subagent keeps it too: it is a search, not a delegation, so there is no recursion to prevent.
   return arbiterMode() && ARBITER_WITHHELD.has(name);
 }
 
@@ -149,10 +148,7 @@ export function withheldRedirect(name: string): string | null {
         + 'still plan it.'
       : 'subagent is switched off for this run (--disallow-subagents). Work every phase yourself.';
   }
-  if (name === 'find_relevant_files') {
-    return `${name} belongs to the arbitration level, and you are the agent doing the work. `
-      + 'Use grep / find_files / explore to locate a file.';
-  }
+
   // Arbiter mode. Name the one replacement that actually covers this primitive — a list of five
   // alternatives is another way of saying "guess".
   const instead: Record<string, string> = {
@@ -160,9 +156,12 @@ export function withheldRedirect(name: string): string | null {
       + 'goes to a child: subagent(task="…"), which has the full primitive set including bash.',
     write_file: 'creating a file is a STAGE, not a correction — hand it to subagent(task="…"). To '
       + 'change a file that already exists, read it and use str_replace.',
-    grep: 'use explore, or find_relevant_files(task="…") for the files a task touches.',
-    find_files: 'use find_relevant_files(task="…"), which verifies every path it returns against disk.',
-    list_dir: 'use explore, or find_relevant_files(task="…").',
+    grep: 'use explore(question="…") — it searches semantically and quotes what it finds, verbatim, '
+      + 'with the file and line. For an exact symbol you already know, hand the stage to subagent(task="…").',
+    find_files: 'use explore(question="…"), or find_references(target="…") when you have one file and '
+      + 'want what points at it.',
+    list_dir: 'use explore(question="…") — a directory listing is not a question, and the arbitration '
+      + 'level does not need one.',
   };
   const how = instead[name] ?? 'hand the work to subagent(task="…").';
   return `${name} is withheld at the arbitration level — you decide and verify, you do not type. ${how}`;

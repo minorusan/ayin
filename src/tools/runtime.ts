@@ -150,6 +150,16 @@ export interface ToolServices {
   /** One config value by key. Tools read config; they do not own where it lives. */
   config(key: string): string | undefined;
   /**
+   * The directory ayin keeps its own working notes in, for a tool that PRODUCES one — a rendered
+   * diagram, a report. Core decides where that is and that it is git-ignored; a tool names the kind
+   * and never the path, the same bargain as `prompts`.
+   *
+   * A seam rather than an import because `tools/` imports nothing outside `tools/` — and the first
+   * version of the diagram fix reached straight into `../ayin-dir.js`, which the gate caught only
+   * after the fact because that assertion was already failing for an unrelated reason.
+   */
+  workDir(kind: 'diagrams'): string;
+  /**
    * This tool's prompts, by namespace. Core resolves the shipped directory from the namespace and
    * materializes it — so a tool names WHAT it wants, never where the files are, which is the whole
    * reason a tool package can live in its own repo.
@@ -237,7 +247,11 @@ export function toolShell(): ToolShell {
   return require_().shell;
 }
 
-/** Per-language source structure, for a tool that answers a file as shape rather than as bytes. */
+/** Where a tool PUTS what it produces. Core owns the path; the tool names only the kind. */
+export function toolWorkDir(kind: 'diagrams'): string {
+  return require_().workDir(kind);
+}
+
 export function toolStructure(): ToolStructure {
   return require_().structure;
 }

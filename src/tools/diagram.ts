@@ -43,12 +43,11 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { ensureAyinDir } from '../ayin-dir.js';
 import { isAbsolute, join } from 'node:path';
 
 
 
-import { toolLlm, toolLog, toolOpenInEditor, toolPrompts, type ToolPrompts } from './runtime.js';
+import { toolLlm, toolLog, toolOpenInEditor, toolPrompts, type ToolPrompts, toolWorkDir} from './runtime.js';
 
 /**
  * This tool's prompt namespace — `prompts/diagram/*.txt`, materialized into the operator's local
@@ -174,7 +173,7 @@ export async function makeDiagram(
    * so on purpose. Nothing is hidden by this — the file is rendered and opened either way, and the
    * result states the path.
    */
-  const dir = opts.dir || process.env.AYIN_PUML_DIR || ensureAyinDir(process.cwd(), 'diagrams');
+  const dir = opts.dir || process.env.AYIN_PUML_DIR || toolWorkDir('diagrams');
   const render = (opts.render ?? RENDER_DEFAULT).toLowerCase();
   let source = '';
   let lastError = '';
