@@ -258,10 +258,23 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
         // irrelevant bands are 0.017 apart — and returning the best of a bad shortlist is how a
         // corpus launders a guess into a citation. Saying so is the whole reason this stage exists.
         if (!kept.length) {
+          /**
+           * AND NAME WHAT IT DOES HOLD NEARBY. A refusal that reports only a number leaves the caller
+           * guessing whether a different phrasing would land — reported verbatim: *"honest but leaves
+           * me guessing whether a slightly different phrasing would have hit. A hint of what the
+           * corpus covers would help me phrase the query."* So the closest few are listed as
+           * QUESTIONS, never as answers: they did not clear the floor, and printing their answers
+           * here would be the laundering this branch exists to prevent.
+           */
+          const near = scored.slice(0, 3)
+            .map((h) => `    ${h.score.toFixed(2)}  ${ordered[h.index].question}`)
+            .join('\n');
           return `Nothing in the corpus answers "${query}".`
             + ` ${scored.length} candidate(s) were considered and the closest scored`
             + ` ${scored[0].score.toFixed(2)} against a floor of ${floor}.`
-            + ` The corpus holds ${store.totals().chunks} answered question(s) for this repo.`;
+            + ` The corpus holds ${store.totals().chunks} answered question(s) for this repo.\n`
+            + `The nearest it has — none of them an answer to yours, and their answers are NOT shown `
+            + `for that reason. Rephrase toward one of these if it is what you meant:\n${near}`;
         }
         return render(repoPath, store, kept.map((h) => ordered[h.index]), query, named, 'semantic');
       }
