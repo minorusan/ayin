@@ -83,7 +83,21 @@ export function scoreFinding(f: Finding, termHitsInFile: number): number {
    */
   if (f.reason === 'filename' && f.term) {
     const stem = f.span.file.split('/').pop()?.replace(/\.[^.]+$/, '') ?? '';
-    if (stem.toLowerCase() === f.term.toLowerCase()) s += 0.2;
+    /**
+     * AN EXACT BASENAME IS A DECLARATION, in the only form an asset has.
+     *
+     * `Toast.prefab` does not merely mention Toast — it IS the thing, the same claim `class Toast`
+     * would make, and for a file with no code in it there is no stronger statement available. The
+     * small nudge here was enough while `defines` was broken and returning nothing; the moment that
+     * probe started working again at weight 1.0 it buried the asset under methods that merely have
+     * the term in their NAME — "where is the Toast prefab root" came back led by Spine's
+     * SkeletonBaker and four test methods, with the prefab off the end of the list.
+     *
+     * So an exact stem scores alongside a declaration. A PREFIX match keeps the small nudge it had:
+     * `ToastTrophy.prefab` is a real lead and is not what was asked for.
+     */
+    if (stem.toLowerCase() === f.term.toLowerCase()) s += 0.55;
+    else if (stem.toLowerCase().startsWith(f.term.toLowerCase())) s += 0.1;
   }
 
   // A short path is usually closer to the core than a deeply nested one.
