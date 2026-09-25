@@ -50,6 +50,18 @@ function pruneArgs(): string[] {
   return PRUNE.map((d) => `--exclude-dir=${d}`);
 }
 
+/**
+ * The same directory list, in the form `find` skips with.
+ *
+ * `-not -path './Library/*'` FILTERS but does not PRUNE: find still descends every one of Library's
+ * hundreds of thousands of imported files and then discards them. That is where the filename probe's
+ * seconds went on this repository. `-prune` cuts the subtree. `-name` rather than `-path` so it
+ * matches at any depth, which is what `--exclude-dir` means.
+ */
+function findPrune(): string[] {
+  return ['(', ...PRUNE.flatMap((d, i) => (i ? ['-o'] : []).concat(['-name', d])), ')', '-prune', '-o'];
+}
+
 /** `guid: 0123abcd…` from a `.meta`. Returns '' when there is no meta or no guid line. */
 export function guidOf(csAbs: string): string {
   const meta = `${csAbs}.meta`;
@@ -158,8 +170,23 @@ export const unity: ProjectExplorer = {
         reason: 'anim-event' as Reason,
         argv: ['grep', '-rnI', ...pruneArgs(), '--include=*.anim', '--include=*.controller', '-F', term, '.'],
       },
-      // A file named after the term.
-      { strategy: 'filename', reason: 'filename' as Reason, argv: ['find', '.', '-name', `*${term}*.cs`, '-not', '-path', './Library/*', '-not', '-path', './.git/*'] },
+      /**
+       * A file named after the term — AND IN UNITY THAT FILE IS USUALLY NOT CODE.
+       *
+       * This probe searched `*.cs` and nothing else, in an explorer whose entire reason to exist is
+       * that a Unity project is half assets. So "where is the Toast prefab" could not be answered by
+       * any probe in the battery: `Assets/Prefabs/MainUI/Toaster/Toast.prefab` was unreachable, and
+       * the answer came back as widened word-matches inside Zenject and test files.
+       *
+       * `-iname`, not `-name`, for the same class of miss: `*toast*.cs` does not match `ToastView.cs`,
+       * so the widening pass that exists to rescue exactly this case found nothing either.
+       */
+      {
+        strategy: 'filename', reason: 'filename' as Reason,
+        argv: ['find', '.', ...findPrune(), '-type', 'f', '(',
+          ...['*.cs', ...ASSET_GLOBS].flatMap((g, i) => (i ? ['-o'] : []).concat(['-iname', `*${term}*${g.slice(1)}`])),
+          ')', '-print'],
+      },
     ];
   },
 

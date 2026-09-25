@@ -98,6 +98,33 @@ const META = new Set([
   'event', 'events', 'member', 'members', 'section', 'block', 'statement', 'expression',
 ]);
 
+/**
+ * ARTIFACT KINDS — the words that say what KIND of file a thing is, never what it is called.
+ *
+ * "Where is the Toast prefab root" names one file, `Assets/Prefabs/MainUI/Toaster/Toast.prefab`, and
+ * the joiner could not reach it: adjacent content words became `toastPrefab`, `prefabRoot` and their
+ * cased variants, none of which anyone wrote, so every term missed, the widening pass fell back to
+ * the bare words `prefab` and `root`, and the answer was eight hits inside Zenject and test files.
+ * Measured on the real repository.
+ *
+ * The English is regular — "the <name> <kind>" — so the word IMMEDIATELY BEFORE a kind is the name,
+ * and that is the only position read. "the Toast prefab" yields `Toast`; "prefab root" yields nothing,
+ * because `prefab` is not a name.
+ *
+ * ADDITIVE, never a suppression. `_toastPrefab` is a perfectly ordinary serialized field, so the
+ * joined forms still get searched — this only puts the name the question actually used in front of
+ * them, where the few searched slots can reach it.
+ *
+ * Deliberately short, and `controller`, `sprite`, `clip` and `texture` are deliberately NOT here for
+ * the same reason `handler` and `manager` are absent from META: people really do write
+ * `SpriteRenderer` and `AnimatorController`.
+ */
+const ARTIFACT = new Set([
+  'prefab', 'prefabs', 'scene', 'scenes', 'asset', 'assets', 'asmdef',
+  'scriptableobject', 'scriptableobjects', 'material', 'materials', 'shader', 'shaders',
+  'animation', 'animations',
+]);
+
 export function extractTerms(question: string): Terms {
   const quoted = [...question.matchAll(/["'`]([^"'`]{2,})["'`]/g)].map((m) => m[1].trim()).filter(Boolean);
   // Namespaced keys count as literals even unquoted — they are searched verbatim, never re-cased.
@@ -182,13 +209,22 @@ export function extractTerms(question: string): Terms {
   });
   const joined = plausible.map((c) => c.id);
 
+  // The name in front of an artifact kind — see ARTIFACT. Ahead of the joins because it is a word the
+  // asker actually typed, and only a handful of terms are searched at all.
+  const named: string[] = [];
+  for (const run of runs) {
+    for (let i = 1; i < run.length; i++) {
+      if (ARTIFACT.has(run[i]) && !ARTIFACT.has(run[i - 1]) && !META.has(run[i - 1])) named.push(cap(run[i - 1]));
+    }
+  }
+
   // Action words become method-name candidates on their own: "applied" -> Apply, apply.
   const actions = words.filter((w) => ACTION.has(w)).flatMap((w) => {
     const stem = w.replace(/(ed|es|s)$/, '');
     return [cap(stem), stem];
   });
 
-  const identifiers = [...new Set([...typed, ...joined, ...actions])]
+  const identifiers = [...new Set([...typed, ...named, ...joined, ...actions])]
     .filter((s) => s.length >= 3 && s.length <= 60);
 
   return { identifiers, words: [...new Set(words)], literals, paths };

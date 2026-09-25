@@ -92,6 +92,34 @@ export const tool: Tool = {
       if (ext === '.pdf') {
         return `Error: no vision encoder here reads PDF. Rasterize to PNG first, e.g.:\n  pdftoppm -r 200 -png "${resolved}" /tmp/page\n  read_file /tmp/page-1.png`;
       }
+      /**
+       * A .controller IS A STATE MACHINE, and there was a tool that said so while doing nothing.
+       *
+       * Reading one returned 1,900 lines of YAML with a note on top saying `animator_inspect` reads
+       * this structurally — advice, delivered alongside the very thing it advises against, after the
+       * window had already been spent. Reported verbatim: the banner arrived *with* the raw dump
+       * rather than instead of it. A pointer the harness can follow itself is not a pointer.
+       *
+       * ONLY ON A PARAM-FREE READ. `offset=`, `around=`, `tail=`, `limit=` and `structure=` all say
+       * the caller wants bytes at a position, which is exactly the case the map cannot serve — and it
+       * is the escape hatch `animator_inspect` itself names when its parse comes back empty.
+       *
+       * AND ONLY ON THE FIRST ONE. A windowed read ends with "read again with no offset to slide to
+       * the next part" — follow that on a routed file and the slide hands back the map instead, which
+       * is the loop this is supposed to end rather than a new one. Once the YAML has been opened it
+       * stays open.
+       */
+      if (ext === '.controller'
+        && !params.offset && !params.around && !params.tail && !params.limit
+        && String(params.structure ?? '').toLowerCase() !== 'true'
+        && !coverage(resolved)) {
+        // Lazy, for the same reason as the vision check below: a module-scope edge between defs
+        // half-initializes whichever side the loader reaches first.
+        const { tool: animator } = await import('./animator_inspect.js');
+        return `${params.path} — returned as its state machine rather than as YAML. This is `
+          + `animator_inspect(path=${params.path}); read_file ${params.path} offset=1 returns the raw file.\n\n`
+          + `${await animator.execute({ path: resolved })}`;
+      }
       if (isImagePath(resolved)) {
         /**
          * ASK BEFORE ATTACHING. An image handed to a model with no vision encoder does not come back

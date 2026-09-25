@@ -30,6 +30,8 @@ const REASON_WEIGHT: Record<Reason, number> = {
 
 /** Generated, vendored or build output — real files, but never the answer to "how does this work". */
 const LOW_VALUE = /(^|\/)(Library|Temp|obj|Build|Builds|dist|node_modules|\.git)\//;
+/** Serialized data, not source — a path IS the whole answer these files can give. */
+const NOT_SOURCE = /\.(prefab|unity|asset|anim|controller|mat|playable|asmdef|shader)$/i;
 /** A path that reads like a sample rather than the system. */
 const SAMPLE = /(^|\/)(Samples?|Examples?|Demos?|Third-?Party|Plugins)\//i;
 
@@ -39,7 +41,13 @@ export function scoreFinding(f: Finding, termHitsInFile: number): number {
   // NO TEXT, NO PRECEDENCE. A finding without a quoted span tells the caller a path and nothing more,
   // so it can never be worth more than one that shows the line. Without this, bare `find` results
   // outranked every real hit and the answer contained no code at all.
-  if (!f.span.text) s -= 0.35;
+  //
+  // EXCEPT WHERE THERE IS NO LINE TO SHOW. A .prefab holds YAML: no probe quotes it, so the penalty
+  // is being charged for the file's TYPE rather than for weak evidence. "Where is the Toast prefab"
+  // is answered by Toast.prefab and by nothing else, and scored as a bare find hit it landed at zero
+  // and was trimmed out of every answer while widened matches on the word "prefab" inside Zenject
+  // tests filled the list.
+  if (!f.span.text && !(f.reason === 'filename' && NOT_SOURCE.test(f.span.file))) s -= 0.35;
 
   // Density: a file mentioning the term repeatedly is more likely to own it. Capped so one enormous
   // file cannot dominate purely by being enormous.
@@ -59,6 +67,17 @@ export function scoreFinding(f: Finding, termHitsInFile: number): number {
    * found nothing these ARE the only leads there are.
    */
   if (f.widened) s -= 0.3;
+
+  /**
+   * AN EXACT NAME BEATS A PREFIX. `*Toast*` matches `Toast.prefab`, `ToastSafe.prefab`,
+   * `ToastTrophy.prefab` and `Toaster.prefab` equally, and "where is the Toast prefab" has exactly
+   * one right answer among them. Scored the same they came back in path order, which put the file
+   * that IS the term fifth. Small, because a prefix match is still a real lead.
+   */
+  if (f.reason === 'filename' && f.term) {
+    const stem = f.span.file.split('/').pop()?.replace(/\.[^.]+$/, '') ?? '';
+    if (stem.toLowerCase() === f.term.toLowerCase()) s += 0.2;
+  }
 
   // A short path is usually closer to the core than a deeply nested one.
   const depth = f.span.file.split('/').length;
@@ -104,10 +123,25 @@ export function rankAndTrim(findings: Finding[], limit = 8): Finding[] {
 
   const seen = new Set<string>();
   const out: Finding[] = [];
+  /**
+   * AND NO ONE FILE TAKES THE WHOLE ANSWER.
+   *
+   * Deduping by (file, symbol) stops the same method repeating, and a test class with eight
+   * differently-named assertions defeats it completely: asking "where is the Toast prefab" returned
+   * eight spans from `PendingTournamentResultToastsHandlerTests.cs` and nothing else, because `spec`
+   * outweighs every other reason and the density bonus REWARDS a file for being the one that matched
+   * most. Eight views of one file is one finding, spent eight times.
+   *
+   * Three is the most a single file can say before it is repeating itself.
+   */
+  const PER_FILE = 3;
+  const taken = new Map<string, number>();
   for (const f of scored) {
     const key = `${f.span.file}::${f.symbol ?? f.reason}`;
     if (seen.has(key)) continue;
+    if ((taken.get(f.span.file) ?? 0) >= PER_FILE) continue;
     seen.add(key);
+    taken.set(f.span.file, (taken.get(f.span.file) ?? 0) + 1);
     out.push(f);
     if (out.length >= limit) break;
   }
