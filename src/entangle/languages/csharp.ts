@@ -29,7 +29,7 @@ const MEMBER = /^\s*(?:\[[^\]]*\]\s*)*(?<vis>public|private|protected|internal)?
  * C#'s own vocabulary. Erring toward TRUE on purpose — a missed violation costs a review, a false stop on
  * `Dictionary` costs the operator the whole feature.
  */
-const BUILTIN = new Set([
+export const BUILTIN = new Set([
   // Namespace roots as well as types: `System.Action<T>` splits into System + Action, and flagging
   // `System` as an undesigned type was a live-run false positive.
   'System', 'Microsoft', 'Collections', 'Generic', 'Linq', 'Text', 'Threading', 'Tasks', 'IO',
@@ -175,24 +175,32 @@ export const csharp: SurfaceLanguage = {
 
   surfaceOf(source) {
     const types: DeclaredType[] = [];
-    let current: DeclaredType | null = null;
     let depth = 0;
-    let typeDepth = -1;
-    // Has the type's BODY actually opened yet? Load-bearing for Allman brace style, which is the
-    // Microsoft/Unity standard and what real C# looks like:
-    //
-    //     public class Foo          <- DECL seen here, depth is still 1
-    //     {                         <- the brace is on the NEXT line
-    //         public void Bar()     <- members live at depth 2
-    //
-    // `typeDepth` is recorded at the DECL line, before that brace is counted. Without this flag the
-    // end-of-type check (`depth <= typeDepth`) fires on the declaration line ITSELF and clears
-    // `current` immediately, so every member is skipped — silently, with no error and a plausible
-    // result: the type is still reported, just with an empty member list. Measured on a real project:
-    // `GameFlowManager` yielded the file and the class and NOTHING else, and a struct with eight
-    // public fields produced two targets. K&R style (`class Foo {`) happened to work, which is why
-    // this survived.
-    let entered = false;
+    /**
+     * A STACK, BECAUSE C# TYPES NEST — and a single `current` silently loses the outer one.
+     *
+     * `RewardService` declares a private `Entry` class at the top of its body. With one `current`,
+     * `Entry`'s declaration overwrote it and `Entry`'s close reset it to null, so the twenty-odd
+     * members declared AFTER the nested type — every field, every event, the whole service — were
+     * attributed to nothing and dropped. Measured on that file: `class RewardService members: 0`,
+     * next to `class Entry members: 12`. Both types are still reported, which is what made it
+     * invisible: nothing errors, and a type with no members reads like a marker interface rather
+     * than a parse failure. `entangle`'s closure gate and the too-big-file skeleton both read this.
+     *
+     * `entered` is per frame and load-bearing for Allman brace style, which is the Microsoft/Unity
+     * standard and what real C# looks like:
+     *
+     *     public class Foo          <- DECL seen here, depth is still 1
+     *     {                         <- the brace is on the NEXT line
+     *         public void Bar()     <- members live at depth 2
+     *
+     * `typeDepth` is recorded at the DECL line, before that brace is counted, so without the flag the
+     * end-of-frame check (`depth <= typeDepth`) fires on the declaration line ITSELF and pops the
+     * frame immediately — every member skipped, silently, with the same plausible empty result. K&R
+     * style (`class Foo {`) happened to work, which is why that one survived too.
+     */
+    const stack: Array<{ type: DeclaredType; typeDepth: number; entered: boolean }> = [];
+    const top = (): { type: DeclaredType; typeDepth: number; entered: boolean } | undefined => stack[stack.length - 1];
     const masked = stripSource(source);
     const rawLines = source.split('\n');
     /**
@@ -210,13 +218,13 @@ export const csharp: SurfaceLanguage = {
       const line = masked[idx];
       if (!pending) {
         const decl = DECL.exec(line);
+        const frame = top();
         if (decl?.groups) {
           const kind = decl.groups.mods?.includes('abstract') ? 'abstract' : KIND[decl.groups.kind];
-          current = { name: decl.groups.name, kind, members: [], line: n };
-          types.push(current);
-          typeDepth = depth;
-          entered = false;
-        } else if (current && depth === typeDepth + 1 && current.kind === 'enum') {
+          const declared: DeclaredType = { name: decl.groups.name, kind, members: [], line: n };
+          types.push(declared);
+          stack.push({ type: declared, typeDepth: depth, entered: false });
+        } else if (frame && depth === frame.typeDepth + 1 && frame.type.kind === 'enum') {
           // Enum members BEFORE the general member rule, not after it. `Klondike,` is a bare
           // identifier: MEMBER needs `<type> <name> <tail>` and cannot match it, so the enum branch
           // being an `else if` after MEMBER made it unreachable for any enum whose body opens on its
@@ -225,20 +233,20 @@ export const csharp: SurfaceLanguage = {
           const name = line.trim().replace(/[,=].*$/, '').trim();
           if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
             // An enum value is always exactly one line — there is no body to walk.
-            current.members.push({ name, kind: 'field', visibility: 'public', sig: rawLines[idx].trim(), line: n, endLine: n });
+            frame.type.members.push({ name, kind: 'field', visibility: 'public', sig: rawLines[idx].trim(), line: n, endLine: n });
           }
-        } else if (current && depth === typeDepth + 1) {
+        } else if (frame && depth === frame.typeDepth + 1) {
           const m = MEMBER.exec(line);
-          if (m?.groups && m.groups.name !== current.name) {
+          if (m?.groups && m.groups.name !== frame.type.name) {
             const kind: DeclaredMember['kind'] = m.groups.ev ? 'event'
               : m.groups.tail === '(' ? 'method'
               : m.groups.tail === '{' ? 'property' : 'field';
             // An interface member carries no access modifier and is public BY DEFINITION. Reading the
             // absent modifier as C#'s `private` default made MEMBER skip every interface — which is
             // where most of a design's contract actually lives.
-            const vis: Visibility = current.kind === 'interface' ? 'public' : visibility(m.groups.vis);
+            const vis: Visibility = frame.type.kind === 'interface' ? 'public' : visibility(m.groups.vis);
             const member: DeclaredMember = { name: m.groups.name, kind, visibility: vis, sig: rawLines[idx].replace(/\/\/.*$/, '').trim(), line: n };
-            current.members.push(member);
+            frame.type.members.push(member);
             pending = { member, entered: false, parenDepth: 0 };
           }
         }
@@ -248,12 +256,13 @@ export const csharp: SurfaceLanguage = {
           if (ch === '(') pending.parenDepth++;
           else if (ch === ')') pending.parenDepth = Math.max(0, pending.parenDepth - 1);
         }
+        const f = top();
         if (ch === '{') {
-          if (pending && !pending.entered && pending.parenDepth === 0 && depth === typeDepth + 1) pending.entered = true;
+          if (pending && !pending.entered && pending.parenDepth === 0 && f && depth === f.typeDepth + 1) pending.entered = true;
           depth++;
         } else if (ch === '}') {
           depth--;
-          if (pending?.entered && depth === typeDepth + 1) {
+          if (pending?.entered && f && depth === f.typeDepth + 1) {
             pending.member.endLine = n;
             pending = null;
           }
@@ -261,12 +270,19 @@ export const csharp: SurfaceLanguage = {
       }
       // No body ever opened and this line closed at the member's own level with `;` — a field, an
       // auto-property with no initializer past this point, or (inside an interface) a bare signature.
-      if (pending && !pending.entered && pending.parenDepth === 0 && depth === typeDepth + 1 && /;\s*$/.test(line)) {
+      const open = top();
+      if (pending && !pending.entered && pending.parenDepth === 0 && open && depth === open.typeDepth + 1 && /;\s*$/.test(line)) {
         pending.member.endLine = n;
         pending = null;
       }
-      if (current && depth > typeDepth) entered = true;
-      if (current && entered && depth <= typeDepth) { pending = null; current = null; typeDepth = -1; entered = false; }
+      if (open && depth > open.typeDepth) open.entered = true;
+      // Pop every frame this line closed, not just the innermost: `} } }` on one line ends three.
+      while (stack.length) {
+        const f = stack[stack.length - 1];
+        if (!f.entered || depth > f.typeDepth) break;
+        pending = null;
+        stack.pop();
+      }
     }
     return types;
   },
