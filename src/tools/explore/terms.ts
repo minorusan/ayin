@@ -58,7 +58,7 @@ const CASE_ID = /\b[A-Za-z_$][A-Za-z0-9_$]*\b/g;
 const KEYISH = /\b[a-zA-Z_][\w-]*(?:[:.][\w-]+)+\b/g;
 const PATHISH = /(?:[\w.-]+\/)+[\w.-]+|\b[\w-]+\.(?:cs|ts|tsx|js|jsx|asset|prefab|unity|anim|meta|json|md)\b/g;
 
-function cap(w: string): string {
+export function cap(w: string): string {
   return w.charAt(0).toUpperCase() + w.slice(1);
 }
 

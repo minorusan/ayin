@@ -28,7 +28,10 @@ const GIT_READ_SUBCOMMANDS = new Set(['grep', 'ls-files', 'log', 'show', 'blame'
 
 /** Directories a code search must never descend into. Shared shape with the `grep` tool's list. */
 export const PRUNE = [
-  '.git', 'node_modules',
+  // `.ayin` is AYIN'S OWN OUTPUT, and searching it makes the tool answer with its own homework:
+  // `map_dependencies` writes a design file per type, so a filename probe for Toaster came back
+  // with `.ayin/diagrams/toaster-deps/Toaster.cs` above the real one.
+  '.git', '.ayin', 'node_modules',
   'Library', 'Temp', 'obj', 'Logs', 'Build', 'Builds',
   // GLOBS, not names. Real repositories accumulate `dist.bak-20260704-234256/`, `dist.old/`,
   // `src.bak/` — and `--exclude-dir=dist` matches none of them. Measured: a stale backup tree put
@@ -104,17 +107,45 @@ export function asGitGrep(argv: string[], cwd: string): string[] | null {
 
   flags.push('-nI');
   if (listOnly) flags.splice(0, 1, '-lI');
-  // No `-C`: the runner already spawns with this cwd, and a `git -C …` shape would put a flag where
-  // the read-only guard looks for the subcommand — which it rightly refuses.
+  /**
+   * `-E` MEANS TWO DIFFERENT LANGUAGES, and swapping engines silently changed which one.
+   *
+   * GNU grep's `-E` accepts `\s`, `\b`, `\d`, `\w` and `(?:…)` as extensions. `git grep -E` is
+   * POSIX ERE and accepts none of them — it does not error, it simply matches nothing. So this
+   * translation, written for speed and verified for identical hits, silently emptied every probe that
+   * used one, in every git repository, which is all of them.
+   *
+   * What it cost: `definition` and `mentions` are built on `\b` and `\s`, so the two strongest probes
+   * ayin has returned ZERO for years of use, while `spec` — whose regex is `(Assert|Should|Expect).*term`,
+   * pure POSIX by accident — kept working. That is the whole reason every answer came back as test
+   * assertions. Measured here: `definition(Toaster)` found nothing in a repository whose
+   * `Toaster.cs:11` reads `public class Toaster : MonoBehaviour, IToasterService`, and the same
+   * pattern under `-P` finds it instantly.
+   *
+   * So a pattern using the extensions asks for `-P`, which is PCRE and a superset of what GNU grep
+   * was giving us. Git may be built without PCRE; `runProbe` notices that and runs the original grep.
+   */
+  const needsPerl = mode === 'E' && /\\[sbdwSBDW]|\(\?[:=!<]/.test(pattern);
   return [
-    'git', 'grep', '--no-color', '--untracked', ...flags, `-${mode}`, pattern,
+    'git', 'grep', '--no-color', '--untracked', ...flags, needsPerl ? '-P' : `-${mode}`, pattern,
     '--', ...(includes.length ? includes : ['.']),
   ];
 }
 
 export function runProbe(argv: string[], cwd: string): Promise<ProbeResult> {
+  const original = argv;
   const translated = asGitGrep(argv, cwd);
   if (translated) argv = translated;
+  assertReadOnly(argv);
+  // A git built without PCRE refuses `-P` outright. That is a fact about the machine, not about the
+  // repository, so the original grep runs instead of the probe reporting an empty search.
+  if (argv !== original && argv.includes('-P')) {
+    return runRaw(argv, cwd).then((r) => (r.failed ? runRaw(original, cwd) : r));
+  }
+  return runRaw(argv, cwd);
+}
+
+function runRaw(argv: string[], cwd: string): Promise<ProbeResult & { failed?: boolean }> {
   assertReadOnly(argv);
   const printable = argv.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ');
   return new Promise((resolve) => {
@@ -123,18 +154,21 @@ export function runProbe(argv: string[], cwd: string): Promise<ProbeResult> {
     const child = spawn(argv[0], argv.slice(1), { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     let done = false;
+    let code = 0;
     const finish = (timedOut: boolean): void => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       const lines = out.split('\n').filter(Boolean).slice(0, MAX_LINES);
-      resolve({ ok: true, lines, timedOut, printable });
+      // git grep exits 1 for "no matches" and 128 for "I cannot run this" — only the second is a
+      // failed SEARCH rather than an empty one, and only it may trigger a fallback.
+      resolve({ ok: true, lines, timedOut, printable, failed: code === 128 && lines.length === 0 });
     };
     const timer = setTimeout(() => { child.kill('SIGKILL'); finish(true); }, TIMEOUT_MS);
     child.stdout.on('data', (c: Buffer) => {
       if (out.length < 2_000_000) out += c.toString();
     });
-    child.on('close', () => finish(false));
+    child.on('close', (c) => { code = c ?? 0; finish(false); });
     // grep exits 1 on "no match" — a normal answer, not a failure.
     child.on('error', () => { if (!done) { done = true; clearTimeout(timer); resolve({ ok: false, lines: [], timedOut: false, printable }); } });
   });

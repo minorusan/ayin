@@ -529,12 +529,55 @@ function relativeWhen(iso: string): string {
 let busy = false;
 
 /**
+ * `!<command>` — straight to the shell, no model, no round: everything after the `!` is the
+ * operator's, verbatim.
+ */
+async function runBangLine(text: string): Promise<void> {
+  const command = text.slice(1).trim();
+  if (!command) {
+    addMessage('system', 'Nothing after the `!`. `!<command>` runs it in your shell; the model never sees it.');
+    return;
+  }
+  // One tiny model call in front of the shell: it corrects the SPELLING of the line and nothing
+  // else, and any rewrite that escalates is thrown away by `vetRewrite` (bang-check.ts). It cannot
+  // block — a timeout or a dead endpoint runs what was typed. `runBang` is still verbatim.
+  const wasBusy = busy;
+  if (!wasBusy) setAgentStatus('Checking...');
+  const { command: toRun, note } = await checkBangSyntax(command);
+  if (note) addMessage('system', note);
+  if (!wasBusy) setAgentStatus('Running...');
+  const r = await runBang(toRun);
+  // The agent owns the status line while it is working; a passthrough must not clear it out from
+  // under a running turn, which would read as the turn having finished.
+  if (!wasBusy) setAgentStatus('');
+  addMessage('tool', formatShellForChat(toRun, r.output, r));
+}
+
+/**
  * ONE PATH FOR EVERY PROMPT. The review page's comments come through here too, which is what makes them
  * indistinguishable from typing in the chat: same history entry, same `user` bubble, same busy/queue
  * rules, same agent loop. A second entry point would be a second set of those decisions to keep in
  * sync, and the first thing to drift would be the one the operator only sees when it breaks.
  */
 async function handleInput(text: string): Promise<void> {
+  /**
+   * `!` IS NOT A PROMPT, so it does not queue behind the agent.
+   *
+   * The busy gate below holds a typed line until the turn ends, which is right for anything the model
+   * has to read — and `!<command>` is the one input the model never sees. It went into the queue
+   * anyway and came back as "Queued for the agent.", so the shell passthrough did nothing at the
+   * moment it is most wanted: while a turn is running and the operator wants to look at something.
+   * Reported by the operator typing `!ls` and watching it queue.
+   *
+   * Safe to run concurrently because it always was concurrent: it is the operator's own shell line,
+   * in their own tree, and the agent's shell calls are separate processes either way.
+   */
+  if (text.startsWith('!')) {
+    pushEntry(text);
+    addMessage('user', text);
+    await runBangLine(text);
+    return;
+  }
   if (busy) {
     // A slash command typed while the agent works is REFUSED below, so its argument is never acted on —
     // and an argument that is never acted on has no business being persisted, least of all a credential
@@ -554,27 +597,6 @@ async function handleInput(text: string): Promise<void> {
 
   pushEntry(text);
   addMessage('user', text);
-
-  // `!<command>` — straight to the shell, no model, no round. Placed before the slash block because
-  // it is a passthrough rather than a command: everything after the `!` is the operator's, verbatim.
-  if (text.startsWith('!')) {
-    const command = text.slice(1).trim();
-    if (!command) {
-      addMessage('system', 'Nothing after the `!`. `!<command>` runs it in your shell; the model never sees it.');
-      return;
-    }
-    // One tiny model call in front of the shell: it corrects the SPELLING of the line and nothing
-    // else, and any rewrite that escalates is thrown away by `vetRewrite` (bang-check.ts). It cannot
-    // block — a timeout or a dead endpoint runs what was typed. `runBang` is still verbatim.
-    setAgentStatus('Checking...');
-    const { command: toRun, note } = await checkBangSyntax(command);
-    if (note) addMessage('system', note);
-    setAgentStatus('Running...');
-    const r = await runBang(toRun);
-    setAgentStatus('');
-    addMessage('tool', formatShellForChat(toRun, r.output, r));
-    return;
-  }
 
   // Slash commands
   if (text.startsWith('/')) {

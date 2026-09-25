@@ -66,7 +66,14 @@ export function scoreFinding(f: Finding, termHitsInFile: number): number {
    * read as confidently as the real thing. Demoted rather than dropped, because when the precise pass
    * found nothing these ARE the only leads there are.
    */
-  if (f.widened) s -= 0.3;
+  /**
+   * …BUT A DECLARATION IS NOT A COINCIDENCE, whichever pass found it. `defines` and `filename` say a
+   * thing is NAMED after the word, and that is the answer to "where is the toaster", not a token it
+   * happens to share. The flat penalty put `class Toaster` below four test assertions whose only
+   * claim was the English word "shown". The demotion stays for `mentions` and `spec`, which are
+   * exactly where a shared word IS usually a coincidence.
+   */
+  if (f.widened && f.reason !== 'defines' && f.reason !== 'filename') s -= 0.3;
 
   /**
    * AN EXACT NAME BEATS A PREFIX. `*Toast*` matches `Toast.prefab`, `ToastSafe.prefab`,

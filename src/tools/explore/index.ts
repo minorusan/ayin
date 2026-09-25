@@ -25,7 +25,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { toolLog, toolReport } from '../runtime.js';
-import { extractTerms } from './terms.js';
+import { cap, extractTerms } from './terms.js';
 import { parseGrepLine, readSpan, runAll } from './search.js';
 import { rankAndTrim } from './rank.js';
 import { formatResult } from './format.js';
@@ -226,7 +226,25 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
   // only on the searches that already failed, and it is what makes a concept findable at all.
   let widenedSearch = false;
   if (findings.length === 0 && terms.words.length) {
-    const wordTerms = terms.words.filter((w) => w.length >= 3).slice(0, MAX_TERMS);
+    /**
+     * CODE IS PASCALCASE AND THE WIDENED WORDS WERE NOT — so the rescue pass could not see a
+     * declaration even when it was the answer.
+     *
+     * `terms.words` is lowercased, because that is how the question was written. Every probe but the
+     * filename one greps case-sensitively, so `definition(toaster)` ran
+     * `(class|struct|interface)\s+toaster\b` and returned ZERO against a file containing
+     * `public class Toaster : MonoBehaviour, IToasterService`. Measured on "how is the toast/toaster
+     * shown and hidden at runtime": the precise pass spent all four slots on `toastToaster`,
+     * `toasterShown` and their cased variants — symbols nobody wrote — and the widening that exists
+     * to rescue exactly that found only test assertions containing the English words "shown" and
+     * "hidden", because the one real declaration was a capital letter out of reach.
+     *
+     * Capitalised forms first, in the order the question asked them: a widened word is being matched
+     * against code, and code names things `Toaster`. The lowercase forms follow and take whatever
+     * slots are left, for prose and for camelCase tails that `\b_?term\b` still reaches.
+     */
+    const plain = terms.words.filter((w) => w.length >= 3);
+    const wordTerms = [...new Set([...plain.map(cap), ...plain])].slice(0, MAX_TERMS);
     if (wordTerms.length) {
       widenedSearch = true;
       toolReport(`explore · nothing for the joined forms — widening to ${wordTerms.join(', ')}`);
