@@ -305,17 +305,34 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
            * are arbitrary, and reported as such — *"so far off they add nothing"*. Under this the
            * coverage note is the honest answer on its own: not what is nearby, but what is here.
            */
+          /**
+           * ENOUGH PRECISION TO TELL THE TWO CASES APART. `toFixed(2)` prints 0.00 for a candidate
+           * scored 0.004 and for one scored 0.0000, and those are not the same situation: on "Toast
+           * fade timer how long does a toast stay on screen" the three listed at "0.00" were
+           * *"Under what condition does the timer callback trigger a FadeOut call"* and two more
+           * about exactly that — plainly relevant, and printed with a number that says worthless.
+           * The filter below tests the raw score while the display rounded it, so a real near miss
+           * and arbitrary noise came out looking identical.
+           */
           const near = scored.slice(0, 3).filter((h) => h.score > 0)
-            .map((h) => `    ${h.score.toFixed(2)}  ${ordered[h.index].question}`)
+            .map((h) => `    ${h.score < 0.01 ? h.score.toExponential(1) : h.score.toFixed(2)}  ${ordered[h.index].question}`)
             .join('\n');
           return `Nothing in the corpus answers "${query}".`
             + ` ${scored.length} candidate(s) were considered and the closest scored`
-            + ` ${scored[0].score.toFixed(2)} against a floor of ${floor}.`
+            + ` ${scored[0].score < 0.01 ? scored[0].score.toExponential(1) : scored[0].score.toFixed(2)}`
+            + ` against a floor of ${floor} — the floor is what separates an answer that may be cited`
+            + ` from one that may not.`
             + ` The corpus holds ${store.totals().chunks} answered question(s) for this repo.\n`
             + (near
-              ? `The nearest it has — none of them an answer to yours, and their answers are NOT shown `
-                + `for that reason. Rephrase toward one of these if it is what you meant:\n${near}\n`
-              : 'Nothing scored above zero, so there is no near miss to rephrase toward.\n')
+              // NOT "none of these answers you" — THE RERANKER SAID THAT, and on the measured case it
+              // was wrong: three questions about a toast's fade timer, for a question about a toast's
+              // fade timer, all under the floor. Their answers stay hidden, because a score below the
+              // floor cannot be presented as a citation; what the message must not also do is assert
+              // they are irrelevant, which is a claim the floor does not support either.
+              ? `The nearest it holds, none of which cleared the floor — their answers are withheld for `
+                + `that reason alone, not because they are known to be wrong. Ask again naming one of `
+                + `these if it is what you meant:\n${near}\n`
+              : 'Nothing scored above zero, so there is no near miss to point at.\n')
             + coverageNote(all);
         }
         return render(repoPath, store, kept.map((h) => ordered[h.index]), query, named, 'semantic');

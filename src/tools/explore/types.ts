@@ -92,6 +92,17 @@ export interface Finding {
    * explore should have surfaced.
    */
   widened?: boolean;
+  /**
+   * The matched line is a COMMENT, so whatever the probe called it, it is not a declaration.
+   *
+   * `definition` matches `\b<PREFIX>?Term\s*\(`, which is exactly the shape a doc comment uses to
+   * TALK about a method: `/// Other features like Seek(), Loop() and \ref clipFrequencyShift`. Asking
+   * "main game loop" returned eight `[defines]` hits, every one of them a `///` line inside a
+   * heavily-documented third-party library, at the top weight in the table. The session read that as
+   * a third-party problem and asked for a vendor skip-list; it is not. It is prose being scored as
+   * code, and it fires in any well-documented file.
+   */
+  inComment?: boolean;
   /** Ranking score. Reported so the caller can see the ordering is mechanical. */
   score: number;
   /**

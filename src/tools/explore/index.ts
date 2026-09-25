@@ -37,6 +37,15 @@ import { exploreCacheGet, exploreCacheKey, exploreCacheSet } from './cache.js';
 import { exploreCorpusBlock } from './corpus.js';
 import { exploreDesignBlock } from './design.js';
 
+/**
+ * Is the matched line prose rather than code?
+ *
+ * Line-level and deliberately so: a full comment parse would need a lexer per language, and the case
+ * that matters is the whole-line comment a doc block is made of. A trailing `// note` after real code
+ * still reads as code here, which is correct — the declaration on that line is real.
+ */
+const COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*|#|--|;;)/;
+
 /** Most specific first; `generic` always matches. */
 const EXPLORERS: ProjectExplorer[] = [unity, typescript, generic];
 
@@ -208,6 +217,7 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
         },
         reason,
         term,
+        inComment: COMMENT_LINE.test(parsed.text),
         symbol: explorer.symbolAt(got.lines, parsed.line),
         score: 0,
       });
@@ -269,7 +279,8 @@ export async function exploreExecute(params: Record<string, string>): Promise<st
               toLine: Math.max(1, parsed.line - CONTEXT_BEFORE) + got.text.split('\n').length - 1,
               text: got.text,
             },
-            reason, term, widened: true, symbol: explorer.symbolAt(got.lines, parsed.line), score: 0,
+            reason, term, widened: true, inComment: COMMENT_LINE.test(parsed.text),
+            symbol: explorer.symbolAt(got.lines, parsed.line), score: 0,
           });
         }
       }

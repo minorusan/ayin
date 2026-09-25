@@ -49,6 +49,15 @@ export function scoreFinding(f: Finding, termHitsInFile: number): number {
   // tests filled the list.
   if (!f.span.text && !(f.reason === 'filename' && NOT_SOURCE.test(f.span.file))) s -= 0.35;
 
+  /**
+   * PROSE IS NOT A DECLARATION. See `Finding.inComment`: the `definition` probe's method form
+   * (`Term(`) is the same shape a doc comment uses to mention one, so `/// … Seek(), Loop() and …`
+   * arrived as `[defines]` at weight 1.0 and filled an answer with a third-party library's
+   * documentation. Dropped to below `mentions`, not discarded: a comment naming the thing is still a
+   * pointer at the right file, and sometimes the only one.
+   */
+  if (f.inComment && (f.reason === 'defines' || f.reason === 'spec')) s = 0.3;
+
   // Density: a file mentioning the term repeatedly is more likely to own it. Capped so one enormous
   // file cannot dominate purely by being enormous.
   s += Math.min(termHitsInFile, 8) * 0.04;
