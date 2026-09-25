@@ -80,10 +80,49 @@ export const tool: Tool = {
         (a, b) => rankScore(a) - rankScore(b),
       );
       if (!lines.length) {
+        /**
+         * A MISS SHOULD SAY WHERE THESE FILES DO LIVE, not list ways to guess again.
+         *
+         * `find_files path=Assets/Games/SolitaireGame pattern=*.controller` returned nothing, and the
+         * advice it gave — try ignore_case, try a wider glob — was all about the PATTERN, when the
+         * pattern was right and the directory was wrong: every controller in that project sits under
+         * `Assets/Art/Animations`. So the caller re-ran the identical pattern one directory up and
+         * got the answer. Reported verbatim: *"a no match → here is where similar names DO live hint
+         * would save a round-trip."*
+         *
+         * The second search only runs on a miss, is bounded, and reports DIRECTORIES with counts
+         * rather than paths — the question it answers is "where should I have looked", and a list of
+         * two hundred files answers a different one.
+         */
+        let elsewhere = '';
+        const searched = resolveAgainstCwd(String(params.path));
+        if (searched !== CWD) {
+          try {
+            const wider = await execAsync(
+              `find ${shq(CWD)} ${flag} ${shq(pattern)} ${PRUNED} | head -200`,
+              { cwd: CWD },
+            );
+            const hits = wider === '(no output)' ? [] : wider.split('\n').filter((l) => l.trim());
+            const byDir = new Map<string, number>();
+            for (const h of hits) {
+              const d = h.slice(0, h.lastIndexOf('/')).replace(`${CWD}/`, '');
+              byDir.set(d, (byDir.get(d) ?? 0) + 1);
+            }
+            const top = [...byDir.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+            if (top.length) {
+              // `head -200` makes the count a FLOOR, not a total. Printing it as a total would be a
+              // small lie in a message whose whole job is to be trusted about where things are.
+              elsewhere = `\nThe same pattern DOES match elsewhere in this project — `
+                + `${hits.length >= 200 ? 'at least 200' : `${hits.length}`} file(s), mostly in:\n`
+                + top.map(([d, n]) => `  ${d}/  (${n})`).join('\n')
+                + `\nRe-run with one of those as path=.`;
+            }
+          } catch { /* the wider look is a courtesy; its failure is not this call's failure */ }
+        }
         return (
           `0 files match ${pattern} under ${params.path} (matched against the ${kind}).\n` +
           `The directory was searched successfully. Next: ignore_case=true, a wider glob like "*Ball*.cs", ` +
-          `or a path glob such as "*/GameServices/*.cs".`
+          `or a path glob such as "*/GameServices/*.cs".${elsewhere}`
         );
       }
       if (lines.length > FIND_LIMIT) {

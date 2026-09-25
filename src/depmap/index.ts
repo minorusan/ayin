@@ -114,6 +114,45 @@ interface Node {
   expanded: boolean;
 }
 
+/**
+ * `GUID:9b261077…` → the assembly that guid names.
+ *
+ * A Unity `.asmdef` may spell a reference EITHER WAY — the plain assembly name, or `GUID:` plus the
+ * guid from the target manifest's `.meta`. Unity writes the guid form when "Use GUIDs" is on, and it
+ * is the more robust of the two because it survives a rename. Both forms appear in one project and
+ * often in one file: Core listed forty guids and six names.
+ *
+ * Printed raw they are worse than useless — they are a wall of hex where the whole point of the
+ * grouping is that a person can read which assembly is which. Reported verbatim: *"dumps a wall of
+ * bare GUID:xxxx references … resolving even the first hop's guids to names would make it far more
+ * readable."* The mapping is on disk and exact, so there is nothing to guess.
+ *
+ * Built once per call, and only when a guid reference is actually seen — most projects use names.
+ */
+function asmdefIndex(root: string): Map<string, string> {
+  const byGuid = new Map<string, string>();
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 12) return;
+    let entries: string[];
+    try { entries = readdirSync(dir); } catch { return; }
+    for (const e of entries) {
+      if (PRUNE.has(e) || e.startsWith('.')) continue;
+      const abs = join(dir, e);
+      let st;
+      try { st = statSync(abs); } catch { continue; }
+      if (st.isDirectory()) { walk(abs, depth + 1); continue; }
+      if (!e.endsWith('.asmdef')) continue;
+      try {
+        const guid = /^guid:\s*([0-9a-f]{32})\s*$/m.exec(readFileSync(`${abs}.meta`, 'utf-8'))?.[1];
+        const name = (JSON.parse(readFileSync(abs, 'utf-8')) as { name?: string }).name;
+        if (guid && name) byGuid.set(guid, name);
+      } catch { /* a manifest without a meta, or malformed — it simply does not resolve */ }
+    }
+  };
+  walk(root, 0);
+  return byGuid;
+}
+
 /** The project root: the nearest ancestor holding a marker, else the seed's own directory. */
 function rootFor(start: string): string {
   let dir = statSync(start, { throwIfNoEntry: false })?.isDirectory() ? start : dirname(start);
@@ -229,7 +268,17 @@ export async function buildDepMap(seedPaths: string[], opts: DepMapOptions = {})
     return text;
   };
 
-  const domainOf = (file: string): string => {
+  /**
+   * The assembly a file compiles into. A LOOKUP, WITH NO SIDE EFFECT — which it did not used to be.
+   *
+   * `fileFor` calls this to settle an ambiguous name by assembly, and that call registered the
+   * domain. So an assembly merely CONSIDERED during resolution got a cluster of its own, and the
+   * answer carried `Appboy — references NOTHING` above an empty list of types. A group with nothing
+   * in it is not a fact about the graph, it is a trace of how the graph was computed.
+   */
+  const assemblyOf = (file: string): string => lang.domainOf(file)?.name ?? '';
+
+  const registerDomain = (file: string): string => {
     const d = lang.domainOf(file);
     if (!d) return '';
     if (!domains.has(d.name)) domains.set(d.name, { references: d.allows ?? [], sealed: d.sealed === true });
@@ -248,8 +297,8 @@ export async function buildDepMap(seedPaths: string[], opts: DepMapOptions = {})
     const hits = byName.get(name);
     if (!hits?.length) { unresolved.add(name); return null; }
     if (hits.length === 1) return hits[0];
-    const mine = domainOf(from);
-    const same = hits.filter((h) => domainOf(h) === mine);
+    const mine = assemblyOf(from);
+    const same = hits.filter((h) => assemblyOf(h) === mine);
     if (same.length === 1) return same[0];
     ambiguous.add(name);
     return null;
@@ -262,7 +311,7 @@ export async function buildDepMap(seedPaths: string[], opts: DepMapOptions = {})
       return existing;
     }
     if (nodes.size >= MAX_NODES) { capped = true; return null; }
-    const node: Node = { type, file, domain: domainOf(file), dist, expanded: false };
+    const node: Node = { type, file, domain: registerDomain(file), dist, expanded: false };
     nodes.set(type.name, node);
     return node;
   };
@@ -330,7 +379,11 @@ export async function buildDepMap(seedPaths: string[], opts: DepMapOptions = {})
 
   const title = `${seeds.map((s) => basename(s)).join(' + ')} — dependencies, depth ${depth}`;
   const doc: NaamaDoc = emptyDoc(title);
-  doc.domains = [...domains.entries()].map(([name, d]) => ({ name, references: d.references, sealed: d.sealed }));
+  const guids = [...domains.values()].some((d) => d.references.some((r) => r.startsWith('GUID:')))
+    ? asmdefIndex(root)
+    : new Map<string, string>();
+  const named = (ref: string): string => (ref.startsWith('GUID:') ? guids.get(ref.slice(5)) ?? ref : ref);
+  doc.domains = [...domains.entries()].map(([name, d]) => ({ name, references: d.references.map(named), sealed: d.sealed }));
   // Files outside any assembly still have to live somewhere, and an invented domain name would read as
   // a real one. The empty string is what `domainOf` returns for them; it gets a label that says so.
   const LOOSE = '(no assembly)';

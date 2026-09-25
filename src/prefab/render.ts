@@ -194,6 +194,41 @@ export function renderPrefabAt(map: PrefabMap, at: string, only: string[] = []):
   if (!segs.length) return 'Error: at is empty — use an address like GameOverLayer/Panel/RectTransform.';
 
   const eq = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+  /**
+   * A PATH MAY START ANYWHERE IT IS UNAMBIGUOUS, not only at the file root.
+   *
+   * `at=` walks from the roots, and a prefab's root is its single top GameObject — so
+   * `GameFieldContainer/SafeAreaPanel/ExitButton` failed on a node that really exists, three levels
+   * down, and the caller spent a round re-issuing it with `GameLayer/` on the front. Naming the
+   * missing prefix in the error already helped; resolving it is better, because the address the
+   * caller wrote was never wrong about WHICH NODE IT MEANT.
+   *
+   * ONLY WHEN ONE NODE ANSWERS TO IT. Two objects named `Icon` in different branches make
+   * `Icon/Image` genuinely ambiguous, and guessing there would show the wrong component's properties
+   * with nothing on screen admitting it — so that case still falls through to the error below, which
+   * lists what it found. Root-anchored paths are matched first and always win, so nothing that
+   * resolved before resolves differently now.
+   */
+  if (!map.roots.some((o) => eq(o.name, segs[0]))) {
+    const found: ObjectMap[] = [];
+    const seek = (nodes: ObjectMap[]): void => {
+      for (const n of nodes) {
+        if (eq(n.name, segs[0])) found.push(n);
+        seek(n.children);
+      }
+    };
+    seek(map.roots);
+    if (found.length === 1) {
+      const rest = segs.slice(1);
+      const inner = rest.length ? renderPrefabAt({ ...map, roots: [found[0]] }, [found[0].name, ...rest].join('/'), only) : '';
+      if (!rest.length || !inner.startsWith('Error:')) {
+        const note = `(resolved from ${map.roots[0]?.name ?? 'the root'} — "${at}" names a node below it, not a root)`;
+        return rest.length
+          ? `${note}\n${inner}`
+          : [`${map.file}`, '', note, '', ...objectLines(found[0], 0, false)].join('\n');
+      }
+    }
+  }
   let level = map.roots;
   let obj: ObjectMap | null = null;
 

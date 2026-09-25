@@ -73,8 +73,23 @@ export const tool: Tool = {
       `${result.doc.types.length} type(s) · ${result.doc.edges.length} edge(s) · ${result.doc.domains.length} assembly(ies) · from ${result.seeds.join(', ')}`,
       '',
     ];
+    /**
+     * NAME THE REFERENCES THAT ARE ON THE PAGE, COUNT THE REST.
+     *
+     * `Core` declares forty-six, and printing all of them buried the eight types the walk actually
+     * found under a paragraph of assembly names — reported as "a wall". The references worth reading
+     * here are the ones this graph also drew, because those are the edges the picture explains; the
+     * others are true and irrelevant to this question. The remainder is COUNTED rather than dropped,
+     * since "references these two" and "references these two of forty-six" are different facts and
+     * the second one is the one about coupling.
+     */
+    const drawn = new Set(result.doc.domains.map((d) => d.name));
     for (const d of result.doc.domains) {
-      const refs = d.references.length ? `references ${d.references.join(', ')}` : 'references NOTHING';
+      const here = d.references.filter((r) => drawn.has(r));
+      const rest = d.references.length - here.length;
+      const refs = d.references.length === 0 ? 'references NOTHING'
+        : here.length === 0 ? `references ${d.references.length}, none of them drawn here`
+          : `references ${here.join(', ')}${rest ? ` (+${rest} not on this graph)` : ''}`;
       const held = result.doc.types.filter((t) => t.domain === d.name).map((t) => t.name);
       lines.push(`  ${d.name} — ${refs}${d.sealed ? ' · no engine references' : ''}`);
       lines.push(`      ${held.join(', ')}`);
