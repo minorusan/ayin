@@ -1090,45 +1090,45 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
   // C#: sealed asmdef
   const cs = join(root, 'cs'); mkdirSync(cs, { recursive: true });
   writeFileSync(join(cs, 'Widgets.Core.asmdef'), JSON.stringify({ name: 'Widgets.Core', references: [], noEngineReferences: true }));
-  const okCs = ent.gateWrite(join(cs, 'Gauge.cs'), 'namespace Widgets.Core {\n public class Gauge {\n  private int _raw;\n  public int Read() { return _raw; }\n }\n}\n');
+  const okCs = await ent.gateWrite(join(cs, 'Gauge.cs'), 'namespace Widgets.Core {\n public class Gauge {\n  private int _raw;\n  public int Read() { return _raw; }\n }\n}\n');
   ok(okCs === null, 'a C# write matching the design passes', String(okCs).slice(0, 60));
-  const proxy = ent.gateWrite(join(cs, 'P.cs'), 'namespace Widgets.Core {\n public interface IGaugeProvider { int Get(); }\n}\n');
+  const proxy = await ent.gateWrite(join(cs, 'P.cs'), 'namespace Widgets.Core {\n public interface IGaugeProvider { int Get(); }\n}\n');
   ok(proxy !== null && /CLOSURE/.test(proxy), 'an invented C# type is STOPPED — the proxy that cost a week');
-  const member = ent.gateWrite(join(cs, 'M.cs'), 'namespace Widgets.Core {\n public class Gauge {\n  public int Read() { return 0; }\n  public void Calibrate() {}\n }\n}\n');
+  const member = await ent.gateWrite(join(cs, 'M.cs'), 'namespace Widgets.Core {\n public class Gauge {\n  public int Read() { return 0; }\n  public void Calibrate() {}\n }\n}\n');
   ok(member !== null && /MEMBER/.test(member), 'an undesigned PUBLIC member is stopped');
-  const priv = ent.gateWrite(join(cs, 'V.cs'), 'namespace Widgets.Core {\n public class Gauge {\n  public int Read() { return 0; }\n  private void Calibrate() {}\n }\n}\n');
+  const priv = await ent.gateWrite(join(cs, 'V.cs'), 'namespace Widgets.Core {\n public class Gauge {\n  public int Read() { return 0; }\n  private void Calibrate() {}\n }\n}\n');
   ok(priv === null, 'a PRIVATE helper is allowed — implementation freedom inside the designed surface');
-  const dom = ent.gateWrite(join(cs, 'D.cs'), 'using UnityEngine;\nnamespace Widgets.Core {\n public class Gauge {\n  public int Read() { return 0; }\n }\n}\n');
+  const dom = await ent.gateWrite(join(cs, 'D.cs'), 'using UnityEngine;\nnamespace Widgets.Core {\n public class Gauge {\n  public int Read() { return 0; }\n }\n}\n');
   ok(dom !== null && /DOMAIN/.test(dom), 'a reference the asmdef forbids is stopped, naming the manifest');
 
   // JS/TS: the same rules through a different domain concept
   const ts = join(root, 'ts'); mkdirSync(ts, { recursive: true });
   writeFileSync(join(ts, 'package.json'), JSON.stringify({ name: 'widgets-core', dependencies: {} }));
-  ok(ent.gateWrite(join(ts, 'g.ts'), 'export class Gauge {\n  #raw = 0;\n  Read(): number { return this.#raw; }\n}\n') === null,
+  ok(await ent.gateWrite(join(ts, 'g.ts'), 'export class Gauge {\n  #raw = 0;\n  Read(): number { return this.#raw; }\n}\n') === null,
     'a TS write matching the design passes');
-  const tsProxy = ent.gateWrite(join(ts, 'p.ts'), 'export interface IGaugeProvider {\n  Get(): number;\n}\n');
+  const tsProxy = await ent.gateWrite(join(ts, 'p.ts'), 'export interface IGaugeProvider {\n  Get(): number;\n}\n');
   ok(tsProxy !== null && /CLOSURE/.test(tsProxy), 'an invented TS type is stopped by the SAME rule');
-  const tsDom = ent.gateWrite(join(ts, 'd.ts'), "import { z } from 'zod';\nexport class Gauge {\n  Read(): number { return 0; }\n}\n");
+  const tsDom = await ent.gateWrite(join(ts, 'd.ts'), "import { z } from 'zod';\nexport class Gauge {\n  Read(): number { return 0; }\n}\n");
   ok(tsDom !== null && /DOMAIN/.test(tsDom), 'a dependency package.json does not list is stopped');
 
   // REFERENCE — naming an undesigned type is the same violation as declaring one, and it is the form the
   // hardest trap took: `Feed(Telemetry)` where Telemetry exists nowhere. A declarations-only
   // check passes a file that cannot even compile.
   const iface = 'namespace N {\n public interface IGauge {\n  void Feed(Telemetry t);\n }\n}\n';
-  const refStop = ent.gateWrite(join(cs, 'R.cs'), iface);
+  const refStop = await ent.gateWrite(join(cs, 'R.cs'), iface);
   ok(refStop !== null && /REFERENCE/.test(refStop) && /Telemetry/.test(refStop),
     'a signature naming a type the design lacks is stopped, by name');
   // The false positives that made the first three attempts unusable — every one measured, not imagined.
-  ok(ent.gateWrite(join(cs, 'B.cs'),
+  ok(await ent.gateWrite(join(cs, 'B.cs'),
     'using System.Collections.Generic;\nnamespace N {\n public class Gauge {\n  public Dictionary<string,int> M { get; set; }\n  public int Read() { return 0; }\n }\n}\n') === null,
     'BCL types in signatures are not flagged — Dictionary/int/string are the language, not the design');
-  ok(ent.gateWrite(join(cs, 'O.cs'), 'namespace N {\n public class Gauge { public int Read() { return 0; } }\n}\n') === null,
+  ok(await ent.gateWrite(join(cs, 'O.cs'), 'namespace N {\n public class Gauge { public int Read() { return 0; } }\n}\n') === null,
     'a one-line type body does not make the keyword `class` look like a field type');
-  ok(ent.gateWrite(join(cs, 'S.cs'), 'namespace N {\n public class Gauge : IGauge {\n  public int Read() { return 0; }\n }\n}\n') === null,
+  ok(await ent.gateWrite(join(cs, 'S.cs'), 'namespace N {\n public class Gauge : IGauge {\n  public int Read() { return 0; }\n }\n}\n') === null,
     'a base list of designed types passes');
   // An interface member has no access modifier; reading that as C#'s private default made MEMBER skip
   // every contract in the design, which is most of what a design IS.
-  const ifMember = ent.gateWrite(join(cs, 'M2.cs'), 'namespace N {\n public interface IGauge {\n  int Read();\n  string Dump();\n }\n}\n');
+  const ifMember = await ent.gateWrite(join(cs, 'M2.cs'), 'namespace N {\n public interface IGauge {\n  int Read();\n  string Dump();\n }\n}\n');
   ok(ifMember !== null && /Dump/.test(ifMember),
     'an undesigned member on an INTERFACE is caught — interface members are public by definition');
 
@@ -1136,7 +1136,7 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
   // CONSTRUCTOR: it has no return type, so a signature pattern reads `public` as one. Measured in a live
   // run — the model was stopped on a real violation and told, alongside it, that "public" was an
   // undesigned type.
-  ok(ent.gateWrite(join(cs, 'C.cs'),
+  ok(await ent.gateWrite(join(cs, 'C.cs'),
     'namespace N {\n public class Gauge {\n  public int Read() { return 0; }\n  public Gauge(int seed) {}\n }\n}\n') === null,
     'a constructor is not read as a member whose return type is `public`');
 
@@ -1182,11 +1182,11 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
   ok(typeof ent.blockedTypes === 'function', 'parked types are reportable at the end of a task');
 
   // the design file is the agent's blind spot on purpose
-  const self = ent.gateWrite(join(root, 'design.puml'), '@startuml\n@enduml\n');
+  const self = await ent.gateWrite(join(root, 'design.puml'), '@startuml\n@enduml\n');
   ok(self !== null, 'the design file is READ-ONLY while entangled — else the model legalises its own drift');
 
   // an unhandled language must pass, not be refused
-  ok(ent.gateWrite(join(root, 'notes.md'), '# hello') === null, 'a language with no implementation is not blocked');
+  ok(await ent.gateWrite(join(root, 'notes.md'), '# hello') === null, 'a language with no implementation is not blocked');
 
   // AN ENFORCEMENT MECHANISM THE ENFORCED PARTY CAN DISABLE IS DECORATION.
   // Measured: given `op=off` on the entangle tool, the model called it — "Good, I'm disentangled. Now let
@@ -1206,13 +1206,13 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
   // SIGNATURE — the last workaround a live run found. Told `Telemetry` was undesigned, the model kept the
   // member and changed its parameter: `Feed(Telemetry)` became `Feed(string id)`. Same name, so a
   // name-only MEMBER check passed while the contract quietly moved.
-  const sigStop = ent.gateWrite(join(cs, 'Sig.cs'),
+  const sigStop = await ent.gateWrite(join(cs, 'Sig.cs'),
     'namespace N {\n public interface IGauge {\n  int Read();\n  void Feed(string id);\n }\n}\n');
   ok(sigStop === null || !/SIGNATURE/.test(sigStop) || /Feed/.test(sigStop),
     'a member whose designed parameter type vanished is caught by SIGNATURE, not passed by name');
   // And the false positive that would have made it unusable: design signatures are informal and often
   // name PARAMETERS rather than types, so only capitalized names are treated as types that must survive.
-  ok(ent.gateWrite(join(cs, 'Sig2.cs'),
+  ok(await ent.gateWrite(join(cs, 'Sig2.cs'),
     'namespace N {\n public interface IGauge {\n  int Read();\n }\n}\n') === null,
     'an informal designed signature does not fire SIGNATURE on every member');
 
@@ -1222,7 +1222,7 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
   ok(typeof ent.stopAwaitingOperator === 'function', 'the loop can ask whether a stop is awaiting the operator');
   ent.entangle(join(root, 'design.puml'), 'Widgets.Core');
   ok(ent.stopAwaitingOperator() === false, 'a fresh binding starts with no stop pending');
-  ent.gateWrite(join(cs, 'Stop.cs'), 'namespace N {\n public struct Undesigned { public int X; }\n}\n');
+  await ent.gateWrite(join(cs, 'Stop.cs'), 'namespace N {\n public struct Undesigned { public int X; }\n}\n');
   ok(ent.stopAwaitingOperator() === true, 'a blocked write raises it, so the nudges stand down');
   ent.clearStop();
   ok(ent.stopAwaitingOperator() === false, 'and the operator seeing it clears it');
@@ -1239,7 +1239,7 @@ console.log('\nentangle: the design is enforced, in every language, or not at al
     'the loop does not argue with a tool-less reply — it discards the round');
 
   ent.disentangle();
-  ok(ent.gateWrite(join(cs, 'P.cs'), 'namespace Widgets.Core { public interface IAnything {} }') === null,
+  ok(await ent.gateWrite(join(cs, 'P.cs'), 'namespace Widgets.Core { public interface IAnything {} }') === null,
     'nothing is checked when not entangled — the design loop stays free');
 }
 

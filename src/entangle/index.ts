@@ -9,7 +9,9 @@
  * certifies the drift. A write to the entangled file is itself a violation.
  */
 
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { syntaxBroken } from '../syntax/check.js';
 import { loadDesign } from './design.js';
 import { checkFile, checkAdoption, renderStop } from './check.js';
 import { csharp } from './languages/csharp.js';
@@ -43,6 +45,11 @@ const LANGUAGES: SurfaceLanguage[] = [csharp, typescript, dart, python, go, rust
 
 export function languageFor(path: string): SurfaceLanguage | null {
   return LANGUAGES.find((l) => l.handles(path)) ?? null;
+}
+
+/** The bytes on disk, or '' when this write is a create. Never throws: unreadable is the same as new. */
+function readIfPresent(abs: string): string {
+  try { return readFileSync(abs, 'utf-8'); } catch { return ''; }
 }
 
 let design: Design | null = null;
@@ -118,9 +125,23 @@ export function entangledTo(): string {
  * What must never happen is treating "cannot check" as "checked and fine" for a language we DO handle,
  * which is why a malformed manifest yields no domain rather than an empty allow-list.
  */
-export function gateWrite(file: string, source: string): string | null {
-  if (!design) return null;
+export async function gateWrite(file: string, source: string): Promise<string | null> {
   const abs = resolve(file);
+  /**
+   * SYNTAX FIRST, AND WHETHER OR NOT A DESIGN IS ENTANGLED.
+   *
+   * This function is THE write gate — `write_file`, `str_replace` and both `prefab_edit` paths all
+   * answer to it — so it is the one place a check cannot be forgotten by adding a fifth writer. The
+   * design rules below only run when something is entangled, which is rare; a broken file is always
+   * a broken file, so it is checked before the early return that would otherwise skip it.
+   *
+   * It reads the CURRENT bytes to compare against. A path that does not exist yet is a create, and
+   * an empty `before` is the right baseline for one: anything unparseable in it is new.
+   */
+  const broken = await syntaxBroken(abs, readIfPresent(abs), source);
+  if (broken) return broken;
+
+  if (!design) return null;
   if (abs === designPath) {
     return renderStop([{
       rule: 'CLOSURE', subject: designPath, file: abs,

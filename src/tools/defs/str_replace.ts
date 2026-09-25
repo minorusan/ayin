@@ -44,7 +44,7 @@ export const tool: Tool = {
       const after = before.replace(params.old_str, params.new_str);
       // Same gate as write_file, on the resulting file rather than the fragment: a surgical edit that
       // adds an undesigned type is the same violation, and checking the fragment alone would miss it.
-      const editStop = gateWrite(resolved, after);
+      const editStop = await gateWrite(resolved, after);
       if (editStop) return editStop;
       writeFileSync(resolved, after, 'utf-8');
       // READ BACK AFTER. The diff below is computed from what we MEANT to write; without this line it

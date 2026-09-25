@@ -87,7 +87,8 @@
     "check:rust": "node tool/check-rust.mjs",
     "check:ruby": "node tool/check-ruby.mjs",
     "check:java": "node tool/check-java.mjs",
-    "check:cpp": "node tool/check-cpp.mjs"
+    "check:cpp": "node tool/check-cpp.mjs",
+    "check:syntax": "node tool/check-syntax.mjs"
   },
   "dependencies": {
     "@langchain/core": "^1.2.9",
@@ -95,7 +96,8 @@
     "blessed": "^0.1.81",
     "openai": "^7.4.0",
     "sharp": "^0.33.5",
-    "undici": "^6.20.0"
+    "undici": "^6.20.0",
+    "web-tree-sitter": "^0.25.10"
   },
   "devDependencies": {
     "@types/blessed": "^0.1.25",

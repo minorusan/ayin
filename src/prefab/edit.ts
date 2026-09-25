@@ -344,7 +344,7 @@ export async function setPrefabProperty(req: EditRequest): Promise<EditResult> {
       // Same rule as the scalar path below: carry the line's own ending across the rewrite.
       const eol0 = lines0[parent.endLine - 1].endsWith('\r') ? '\r' : '';
       const after0 = [...lines0.slice(0, parent.line - 1), `${head0}${rewrittenFlow}${eol0}`, ...lines0.slice(parent.endLine)].join('\n');
-      const stop0 = gateWrite(req.file, after0);
+      const stop0 = await gateWrite(req.file, after0);
       if (stop0) return { ok: false, error: stop0 };
       writeFileSync(req.file, after0, 'utf-8');
       log('INFO', 'prefab_property_set', {
@@ -421,7 +421,7 @@ export async function setPrefabProperty(req: EditRequest): Promise<EditResult> {
 
   // The same gate write_file and str_replace answer to. A prefab declares no code surface, so this is a
   // no-op today; going around it would be the kind of second door that stops being a no-op quietly.
-  const stop = gateWrite(req.file, after);
+  const stop = await gateWrite(req.file, after);
   if (stop) return { ok: false, error: stop };
 
   writeFileSync(req.file, after, 'utf-8');

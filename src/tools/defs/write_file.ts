@@ -30,7 +30,7 @@ export const tool: Tool = {
       // ENTANGLED: check the surface this write would declare BEFORE it lands. A violation stops the
       // turn rather than being denied-and-retried — a denial invites the workaround (rename it, move it,
       // inline it into a 200-line method), which is the exact behaviour the gate exists to prevent.
-      const stop = gateWrite(params.path, params.content);
+      const stop = await gateWrite(params.path, params.content);
       if (stop) return stop;
       /**
        * READ BEFORE OVERWRITE. Creating a file needs no read — there is nothing to have read — but
