@@ -7,8 +7,32 @@ import { corpusBlockFor, chunksForFile } from '../../indulge/inject.js';
 import { log } from '../../log.js';
 import { attributeFile } from '../../indulge/attribution.js';
 import { coverage, recordRead, takeEditNotes } from '../readGuard.js';
+import { getArtifactsDir } from '../../artifacts.js';
 import { skeletonOf } from '../skeleton.js';
 import { AROUND_DEFAULT, centeredWindow, clampSpan, describeSpans, slideWindow, snapEnd, snapStart, spanLines, unreadRanges } from '../readWindow.js';
+
+/**
+ * A SAVED TOOL RESULT IS NOT A SOURCE FILE, and read_file was treating one as the other.
+ *
+ * Every tool result is written to `~/.ayin-cli/artifacts/<session>/tN-<tool>.txt`, and a clipped one
+ * tells the model to read it there. It then comes back through this tool, which numbers the lines,
+ * counts coverage, reports "unread" ranges and credits the read to the edit guard — all of it about
+ * the DUMP rather than the file it came from.
+ *
+ * Measured, and it stalled a turn twice: `read_file(t33-read_file.txt, offset=107, limit=110)` came
+ * back double-numbered — `204\t201\t Amounts = new[] { 3 },` — because the artifact already carried
+ * the original tool's line numbers, so neither column meant anything about RewardService.cs. The
+ * footer then advertised `(unread: 1-106, 217-294 — 184 of 294 lines. Read again with no offset to
+ * slide there)`, inviting more paging of a dump, and another read announced `[Lines 812-826 now count
+ * as read — str_replace within them is allowed.]` for a 616-line file. The model spent three rounds
+ * saying which bodies it still needed and never issued a call.
+ *
+ * So an artifact is returned as what it is: its bytes, no line numbers, no coverage, no edit credit,
+ * and a line naming the tool whose output it holds so the model goes back to the real file.
+ */
+function isArtifactPath(p: string): boolean {
+  return p.startsWith(getArtifactsDir() + '/');
+}
 
 /** How much of a first big-file read is spent on the END of the file rather than its top. */
 const OUTLINE_TAIL_LINES = 40;
@@ -177,6 +201,14 @@ export const tool: Tool = {
         return `Error: ${params.path} is a binary file (${(raw.length / 1024).toFixed(1)} KB). Use bash (file, strings, xxd) if you need to inspect it.`;
       }
       const text = raw.toString('utf-8');
+      // See `isArtifactPath`. Returned verbatim, before any of the machinery below can describe a
+      // saved tool result as if it were the file that result was about.
+      if (isArtifactPath(resolved)) {
+        const tool = /t\d+-([a-z_]+)\.txt$/.exec(basename(resolved))?.[1] ?? 'a tool';
+        return `[saved output of \`${tool}\`, returned verbatim — this is a RESULT, not a file. Any line `
+          + `numbers in it are the ones ${tool} printed, so they do not address this file and an offset `
+          + `into it means nothing. Go to the real path for lines, structure= or expand_method.]\n\n${text}`;
+      }
       const lines = text.split('\n');
       // `offset` is the LINE NUMBER to start at, matching grep's output and the numbers printed below.
       // It used to be 0-based while the display was 1-based, so feeding a grep hit straight back read
