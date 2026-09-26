@@ -175,24 +175,25 @@ export interface PlanResult {
  * still gets through, once, regardless of the toggle.
  */
 /**
- * ON BY DEFAULT. `AYIN_PLAN=0` turns it off; `/plan` toggles it for the session.
+ * OFF BY DEFAULT. `AYIN_PLAN=1` turns it on; `/plan` toggles it for the session.
  *
- * It was opt-in, and opt-in made it unreachable exactly where it matters most. Headless (`-p`) has no
- * TUI and therefore no way to type `/plan`, so every scripted run — a harness, a cron job, an operator
- * demonstrating the thing — silently got no plan, no phases, and no `executor.scaffold()`. Measured on
- * a greenfield request: without the flag the agent improvised a project and never entered plan mode at
- * all; with it, the same request produced a deterministic scaffold, a grounded plan and three
- * validated phases. A feature whose default is "off" in the mode nobody can toggle is a feature that
- * does not run.
+ * It was on, on the argument that headless (`-p`) cannot type `/plan` and a feature whose default is
+ * off in the mode nobody can toggle does not run. True, and it bought that reach at the price of
+ * planning turns nobody asked to have planned. Measured: "perform investigation and pin the root
+ * cause with evidence", 95 characters, went through the toggled floor into triage, came back
+ * `investigate`, and spent 201 seconds writing a five-phase 24-step plan — running explore four times
+ * over the same four terms for the same eight findings — before stopping at the approval gate with
+ * nothing investigated. The operator had asked for an investigation and got a document about one.
  *
- * The cost is bounded and was already designed for: `runPlan` still returns before spending anything
- * on a request under `planToggledMinChars`, and triage's veto still refuses to plan a single-feature
- * ask. What changes is that the door is open.
+ * The floor is the reason this is a default worth flipping rather than a threshold worth raising:
+ * with the toggle on it drops to `planToggledMinChars` (60), so practically any real sentence opens
+ * the most expensive gate in the system.
  *
- * `AYIN_PLAN=1` is kept as an explicit force — it now agrees with the default rather than creating it,
- * and a harness that sets it keeps working.
+ * Nothing is unreachable. `AYIN_PLAN=1` is the explicit force and a harness that sets it plans
+ * exactly as before — the env var now creates the behaviour rather than merely agreeing with it —
+ * `/plan` toggles a session, and `/planthis <text>` still gets one turn through regardless.
  */
-let sessionEnabled = process.env.AYIN_PLAN !== '0';
+let sessionEnabled = process.env.AYIN_PLAN === '1';
 
 export function togglePlanSession(): boolean {
   sessionEnabled = !sessionEnabled;

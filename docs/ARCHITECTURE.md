@@ -1805,19 +1805,26 @@ per phase from a budget shared across the breakdown (3), in phase order: each ca
 loop, and if there is only enough for three, the early phases are the ones later ones are built on.
 Skipped entirely on greenfield, for the same reason the global pair is.
 
-### Plan mode is ON by default; QA is not
+### Plan mode is OFF by default, like QA
 
-`/plan` was an opt-in session toggle, and opt-in made it unreachable in the mode where it matters most.
-Headless (`-p`) has no TUI and therefore no way to type `/plan`, so every scripted run — a harness, a
-cron job, an operator demonstrating the agent — silently got **no plan, no phases, and no
-`executor.scaffold()`**. Measured on one greenfield request, the same words both ways: without the
-toggle the agent improvised a project and never entered plan mode at all; with it, the request produced
-a deterministic scaffold, a grounded plan and three validated phases.
+It was ON for a while, and the reason was real: headless (`-p`) has no TUI and therefore no way to type
+`/plan`, so every scripted run — a harness, a cron job, an operator demonstrating the agent — silently
+got **no plan, no phases, and no `executor.scaffold()`**. Measured on one greenfield request, the same
+words both ways: without the toggle the agent improvised a project and never entered plan mode at all;
+with it, the request produced a deterministic scaffold, a grounded plan and three validated phases.
 
-So `sessionEnabled` now starts **true**. The cost was already designed for and has not changed: `runPlan`
-still returns before spending anything under `planToggledMinChars`, and triage's veto still refuses to
-plan a single-feature ask. **`AYIN_PLAN=0`** is the way off, `/plan` still toggles it for the session,
-and `AYIN_PLAN=1` is kept as an explicit force that now agrees with the default rather than creating it.
+It bought that reach at the price of every interactive turn. With the toggle on, the size door drops
+from `planMinChars` (2000) to **`planToggledMinChars` (60)** — so practically any real sentence opens
+the most expensive gate in the system. Measured: *"perform investigation and pin the root cause with
+evidence"*, 95 characters, went through the floor, came back from triage as `investigate`, and spent
+**201 seconds** writing a five-phase 24-step plan — running `explore` four times over the same four
+terms for the same eight findings — before stopping at the approval gate with nothing investigated.
+The operator asked for an investigation and got a document about one.
+
+So `sessionEnabled` starts **false**. Nothing became unreachable: **`AYIN_PLAN=1`** is the explicit
+force and a harness that sets it plans exactly as before — the env var now creates the behaviour rather
+than agreeing with it — `/plan` toggles a session, and `/planthis <text>` still forces one turn
+regardless. `AYIN_PLAN=0` remains the hard kill switch that beats `/planthis` too.
 
 **QA stays opt-in** (`/qa`, `AYIN_QA=1`). The asymmetry is deliberate: planning costs one cheap triage
 call on a request that might not need it, while QA costs a whole pass over finished work.

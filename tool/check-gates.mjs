@@ -1920,19 +1920,19 @@ ok(act.activityText() === null, 'a turn ending clears every label, so none outli
 console.log('\nplan/qa/presenter: toggle + one-shot force');
 const plan = await import(`file://${join(DIST, 'plan/index.js')}`);
 /**
- * PLAN MODE STARTS ON — and that is the one of the three that differs.
+ * PLAN MODE STARTS OFF — the same as QA and the presenter, and for the same reason.
  *
- * It was opt-in, and opt-in made it unreachable exactly where it matters: headless has no TUI, so no
- * `/plan` can be typed, so every scripted run silently got no plan, no phases and no
- * `executor.scaffold()`. Measured on a greenfield request — without the toggle the agent improvised a
- * project and never entered plan mode at all. `AYIN_PLAN=0` is the way off, and `/plan` still toggles.
- * QA and the presenter stay opt-in: they cost a pass over finished work, not a cheap triage call.
+ * It was ON, so that headless could reach it without a `/plan` nobody can type there. The price was
+ * every interactive turn: with the toggle on the floor drops to `planToggledMinChars` (60), so a
+ * 95-character "investigate and pin the root cause" bought 201 seconds of planning and a 24-step
+ * document instead of an investigation. `AYIN_PLAN=1` is the way on and a harness that sets it plans
+ * exactly as before; `/plan` toggles a session and `/planthis` forces one turn.
  */
-ok(plan.isPlanSessionEnabled() === true, 'plan mode starts ON for a session — headless cannot type /plan');
-ok(plan.togglePlanSession() === false, 'toggling plan mode flips it off and reports the new state');
-ok(plan.isPlanSessionEnabled() === false, 'and the getter agrees');
-ok(plan.togglePlanSession() === true, 'toggling again flips it back on');
-ok(plan.isPlanSessionEnabled() === true, 'and the getter agrees again');
+ok(plan.isPlanSessionEnabled() === false, 'plan mode starts OFF for a session — AYIN_PLAN=1 is the way on');
+ok(plan.togglePlanSession() === true, 'toggling plan mode flips it on and reports the new state');
+ok(plan.isPlanSessionEnabled() === true, 'and the getter agrees');
+ok(plan.togglePlanSession() === false, 'toggling again flips it back off');
+ok(plan.isPlanSessionEnabled() === false, 'and the getter agrees again');
 
 const qaToggle = await import(`file://${join(DIST, 'qa/index.js')}`);
 ok(qaToggle.isQaSessionEnabled() === false, 'QA gate starts OFF for a session');
@@ -3388,7 +3388,11 @@ console.log('\n--full: the composite flag turns on what it claims');
     ok(false, '--full probe ran', String(err).slice(0, 160));
   }
   ok(state.full === true, '--full is seen by full-mode.ts');
-  ok(state.plan === true, '  → plan mode is on');
+  // NOT ONE OF THE THREE `--full` CLAIMS — it buys the debug bundle, the QA toggle and the permission
+  // gate, and full-mode.ts says so. This asserted `true` only because plan mode's own default was ON,
+  // which is a gate measuring the environment rather than the flag. Asserted OFF for the same reason
+  // the presenter line below it is: the flag must not quietly acquire a switch it never claimed.
+  ok(state.plan === false, '  → plan mode is OFF (--full does not buy it; AYIN_PLAN=1 or /plan is the way in)');
   ok(state.qa === true, '  → the QA gate is on');
   ok(state.presenter === false, '  → the presenter is OFF (--full does not buy it; /present is the only way in)');
   // THE TOGGLE IS NOT THE SAME QUESTION AS "did the gate run". `shouldRunQaThisTurn()` is what the

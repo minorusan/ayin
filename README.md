@@ -371,8 +371,10 @@ API was checked is failed. Only then does your
 prompt reach the model, with the plan already in context.
 
 The plan is on disk *before* implementation starts, so an interrupted machine leaves the thinking
-behind rather than half a feature. `AYIN_PLAN=0` is a hard kill switch beating the toggle *and*
-`/planthis`; `planMinChars` / `planExploreCalls` tune the toggled-on behavior.
+behind rather than half a feature. Plan mode is **off by default** — `/plan` toggles it for a session,
+`/planthis <what to plan>` forces one turn, and `AYIN_PLAN=1` starts a run with it on (what a headless
+harness sets). `AYIN_PLAN=0` is a hard kill switch beating the toggle *and* `/planthis`; `planMinChars`
+/ `planExploreCalls` tune the toggled-on behavior.
 
 ## A file too big to read answers with its shape
 
