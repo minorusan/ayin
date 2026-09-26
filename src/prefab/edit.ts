@@ -65,12 +65,21 @@ export interface EditRequest {
   property: string;
   /** The new scalar, as it should read in the file. */
   value?: string;
+  /**
+   * SHOW THE DIFF AND WRITE NOTHING.
+   *
+   * Asked for twice in one report — *"No dry-run/preview. You commit blind"* — and the reason it is
+   * cheap is that this function already computes the whole file before writing it. The preview is the
+   * real edit, stopped one line short of `writeFileSync`, so what it shows cannot drift from what a
+   * write would do: there is no second code path to keep honest.
+   */
+  dryRun?: boolean;
   /** An asset FILE NAME to point this property at. Mutually exclusive with `value`. */
   asset?: string;
 }
 
 export type EditResult =
-  | { ok: true; diff: string; rule: string; target: string }
+  | { ok: true; diff: string; rule: string; target: string; dryRun?: boolean }
   | { ok: false; error: string };
 
 const extOf = (p: string): string => {
@@ -206,7 +215,14 @@ async function locate(req: EditRequest, docs: YDocument[]): Promise<Located | { 
       hits = byName[0][1];
       where = byName[0][0];
     } else where = req.object;
-    if (hits.length > 1) return { error: `"${req.object}" names ${hits.length} GameObjects in this file — use #<fileID>` };
+    if (hits.length > 1) {
+      // AN ERROR MUST NOT ASK FOR A VALUE IT WITHHOLDS. This said "use #<fileID>" and stopped, so the
+      // only way forward was to go and run prefab_inspect for numbers this function was holding at
+      // the time it refused. Exactly the dead end the ambiguous-ASSET message had, reported as
+      // *"tells you the syntax but not HOW to get the fileID"*. The ids go in the message.
+      return { error: `"${req.object}" names ${hits.length} GameObjects in this file. Say which by `
+        + `passing one of these as object=:\n  ${hits.map((d) => `#${d.fileId}`).join('\n  ')}` };
+    }
     pool = componentIdsOf(hits[0]).map((id) => byId.get(id)).filter((d): d is YDocument => Boolean(d));
   } else {
     pool = real.filter((d) => d.classId !== GAME_OBJECT);
@@ -346,6 +362,7 @@ export async function setPrefabProperty(req: EditRequest): Promise<EditResult> {
       const after0 = [...lines0.slice(0, parent.line - 1), `${head0}${rewrittenFlow}${eol0}`, ...lines0.slice(parent.endLine)].join('\n');
       const stop0 = await gateWrite(req.file, after0);
       if (stop0) return { ok: false, error: stop0 };
+      if (req.dryRun) return { ok: true, dryRun: true, diff: buildUnifiedDiff(relToRoot(req.root, req.file), before, after0), target: located.label, rule: 'field inside a flow map' };
       writeFileSync(req.file, after0, 'utf-8');
       log('INFO', 'prefab_property_set', {
         file: relToRoot(req.root, req.file), target: located.label, property: req.property, rule: 'field inside a flow map',
@@ -397,6 +414,46 @@ export async function setPrefabProperty(req: EditRequest): Promise<EditResult> {
     };
   }
 
+  /**
+   * A FLOW MAP IS NOT A SCALAR, AND WRITING ONE OVER THE OTHER CORRUPTS THE ASSET SILENTLY.
+   *
+   * `kind === 'map'` above catches the BLOCK form. The flow form — `{r: 1, g: 1, b: 1, a: 1}`, which
+   * is how Unity writes every colour, vector and rect — is `kind: 'flow'`, and it fell through to the
+   * scalar path and was overwritten wholesale. Found in a real working tree after a model tested the
+   * tool on `HiddenInputField.prefab`:
+   *
+   *     -  m_Color: {r: 1, g: 1, b: 1, a: 1}
+   *     +  m_Color: 0.5, 0.5, 0.5, 1
+   *
+   * That is not a Color any more; Unity cannot read it. The tool reported success, printed a clean
+   * one-line diff, and the model's own report described the edit as having worked. Nothing anywhere
+   * said otherwise — which is the whole problem, because a corrupted prefab surfaces as a broken
+   * scene days later with no trail back to this.
+   *
+   * A value that is ITSELF a flow map is allowed through: replacing `{r: 1, g: 1}` with
+   * `{r: 0.5, g: 0.5}` is a legitimate whole-map rewrite. Anything else names the fields instead —
+   * which is the syntax the dotted path already supports and this message now points at.
+   */
+  if (req.asset === undefined && value.kind === 'flow' && /^\{/.test(value.raw.trim())) {
+    // ASSET WRITES ARE EXEMPT, AND THE GATE CAUGHT ME OVER-REACHING. A reference is `{fileID: …,
+    // guid: …, type: 2}` — itself a flow map, built by `refText` rather than typed by the caller —
+    // so the first version of this guard refused every reference swap the tool exists to make. The
+    // rule is about a SCALAR being written over a map, which is `req.value`, and nothing else.
+    const written = (req.value ?? '').trim();
+    if (!/^\{.*\}$/.test(written)) {
+      const fields = [...value.raw.matchAll(/([A-Za-z_][\w]*)\s*:/g)].map((m) => m[1]);
+      return {
+        ok: false,
+        error: `"${req.property}" is ${value.raw.trim()} — a map written inline, not a single value. `
+          + `Writing "${written}" over it would leave the asset unreadable by Unity.\n`
+          + (fields.length
+            ? `Set one field: ${fields.slice(0, 8).map((f) => `${req.property}.${f}`).join(', ')}`
+            : 'Set one field with the dotted form')
+          + `, or pass the whole map in braces, e.g. value={${fields.slice(0, 2).map((f) => `${f}: 0`).join(', ')}${fields.length > 2 ? ', …' : ''}}.`,
+      };
+    }
+  }
+
   let replacement: string;
   let rule: string;
   if (req.asset !== undefined) {
@@ -424,6 +481,7 @@ export async function setPrefabProperty(req: EditRequest): Promise<EditResult> {
   const stop = await gateWrite(req.file, after);
   if (stop) return { ok: false, error: stop };
 
+  if (req.dryRun) return { ok: true, dryRun: true, diff: buildUnifiedDiff(relToRoot(req.root, req.file), before, after), target: located.label, rule };
   writeFileSync(req.file, after, 'utf-8');
   log('INFO', 'prefab_property_set', {
     file: relToRoot(req.root, req.file), target: located.label, property: req.property, rule,

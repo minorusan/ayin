@@ -1,5 +1,6 @@
 import type { Tool } from '../base.js';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { resolveAgainstCwd } from '../lib.js';
 import { buildAnimatorMap, isAnimatorController, isAnimatorOverride } from '../../animator/map.js';
 import { projectRootFor } from '../../prefab/edit.js';
@@ -24,6 +25,26 @@ export const tool: Tool = {
       const abs = resolveAgainstCwd(params.path.trim());
       if (!existsSync(abs)) return `Error: file not found: ${abs}`;
       if (!isAnimatorController(abs) && !isAnimatorOverride(abs)) {
+        /**
+         * A DIRECTORY IS A REASONABLE THING TO POINT AT and a useless thing to be refused over.
+         * Reported: *"errors on directories — the message could suggest how to find controllers in a
+         * folder"*, after which the caller ran find_files and came back. The controllers are one
+         * `readdirSync` away, so the refusal can carry them instead of the search instruction.
+         */
+        if (statSync(abs, { throwIfNoEntry: false })?.isDirectory()) {
+          let found: string[] = [];
+          try {
+            found = readdirSync(abs)
+              .filter((f) => /\.(controller|overrideController)$/i.test(f))
+              .slice(0, 20);
+          } catch { /* unreadable — fall through to the plain refusal */ }
+          return found.length
+            ? `${params.path} is a directory. The controllers directly inside it:\n`
+              + `${found.map((f) => `  ${join(params.path.trim(), f)}`).join('\n')}\n`
+              + `Pass one of those. For controllers deeper down: find_files path=${params.path.trim()} pattern=*.controller`
+            : `${params.path} is a directory and holds no .controller or .overrideController directly. `
+              + `Search below it with find_files path=${params.path.trim()} pattern=*.controller`;
+        }
         return `Error: ${abs} is not a .controller or .overrideController. Use prefab_inspect for `
           + `.prefab, .unity, .asset and the other serialized assets.`;
       }

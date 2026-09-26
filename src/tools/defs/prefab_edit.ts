@@ -24,6 +24,7 @@ export const tool: Tool = {
       { name: 'object', type: 'string', description: 'The GameObject: a hierarchy path (Canvas/Progress/Slot0) or a unique name. Omit for a single-document .asset.', required: false },
       { name: 'component', type: 'string', description: 'The component class (SkeletonGraphic, RectTransform) or #<fileID>.', required: false },
       { name: 'value', type: 'string', description: 'A scalar, written as-is. Mutually exclusive with asset.', required: false },
+      { name: 'dry_run', type: 'string', description: 'true shows the exact unified diff the write WOULD make and writes nothing. The preview is the real edit stopped one line short of the write, so it cannot differ from it.', required: false },
       { name: 'asset', type: 'string', description: 'The asset to reference: its file name, its project-relative PATH when two files share a name (Assets/Art/Popups/Seasonal/PopupBG.png), or its 32-character guid. Resolved to a guid; an ambiguous bare name is refused and lists the paths to pass instead.', required: false },
     ],
     async execute(params) {
@@ -40,8 +41,12 @@ export const tool: Tool = {
         property: params.property.trim(),
         value: params.value,
         asset: params.asset?.trim() || undefined,
+        dryRun: /^(true|1|yes|on)$/i.test((params.dry_run ?? '').trim()),
       });
       if (!result.ok) return `Refused: ${result.error}`;
-      return `Set ${params.property} on ${result.target} — ${result.rule}.\n${result.diff}`;
+      return result.dryRun
+        ? `DRY RUN — nothing was written. This is the diff the write would make on ${result.target} `
+          + `(${result.rule}):\n${result.diff}\nRun again without dry_run to apply it.`
+        : `Set ${params.property} on ${result.target} — ${result.rule}.\n${result.diff}`;
     },
   };
