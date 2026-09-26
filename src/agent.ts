@@ -550,12 +550,44 @@ async function callJudge(task: string, facts: string[]): Promise<JudgeVerdict> {
  * `toolResultChars`.
  */
 const WINDOW_RESULT_CHARS_DEFAULT = 8_000;
-function windowResultChars(): number { return getConfig('toolResultChars', WINDOW_RESULT_CHARS_DEFAULT); }
-export function clipForWindow(text: string, limit = windowResultChars()): string {
+
+/**
+ * …AND THE MEASUREMENT ABOVE WAS TAKEN AT 32k. It is the knee for a window that size and a fixed
+ * ceiling everywhere else, which on a million-token model is two orders of magnitude too mean: every
+ * tool result clipped to 8,000 characters, and both halves of the answer thrown away to protect a
+ * window with 99% of itself unused. Reported as the single biggest productivity leak in the harness —
+ * *"the truncation/continuation gap"* — with the reader forced to re-run narrower queries to see
+ * output that had already been produced once.
+ *
+ * So the floor stays exactly where it was measured, and above it the clip follows the window. Roughly
+ * 2% of the context per result: 8,000 characters at 32k as before, about 80,000 at 1M. An explicit
+ * `toolResultChars` still wins over both — an operator who set a number meant it.
+ */
+function windowResultChars(): number {
+  const set = getConfig('toolResultChars', 0);
+  if (set > 0) return set;
+  const ctx = activeContextTokens();
+  if (!ctx || ctx <= 0) return WINDOW_RESULT_CHARS_DEFAULT;
+  return Math.max(WINDOW_RESULT_CHARS_DEFAULT, Math.floor(ctx * 0.08));
+}
+
+/**
+ * `where` names the artifact holding the WHOLE result, and it is the half that was missing.
+ *
+ * Every tool result is already written to `~/.ayin-cli/artifacts/<session>/tN-<tool>.txt` before it
+ * reaches the window. The clip never said so, and told the reader to "re-run narrowed" instead —
+ * asking a model to reproduce output that was sitting complete on disk. Reported twice in one
+ * session: *"the artifact files exist but aren't referenced in the tool response"*, and a request for
+ * a continuation token to fetch the omitted middle. The token is a path, and it already exists.
+ */
+export function clipForWindow(text: string, limit = windowResultChars(), where = ''): string {
   if (text.length <= limit) return text;
   const marker = (n: number): string =>
     `\n\n… [${n.toLocaleString()} characters omitted from the MIDDLE of this result — the end is kept because errors land there. ` +
-    `Re-run narrowed, or redirect to a file and grep it, if you need the omitted part.] …\n\n`;
+    (where
+      ? `THE WHOLE RESULT IS ON DISK: read_file ${where} — it is complete, and reading it costs one call instead of re-running this one.`
+      : `Re-run narrowed, or redirect to a file and grep it, if you need the omitted part.`) +
+    `] …\n\n`;
   const head = Math.floor(limit * 0.55);
   const tail = Math.max(0, limit - head - marker(0).length);
   const omitted = text.length - head - tail;
@@ -3326,7 +3358,9 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       if (!detached && TREE_SAFE.has(name) && !/^(Error|Refused)\b/.test(result)) {
         guardNoteRead([params.path, params.file].filter((p): p is string => Boolean(p)));
       }
-      saveArtifact(name, paramPreview, result);
+      // The path comes back so the clip can NAME it — see `clipForWindow`. Saving and then telling the
+      // reader to re-run is the gap both of this session's reports called the biggest one.
+      const savedArtifact = saveArtifact(name, paramPreview, result);
       recordTool(name, paramPreview, result);
       // FULL params (not the 60-char-per-value preview) and the FULL result — the operating record
       // clips both at 4000 chars, which is exactly the part that explains the next model turn.
@@ -3609,7 +3643,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       if (lostWhyNow?.kind === 'clap') {
         lostAtRound = round;
         lostWhy = lostWhyNow.why;
-        pushToWindow('user', renderToolResult(echo ?? clipForWindow(result)));
+        pushToWindow('user', renderToolResult(echo ?? clipForWindow(result, undefined, savedArtifact.filepath)));
         // `continue roundLoop` for the same reason as the blocked-call clap above: this is the tool
         // loop, and the last word has to come from the model, not from the next call in the batch.
         if (askForLastWord(round)) continue roundLoop;
@@ -3622,7 +3656,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       const nudgeNote = lostWhyNow ? lostNudge(lostWhyNow.why) : '';
       const shaped = echo !== null
         ? { body: echo, suppressRepeatNote: true }
-        : shapeFileResult(name, params as Record<string, unknown>, result, clipForWindow(result), conversationWindow);
+        : shapeFileResult(name, params as Record<string, unknown>, result, clipForWindow(result, undefined, savedArtifact.filepath), conversationWindow);
       const repeatNote = shaped.suppressRepeatNote ? '' : (guard.note ?? '');
       pushToWindow('user', renderToolResult(resultHead + shaped.body + repeatNote + editMissNote + nudgeNote));
       pushMessage('assistant', `[tool: ${name}(${paramPreview})]`);

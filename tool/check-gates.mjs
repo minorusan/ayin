@@ -1725,10 +1725,19 @@ for (const off of ['0', 'false', '', 'yes']) {
 }
 if (priorUnchained === undefined) delete process.env.AYIN_UNCHAINED; else process.env.AYIN_UNCHAINED = priorUnchained;
 
+/**
+ * THE LIMIT IS PINNED HERE, because the DEFAULT one is now a function of the served window — it is the
+ * measured 8,000 floor when no model publishes a context and roughly 2% of the window above that. A
+ * case asserting what clipping DOES must not also depend on which provider happened to be probed
+ * earlier in this file; left to the default it passed on a laptop and failed the moment a million-token
+ * model was configured, which is the gate reporting on the environment rather than on the behaviour.
+ */
 const long = `HEAD_MARKER${'x'.repeat(40000)}TAIL_MARKER`;
-const clipped = agentMod.clipForWindow(long);
+const clipped = agentMod.clipForWindow(long, 8000);
 ok(clipped.length < long.length && /HEAD_MARKER/.test(clipped) && /TAIL_MARKER/.test(clipped), 'a clipped tool result keeps BOTH ends — the tail is where a compiler puts the error');
 ok(/omitted from the MIDDLE/.test(clipped), 'and it says characters were dropped, instead of looking complete');
+ok(/read_file \/tmp\/whole\.txt/.test(agentMod.clipForWindow(long, 8000, '/tmp/whole.txt')),
+  'and when the whole result was saved, the marker names the file instead of asking for a re-run');
 ok(agentMod.clipForWindow('short') === 'short', 'a result that fits is untouched');
 
 let f3 = await findTool.execute({ path: sRoot, pattern: 'Target*.cs' });
