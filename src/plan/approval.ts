@@ -144,14 +144,46 @@ export function readAnswer(input: string): Answer {
   return { kind: 'revise', feedback: input.trim() };
 }
 
-/** What the operator is shown while the plan waits. Painted, never sent to a model. */
-export function approvalNotice(planPath: string, phases: number, steps: number): string {
+/**
+ * What the operator is shown while the plan waits. Painted, never sent to a model.
+ *
+ * THE PLAN IS SHOWN, NOT FILED. This printed a shape and a path — "5 phases · 24 steps" and a
+ * filename — and then asked for `go`. Approving something you have not read is not approval, and the
+ * one thing the gate exists to buy is a person looking at the proposal before anything is written.
+ * Sending the reader to a file to do that spends the turn they were about to answer in.
+ *
+ * ONE LINE PER STEP: its title and the paths it touches, which is what distinguishes a step worth
+ * stopping for from a step worth skimming. The rationale and the verify command stay in the file,
+ * because they are what you read AFTER deciding to look closer, and the path is still printed for
+ * exactly that.
+ */
+export function approvalNotice(
+  planPath: string,
+  phases: number,
+  steps: number,
+  detail: ReadonlyArray<PendingPhase> = [],
+): string {
   const shape = phases > 0
     ? `${phases} phase${phases === 1 ? '' : 's'} · ${steps} step${steps === 1 ? '' : 's'}`
     : `${steps} step${steps === 1 ? '' : 's'}`;
-  return `PLAN READY — ${shape}. Nothing has been changed on disk.\n`
-    + `  ${planPath}\n`
-    + '  Reply `go` to run it, `cancel` to drop it, or say what to change and it will be re-planned.';
+  const lines = [`PLAN READY — ${shape}. Nothing has been changed on disk.`, ''];
+  for (const p of detail) {
+    // A flat plan is tracked as one synthetic phase titled "the plan"; it has no goal worth a header.
+    const head = detail.length === 1 && p.phase.title === 'the plan'
+      ? null
+      : `  ${p.phase.id}. ${p.phase.title}${p.phase.goal ? ` — ${p.phase.goal}` : ''}`;
+    if (head) lines.push(head);
+    for (const st of p.steps) {
+      const where = st.files.length ? ` · ${st.files.join(', ')}` : '';
+      lines.push(`${head ? '     ' : '  '}${st.id}. ${st.title}${where}`);
+    }
+    if (head) lines.push('');
+  }
+  if (detail.length && !lines[lines.length - 1]) lines.pop();
+  if (detail.length) lines.push('');
+  lines.push(`  ${planPath}`);
+  lines.push('  Reply `go` to run it, `cancel` to drop it, or say what to change and it will be re-planned.');
+  return lines.join('\n');
 }
 
 /** Asked back when a short reply matched nothing. The plan is still waiting — say so, and stop. */

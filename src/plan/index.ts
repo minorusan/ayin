@@ -1038,7 +1038,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
         contextBody: contextBody.trim(), phases: runtime, cwd: process.cwd(),
         createdAt: new Date().toISOString(),
       });
-      addMessage('system', approvalNotice(shortPath(path, projectRoot), phased?.phases.length ?? 0, stepCount));
+      addMessage('system', approvalNotice(shortPath(path, projectRoot), phased?.phases.length ?? 0, stepCount, runtime));
       return { kind: 'awaiting', path, body: '', features: t.features, phaseCount: phased?.phases.length ?? 0, mode };
     }
 
