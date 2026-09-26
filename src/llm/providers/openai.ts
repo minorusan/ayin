@@ -136,6 +136,34 @@ function describe(err: unknown, v: CompatVendor = OPENAI): string {
       return `${v.id} 401: the key was rejected — it is wrong, revoked, or from another account. `
         + `Re-set it with /${v.id}.`;
     }
+    /**
+     * 429 SHOULD SAY WHEN, because "rate limit exceeded" answers the wrong half of the question.
+     *
+     * The operator already knows they hit a limit — the run just stopped. What they cannot see is
+     * whether to wait one minute or fourteen hours, and the answer is in a header the SDK hands us
+     * and the message threw away. Measured against a real capped account: `x-ratelimit-reset` held
+     * 1790467200000, which is 03:00 tomorrow, which is the difference between "make coffee" and
+     * "use the local model today".
+     *
+     * The vendor's own text is kept, because OpenRouter's names the remedy better than a generic
+     * sentence could ("Add 10 credits to unlock 1000 free model requests per day"). What is added is
+     * the clock, and the status prefix is dropped when the body already leads with it.
+     */
+    if (err.status === 429) {
+      // `err.headers` is a fetch `Headers`, not a plain object — indexing it returns undefined and
+      // silently drops the one fact this branch exists to add. Read with `.get`, fall back to the
+      // copy the body carries, and take neither on faith.
+      const h = err.headers as unknown as { get?(n: string): string | null } | undefined;
+      const meta = (err.error as { metadata?: { headers?: Record<string, string> } } | undefined)?.metadata;
+      const raw = (typeof h?.get === 'function' ? h.get('x-ratelimit-reset') : null)
+        ?? meta?.headers?.['X-RateLimit-Reset'];
+      const at = Number(raw);
+      const when = Number.isFinite(at) && at > 0
+        ? new Date(at > 1e12 ? at : at * 1000).toLocaleString()
+        : '';
+      const body = detail.replace(/^429\s*/, '');
+      return `${v.id} 429: ${body}${when ? ` Resets ${when}.` : ''}`;
+    }
     if (err.status === 402) {
       return `${v.id} 402: the key is valid but the account has no credit — nothing is wrong with `
         + `ayin or with your key. Top up at ${v.signup.replace(/\/[^/]*$/, '')}, then try again.`;
