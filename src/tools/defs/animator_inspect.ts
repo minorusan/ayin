@@ -1,7 +1,7 @@
 import type { Tool } from '../base.js';
 import { existsSync } from 'node:fs';
 import { resolveAgainstCwd } from '../lib.js';
-import { buildAnimatorMap, isAnimatorController } from '../../animator/map.js';
+import { buildAnimatorMap, isAnimatorController, isAnimatorOverride } from '../../animator/map.js';
 import { projectRootFor } from '../../prefab/edit.js';
 import { resolveProject } from '../explore/index.js';
 
@@ -17,14 +17,15 @@ export const tool: Tool = {
       + 'and its conditions spelled out ("isWinning is set"). Per state: its clip, that clip\'s length '
       + 'and loop flag, speed and whether it is the default. Read-only.',
     parameters: [
-      { name: 'path', type: 'string', description: 'The .controller file. Absolute, or relative to the cwd.', required: true },
+      { name: 'path', type: 'string', description: 'The .controller file, or an .overrideController — an override is resolved to the base controller it points at and the graph is printed with its clip swaps already applied. Absolute, or relative to the cwd.', required: true },
     ],
     async execute(params) {
       if (!params.path) return 'Error: path required';
       const abs = resolveAgainstCwd(params.path.trim());
       if (!existsSync(abs)) return `Error: file not found: ${abs}`;
-      if (!isAnimatorController(abs)) {
-        return `Error: ${abs} is not a .controller. An AnimatorController lives only in that file type; use prefab_inspect for .prefab, .unity and .asset.`;
+      if (!isAnimatorController(abs) && !isAnimatorOverride(abs)) {
+        return `Error: ${abs} is not a .controller or .overrideController. Use prefab_inspect for `
+          + `.prefab, .unity, .asset and the other serialized assets.`;
       }
       const root = projectRootFor(abs) || resolveProject(abs).root;
       const map = await buildAnimatorMap(abs, { root }) as { layers?: unknown[]; parameters?: unknown[] };

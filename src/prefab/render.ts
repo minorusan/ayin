@@ -71,6 +71,37 @@ function componentLines(c: ComponentMap, pad: string, everything: boolean): stri
   return out;
 }
 
+/**
+ * A BUDGET, AND A NAME FOR WHAT IT CUT.
+ *
+ * A 117-document prefab renders to more than the window holds, and the history compressor then cut it
+ * mid-hierarchy with generic advice — *"narrow it: around=<line> for a span, or a tighter grep
+ * pattern"* — neither of which addresses a prefab. Reported: *"the truncation message doesn't tell
+ * you which node to target; MedalText's children were never shown."*
+ *
+ * A tool that knows it is running out of room can say what it dropped, and `ObjectMap.path` is
+ * already the exact address `at=` takes. So the cut is made HERE, at a node boundary, and every
+ * subtree that did not fit is named by the address that fetches it. The caller's next call is a
+ * copy-paste rather than a guess.
+ */
+interface Budget { left: number; omitted: string[] }
+
+function budgetedLines(o: ObjectMap, depth: number, everything: boolean, b: Budget): string[] {
+  const lines = objectLines(o, depth, everything);
+  const size = lines.reduce((n, l) => n + l.length + 1, 0);
+  if (size <= b.left) { b.left -= size; return lines; }
+
+  // The node's own header and components go in; its CHILDREN are where the weight is, so they are
+  // offered individually and the ones that do not fit are named rather than silently missing.
+  const ownDepth = objectLines({ ...o, children: [] }, depth, everything);
+  const ownSize = ownDepth.reduce((n, l) => n + l.length + 1, 0);
+  if (ownSize > b.left || !o.children.length) { b.omitted.push(o.path); return []; }
+  b.left -= ownSize;
+  const out = [...ownDepth];
+  for (const child of o.children) out.push(...budgetedLines(child, depth + 1, everything, b));
+  return out;
+}
+
 function objectLines(o: ObjectMap, depth: number, everything: boolean): string[] {
   const pad = INDENT.repeat(depth);
   const marks: string[] = [];
@@ -105,7 +136,12 @@ export function renderPrefabTree(map: PrefabMap, opts: { everything?: boolean } 
     + (map.stripped ? `, ${map.stripped} from nested prefabs` : '')
     + (map.unresolved.length ? `, ${map.unresolved.length} unresolved reference(s)` : '');
   const out = [head, ''];
-  for (const root of map.roots) out.push(...objectLines(root, 0, everything));
+  /**
+   * Generous enough that an ordinary prefab is never touched — measured, the Toast prefab renders at
+   * about 3 KB — and small enough that the biggest one in a project still leaves room to think.
+   */
+  const budget: Budget = { left: everything ? 120_000 : 40_000, omitted: [] };
+  for (const root of map.roots) out.push(...budgetedLines(root, 0, everything, budget));
   if (map.loose.length) {
     /**
      * "NOT PART OF ANY HIERARCHY" IS A FINDING IN A PREFAB AND A LIE IN A MATERIAL.
@@ -118,6 +154,12 @@ export function renderPrefabTree(map: PrefabMap, opts: { everything?: boolean } 
      */
     out.push('', map.roots.length ? 'not part of any hierarchy:' : 'contents:');
     for (const c of map.loose) out.push(...componentLines(c, INDENT, everything));
+  }
+  if (budget.omitted.length) {
+    out.push('', `${budget.omitted.length} subtree(s) did not fit. Each is a whole answer on its own — `
+      + `fetch one with at=<path>:`);
+    for (const path of budget.omitted.slice(0, 20)) out.push(`  at=${path}`);
+    if (budget.omitted.length > 20) out.push(`  (+${budget.omitted.length - 20} more)`);
   }
   if (map.unresolved.length) {
     out.push('', `unresolved guids (no .meta in the project, its packages, or Unity's built-ins):`);

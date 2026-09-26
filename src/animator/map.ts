@@ -26,6 +26,8 @@ import { collectRefs, entry, parseRef, parseUnityYaml, type YDocument, type YEnt
 import { relToRoot, resolveGuids, type AssetRef } from '../prefab/refs.js';
 
 const CONTROLLER = 91;
+/** AnimatorOverrideController — a base controller plus clip substitutions, and no graph of its own. */
+const OVERRIDE_CONTROLLER = 221;
 const STATE = 1102;
 const TRANSITION = 1101;
 const STATE_MACHINE = 1107;
@@ -61,6 +63,8 @@ export interface ClipInfo {
   /** Seconds, from the clip's own `m_StopTime` minus `m_StartTime`. Absent when the clip was unreadable. */
   lengthSeconds?: number;
   loops?: boolean;
+  /** Set when an override replaced this slot: what the BASE controller plays here. */
+  overriddenFrom?: string;
 }
 
 export interface TransitionCondition {
@@ -122,12 +126,28 @@ export interface LayerInfo {
   entryTransitions: TransitionInfo[];
 }
 
+export interface ClipOverride {
+  /** The clip the base controller plays. */
+  original: string;
+  /** What this override plays instead, or null where the override slot is empty. */
+  replacement: string | null;
+}
+
 export interface AnimatorMap {
   file: string;
   parameters: AnimatorParameter[];
   layers: LayerInfo[];
   /** Facts worth acting on that are only visible once the graph is assembled. */
   findings: string[];
+  /**
+   * Set when `file` is an `.overrideController`: the base controller whose graph is printed above,
+   * and the clip substitutions this asset makes to it.
+   *
+   * An AnimatorOverrideController has NO STATES OF ITS OWN — that is the whole point of it. It is a
+   * base controller plus a list of clip swaps, so reading it alone tells you nothing about what plays
+   * when, and reading the base alone tells you the wrong clips.
+   */
+  overrides?: { base: string; clips: ClipOverride[] };
 }
 
 const num = (v: string | undefined, fallback = 0): number => {
@@ -376,8 +396,82 @@ function guidsIn(file: YFile): Set<string> {
   return out;
 }
 
+/**
+ * An `.overrideController` resolved: the BASE controller's graph, with the clip swaps applied on top.
+ *
+ * Reading the override alone is `m_Controller` plus a list of guid pairs and nothing else — no
+ * states, no transitions, no timing. Reading the base alone describes clips this asset does not play.
+ * Neither is the answer, which is why both read tools turning the file away left it *"a dead end
+ * across all three read tools — you end up reading raw YAML via bash."*
+ *
+ * The substitution is applied to the STATES, not merely listed: a state whose clip is overridden now
+ * reports the clip that actually plays, with the base's clip named beside it. That is the fact
+ * somebody opened the file for.
+ */
+async function buildOverrideMap(abs: string, opts: { root: string }, doc: YDocument): Promise<AnimatorMap> {
+  const baseRef = parseRef(entry(doc.body, 'm_Controller')?.raw ?? '');
+  const guids = new Set<string>();
+  if (baseRef?.guid) guids.add(baseRef.guid);
+  const pairs: Array<{ from?: string; to?: string }> = [];
+  for (const item of entry(doc.body, 'm_Clips')?.children ?? []) {
+    const from = parseRef(entry(item.value.children, 'm_OriginalClip')?.raw ?? '')?.guid;
+    const to = parseRef(entry(item.value.children, 'm_OverrideClip')?.raw ?? '')?.guid;
+    if (from) guids.add(from);
+    if (to) guids.add(to);
+    pairs.push({ from, to });
+  }
+  const refs = await resolveGuids(opts.root, guids);
+  const nameOf = (g?: string): string | undefined => (g ? refs.get(g)?.name ?? g : undefined);
+
+  const basePath = baseRef?.guid ? refs.get(baseRef.guid)?.path : undefined;
+  const clips: ClipOverride[] = pairs.map((p) => ({
+    original: nameOf(p.from) ?? '(unset)',
+    replacement: p.to ? nameOf(p.to) ?? null : null,
+  }));
+
+  if (!basePath) {
+    return {
+      file: relToRoot(opts.root, abs), parameters: [], layers: [],
+      overrides: { base: baseRef?.guid ? `unresolved guid ${baseRef.guid}` : '(none set)', clips },
+      findings: [baseRef?.guid
+        ? `This override points at a controller whose guid ${baseRef.guid} resolves to no file in the project — the graph it overrides is missing, so nothing here can play.`
+        : 'This override has no base controller set, so it overrides nothing and plays nothing.'],
+    };
+  }
+
+  const map = await buildAnimatorMap(join(opts.root, basePath), opts);
+  // Swap by GUID, which is the identity Unity itself uses — a clip's NAME is not unique in a project.
+  const byGuid = new Map(pairs.filter((p) => p.from).map((p) => [p.from!, p.to]));
+  let applied = 0;
+  for (const layer of map.layers) {
+    for (const state of layer.states) {
+      const g = state.clip.asset?.guid;
+      if (!g || !byGuid.has(g)) continue;
+      applied++;
+      const to = byGuid.get(g);
+      const replacement = to ? refs.get(to) : undefined;
+      state.clip = to && replacement
+        ? { ...state.clip, asset: replacement, overriddenFrom: state.clip.asset?.name }
+        : { ...state.clip, asset: undefined, missing: 'the override leaves this slot empty', overriddenFrom: state.clip.asset?.name };
+    }
+  }
+  const unused = clips.length - applied;
+  return {
+    ...map,
+    file: relToRoot(opts.root, abs),
+    overrides: { base: basePath, clips },
+    findings: [
+      `Overrides ${basePath}: ${clips.length} clip slot(s), ${applied} of them on a state in that graph.`
+      + (unused > 0 ? ` ${unused} name a clip no state plays — a stale slot, or the base changed underneath this asset.` : ''),
+      ...map.findings,
+    ],
+  };
+}
+
 export async function buildAnimatorMap(abs: string, opts: { root: string }): Promise<AnimatorMap> {
   const file = parseUnityYaml(abs, readFileSync(abs, 'utf-8'));
+  const override = file.documents.find((d) => d.classId === OVERRIDE_CONTROLLER);
+  if (override) return buildOverrideMap(abs, opts, override);
   const refs = await resolveGuids(opts.root, guidsIn(file));
   const ctx: Ctx = {
     root: opts.root, refs,
@@ -441,6 +535,10 @@ export async function buildAnimatorMap(abs: string, opts: { root: string }): Pro
 }
 
 /** Only the one extension. A `.controller` is the only file that holds an AnimatorController. */
+export function isAnimatorOverride(path: string): boolean {
+  return /\.overrideController$/i.test(path);
+}
+
 export function isAnimatorController(path: string): boolean {
   return /\.controller$/i.test(path);
 }

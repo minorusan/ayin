@@ -115,6 +115,9 @@ export const tool: Tool = {
        */
       const READER: Record<string, string> = {
         '.controller': 'animator_inspect',
+        // An override has no graph of its own; animator_inspect follows it to the base. Reported as a
+        // dead end across all three read tools before this.
+        '.overridecontroller': 'animator_inspect',
         '.prefab': 'prefab_inspect', '.unity': 'prefab_inspect',
         '.asset': 'prefab_inspect', '.mat': 'prefab_inspect',
       };
@@ -125,7 +128,7 @@ export const tool: Tool = {
         // Lazy, for the same reason as the vision check below: a module-scope edge between defs
         // half-initializes whichever side the loader reaches first.
         const { tool: reader } = await import(`./${READER[ext]}.js`);
-        const shape = ext === '.controller' ? 'its state machine' : 'its object hierarchy';
+        const shape = READER[ext] === 'animator_inspect' ? 'its state machine' : 'its object hierarchy';
         return `${params.path} — returned as ${shape} rather than as YAML. This is `
           + `${READER[ext]}(path=${params.path}); read_file ${params.path} offset=1 returns the raw file.\n\n`
           + `${await reader.execute({ path: resolved })}`;
