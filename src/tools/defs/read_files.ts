@@ -41,8 +41,26 @@ import { isImagePath } from '../../image.js';
 import { recordRead } from '../readGuard.js';
 import { snapEnd } from '../readWindow.js';
 
-/** How many files one call may name. Past this it is a directory listing, not a read. */
-const MAX_FILES = 12;
+/**
+ * How many files one call may name — SCALED TO THE WINDOW, not a constant.
+ *
+ * Twelve was right when a read budget was 800 lines: past that the call stops being a read and starts
+ * being a directory listing. It is the wrong shape of limit now. A 1M-token model gets 31,250 lines,
+ * which is something like 125 ordinary source files, and capping the CALL at twelve forces ten calls
+ * to do what one could — on an endpoint whose scarce resource is REQUESTS PER DAY, not tokens.
+ *
+ * So the ceiling follows the budget, with the old twelve as the floor so a small local window behaves
+ * exactly as it did. The hard maximum is not about tokens at all: past a few dozen files a person has
+ * stopped orienting and started dumping the tree, and `list_dir` is the tool for that.
+ */
+const MIN_FILES = 12;
+const HARD_MAX_FILES = 60;
+/** Lines an ordinary source file runs to. Only used to turn a line budget into a file count. */
+const TYPICAL_FILE = 250;
+
+function maxFiles(capLines: number): number {
+  return Math.max(MIN_FILES, Math.min(HARD_MAX_FILES, Math.floor(capLines / TYPICAL_FILE)));
+}
 
 /** No file is worth returning as a title and three lines. Below this, show it whole or not at all. */
 const MIN_SHARE = 40;
@@ -121,7 +139,7 @@ export const tool: Tool = {
     + 'which lines were withheld; read_file that one file to see the rest. Images and binaries are '
     + 'reported and skipped, never attached.',
   parameters: [
-    { name: 'paths', type: 'string', description: `Absolute file paths, comma- or newline-separated. At most ${MAX_FILES}.`, required: true },
+    { name: 'paths', type: 'string', description: `Absolute file paths, comma- or newline-separated. The ceiling scales with the served model's window — ${MIN_FILES} on a small one, up to ${HARD_MAX_FILES} on a large one; the refusal names the number.`, required: true },
     { name: 'limit', type: 'number', description: 'Total lines for the whole reply, across all files. Defaults to the context the served model has.', required: false },
   ],
 
@@ -129,14 +147,16 @@ export const tool: Tool = {
     if (!params.paths) return 'Error: paths required — comma-separated absolute file paths';
     const given = params.paths.split(/[,\n]/).map((p) => p.trim()).filter(Boolean);
     if (!given.length) return 'Error: paths required — comma-separated absolute file paths';
-    if (given.length > MAX_FILES) {
-      return `Error: ${given.length} paths — read_files takes at most ${MAX_FILES}. `
-        + `Past that it is a directory listing, not a read: use list_dir or grep to narrow first.`;
-    }
 
     // The same cap one `read_file` gets — shared across the set rather than granted per file, which is
     // the whole reason to call this instead of reading them one at a time.
     const capLines = await readCap();
+    const limitFiles = maxFiles(capLines);
+    if (given.length > limitFiles) {
+      return `Error: ${given.length} paths — this model's window allows ${limitFiles} per call `
+        + `(${capLines} lines of budget). Past that it is a directory listing, not a read: use `
+        + `list_dir or grep to narrow first.`;
+    }
     const askedLimit = parseInt(params.limit || '0', 10);
     const total = Number.isFinite(askedLimit) && askedLimit > 0 ? Math.min(askedLimit, capLines) : capLines;
 
@@ -204,7 +224,19 @@ export const tool: Tool = {
       recordRead(f.resolved, [1, end], f.total);
     }
 
-    const header = `${blocks.length} file(s), ${spent} lines (budget ${total})`;
+    /**
+     * SAY WHEN NOTHING WAS CLIPPED, because the alternative is a wasted request.
+     *
+     * A reader that cannot tell whole from truncated has to assume truncated, and the cautious move
+     * after a set read is a follow-up `read_file` "for the rest" — which on an endpoint rationed by
+     * REQUESTS is the expensive mistake. Each block already says whether it is complete; the header
+     * now answers it for the set, so the decision needs no scrolling.
+     */
+    const clipped = blocks.length - ok.filter((f) => f.share >= f.total).length;
+    const header = `${blocks.length} file(s), ${spent} lines (budget ${total})`
+      + (blocks.length && clipped <= 0
+        ? ' — every file COMPLETE, nothing withheld; no follow-up read is needed'
+        : clipped > 0 ? ` — ${clipped} clipped, named below` : '');
     const skipNote = skipped.length ? `\n\nskipped:\n${skipped.map((s) => `  ${s}`).join('\n')}` : '';
     return `${header}\n\n${blocks.join('\n\n')}${skipNote}`;
   },

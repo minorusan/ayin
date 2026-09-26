@@ -508,9 +508,27 @@ export function createOpenAiProvider(vendorId: string = 'openai'): LlmProvider {
       if (!key) return { ok: false, model: null };
       try {
         // A status poll must never wait the generate timeout, so the probe overrides it per request.
-        await client(key, v).models.list({ timeout: PROBE_TIMEOUT_MS, maxRetries: 0 });
+        const list = await client(key, v).models.list({ timeout: PROBE_TIMEOUT_MS, maxRetries: 0 });
         const m = model(v);
-        return { ok: true, model: m, ...(contextTokensFor(m) ? { contextTokens: contextTokensFor(m) } : {}) };
+        /**
+         * THE WINDOW, FROM THE LISTING THIS CALL ALREADY MADE.
+         *
+         * `contextTokensFor` is a regex table that knows `gpt-5.6` and nothing else, so every other
+         * endpoint reported NO window — and "unknown" is not free. `readCap` falls back to its
+         * 800-line floor, `read_files` splits those 800 across up to twelve files, and a model with
+         * 977,000 tokens of context was being handed sixty-six lines per file. Measured exactly that
+         * way on OpenRouter before this: `activeContextTokens() → 0`.
+         *
+         * The number was in the response all along. This poll already fetches the catalogue to prove
+         * the key works, and OpenRouter publishes `context_length` on every row; reading it costs
+         * nothing and no extra request. The table stays as the fallback for endpoints that publish
+         * no such field.
+         */
+        const row = (list.data as unknown as Array<Record<string, unknown>>)
+          .find((x) => String(x.id ?? '') === m);
+        const published = Number(row?.context_length);
+        const ctx = Number.isFinite(published) && published > 0 ? published : contextTokensFor(m);
+        return { ok: true, model: m, ...(ctx ? { contextTokens: ctx } : {}) };
       } catch {
         return { ok: false, model: null };
       }
