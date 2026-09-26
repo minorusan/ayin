@@ -325,6 +325,17 @@ export function openAiModel(): string {
  * my choice" and is invisible in the transcript. A model somebody chose is never a guess, whatever
  * happens to it next.
  */
+/** Pin the model for ANY compatible vendor. `setOpenAiModel` is this for `openai`, and its doc. */
+export function setVendorModel(vendorId: string, id: string): boolean {
+  const wanted = id.trim();
+  const v = vendor(vendorId);
+  if (!wanted || !v) return false;
+  if (v.id === OPENAI.id) return setOpenAiModel(wanted);
+  chosenModel.set(v.id, wanted);
+  providerLog().info('vendor_set_model', { vendor: v.id, model: wanted });
+  return true;
+}
+
 export function setOpenAiModel(id: string): boolean {
   const wanted = id.trim();
   if (!wanted) return false;

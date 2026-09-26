@@ -35,10 +35,11 @@ import { addMessage, setAgentStatus } from './ui.js';
 import { showDialog, type DialogOption } from './dialog.js';
 import { setConfigValue } from './prompts.js';
 import { llmProvider, llmProviderName, setProviderOverride, providerOverrideName, resetProviderResolution } from './llm/select.js';
-import { openAiKey, openAiModel, setOpenAiModel } from './llm/providers/openai.js';
-import { vendor } from './llm/vendors.js';
+import { openAiKey, openAiModel, setOpenAiModel, setVendorModel } from './llm/providers/openai.js';
+import { VENDORS, VENDOR_IDS, vendor } from './llm/vendors.js';
 import { providerCredential } from './llm/providers/runtime.js';
 import { noKeyMessage, writeOpenAiModel } from './tools/credentials/openai.js';
+import { writeVendorModel } from './tools/credentials/compat.js';
 import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
 import { refreshActiveModel, activeModelId, resetModelResolution, setAdapter, adapterNames, activeAdapter } from './llm/manager.js';
 import { getConfig, getConfigString } from './prompts.js';
@@ -377,43 +378,72 @@ async function handleProviderChoice(want: string): Promise<boolean> {
  * a different kind of choice — how ayin SPEAKS, not who it speaks to — and mixing both into one list
  * would make an adapter look like something that changes the model.
  */
+/**
+ * The rows of the "Who answers" dialog: Local, then every OpenAI-compatible vendor ayin knows.
+ *
+ * EXTRACTED SO IT CAN BE PRINTED WITHOUT A TERMINAL. This list was two hardcoded entries — Local and
+ * OpenAI — and stayed two after DeepSeek and OpenRouter were wired, so `/model` offered a choice
+ * between the one provider the operator was not using and the one they had not configured, while the
+ * two they HAD configured were reachable only by typing the id. Verified by the operator's
+ * screenshot, not by me, which is the whole reason this is a function now: a dialog nobody can render
+ * in a test is a dialog that drifts from the table behind it.
+ */
+export async function providerRows(): Promise<DialogOption[]> {
+  const active = (await llmProvider()).name;
+  const localName = VENDOR_IDS.includes(active) ? llmProviderName() : llmProviderName();
+  const localModel = activeModelId();
+  const onVendor = VENDOR_IDS.includes(active);
+
+  const rows: DialogOption[] = [{
+    label: 'Local',
+    note: onVendor ? (localName || 'not configured') : `${localName} · active`,
+    sub: onVendor
+      ? (localName ? 'a model you host — nothing leaves this machine'
+        : 'nothing local configured yet — /set llm-provider ollama, or /set llm-url http://host:9100')
+      : (localModel ? `serving ${localModel}` : 'a model you host — nothing leaves this machine'),
+  }];
+
+  for (const v of VENDORS) {
+    const cred = providerCredential(v.id);
+    const key = cred.key.trim();
+    const here = active === v.id;
+    const model = cred.model || v.defaultModel;
+    // "BILLED PER TOKEN" IS FALSE WHEN THE CHOSEN MODEL IS FREE. OpenRouter's row pointed at
+    // `…:free` and warned about the bill underneath it — true of the vendor, wrong about the
+    // decision the reader is making.
+    const free = /:free$/i.test(model);
+    const cost = free ? 'free model' : 'billed per token';
+    rows.push({
+      label: v.label,
+      note: key ? (here ? `active · ${cost}` : cost) : 'no key',
+      // The absence of a key is the whole reason a row would not work, so it says the fix HERE rather
+      // than after the operator has already picked it.
+      sub: key
+        ? `${model} · hosted, needs no GPU — pick this to choose the model`
+        : `run /${v.id} <key> first — it is verified before it is saved`,
+    });
+  }
+  return rows;
+}
+
 async function showProviderPicker(): Promise<void> {
   // The RESOLVED provider, which is the only honest answer to "what answers me right now" — an override
   // is one of several ways to arrive at OpenAI, and the default is another.
   const active = (await llmProvider()).name;
-  const onOpenAi = active === 'openai';
-  const key = openAiKey();
   const cur = activeAdapter();
-  const localName = onOpenAi ? (llmProviderName() === 'openai' ? '' : llmProviderName()) : llmProviderName();
-  const localModel = activeModelId();
-
-  const options: DialogOption[] = [
-    {
-      label: 'Local',
-      note: onOpenAi ? (localName || 'not configured') : `${localName} · active`,
-      sub: onOpenAi
-        ? (localName ? 'a model you host — nothing leaves this machine'
-          : 'nothing local configured yet — /set llm-provider ollama, or /set llm-url http://host:9100')
-        : (localModel ? `serving ${localModel}` : 'a model you host — nothing leaves this machine'),
-    },
-    {
-      label: 'OpenAI',
-      note: key ? (onOpenAi ? 'active · billed per token' : 'billed per token') : 'no key',
-      // The absence of a key is the whole reason a row would not work, so it says the fix here rather
-      // than after the operator has already picked it.
-      sub: key ? `${openAiModel()} · hosted, needs no GPU — pick this to choose the tier` : 'run /openai sk-… first — the key is verified before it is saved',
-    },
-  ];
+  const options = await providerRows();
+  const activeIdx = VENDOR_IDS.indexOf(active);
 
   const choice = await showDialog('Who answers', options, {
     subtitle: `adapter ${cur.id}${cur.forced ? ' (chosen)' : ' (matched)'} · /model gemma|qwen|auto to change how ayin formats tool calls`,
-    selected: onOpenAi ? 1 : 0,
+    selected: activeIdx >= 0 ? activeIdx + 1 : 0,
     footer: '↑↓ select · Enter switch · Esc cancel',
   });
 
   if (choice < 0) return;
-  if (choice === 1) {
-    await handleProviderChoice('openai');
+  if (choice >= 1) {
+    const picked = VENDORS[choice - 1];
+    await handleProviderChoice(picked.id);
     /**
      * …then WHICH OpenAI model, because "who answers" was never the whole question.
      *
@@ -425,7 +455,7 @@ async function showProviderPicker(): Promise<void> {
      * common case once OpenAI is the provider, and it is the only route to the picker that needs no
      * argument remembered.
      */
-    if ((await llmProvider()).name === 'openai') await showOpenAiModelPicker();
+    if ((await llmProvider()).name === picked.id) await showVendorModelPicker(picked.id);
     return;
   }
   await handleProviderChoice('local');
@@ -558,6 +588,55 @@ async function applyOpenAiModel(id: string): Promise<void> {
  * `rankForAgentic` supplies the tier, the price and the caveats — including the one that reorders the
  * list: on this endpoint gpt-5.5 is the only tier that takes function tools WITH reasoning on.
  */
+/**
+ * WHICH model from this vendor answers you.
+ *
+ * OpenAI keeps its own path below: `rankForAgentic` encodes researched, measured facts about that
+ * lineup — which tier takes tools with reasoning on, which refuses this endpoint entirely — and there
+ * is no equivalent knowledge to invent for 458 OpenRouter models. For every other vendor the CATALOGUE
+ * already carries what matters, because `pickModels` put it there: the price (or FREE), the context,
+ * and the order worth reading them in.
+ */
+export async function showVendorModelPicker(vendorId: string): Promise<void> {
+  if (vendorId === 'openai') return showOpenAiModelPicker();
+  const v = vendor(vendorId);
+  if (!v) return;
+  const { createOpenAiProvider } = await import('./llm/providers/openai.js');
+  setAgentStatus(`Reading the ${v.label} catalogue…`);
+  const cat = await createOpenAiProvider(v.id).models?.().catch(() => null);
+  setAgentStatus('');
+  const models = cat?.models ?? [];
+  if (!models.length) {
+    addMessage('system', `Could not list models for ${v.label} — the account may be unreachable or out of quota. `
+      + `Name one directly: /model ${v.id} <id>.`);
+    return;
+  }
+  const cur = cat?.activeModel ?? '';
+  const rows: DialogOption[] = models.slice(0, 40).map((m) => ({
+    label: m.name,
+    note: m.name === cur ? 'current' : (m.parameterSize || ''),
+    sub: [m.parameterSize && m.name === cur ? m.parameterSize : '', m.ctx ? `${Math.round(m.ctx / 1024)}k context` : '']
+      .filter(Boolean).join(' · '),
+  }));
+  const pick = await showDialog(`Which ${v.label} model answers you`, rows, {
+    subtitle: `${models.length} model(s) that accept tools · this agent only`,
+    selected: Math.max(0, rows.findIndex((r) => r.note === 'current')),
+    footer: '↑↓ select · Enter choose · Esc keep the current one',
+  });
+  if (pick < 0) return;
+  const chosen = rows[pick].label;
+  if (chosen === cur) {
+    addMessage('system', `Already on ${chosen} — nothing changed.`);
+    return;
+  }
+  if (!setVendorModel(v.id, chosen)) return;
+  writeVendorModel(v.id, v.label, v.envKey, v.envModel, chosen);
+  resetModelResolution();
+  await refreshActiveModel().catch(() => {});
+  addMessage('system', `${v.label} model: ${chosen} — this agent only.`);
+  log('INFO', 'vendor_model_chosen', { vendor: v.id, model: chosen });
+}
+
 export async function showOpenAiModelPicker(): Promise<void> {
   const key = openAiKey();
   if (!key) {
