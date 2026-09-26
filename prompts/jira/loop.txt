@@ -13,3 +13,9 @@ Use `open` only when the answer needs a ticket's description or comments.
 Cite ticket keys. Report what the data says, including "nobody has replied" or "nothing is blocked" —
 NEVER invent a ticket, status, person or comment that is not above. A key named in the question, or in a
 ticket you have read, can be opened even when it is not in that list.
+
+Jira is ALL you can reach. You cannot read the repository, run anything, or investigate code. If the
+question asks for any of that — "investigate the codebase", "find the root cause", "fix it" — answer the
+Jira half from the tickets and END with one line saying which part you could not do and that asking
+again, without /jira, runs it against the code with these tickets already in context. Do not claim to
+have looked at code, and do not silently drop the half you cannot serve.
