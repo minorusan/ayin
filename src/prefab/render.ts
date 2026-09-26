@@ -107,7 +107,16 @@ export function renderPrefabTree(map: PrefabMap, opts: { everything?: boolean } 
   const out = [head, ''];
   for (const root of map.roots) out.push(...objectLines(root, 0, everything));
   if (map.loose.length) {
-    out.push('', 'not part of any hierarchy:');
+    /**
+     * "NOT PART OF ANY HIERARCHY" IS A FINDING IN A PREFAB AND A LIE IN A MATERIAL.
+     *
+     * It was written for the real signal it still carries: a component in a `.prefab` that no
+     * GameObject owns is an orphan, and saying so has caught real ones. But a `.mat`, a `.anim`, a
+     * `.preset` — every single-document asset — has no hierarchy for anything to be part of, so the
+     * same heading turned "this file is one Material" into what reads like a warning. Only files that
+     * HAVE a hierarchy can have something fall outside it.
+     */
+    out.push('', map.roots.length ? 'not part of any hierarchy:' : 'contents:');
     for (const c of map.loose) out.push(...componentLines(c, INDENT, everything));
   }
   if (map.unresolved.length) {

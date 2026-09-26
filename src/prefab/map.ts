@@ -21,7 +21,7 @@
  * the only place anything is dropped.
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { at, collectRefs, entry, parseRef, parseUnityYaml, type YDocument, type YEntry, type YFile, type YValue } from './yaml.js';
 import { relToRoot, resolveGuids, type AssetRef } from './refs.js';
@@ -458,5 +458,31 @@ export async function buildPrefabMap(
 
 /** `.prefab`, `.unity`, `.asset` — one dialect, and the only three this accepts. */
 export function isInspectable(path: string): boolean {
-  return /\.(prefab|unity|asset)$/i.test(basename(path));
+  if (/\.(prefab|unity|asset)$/i.test(basename(path))) return true;
+  /**
+   * THE DIALECT IS THE TEST, NOT THE EXTENSION.
+   *
+   * Unity writes ONE serialization format and spells it a dozen ways. The allowlist named three of
+   * them, so a material — byte-for-byte the same `%YAML 1.1` / `%TAG !u!` document stream, with the
+   * same class ids and the same `{fileID, guid, type}` references — was turned away as "a different
+   * format". Counted in one real project: 302 `.mat`, 887 `.anim`, 62 `.overrideController`, 9
+   * `.preset`, 6 `.spriteatlas`. 1,266 files this reader understands completely and refused to look
+   * at, because of how they are named.
+   *
+   * Unity's own header settles it in the first forty bytes and costs one read. An extension list has
+   * to be maintained against a format that keeps adding spellings; a signature does not. `.meta` is
+   * correctly excluded by it — that is YAML, but it is `fileFormatVersion: 2`, not a document stream
+   * with class ids, and it has no structure worth mapping.
+   */
+  try {
+    const fd = openSync(path, 'r');
+    try {
+      const buf = Buffer.alloc(64);
+      const n = readSync(fd, buf, 0, 64, 0);
+      const head = buf.subarray(0, n).toString('utf-8');
+      return head.startsWith('%YAML') && head.includes('!u!');
+    } finally { closeSync(fd); }
+  } catch {
+    return false;
+  }
 }
