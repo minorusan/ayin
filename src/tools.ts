@@ -14,6 +14,8 @@ import { prompts, packagePath } from './prompts-service.js';
 import type { Tool } from './tools/base.js';
 import { ensureToolRuntime } from './tool-wiring.js';
 import { discoverTools, extraToolDirs } from './tools/loader.js';
+import { isUnityProject } from './indulge/attributors/unity.js';
+import { isArduinoProject } from './tools/arduino-explain.js';
 import { toolCallInstructions, toolMode } from './llm/manager.js';
 
 export { cancelActiveToolExecution } from './tools/lib.js';
@@ -246,6 +248,34 @@ let leanTools = false;
 export function setLeanTools(on: boolean): void { leanTools = on && process.env.AYIN_ALL_TOOLS !== '1'; }
 export function isLeanTools(): boolean { return leanTools; }
 
+/**
+ * WHAT KIND OF PROJECT IS THIS, for `Tool.projects`. Cheap, cached, and silent about what it cannot
+ * tell: an empty set means "no idea", and no idea means every tool is offered.
+ *
+ * Deliberately NOT the executor's project detection, which is about how to build and test a thing and
+ * costs a directory walk. This answers a much smaller question — is there an `Assets/` beside a
+ * `ProjectSettings/`, is there an `.ino` — and it answers it once per process, because the working
+ * directory of a session does not change under it.
+ */
+let kinds: Set<string> | null = null;
+function projectKinds(): Set<string> {
+  if (kinds) return kinds;
+  kinds = new Set<string>();
+  const root = process.cwd();
+  try {
+    if (isUnityProject(root)) kinds.add('unity');
+  } catch { /* an unreadable cwd is "no idea", which offers everything */ }
+  try {
+    if (isArduinoProject(root)) kinds.add('arduino');
+  } catch { /* same */ }
+  return kinds;
+}
+
+/** For the gate, and for a session that changes directory: forget what was detected. */
+export function _resetProjectKinds(): void {
+  kinds = null;
+}
+
 export function modelTools(): Tool[] {
   assertLoaded();
   // The design workflow is OFF by default (`modes.ts#isNaamah`), and off means the tool is not in the
@@ -256,7 +286,16 @@ export function modelTools(): Tool[] {
   const offered = withoutDesign.filter((t) => !t.slashOnly);
   // A tool withheld here is withheld from the catalogue, the native schemas and the unknown-tool hint
   // alike — the same invariant the comment above states, applied to the work set.
-  return leanTools ? offered.filter((t) => WORK_TOOLS.has(t.name)) : offered;
+  /**
+   * SCOPED OUT, when this project is known to be a different kind. `projects` carries the reasoning;
+   * the rule here is only that an UNKNOWN project keeps everything, because a tool hidden by a wrong
+   * guess is worse than a tool nobody needed.
+   */
+  const here = projectKinds();
+  const relevant = here.size === 0
+    ? offered
+    : offered.filter((t) => !t.projects?.length || t.projects.some((k) => here.has(k)));
+  return leanTools ? relevant.filter((t) => WORK_TOOLS.has(t.name)) : relevant;
 }
 
 // ── System prompt XML ───────────────────────────────────────────────

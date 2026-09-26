@@ -253,6 +253,11 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
   // Names narrowed the field; domains narrow it again; cosine only ranks what survived. If the
   // endpoint is down or nothing is embedded, fall through to lexical rather than failing the tool.
   let vectorNote: string | undefined;
+  /**
+   * WHAT THE SEMANTIC PASS SAID WHEN IT SAID NO — carried down to the literal pass below rather than
+   * returned on the spot. See the below-floor branch.
+   */
+  let belowFloor = '';
   if (hasUsableVectors(store)) {
     try {
       const qv = await embedQuery(query);
@@ -317,7 +322,7 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
           const near = scored.slice(0, 3).filter((h) => h.score > 0)
             .map((h) => `    ${h.score < 0.01 ? h.score.toExponential(1) : h.score.toFixed(2)}  ${ordered[h.index].question}`)
             .join('\n');
-          return `Nothing in the corpus answers "${query}".`
+          belowFloor = `Nothing in the corpus answers "${query}" by MEANING.`
             + ` ${scored.length} candidate(s) were considered and the closest scored`
             + ` ${scored[0].score < 0.01 ? scored[0].score.toExponential(1) : scored[0].score.toFixed(2)}`
             + ` against a floor of ${floor} — the floor is what separates an answer that may be cited`
@@ -332,10 +337,29 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
               ? `The nearest it holds, none of which cleared the floor — their answers are withheld for `
                 + `that reason alone, not because they are known to be wrong. Ask again naming one of `
                 + `these if it is what you meant:\n${near}\n`
-              : 'Nothing scored above zero, so there is no near miss to point at.\n')
-            + coverageNote(all);
+              : 'Nothing scored above zero, so there is no near miss to point at.\n');
+          /**
+           * AND THEN ASK THE LITERAL QUESTION, because the two passes fail differently.
+           *
+           * The lexical scorer below — question text, file paths, answer body, plus a strong bonus for
+           * a name the query actually spells — has been in this function all along, reachable only
+           * when the semantic pass THREW. A pass that RAN and rejected everything is the far commoner
+           * case, and it returned on the spot: so a query naming a type outright got nothing back.
+           * Measured on "RewardHandlerBase Dispose contract" — 0.03 against a floor of 0.1, in a
+           * corpus that plainly holds RewardHandlerBase facts. The reranker scores prose against prose
+           * and has no special regard for an identifier; substring matching has nothing else.
+           *
+           * The floor still stands — nothing under it is ever cited as a semantic answer. The query is
+           * simply asked a second way. A hit is labelled `keyword` and says why it fell through, so it
+           * cannot be read as the corpus agreeing about meaning.
+           */
         }
-        return render(repoPath, store, kept.map((h) => ordered[h.index]), query, named, 'semantic');
+        // Only when something actually cleared the floor. Below it, control falls past this to the
+        // literal pass — rendering an EMPTY `kept` here printed "0 of 921 chunk(s) match [semantic]",
+        // which is the shape of an answer wrapped around nothing.
+        if (kept.length) {
+          return render(repoPath, store, kept.map((h) => ordered[h.index]), query, named, 'semantic');
+        }
       }
     } catch (e) {
       // SAY WHY, ON SCREEN. This catch hid a real failure for four rounds of debugging: the search
@@ -368,11 +392,17 @@ export async function corpusSearch(repoPath: string, query: string, limit = 3): 
   }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
 
   if (scored.length === 0) {
-    return `Nothing in the corpus matches "${query}". It holds ${store.totals().chunks} answered `
-      + `question(s) for this repo.\n${coverageNote(all)}`;
+    return belowFloor
+      ? `${belowFloor}Nor does any chunk contain those words literally.\n${coverageNote(all)}`
+      : `Nothing in the corpus matches "${query}". It holds ${store.totals().chunks} answered `
+        + `question(s) for this repo.\n${coverageNote(all)}`;
   }
 
-  return render(repoPath, store, scored.map((s2) => s2.chunk), query, named, 'keyword', vectorNote);
+  const why = belowFloor
+    ? 'nothing cleared the semantic floor, so these are LITERAL matches on the words you used'
+    : vectorNote;
+  const body = render(repoPath, store, scored.map((s2) => s2.chunk), query, named, 'keyword', why);
+  return belowFloor ? `${belowFloor}\n${body}` : body;
 }
 
 /** One rendering for both passes — the agent should not be able to tell which found the chunk. */

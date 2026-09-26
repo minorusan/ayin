@@ -8,6 +8,7 @@ import { resolveProject } from '../explore/index.js';
 
 export const tool: Tool = {
     name: 'prefab_inspect',
+    projects: ['unity'],
     icon: '🔬',
     description:
       'READ a Unity .prefab, .unity scene or .asset as a STRUCTURED MAP instead of raw YAML. Called with just '

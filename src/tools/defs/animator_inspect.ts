@@ -7,6 +7,7 @@ import { resolveProject } from '../explore/index.js';
 
 export const tool: Tool = {
     name: 'animator_inspect',
+    projects: ['unity'],
     icon: '🎬',
     description:
       'READ a Unity .controller as a map of states and transitions instead of raw YAML. Per transition: '

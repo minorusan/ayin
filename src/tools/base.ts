@@ -115,6 +115,23 @@ export interface Tool {
    */
   readonly slashOnly?: boolean;
   /**
+   * THE PROJECT KINDS THIS TOOL IS FOR. Omitted means every project, which is almost all of them.
+   *
+   * A tool the model can see is a tool it has to read and rule out, on every turn, forever. Measured:
+   * a session on a Unity repository called `arduino_db(query="rgb led")` to find out what it was, and
+   * reported the cost plainly — *"arduino_db is present in a Unity-only project; harmless, but a sign
+   * the toolset isn't scoped per project, so discovering which tools are relevant costs a turn."*
+   * Harmless is not free: it is prompt on every request and a wrong turn on some of them.
+   *
+   * WITHHELD FROM THE CATALOGUE, NOT FROM THE REGISTRY — the same bargain `naamah` already has.
+   * `getAllTools()` keeps it, so `/help`, `ayin_help` and name resolution still answer for it, and a
+   * model that names it anyway is served rather than told it does not exist.
+   *
+   * A project whose kind cannot be determined gets EVERYTHING. Hiding a tool because detection was
+   * unsure is the one failure mode worse than showing a tool that is not needed.
+   */
+  readonly projects?: readonly string[];
+  /**
    * ONE GLYPH, shown on this tool's card in the transcript. Optional; a tool without one gets `\u25B8`.
    *
    * NOT AN EMOJI, and this is enforced. blessed reports `strWidth` 1 for an emoji while every terminal

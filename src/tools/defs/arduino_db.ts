@@ -3,6 +3,7 @@ import { arduinoDbExecute } from '../arduino-db.js';
 
 export const tool: Tool = {
     name: 'arduino_db',
+    projects: ['arduino'],
     icon: '🧰',
     description: 'Look up a common Arduino/electronics component in a reference catalog (~30 starter-kit parts: LEDs, buttons, servos, sensors, displays, drivers, ICs, …). Use this whenever you are writing or explaining Arduino code and need to know how to identify a part in a kit, what it does, or exactly which leg wires to which pin. NOT project-specific — it never knows what a particular sketch uses, only general reference facts about the part itself. Prefer this over recalling component facts from memory: it is curated and this codebase treats recalled hardware facts the same way it treats recalled API facts — a good way to wire something backwards.',
     parameters: [
