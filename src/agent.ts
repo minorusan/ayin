@@ -568,7 +568,28 @@ function windowResultChars(): number {
   if (set > 0) return set;
   const ctx = activeContextTokens();
   if (!ctx || ctx <= 0) return WINDOW_RESULT_CHARS_DEFAULT;
-  return Math.max(WINDOW_RESULT_CHARS_DEFAULT, Math.floor(ctx * 0.08));
+  const budget = Math.max(WINDOW_RESULT_CHARS_DEFAULT, Math.floor(ctx * 0.08));
+  /**
+   * …AND A FRACTION OF THE TOTAL IS NOT A FRACTION OF WHAT IS FREE.
+   *
+   * `ctx * 0.08` is a char budget derived from a token count, so it stays under the 8,000 floor until
+   * the window passes 100k tokens — which means every ordinary local model gets exactly the fixed
+   * ceiling the scaling was added to remove, no matter how empty its window is.
+   *
+   * Measured: a 40,000-token session, 56% used, 15,520 tokens of headroom. `read_files` returned a
+   * 616-line C# file in one call — 21,029 characters, about 5,100 tokens, comfortably inside that
+   * headroom — and it was clipped to 8,000. The model then spent SIX calls paging the artifact back
+   * with offset/limit, and those reads were clipped at 8,000 too, so recovering the file cost more
+   * window than keeping it would have. The clip only saves anything when the omitted part is not
+   * wanted; here it was the whole point of the call.
+   *
+   * So a result may take up to half of what is ACTUALLY free, and never less than the measured floor.
+   * Half rather than all because the next round has to fit beside it, and the floor stays because it
+   * is the one number in here that was measured rather than reasoned.
+   */
+  if (lastHeadroomTokens <= 0) return budget;
+  const freeChars = Math.floor(lastHeadroomTokens * charsPerToken() * 0.5);
+  return Math.max(budget, freeChars);
 }
 
 /**
@@ -927,7 +948,14 @@ function logCoverage(c: {
     headroomEst: ctx ? String(ctx - RESPONSE_RESERVE_TOKENS - used) : '',
     usedPct: ctx ? (100 * used / ctx).toFixed(1) : '',
   });
+  // KEPT, because the clip below needs it and cannot reconstruct it: this is the only place that
+  // knows the system prefix and the volatile block, and a result budget blind to them is a budget
+  // guessing at the one number it exists to respect.
+  lastHeadroomTokens = ctx ? ctx - RESPONSE_RESERVE_TOKENS - used : 0;
 }
+
+/** Window headroom as of the last round built, in tokens. 0 until one has been. */
+let lastHeadroomTokens = 0;
 
 /**
  * Never compress the four most recent messages. A floor, not a policy — what actually decides how much
@@ -1978,14 +2006,28 @@ async function runAgentTurn(rawInput: string): Promise<void> {
    *   a direction with no anchor      → `looksLikeDeferral`      → still discarded
    *   anything else                   → a report. It is the answer, and it is shown.
    *
-   * `turnRequestKind()` is null whenever triage did not run, so every turn plan mode skips behaves
-   * exactly as it did before. Headless is unchanged either way: prose is never an exit there, and
-   * this only decides whether the reply is SEEN on its way back round to `finish()`.
+   * NULL IS "NOBODY CLASSIFIED THIS", NOT "THIS IS A BUILD".
+   *
+   * `turnRequestKind()` is null whenever triage did not run — which is every turn plan mode skips, and
+   * since plan mode went back to opt-in that is very nearly every turn there is. Reading null as
+   * not-answering made `replyIsTheAnswer` permanently false, so a model that ran its tools and then
+   * wrote the answer had that answer DISCARDED, rebuilt from identical history, and discarded again
+   * until `agent_lost` fired on three refusals.
+   *
+   * Measured on one session, twice in half an hour: two reads, three replies thrown away in under
+   * twenty seconds (rounds 1-3, outputs of 44, 41 and 87 characters), `agent_lost: "3 calls in a row
+   * were refused", tool: "reply"`, and the turn abandoned with the answer never shown. The model had
+   * done the work correctly both times.
+   *
+   * Only `build` is strict now. That is the turn the discard was written for — where prose after tool
+   * calls really is a narrated intention instead of an edit — and the protection there is unchanged.
+   * Everywhere else the reply still has to be a REPORT rather than a promise: `reportsRatherThanPromises`
+   * is unchanged and still discards "now let me check X".
+   *
+   * Headless is unchanged either way: prose is never an exit there, and this only decides whether the
+   * reply is SEEN on its way back round to `finish()`.
    */
-  const answeringTurn = (): boolean => {
-    const kind = turnRequestKind();
-    return kind === 'answer' || kind === 'investigate';
-  };
+  const answeringTurn = (): boolean => turnRequestKind() !== 'build';
   const replyIsTheAnswer = (text: string): boolean => answeringTurn() && reportsRatherThanPromises(text);
   /** How much the design had absorbed at the last nudge, so progress can clear the stall counter. */
   let lastImplemented = -1;
