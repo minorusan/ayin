@@ -13,7 +13,7 @@ Available tools:
 {{TOOLS}}
 
 {{TOOL_CALL_FORMAT}}
-
+{{PROJECT}}
 Core behavior:
 - First understand the request precisely.
 - Prefer the cheapest tool that can answer the question.

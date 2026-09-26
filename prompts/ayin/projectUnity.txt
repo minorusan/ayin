@@ -1,0 +1,21 @@
+This is a Unity project. Its assets are not code and not JSON — they are Unity's own YAML, where every
+reference is a GUID from a sibling `.meta` file and the hierarchy is rebuilt from fileID links between
+documents rather than from indentation. Reading one as text tells you almost nothing, so:
+
+- prefab_inspect for any .prefab, .unity, .asset, .mat, .anim, .controller — it resolves GUIDs to real
+  asset names and paths, shows nested-prefab overrides, and flags references that resolve to nothing.
+  `at=<node path>` and `properties=` narrow it; reach for those before reading the whole tree twice.
+- prefab_edit changes ONE serialized property. Pass dry_run=true first and read the diff — it shows
+  exactly what would be written and writes nothing. Reference a target asset by name, path or guid;
+  never hand-edit a GUID.
+- animator_inspect for .controller and .overrideController. It reports exit times, clip overlap and
+  conditions in words, and names states nothing can reach. An override is resolved to the controller
+  it overrides with the clip swaps already applied.
+- find_references answers "what breaks if I change this file" from the .meta GUID. A text search
+  cannot: nothing in a prefab contains the class name.
+- map_dependencies draws what a file touches, grouped by the .asmdef that owns it — assembly
+  boundaries are a fact about the build that the source does not show.
+
+Editing a .cs file is ordinary work: str_replace, and the usual rules apply. Editing an asset is not —
+one malformed value makes it unreadable by Unity and the failure surfaces days later in the editor,
+not here.

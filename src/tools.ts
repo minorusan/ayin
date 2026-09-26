@@ -300,6 +300,31 @@ export function modelTools(): Tool[] {
 
 // ── System prompt XML ───────────────────────────────────────────────
 
+/**
+ * THE PART OF THE PROMPT THAT DEPENDS ON WHERE WE ARE.
+ *
+ * The selection guidance in `system.txt` names find_files, grep, read_file(s), bash, str_replace and
+ * write_file — the set it was written for. It never grew when the Unity tools arrived, so a session
+ * in a Unity repository was told how to choose between seven generic tools and nothing at all about
+ * the eight that understand the assets in front of it. Measured against the shipped prompt: not one
+ * of prefab_inspect, prefab_edit, animator_inspect, find_references, map_dependencies, explore,
+ * corpus_search or expand_method appears in it. Reported from the other side as *"tool discovery is
+ * manual — had to use ayin_help to learn the full toolset"*.
+ *
+ * In NATIVE mode the catalogue is deliberately absent (see below), which makes the guidance the only
+ * steer there is — so stale guidance costs more there, not less.
+ *
+ * Scoped by the same detection that scopes the catalogue, so a TypeScript repository pays nothing for
+ * Unity advice. Absent means absent: a project kind with no block contributes an empty string rather
+ * than a paragraph of hedging about what might apply.
+ */
+function projectBlock(): string {
+  const here = projectKinds();
+  const blocks: string[] = [];
+  if (here.has('unity')) blocks.push(getPrompt('projectUnity'));
+  return blocks.length ? `\n${blocks.join('\n\n')}\n` : '';
+}
+
 export function toolsSystemPrompt(): string {
   assertLoaded();
   // NATIVE tool declaration: the provider hands the schemas to the runtime, which renders them in its
@@ -312,6 +337,7 @@ export function toolsSystemPrompt(): string {
       WORKING_DIR: CWD,
       TOOLS: 'Your tools are declared to the runtime; call them directly.',
       TOOL_CALL_FORMAT: '',
+      PROJECT: projectBlock(),
     });
   }
   const toolDefs = modelTools().map(t => {
@@ -342,5 +368,6 @@ export function toolsSystemPrompt(): string {
     // here via the LLM manager. New prompts use {{TOOL_CALL_FORMAT}}; an older
     // persisted prompts.json that hardcodes the format simply ignores this var.
     TOOL_CALL_FORMAT: toolCallInstructions(),
+    PROJECT: projectBlock(),
   });
 }
