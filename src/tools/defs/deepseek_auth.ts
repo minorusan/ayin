@@ -46,6 +46,44 @@ async function verify(key: string): Promise<{ ok: true; models: string[] } | { o
   }
 }
 
+/**
+ * THE BALANCE, BECAUSE AUTHENTICATED IS NOT THE SAME AS USABLE.
+ *
+ * `/openai` carries a caveat it cannot resolve — `models.list` proves a key is live and says nothing
+ * about credit, so a freshly-issued key verifies here and then every completion returns 402. That
+ * caveat was written after it happened on OpenAI; it happened again on the first real DeepSeek key,
+ * whose `granted_balance` was 0.00, and the operator had been told by three different write-ups that
+ * new accounts get a free grant.
+ *
+ * DeepSeek publishes `/user/balance` and it is free to call, so the caveat does not have to stay a
+ * caveat here. Best-effort: an endpoint that is missing or slow must not fail the setup, because the
+ * key is still worth saving.
+ */
+async function balance(key: string): Promise<string> {
+  try {
+    const res = await fetch(`${DS.baseURL}/user/balance`, {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return '';
+    const body = await res.json() as {
+      is_available?: boolean;
+      balance_infos?: Array<{ currency?: string; total_balance?: string; granted_balance?: string; topped_up_balance?: string }>;
+    };
+    const info = body.balance_infos?.[0];
+    if (!info) return '';
+    const total = `${info.total_balance ?? '?'} ${info.currency ?? ''}`.trim();
+    if (body.is_available === false || info.total_balance === '0.00') {
+      return `Balance: ${total} — granted ${info.granted_balance ?? '?'}, topped up ${info.topped_up_balance ?? '?'}.\n`
+        + `THE KEY WORKS AND THE ACCOUNT IS EMPTY: every completion will return 402 until you add credit. `
+        + `There is no signup grant on this account, whatever the guides say.`;
+    }
+    return `Balance: ${total} (granted ${info.granted_balance ?? '?'}, topped up ${info.topped_up_balance ?? '?'}).`;
+  } catch {
+    return ''; // the balance endpoint is a courtesy; its silence is not a failure to save the key
+  }
+}
+
 function summary(): string {
   const key = readVendorKey(DS.id, DS.envKey);
   if (!key) return `${DS.label}: no key configured.`;
@@ -100,11 +138,13 @@ export const tool: Tool = {
     }
 
     const path = writeVendorCredentials(DS.id, DS.label, DS.envKey, DS.envModel, { key, model });
+    const credit = await balance(key);
     toolLog().info('deepseek_auth_saved', { model: model || '(provider default)', file: path });
     // Precise about what was proven, the same caveat `/openai` learned: `models.list` authenticates
     // the key and costs nothing, but it succeeds on an account with no balance. Claiming more than was
     // tested sends the operator hunting through ayin for a billing problem.
-    return `deepseek: key authenticated ✓ (a free call — it does not prove the account has credit)\n`
+    return `deepseek: key authenticated ✓\n`
+      + (credit ? `${credit}\n` : '(could not read the balance — that call is a courtesy, the key is saved anyway)\n')
       + `${summary()}\n`
       + (check.models.length ? `Models it offers: ${check.models.join(', ')}\n` : '')
       + `Saved to ${path} (0600).\n`

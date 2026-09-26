@@ -118,14 +118,31 @@ export async function openAiEmbed(texts: string[], embedModel: string): Promise<
  * what an operator needs ("insufficient_quota", "model not found") — but it is rendered here rather
  * than thrown raw so nothing in it can carry the request headers, and therefore the key.
  */
-function describe(err: unknown): string {
+/**
+ * NAME THE VENDOR THAT REFUSED, not the file this code lives in.
+ *
+ * Every message here said "openai", which was true while this provider could only reach one endpoint.
+ * The first real DeepSeek call came back as `openai 402: Insufficient Balance` — an error naming the
+ * wrong company, pointing at the wrong command, about the wrong account. An error that misidentifies
+ * who said no is worse than a bare status code, because the reader acts on it.
+ *
+ * 402 gets a line of its own because it is the one failure that looks like a bug and is not: the key
+ * is valid, the endpoint is up, and the account simply has no money in it.
+ */
+function describe(err: unknown, v: CompatVendor = OPENAI): string {
   if (err instanceof OpenAI.APIError) {
     const detail = (err.message || 'request failed').slice(0, 300);
-    return err.status === 401
-      ? `openai 401: the key was rejected — it is wrong, revoked, or from another account. Re-set it with /openai.`
-      : `openai ${err.status ?? '?'}: ${detail}`;
+    if (err.status === 401) {
+      return `${v.id} 401: the key was rejected — it is wrong, revoked, or from another account. `
+        + `Re-set it with /${v.id}.`;
+    }
+    if (err.status === 402) {
+      return `${v.id} 402: the key is valid but the account has no credit — nothing is wrong with `
+        + `ayin or with your key. Top up at ${v.signup.replace(/\/[^/]*$/, '')}, then try again.`;
+    }
+    return `${v.id} ${err.status ?? '?'}: ${detail}`;
   }
-  return `openai: ${err instanceof Error ? err.message : String(err)}`;
+  return `${v.id}: ${err instanceof Error ? err.message : String(err)}`;
 }
 
 /**
@@ -419,7 +436,7 @@ export function createOpenAiProvider(vendorId: string = 'openai'): LlmProvider {
          */
         const effortFixed = noteEffortRefusal(model(v), err);
         const repaired = effortFixed ? null : await resolveUnknownDefault(key, err);
-        if (!effortFixed && !repaired) throw new Error(describe(err));
+        if (!effortFixed && !repaired) throw new Error(describe(err, v));
         try {
           completion = await client(key, v).chat.completions.create(req(repaired ?? model(v)));
         } catch (err2) {
