@@ -35,7 +35,7 @@ import OpenAI from 'openai';
 import type {
   GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ModelEntry, ProviderStatus, TokenUsage,
 } from '../provider.js';
-import { providerLog, providerCredential } from './runtime.js';
+import { providerLog, providerCredential, providerPendingImages } from './runtime.js';
 import { type CatalogRow, type CompatVendor, vendor } from '../vendors.js';
 
 /**
@@ -428,6 +428,23 @@ function toOpenAiTools(tools: GenerateOptions['tools']): OpenAI.Chat.Completions
 }
 
 /**
+ * WHAT `look` QUEUES HAS TO LEAVE THE PROCESS HERE TOO.
+ *
+ * `look` and `read_file` push a preprocessed image onto the pending queue and tell the model it will
+ * see it next turn. Only the two LOCAL paths — `connection.ts` and the Ollama provider — ever drained
+ * that queue, so on OpenAI, DeepSeek or OpenRouter the tool reported success, the picture was never
+ * sent, and the model answered about an image it had not been shown. Reported as `look` being broken;
+ * it was this file being text-only.
+ *
+ * The queue carries bytes with no media type, and the OpenAI wire format needs one inside the URL.
+ * `preprocessImage` emits PNG or JPEG and nothing else, so the leading base64 characters — the encoded
+ * magic bytes — decide it.
+ */
+function dataUrl(b64: string): string {
+  return `data:${b64.startsWith('iVBORw0KGgo') ? 'image/png' : 'image/jpeg'};base64,${b64}`;
+}
+
+/**
  * One factory, one vendor. `createOpenAiProvider()` is OpenAI, as every existing caller means; passing
  * a vendor id points the same implementation at another OpenAI-compatible endpoint.
  */
@@ -446,12 +463,23 @@ export function createOpenAiProvider(vendorId: string = 'openai'): LlmProvider {
         throw new Error(vendorSetupHint(v));
       }
       const tools = toOpenAiTools(opts?.tools);
+      // Drained ONCE, outside `req` — the self-repairs below rebuild the request, and a second drain
+      // would hand the retry an empty queue and silently lose the image.
+      const images = providerPendingImages();
+      const lastUser = messages.map((mm) => mm.role).lastIndexOf('user');
       const req = (m: string): OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming => ({
         model: m,
-        messages: messages.map((mm) => ({
-          role: mm.role as 'system' | 'user' | 'assistant',
-          content: mm.content,
-        })),
+        messages: messages.map((mm, i) => {
+          const role = mm.role as 'system' | 'user' | 'assistant';
+          if (!images.length || i !== lastUser) return { role, content: mm.content };
+          return {
+            role: 'user' as const,
+            content: [
+              { type: 'text' as const, text: mm.content },
+              ...images.map((b64) => ({ type: 'image_url' as const, image_url: { url: dataUrl(b64) } })),
+            ],
+          };
+        }),
         ...(opts?.temperature !== undefined ? { temperature: opts.temperature } : {}),
         ...(tools ? { tools } : {}),
         // See NEEDS_EFFORT_NONE. Only ever sent alongside tools, because that is the only combination
@@ -531,6 +559,37 @@ export function createOpenAiProvider(vendorId: string = 'openai'): LlmProvider {
         return { ok: true, model: m, ...(ctx ? { contextTokens: ctx } : {}) };
       } catch {
         return { ok: false, model: null };
+      }
+    },
+
+    /**
+     * CAN THE SERVED MODEL SEE — answered from the catalogue, not guessed.
+     *
+     * Attaching an image to a text-only model does not degrade the answer, it kills the call.
+     * Measured here, against this account: the free Nemotron returns
+     * `404 No endpoints found that support image input`, so `look` reported success and the NEXT
+     * round of the agent loop died on a 404 the operator had no way to connect to a picture.
+     *
+     * OpenRouter publishes `architecture.input_modalities` on every row of the listing — 458 of 458,
+     * 288 of them image-capable — so the question has a real answer for the price of the poll that
+     * `status` already makes. An endpoint that publishes no such field returns `null`, which the
+     * contract defines as "unknown, attach anyway": vision must not be switched off on behalf of a
+     * provider that merely stays silent.
+     */
+    async vision(which?: string): Promise<boolean | null> {
+      const key = vendorKey(v);
+      if (!key) return null;
+      try {
+        const list = await client(key, v).models.list({ timeout: PROBE_TIMEOUT_MS, maxRetries: 0 });
+        const want = which ?? model(v);
+        const row = (list.data as unknown as Array<Record<string, unknown>>)
+          .find((x) => String(x.id ?? '') === want);
+        const arch = row?.architecture as { input_modalities?: unknown } | undefined;
+        const modes = arch?.input_modalities;
+        if (!Array.isArray(modes)) return null;
+        return modes.some((mm) => String(mm) === 'image');
+      } catch {
+        return null;
       }
     },
 

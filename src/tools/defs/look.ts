@@ -13,12 +13,11 @@ import { isImagePath, preprocessImage, addPendingImage } from '../../image.js';
  * written out, and refused to apply it: "Unconfirmed: I did not run the LaTeX build to verify the exact
  * rendered output."
  *
- * It was right to refuse. It had no way to check. The model is multimodal and `connection.ts` already
- * ships `body.images` from a pending queue — nothing in an agent turn ever put anything in that queue.
- * This does.
+ * It was right to refuse. It had no way to check. The transports already ship a pending image queue —
+ * nothing in an agent turn ever put anything in that queue. This does.
  *
- * The image is not returned as text; it is queued for the NEXT model call, which is how the runtime's
- * image channel works. So the reply here is a receipt, and the picture arrives with the next round.
+ * The image is not returned as text; it rides on the NEXT model call, which is how the runtime's image
+ * channel works on every provider. So the reply here is a receipt and the picture arrives with it.
  */
 const MAX_BYTES = 12 * 1024 * 1024;
 
@@ -45,11 +44,36 @@ export const tool: Tool = {
     }
     const bytes = statSync(abs).size;
     if (bytes > MAX_BYTES) return `Error: ${raw} is ${(bytes / 1048576).toFixed(1)} MB, over the ${MAX_BYTES / 1048576} MB limit. Render it smaller.`;
+    /**
+     * ASK BEFORE ATTACHING, for the reason `read_file` documents: a model with no vision encoder does
+     * not answer an image badly, it refuses the whole request — Ollama with HTTP 400 "Multimodal data
+     * provided, but model does not support multimodal requests" — so the queued picture kills the NEXT
+     * call and the operator reads a transport error instead of "this model cannot see".
+     *
+     * Lazy import: `llm/select` reaches the tool registry back through the provider runtime, and a
+     * module-scope edge half-initializes whichever side the loader reaches first.
+     */
+    try {
+      const { llmProvider } = await import('../../llm/select.js');
+      const provider = await llmProvider();
+      const sees = provider.vision ? await provider.vision() : null;
+      if (sees === false) {
+        const status = await provider.status();
+        return `Error: the served model (${status.model ?? 'unknown'}) has no vision capability, so `
+          + `${raw} cannot be shown to you — attaching it would fail the next call outright rather than `
+          + `degrade it. Switch with \`/model <name>\` to a model that can see, then look again.`;
+      }
+      // `null` means the provider publishes no capabilities. Attach and let it refuse: vision must not
+      // be disabled on behalf of a provider that cannot answer the question.
+    } catch {
+      // The CHECK failing is not the look failing. Carry on to the attach.
+    }
     try {
       const img = await preprocessImage(abs);
       addPendingImage(img.base64);
-      return `Queued ${raw} (${img.origDims} → ${img.outDims}, ${img.format}, ${(img.outBytes / 1024).toFixed(0)} KB). `
-        + `You will SEE it on your next turn — say what you expected, then judge whether that is what it shows.`;
+      return `Attached ${raw} (${img.origDims} → ${img.outDims}, ${img.format}, ${(img.outBytes / 1024).toFixed(0)} KB). `
+        + `It travels with your next message, so you see it as you answer — say what you expected, then `
+        + `judge whether that is what it shows.`;
     } catch (err) {
       return `Error: could not read ${raw} as an image — ${err instanceof Error ? err.message : String(err)}`;
     }
