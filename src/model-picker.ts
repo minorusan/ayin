@@ -36,6 +36,8 @@ import { showDialog, type DialogOption } from './dialog.js';
 import { setConfigValue } from './prompts.js';
 import { llmProvider, llmProviderName, setProviderOverride, providerOverrideName, resetProviderResolution } from './llm/select.js';
 import { openAiKey, openAiModel, setOpenAiModel } from './llm/providers/openai.js';
+import { vendor } from './llm/vendors.js';
+import { providerCredential } from './llm/providers/runtime.js';
 import { noKeyMessage, writeOpenAiModel } from './tools/credentials/openai.js';
 import { fetchCatalog, fetchGpu, resolveModelName, statusSource, type GpuInfo, type ModelCatalog, type QueueInfo } from './llm-status.js';
 import { refreshActiveModel, activeModelId, resetModelResolution, setAdapter, adapterNames, activeAdapter } from './llm/manager.js';
@@ -269,6 +271,36 @@ export async function openModelPicker(): Promise<void> {
  * surfaces — and it is billed per token, so the refusal costs them nothing to discover.
  */
 async function handleProviderChoice(want: string): Promise<boolean> {
+  /**
+   * EVERY OTHER OPENAI-COMPATIBLE VENDOR, through the branch OpenAI already proved.
+   *
+   * `/model deepseek` is the same decision as `/model openai` — a paid endpoint entered deliberately,
+   * refused without a key, verified before it is persisted, and remembered for later processes. The
+   * only thing that differs is whose key and whose bill, so the code does not differ either. OpenAI
+   * keeps its own branch below because its message and its no-key hint are written for it.
+   */
+  const alt = vendor(want);
+  if (alt && alt.id !== 'openai') {
+    const cred = providerCredential(alt.id);
+    if (!cred.key.trim()) {
+      addMessage('system', cred.setupHint);
+      return true;
+    }
+    setProviderOverride(alt.id);
+    const provider = await llmProvider();
+    const status = await provider.status();
+    if (!status.ok) {
+      setProviderOverride(null);
+      addMessage('system', `${alt.label} is unreachable or rejected the key — staying on the local provider. Re-check with /${alt.id}.`);
+      return true;
+    }
+    setConfigValue('llmProvider', alt.id);
+    resetModelResolution();
+    await refreshActiveModel();
+    addMessage('system', `Now on ${alt.label} (${status.model || alt.defaultModel}) — billed per token, for this and every later run. /model local to go back.`);
+    return true;
+  }
+
   if (want === 'openai' || want === 'gpt') {
     if (!openAiKey()) {
       addMessage('system', noKeyMessage());

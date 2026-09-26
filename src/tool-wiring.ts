@@ -23,6 +23,8 @@ import { ensureAyinDir } from './ayin-dir.js';
 import { initProviderRuntime, providerRuntimeReady } from './llm/providers/runtime.js';
 import { takePendingImages } from './image.js';
 import { noKeyMessage, readOpenAiKey, readOpenAiModel } from './tools/credentials/openai.js';
+import { readVendorKey, readVendorModel } from './tools/credentials/compat.js';
+import { vendor } from './llm/vendors.js';
 import type { ChildProcess } from 'node:child_process';
 import { liveLlm } from './live-mirror.js';
 
@@ -151,12 +153,27 @@ export function ensureProviderRuntime(): void {
     // Core knows where credentials live; the provider only knows it needs one. The legacy
     // `openAiKey` config entry is still read here so an existing install keeps working — an upgrade
     // that silently forgets a stored key is indistinguishable from one that broke it.
-    credential: (vendor) => {
-      if (vendor !== 'openai') return { key: '', model: '', setupHint: `no credential source for "${vendor}"` };
+    credential: (vendorId) => {
+      if (vendorId === 'openai') {
+        return {
+          key: readOpenAiKey() || (getConfigString('openAiKey') ?? '').trim(),
+          model: readOpenAiModel() || (getConfigString('openAiModel') ?? ''),
+          setupHint: noKeyMessage(),
+        };
+      }
+      /**
+       * EVERY OTHER OPENAI-COMPATIBLE VENDOR, through one store. OpenAI keeps its own because it has a
+       * command, a config fallback and a setup message written for it; the rest share `compat.ts`,
+       * which is that shape with the vendor's names passed in. An id that is in no table is not a
+       * typo to be guessed at — it is reported as having no source.
+       */
+      const v = vendor(vendorId);
+      if (!v) return { key: '', model: '', setupHint: `no credential source for "${vendorId}"` };
       return {
-        key: readOpenAiKey() || (getConfigString('openAiKey') ?? '').trim(),
-        model: readOpenAiModel() || (getConfigString('openAiModel') ?? ''),
-        setupHint: noKeyMessage(),
+        key: readVendorKey(v.id, v.envKey),
+        model: readVendorModel(v.id, v.envModel),
+        setupHint: `No ${v.label} key. Get one at ${v.signup}, then set it with /${v.id} <key> `
+          + `(or export ${v.envKey}). ayin stores it in ~/.ayin-cli/${v.id}.env, chmod 0600.`,
       };
     },
   });

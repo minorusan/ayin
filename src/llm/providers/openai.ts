@@ -36,6 +36,18 @@ import type {
   GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ModelEntry, ProviderStatus, TokenUsage,
 } from '../provider.js';
 import { providerLog, providerCredential } from './runtime.js';
+import { type CompatVendor, vendor } from '../vendors.js';
+
+/**
+ * WHICH ENDPOINT THIS CALL IS FOR. Everything below was written for OpenAI and holds for every
+ * OpenAI-COMPATIBLE vendor — see `llm/vendors.ts`. What differs is the base URL, the default model
+ * and the name of the key, so those arrive as a vendor rather than as constants, and the per-session
+ * state they imply is keyed by vendor id instead of living in a single `let`.
+ *
+ * `openai` remains the one this file is named for and the one every existing caller means, so the
+ * unparameterised exports below still resolve to it.
+ */
+const OPENAI = vendor('openai')!;
 
 const GENERATE_TIMEOUT_MS = 10 * 60_000;
 const PROBE_TIMEOUT_MS = 8_000;
@@ -53,12 +65,21 @@ const MAX_RETRIES = 2;
  * the old one until restart — a "the key I just set does nothing" bug with no visible cause. Keyed on
  * the key itself rather than invalidated by a callback: there is then no state to forget to update.
  */
-let cached: { key: string; client: OpenAI } | null = null;
+const cached = new Map<string, OpenAI>();
 
-function client(key: string): OpenAI {
-  if (cached?.key === key) return cached.client;
-  cached = { key, client: new OpenAI({ apiKey: key, timeout: GENERATE_TIMEOUT_MS, maxRetries: MAX_RETRIES }) };
-  return cached.client;
+function client(key: string, v: CompatVendor = OPENAI): OpenAI {
+  // Keyed on VENDOR AND KEY. One cache entry per endpoint, so pointing ayin at DeepSeek mid-session
+  // cannot be served by the client still holding OpenAI's base URL — the same bug the key-keyed cache
+  // was built to avoid, one level up.
+  const id = `${v.id}\u0000${key}`;
+  const hit = cached.get(id);
+  if (hit) return hit;
+  const made = new OpenAI({
+    apiKey: key, timeout: GENERATE_TIMEOUT_MS, maxRetries: MAX_RETRIES,
+    ...(v.baseURL ? { baseURL: v.baseURL } : {}),
+  });
+  cached.set(id, made);
+  return made;
 }
 
 /**
@@ -129,7 +150,7 @@ function describe(err: unknown): string {
  * Override per session with `/openai <model>` or `AYIN_OPENAI_MODEL`; a stored credential model wins
  * over this. Check the lineup before trusting this comment.
  */
-const DEFAULT_MODEL = 'gpt-5.6-luna';
+const DEFAULT_MODEL = OPENAI.defaultModel;
 
 /** True while `model()` is returning the guessed default rather than something anyone chose. */
 let defaultIsGuess = true;
@@ -226,7 +247,7 @@ async function resolveUnknownDefault(key: string, err: unknown): Promise<string 
       ?? ids.find((i) => /nano/i.test(i))
       ?? ids.find((i) => /^gpt-/i.test(i));
     if (!pick) return null;
-    currentModel = pick;
+    chosenModel.set(OPENAI.id, pick);
     providerLog().warn('openai_default_repaired', { guessed: DEFAULT_MODEL, using: pick });
     return pick;
   } catch {
@@ -236,23 +257,36 @@ async function resolveUnknownDefault(key: string, err: unknown): Promise<string 
 
 // Env ONLY at module scope — see the same note in `ollama.ts`. `model()` resolves config on first use.
 // An env-named model is a decision too — never repaired underneath the operator.
-let currentModel = process.env.AYIN_OPENAI_MODEL || '';
-if (currentModel) defaultIsGuess = false;
+const chosenModel = new Map<string, string>();
+{
+  const fromEnv = process.env.AYIN_OPENAI_MODEL || '';
+  if (fromEnv) { chosenModel.set(OPENAI.id, fromEnv); defaultIsGuess = false; }
+}
 
 /** The model this session pays for, resolving stored state the first time anyone asks. */
-function model(): string {
-  if (!currentModel) {
-    const chosen = providerCredential('openai').model;
-    currentModel = chosen || DEFAULT_MODEL;
-    // A stored model is a decision; the constant is a guess. Only the guess may be repaired.
-    defaultIsGuess = !chosen;
-  }
-  return currentModel;
+function model(v: CompatVendor = OPENAI): string {
+  const known = chosenModel.get(v.id);
+  if (known) return known;
+  const chosen = providerCredential(v.id).model;
+  const picked = chosen || v.defaultModel;
+  chosenModel.set(v.id, picked);
+  // A stored model is a decision; the constant is a guess. Only the guess may be repaired.
+  if (v.id === OPENAI.id) defaultIsGuess = !chosen;
+  return picked;
 }
 
 /** The key, from wherever core keeps it. This file does not know, and must not. */
 export function openAiKey(): string {
-  return providerCredential('openai').key.trim();
+  return vendorKey(OPENAI);
+}
+
+/** The key for one vendor, from wherever core keeps it. This file does not know, and must not. */
+function vendorKey(v: CompatVendor): string {
+  return providerCredential(v.id).key.trim();
+}
+
+function vendorSetupHint(v: CompatVendor): string {
+  return providerCredential(v.id).setupHint;
 }
 
 /** What to tell the operator when there is no key — core owns the wording, since core owns the store. */
@@ -277,7 +311,7 @@ export function openAiModel(): string {
 export function setOpenAiModel(id: string): boolean {
   const wanted = id.trim();
   if (!wanted) return false;
-  currentModel = wanted;
+  chosenModel.set(OPENAI.id, wanted);
   defaultIsGuess = false;
   providerLog().info('openai_set_model', { model: wanted });
   return true;
@@ -337,18 +371,23 @@ function toOpenAiTools(tools: GenerateOptions['tools']): OpenAI.Chat.Completions
   }));
 }
 
-export function createOpenAiProvider(): LlmProvider {
+/**
+ * One factory, one vendor. `createOpenAiProvider()` is OpenAI, as every existing caller means; passing
+ * a vendor id points the same implementation at another OpenAI-compatible endpoint.
+ */
+export function createOpenAiProvider(vendorId: string = 'openai'): LlmProvider {
+  const v = vendor(vendorId) ?? OPENAI;
   return {
-    name: 'openai',
+    name: v.id,
     // The API declares the tools, so ayin's prompt must not also carry a catalogue and a format.
     tools: 'native',
 
     async generate(messages: LlmMessage[], opts?: GenerateOptions): Promise<GenerateResult> {
-      const key = openAiKey();
+      const key = vendorKey(v);
       if (!key) {
         // The full setup instructions, not a hint: this throw is what a fresh clone hits on its very
         // first prompt, and it is the one error where the reader has no context to fall back on.
-        throw new Error(openAiSetupHint());
+        throw new Error(vendorSetupHint(v));
       }
       const tools = toOpenAiTools(opts?.tools);
       const req = (m: string): OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming => ({
@@ -365,7 +404,7 @@ export function createOpenAiProvider(): LlmProvider {
       });
       let completion: OpenAI.Chat.Completions.ChatCompletion;
       try {
-        completion = await client(key).chat.completions.create(req(model()));
+        completion = await client(key, v).chat.completions.create(req(model(v)));
       } catch (err) {
         /**
          * TWO SELF-REPAIRS, TRIED IN ORDER, EACH ONCE.
@@ -378,11 +417,11 @@ export function createOpenAiProvider(): LlmProvider {
          * question fine and 400s the moment ayin declares a tool, which is every round of the agent
          * loop — so the default model would have worked in a smoke test and failed in real use.
          */
-        const effortFixed = noteEffortRefusal(model(), err);
+        const effortFixed = noteEffortRefusal(model(v), err);
         const repaired = effortFixed ? null : await resolveUnknownDefault(key, err);
         if (!effortFixed && !repaired) throw new Error(describe(err));
         try {
-          completion = await client(key).chat.completions.create(req(repaired ?? model()));
+          completion = await client(key, v).chat.completions.create(req(repaired ?? model(v)));
         } catch (err2) {
           throw new Error(describe(err2));
         }
@@ -393,7 +432,7 @@ export function createOpenAiProvider(): LlmProvider {
       const rendered = renderToolCalls(msg?.tool_calls as OpenAiToolCall[] | undefined);
       if (completion.usage) {
         providerLog().info('openai_usage', {
-          model: model(),
+          model: model(v),
           in: String(completion.usage.prompt_tokens ?? 0),
           out: String(completion.usage.completion_tokens ?? 0),
         });
@@ -409,12 +448,12 @@ export function createOpenAiProvider(): LlmProvider {
 
     /** Never throws. No key is a normal state, not an error: the provider is simply unavailable. */
     async status(): Promise<ProviderStatus> {
-      const key = openAiKey();
+      const key = vendorKey(v);
       if (!key) return { ok: false, model: null };
       try {
         // A status poll must never wait the generate timeout, so the probe overrides it per request.
-        await client(key).models.list({ timeout: PROBE_TIMEOUT_MS, maxRetries: 0 });
-        const m = model();
+        await client(key, v).models.list({ timeout: PROBE_TIMEOUT_MS, maxRetries: 0 });
+        const m = model(v);
         return { ok: true, model: m, ...(contextTokensFor(m) ? { contextTokens: contextTokensFor(m) } : {}) };
       } catch {
         return { ok: false, model: null };
@@ -426,16 +465,16 @@ export function createOpenAiProvider(): LlmProvider {
      * picker treats 0 as "unknown, always show" rather than filtering it out as a tiny sidecar.
      */
     async models(): Promise<ModelCatalog | null> {
-      const key = openAiKey();
+      const key = vendorKey(v);
       if (!key) return null;
       try {
-        const list = await client(key).models.list({ timeout: PROBE_TIMEOUT_MS, maxRetries: 0 });
+        const list = await client(key, v).models.list({ timeout: PROBE_TIMEOUT_MS, maxRetries: 0 });
         const models: ModelEntry[] = list.data
           .map((m) => String(m.id ?? ''))
           .filter((id) => /^(gpt|o\d)/i.test(id) && !/audio|realtime|image|tts|whisper|embed|moderation/i.test(id))
           .sort()
-          .map((id) => ({ name: id, parameterSize: 'hosted', quantization: '', sizeBytes: 0, active: id === model() }));
-        return { activeModel: model(), loadedModel: model(), sharedModel: '', coderModel: '', models };
+          .map((id) => ({ name: id, parameterSize: 'hosted', quantization: '', sizeBytes: 0, active: id === model(v) }));
+        return { activeModel: model(v), loadedModel: model(v), sharedModel: '', coderModel: '', models };
       } catch {
         return null;
       }

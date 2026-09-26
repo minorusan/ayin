@@ -1,0 +1,1 @@
+Store the DeepSeek API key, verified against DeepSeek before saving, optionally with a model name. Call with no arguments to report whether a key is configured. It does not switch ayin to DeepSeek — /model deepseek does that, because storing a credential and choosing which brain answers are two decisions.

@@ -214,6 +214,7 @@ export const HELP: HelpEntry[] = [
   { name: '/slack-auth', kind: 'command', section: 'Connectors', short: 'Store a Slack user token (xoxp-); a bot token is refused' },
   { name: '/slack', kind: 'command', section: 'Connectors', short: 'Search and read your Slack directly' },
   { name: '/openai', kind: 'command', section: 'Connectors', short: 'Store and verify an OpenAI key · switching to it is /model openai — two decisions, two commands' },
+  { name: '/deepseek', kind: 'command', section: 'Connectors', short: 'Store and verify a DeepSeek key · switching to it is /model deepseek. Cheapest capable endpoint ayin can reach' },
 
   // ── keys ───────────────────────────────────────────────────────────────────────
   {

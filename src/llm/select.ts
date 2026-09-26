@@ -30,6 +30,7 @@ import { createDirectProvider } from './providers/direct.js';
 import { createResourceProvider, probeResourceSurface } from './providers/resource.js';
 import { createOllamaProvider } from './providers/ollama.js';
 import { createOpenAiProvider } from './providers/openai.js';
+import { isVendorId } from './vendors.js';
 import { ensureProviderRuntime } from '../tool-wiring.js';
 
 // Every provider is constructed here, so this is where their runtime must exist. Idempotent, and
@@ -44,15 +45,17 @@ let provisional = false;
 let lastProbeAt = 0;
 let inFlight: Promise<LlmProvider> | null = null;
 
-function configured(): 'direct' | 'resource' | 'ollama' | 'openai' | null {
+function configured(): 'direct' | 'resource' | 'ollama' | 'openai' | string | null {
   const raw = (process.env.AYIN_LLM_PROVIDER || getConfigString('llmProvider') || '').trim().toLowerCase();
   if (raw === 'direct') return 'direct';
   if (raw === 'resource') return 'resource';
   // Explicit only. Never chosen by probe in preference to a resource layer that exists: on a shared
   // GPU two writers is the race the authority prevents. A box with no backend gets it by asking.
   if (raw === 'ollama') return 'ollama';
-  // Billed per token, so never inferred — but an operator who has decided may persist it.
-  if (raw === 'openai') return 'openai';
+  // Billed per token, so never inferred — but an operator who has decided may persist it. The same
+  // holds for every other OpenAI-COMPATIBLE vendor: `deepseek` costs money per token exactly as
+  // `openai` does, so it is reachable only by being asked for, never by a probe falling back to it.
+  if (isVendorId(raw)) return raw;
   return null; // '', 'auto', or a typo → auto-detect rather than fail
 }
 
@@ -67,7 +70,7 @@ async function resolve(): Promise<LlmProvider> {
     provisional = false;
     const p = forced === 'resource' ? createResourceProvider()
       : forced === 'ollama' ? createOllamaProvider()
-        : forced === 'openai' ? createOpenAiProvider()
+        : isVendorId(forced) ? createOpenAiProvider(forced)
           : createDirectProvider();
     log('INFO', 'llm_provider_selected', { provider: p.name, via: 'config' });
     return p;
@@ -115,13 +118,15 @@ async function resolve(): Promise<LlmProvider> {
 let override: LlmProvider | null = null;
 let overrideName = '';
 
-export function setProviderOverride(name: 'openai' | null): string {
+export function setProviderOverride(name: string | null): string {
   if (name === null) {
     override = null;
     overrideName = '';
     return '';
   }
-  override = createOpenAiProvider();
+  // Any OpenAI-compatible vendor, not just OpenAI — `/model deepseek` is the same switch.
+  if (!isVendorId(name)) return '';
+  override = createOpenAiProvider(name);
   overrideName = name;
   return name;
 }

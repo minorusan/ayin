@@ -13,7 +13,7 @@
  * direction is a lie — a documented command that does nothing, or a working feature nobody can find.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -40,9 +40,23 @@ const missing = [...handled].filter((c) => !listed.has(c) && !ALIASES.has(c));
 ok(missing.length === 0,
   'every slash command app.ts handles appears in the help list', missing.join(' '));
 
-// The other direction. A tool-owned command (/jira, /sentry, /openai) has no `case` in app.ts — it
-// is resolved through the tool registry — so those are the only legitimate absences.
-const TOOL_OWNED = new Set(['/jira', '/jira-auth', '/sentry', '/sentry-auth', '/slack', '/slack-auth', '/openai', '/prefab', '/chore']);
+/**
+ * The other direction. A tool-owned command (/jira, /sentry, /openai) has no `case` in app.ts — it is
+ * resolved through the tool registry — so those are the only legitimate absences.
+ *
+ * READ OUT OF THE DEFS, not listed here. This was a hand-written set, and a hand-written set of "the
+ * ones that are fine" is a list somebody has to remember to append to: adding `/deepseek` failed this
+ * gate for being correctly implemented and not yet enumerated, which is the gate reporting on its own
+ * maintenance rather than on the code. Every tool that owns a slash command declares it as
+ * `command: '…'` in its def, so the set is derivable and cannot fall behind.
+ */
+const defsDir = join(ROOT, 'src/tools/defs');
+const TOOL_OWNED = new Set(
+  readdirSync(defsDir)
+    .filter((f) => f.endsWith('.ts'))
+    .flatMap((f) => [...readFileSync(join(defsDir, f), 'utf-8').matchAll(/^\s*command: '([a-z-]+)'/gm)]
+      .map((m) => `/${m[1]}`)),
+);
 const phantom = [...listed].filter((c) => !handled.has(c) && !TOOL_OWNED.has(c));
 ok(phantom.length === 0,
   'every listed slash command is actually handled — a documented no-op is worse than an undocumented feature',
