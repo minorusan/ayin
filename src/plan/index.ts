@@ -92,6 +92,7 @@ import { exploreExecute } from '../tools/explore/index.js';
 import { webSearch } from '../tools/web-search.js';
 import { pushActivity, setActivityDetail } from '../activity.js';
 import { addMessage, setAgentStatus, formatToolCallForChat, formatToolResultForChat } from '../ui.js';
+import { showDialog } from '../dialog.js';
 import { PLAN_CARD, PLAN_GLYPH, columns, phaseBody, shortPath } from './present.js';
 import { checkDeliverables } from '../executors/deliverables.js';
 import { classifyProjectType, requestNeedsMoreThanScaffold } from '../executors/classify.js';
@@ -102,7 +103,7 @@ import { ensureToolRuntime } from '../tool-wiring.js';
 import { buildActionablePlan, buildPhasedPlan, isActionablePlanEnabled, renderDeliverableList, renderPhaseIndex } from './plan.js';
 import type { PlanMode, PlanPhase } from './plan.js';
 import {
-  approvalNotice, approvalRequired, clearPending, loadPending, readAnswer, storePending, unclearNotice,
+  approvalNotice, approvalRequired, clearPending, loadPending, planSummary, readAnswer, storePending, unclearNotice,
   type PendingPhase, type PendingPlan,
 } from './approval.js';
 import { beginPlanProgress, endPlanProgress, type PhaseRuntime } from './progress.js';
@@ -1033,13 +1034,70 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
      * why anything else is read as a revision.
      */
     if (approvalRequired()) {
+      const shortPlan = shortPath(path, projectRoot);
+      const shape = phased?.phases.length
+        ? `${phased.phases.length} phase${phased.phases.length === 1 ? '' : 's'} · ${stepCount} step${stepCount === 1 ? '' : 's'}`
+        : `${stepCount} step${stepCount === 1 ? '' : 's'}`;
+      // The plan goes in the transcript FIRST and stays there: the popup is a way to answer, not the
+      // only place the proposal exists. A dialog tall enough for 24 steps is not a dialog, and one
+      // that scrolls hides exactly what it was opened to show.
+      addMessage('system', approvalNotice(shortPlan, phased?.phases.length ?? 0, stepCount, runtime));
+      /**
+       * ANSWERED THE WAY EVERY OTHER DECISION IN AYIN IS ANSWERED — `showDialog`, the same popup as
+       * `/model` and the permission prompt. It used to be a painted line asking the operator to type
+       * `go`, which is a keyword only this one gate has, and typing anything the word list did not
+       * contain was read as a revision and threw the plan away.
+       *
+       * THE THIRD ROW IS NOT DECORATION. Approve and discard are what the popup is for; "change
+       * something" is the path that made planning worth gating in the first place, and it cannot be a
+       * row that acts — the change is a sentence. So it stores the plan and ends the turn, which is
+       * exactly the state the typed flow has always used, and `resolvePlanApproval` reads the next
+       * message as the revision.
+       */
+      // STORED BEFORE THE POPUP OPENS, not after it answers — `storePending` exists so the question
+      // survives the machine that asked it, and a record written only once a choice came back would
+      // lose the plan to exactly the crash it was written for. Approve and discard clear it again.
       storePending({
         request: userInput, goal, projectDir: t.projectDir, planPath: path, mode,
         contextBody: contextBody.trim(), phases: runtime, cwd: process.cwd(),
         createdAt: new Date().toISOString(),
       });
-      addMessage('system', approvalNotice(shortPath(path, projectRoot), phased?.phases.length ?? 0, stepCount, runtime));
-      return { kind: 'awaiting', path, body: '', features: t.features, phaseCount: phased?.phases.length ?? 0, mode };
+      const keepWaiting = (why: string): PlanResult => {
+        if (why) addMessage('system', why);
+        return { kind: 'awaiting', path, body: '', features: t.features, phaseCount: phased?.phases.length ?? 0, mode };
+      };
+      let choice = -1;
+      try {
+        choice = await showDialog('Plan', [
+          { label: 'Approve', key: 'a', note: 'run it now' },
+          { label: 'Change something', key: 'c', note: 'type what to change' },
+          { label: 'Discard', key: 'd', note: 'nothing runs', danger: true },
+        ], {
+          subtitle: `${shape} · nothing has been changed on disk`,
+          target: shortPlan,
+          body: planSummary(runtime),
+          footer: '↑↓ select · Enter confirm · Esc keeps it waiting',
+        });
+      } catch (e) {
+        // A popup that cannot open is not a plan that cannot be approved. Fall back to the typed flow.
+        log('WARN', 'plan_dialog_failed', { error: e instanceof Error ? e.message : String(e) });
+        return keepWaiting('Reply `go` to run it, `cancel` to drop it, or say what to change.');
+      }
+      if (choice === 2) {
+        log('INFO', 'plan_approval', { answer: 'cancel', plan: path, via: 'dialog' });
+        clearPending(process.cwd());
+        addMessage('system', `Plan dropped — ${shortPlan} stays on disk, nothing ran.`);
+        return { kind: 'awaiting', path, body: '', features: t.features, phaseCount: phased?.phases.length ?? 0, mode };
+      }
+      if (choice !== 0) {
+        log('INFO', 'plan_approval', { answer: choice === 1 ? 'revise' : 'dismissed', plan: path, via: 'dialog' });
+        return keepWaiting(choice === 1
+          ? 'Say what to change and it will be re-planned.'
+          : 'Plan still waiting — `go` to run it, `cancel` to drop it, or say what to change.');
+      }
+      log('INFO', 'plan_approval', { answer: 'approve', plan: path, phases: String(runtime.length), via: 'dialog' });
+      clearPending(process.cwd());
+      addMessage('system', `Plan approved — working ${shortPlan}.`);
     }
 
     // HEADLESS, OR THE GATE SWITCHED OFF — the plan runs now, so this is where the scaffold lands.

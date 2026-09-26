@@ -145,6 +145,33 @@ export function readAnswer(input: string): Answer {
 }
 
 /**
+ * The plan itself, one line per step: its title and the paths it touches, which is what distinguishes
+ * a step worth stopping for from one worth skimming. The rationale and the verify command stay in the
+ * file — they are what you read AFTER deciding to look closer.
+ *
+ * Shared by the transcript notice and the approval popup so the two can never describe different plans.
+ */
+export function planSummary(detail: ReadonlyArray<PendingPhase>, indent = ''): string {
+  const lines: string[] = [];
+  for (const p of detail) {
+    // A flat plan is tracked as one synthetic phase titled "the plan"; it has no goal worth a header.
+    const head = detail.length === 1 && p.phase.title === 'the plan'
+      ? null
+      : `${indent}${p.phase.id}. ${p.phase.title}${p.phase.goal ? ` — ${p.phase.goal}` : ''}`;
+    if (lines.length && head) lines.push('');
+    if (head) lines.push(head);
+    for (const st of p.steps) {
+      const where = st.files.length ? ` · ${st.files.join(', ')}` : '';
+      // A STEP IS MARKED, NOT INDENTED. The popup wraps this through `wrapPlain`, which drops leading
+      // whitespace, so an indent that separates steps from phase headers in the transcript separates
+      // nothing there — every line arrives flush left and a 24-step plan reads as one flat list.
+      lines.push(`${indent}${head ? '   ' : ''}• ${st.id}. ${st.title}${where}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+/**
  * What the operator is shown while the plan waits. Painted, never sent to a model.
  *
  * THE PLAN IS SHOWN, NOT FILED. This printed a shape and a path — "5 phases · 24 steps" and a
@@ -167,22 +194,9 @@ export function approvalNotice(
     ? `${phases} phase${phases === 1 ? '' : 's'} · ${steps} step${steps === 1 ? '' : 's'}`
     : `${steps} step${steps === 1 ? '' : 's'}`;
   const lines = [`PLAN READY — ${shape}. Nothing has been changed on disk.`, ''];
-  for (const p of detail) {
-    // A flat plan is tracked as one synthetic phase titled "the plan"; it has no goal worth a header.
-    const head = detail.length === 1 && p.phase.title === 'the plan'
-      ? null
-      : `  ${p.phase.id}. ${p.phase.title}${p.phase.goal ? ` — ${p.phase.goal}` : ''}`;
-    if (head) lines.push(head);
-    for (const st of p.steps) {
-      const where = st.files.length ? ` · ${st.files.join(', ')}` : '';
-      lines.push(`${head ? '     ' : '  '}${st.id}. ${st.title}${where}`);
-    }
-    if (head) lines.push('');
-  }
-  if (detail.length && !lines[lines.length - 1]) lines.pop();
-  if (detail.length) lines.push('');
+  const body = planSummary(detail, '  ');
+  if (body) lines.push(body, '');
   lines.push(`  ${planPath}`);
-  lines.push('  Reply `go` to run it, `cancel` to drop it, or say what to change and it will be re-planned.');
   return lines.join('\n');
 }
 
