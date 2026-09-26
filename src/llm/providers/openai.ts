@@ -36,7 +36,7 @@ import type {
   GenerateOptions, GenerateResult, LlmMessage, LlmProvider, ModelCatalog, ModelEntry, ProviderStatus, TokenUsage,
 } from '../provider.js';
 import { providerLog, providerCredential } from './runtime.js';
-import { type CompatVendor, vendor } from '../vendors.js';
+import { type CatalogRow, type CompatVendor, vendor } from '../vendors.js';
 
 /**
  * WHICH ENDPOINT THIS CALL IS FOR. Everything below was written for OpenAI and holds for every
@@ -486,11 +486,28 @@ export function createOpenAiProvider(vendorId: string = 'openai'): LlmProvider {
       if (!key) return null;
       try {
         const list = await client(key, v).models.list({ timeout: PROBE_TIMEOUT_MS, maxRetries: 0 });
-        const models: ModelEntry[] = list.data
-          .map((m) => String(m.id ?? ''))
-          .filter((id) => /^(gpt|o\d)/i.test(id) && !/audio|realtime|image|tts|whisper|embed|moderation/i.test(id))
-          .sort()
-          .map((id) => ({ name: id, parameterSize: 'hosted', quantization: '', sizeBytes: 0, active: id === model(v) }));
+        /**
+         * THE VENDOR DECIDES WHAT IS IN ITS OWN CATALOGUE. This used to be one filter, `/^(gpt|o\d)/`,
+         * written when this provider could only reach OpenAI — correct there and empty everywhere
+         * else, which would have shown `/model deepseek` a picker with nothing in it.
+         *
+         * The SDK types `Model` as id/created/object/owned_by, but the endpoint returns whatever the
+         * vendor publishes beside that — OpenRouter sends pricing, context length and the parameters
+         * each model accepts. Casting to a plain record is how the extra fields survive, and the
+         * vendor's own `pickModels` is the only thing that reads them.
+         */
+        const raw = list.data as unknown as Array<Record<string, unknown>>;
+        const rows: CatalogRow[] = v.pickModels
+          ? v.pickModels(raw)
+          : raw.map((m) => ({ id: String(m.id ?? '') })).filter((r) => r.id).sort((a, b) => a.id.localeCompare(b.id));
+        const models: ModelEntry[] = rows.map((r) => ({
+          name: r.id,
+          parameterSize: r.parameterSize ?? 'hosted',
+          quantization: '',
+          sizeBytes: 0,
+          active: r.id === model(v),
+          ...(r.ctx ? { ctx: r.ctx } : {}),
+        }));
         return { activeModel: model(v), loadedModel: model(v), sharedModel: '', coderModel: '', models };
       } catch {
         return null;

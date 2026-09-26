@@ -215,6 +215,7 @@ export const HELP: HelpEntry[] = [
   { name: '/slack', kind: 'command', section: 'Connectors', short: 'Search and read your Slack directly' },
   { name: '/openai', kind: 'command', section: 'Connectors', short: 'Store and verify an OpenAI key · switching to it is /model openai — two decisions, two commands' },
   { name: '/deepseek', kind: 'command', section: 'Connectors', short: 'Store and verify a DeepSeek key · switching to it is /model deepseek. Cheapest capable endpoint ayin can reach' },
+  { name: '/openrouter', kind: 'command', section: 'Connectors', short: 'Store and verify an OpenRouter key · one key, many vendors, and free models that take tools · /model openrouter' },
 
   // ── keys ───────────────────────────────────────────────────────────────────────
   {

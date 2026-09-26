@@ -24,6 +24,14 @@
  * and it is recorded here so the next person does not rediscover it at runtime.
  */
 
+/** One row the model picker can show. `parameterSize` and `ctx` are what it renders beside the name. */
+export interface CatalogRow {
+  id: string;
+  /** Rendered first in the picker's note. For a hosted model, the useful fact is the PRICE. */
+  parameterSize?: string;
+  ctx?: number;
+}
+
 export interface CompatVendor {
   /** What `/model <id>` and `AYIN_LLM_PROVIDER` call it. */
   readonly id: string;
@@ -51,7 +59,28 @@ export interface CompatVendor {
    * rather than printing a template with a placeholder nobody can resolve.
    */
   readonly baseUrlIsPerAccount?: boolean;
+  /**
+   * WHICH MODELS TO OFFER, AND WHAT TO SAY ABOUT THEM.
+   *
+   * Not cosmetic. `/models` means something different at every endpoint: OpenAI lists embeddings and
+   * whisper beside the chat models, OpenRouter lists 458 from every vendor alive, DeepSeek lists two.
+   * A single filter cannot serve all three — the OpenAI one was `/^(gpt|o\d)/`, which is exactly
+   * right for OpenAI and returns NOTHING for `deepseek-flash`.
+   *
+   * The vendor also knows what is worth PRINTING. OpenRouter publishes a price and a context length
+   * per model, so its rows can say `free · 977k ctx` and sort the free ones to the top, which is the
+   * whole difference between a list you scroll and a list you choose from.
+   *
+   * Absent means "offer everything the endpoint lists, sorted by name".
+   */
+  readonly pickModels?: (raw: ReadonlyArray<Record<string, unknown>>) => CatalogRow[];
 }
+
+/** `0` / `'0'` / `'0.0000001'` → a number, for pricing fields that arrive as strings. */
+const num = (v: unknown): number => {
+  const n = typeof v === 'number' ? v : Number(String(v ?? ''));
+  return Number.isFinite(n) ? n : NaN;
+};
 
 export const VENDORS: readonly CompatVendor[] = [
   {
@@ -61,6 +90,13 @@ export const VENDORS: readonly CompatVendor[] = [
     envKey: 'OPENAI_API_KEY',
     envModel: 'OPENAI_MODEL',
     signup: 'https://platform.openai.com/api-keys',
+    // The listing carries embeddings, moderation, tts and whisper beside the chat models; none of
+    // those can hold a conversation, so none belong in a picker titled "Model".
+    pickModels: (raw) => raw
+      .map((m) => String(m.id ?? ''))
+      .filter((id) => /^(gpt|o\d)/i.test(id) && !/audio|realtime|image|tts|whisper|embed|moderation/i.test(id))
+      .sort()
+      .map((id) => ({ id })),
   },
   {
     /**
@@ -81,6 +117,69 @@ export const VENDORS: readonly CompatVendor[] = [
     envKey: 'DEEPSEEK_API_KEY',
     envModel: 'DEEPSEEK_MODEL',
     signup: 'https://platform.deepseek.com/api_keys',
+    // Two models, both usable. Nothing to filter — and the OpenAI filter above would have rejected
+    // both of them for not being called `gpt-…`.
+  },
+  {
+    /**
+     * OPENROUTER — one key, 458 models, and the only free tier whose LIMITS FIT AN AGENT.
+     *
+     * Measured against its public `/models` endpoint: 21 models priced at zero, 18 of which accept
+     * `tools`, with contexts up to 1M. Its free ceiling is 20 requests a minute and 50 a day, rising
+     * to 1,000 a day once an account has bought ten credits — a one-time threshold, by "all-time
+     * credits purchased", not a subscription.
+     *
+     * THE CAPS ARE ON REQUESTS, NOT TOKENS, and that is why it is here rather than Groq. Groq's free
+     * tier is 8,000 tokens per MINUTE against an ayin turn of roughly 30,000 — one turn is four times
+     * the whole budget, and its 200,000 per day works out at about six turns. A request cap suits a
+     * big-prompt agent; a token cap forbids it.
+     */
+    id: 'openrouter',
+    label: 'OpenRouter',
+    baseURL: 'https://openrouter.ai/api/v1',
+    // A free model that takes tools, with the largest context of the free set at the time of writing.
+    // Free models come and go on OpenRouter — the picker is the answer to that, not a constant here.
+    defaultModel: 'nvidia/nemotron-3-ultra-550b-a55b:free',
+    envKey: 'OPENROUTER_API_KEY',
+    envModel: 'OPENROUTER_MODEL',
+    signup: 'https://openrouter.ai/settings/keys',
+    pickModels: (raw) => {
+      const rows = raw
+        .map((m) => {
+          const id = String(m.id ?? '');
+          const params = Array.isArray(m.supported_parameters) ? m.supported_parameters.map(String) : [];
+          const pricing = (m.pricing ?? {}) as Record<string, unknown>;
+          const inPrice = num(pricing.prompt);
+          const outPrice = num(pricing.completion);
+          const free = inPrice === 0 && outPrice === 0;  // exactly zero; -1 means "unknown", not "free"
+          return {
+            id,
+            free,
+            tools: params.includes('tools'),
+            ctx: Number(m.context_length) || undefined,
+            // Per MILLION tokens, which is how every price in this conversation is quoted. The API
+            // gives it per token, and a row reading "$0.0000005" tells nobody anything.
+            // A NEGATIVE PRICE IS A SENTINEL, NOT A PRICE. `openrouter/auto` routes to whichever model
+            // it picks, so its cost is unknown until afterwards and the field carries -1. Multiplied
+            // out that rendered as `$-1000000.00 per M`, which is the picker confidently printing
+            // nonsense. Caught against the live listing, not imagined.
+            parameterSize: free
+              ? 'FREE'
+              : inPrice < 0 || outPrice < 0
+                ? 'price varies'
+                : Number.isFinite(inPrice) && Number.isFinite(outPrice)
+                  ? `$${(inPrice * 1e6).toFixed(2)}/$${(outPrice * 1e6).toFixed(2)} per M`
+                  : '',
+          };
+        })
+        // NO TOOLS, NO PLACE IN THE LIST. ayin drives entirely on native tool calls, so a model that
+        // cannot take a `tools` array is not a slower choice here, it is a broken one — and offering
+        // it in a picker is offering a session that fails on its first move.
+        .filter((r) => r.id && r.tools);
+      // Free first, then widest context: the two things somebody scanning this list is deciding on.
+      rows.sort((a, b) => Number(b.free) - Number(a.free) || (b.ctx ?? 0) - (a.ctx ?? 0) || a.id.localeCompare(b.id));
+      return rows.map(({ id, parameterSize, ctx }) => ({ id, parameterSize, ctx }));
+    },
   },
 ];
 
