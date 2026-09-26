@@ -14,7 +14,7 @@
  * NO SITE, NO PROJECT KEY, NO DEFAULT HOST APPEARS IN THIS FILE.
  */
 
-import { apiTarget, readCredentials, type JiraCredentials } from './credentials.js';
+import { CREDENTIALS_FILE, apiTarget, credentialSummary, daysUntilExpiry, readCredentials, type JiraCredentials } from './credentials.js';
 
 const TIMEOUT_MS = 20_000;
 
@@ -90,11 +90,37 @@ async function call(path: string, init?: { method?: string; body?: unknown }): P
   }
 
   if (res.status === 401 || res.status === 403) {
-    // The single most likely cause, said plainly. A rejected token reads as a network or permission
-    // mystery otherwise, and this connector's whole credential story is "it expires".
+    /**
+     * THE WHOLE PROCEDURE, NOT THE NAME OF THE COMMAND.
+     *
+     * This said "re-run /jira-auth with a fresh token", which names the last step and leaves the
+     * operator to go and find the other three — where Atlassian keeps token creation, what the page
+     * is called, whether the old one needs revoking. Reported as the cost it is: *"so the model will
+     * reply with that instead of me wasting time lurking"*. A token that expires on a schedule is a
+     * refusal this connector will emit over and over, so the fix is to make each one complete.
+     *
+     * The stored credential is read for the message, never for the retry: `credentialSummary` already
+     * knows the site, the auth mode and how far past its expiry date this token is — and "EXPIRED 4d
+     * ago" turns a permission mystery into a diary entry. It is the one fact that decides whether to
+     * mint a token or go looking for a permissions change, and it costs nothing to include.
+     */
+    const stored = readCredentials();
+    const days = stored ? daysUntilExpiry(stored) : null;
+    const verdict = days !== null && days < 0
+      ? `The stored token EXPIRED ${-days} day(s) ago — that is almost certainly the whole story.`
+      : res.status === 403 && stored
+        ? 'The token authenticated but was refused this resource, so it may be a permissions change rather than expiry.'
+        : 'The token is wrong, expired, or lacks access.';
     throw new JiraError(
-      `Jira rejected the credential (HTTP ${res.status}) — the token is wrong, expired, or lacks access. `
-      + 'Re-run /jira-auth with a fresh token.',
+      `Jira rejected the credential (HTTP ${res.status}). ${verdict}\n`
+      + (stored ? `Stored: ${credentialSummary(stored)}\n` : '')
+      + `To refresh it:\n`
+      + `  1. Open https://id.atlassian.com/manage-profile/security/api-tokens\n`
+      + `  2. "Create API token", name it (ayin), copy it — Atlassian shows it once.\n`
+      + `  3. Run: /jira-auth <token>\n`
+      + `     The site is discovered from the token itself; you do not need to pass one.\n`
+      + `  4. Revoke the old token on that same page once the new one works.\n`
+      + `ayin keeps it at ${CREDENTIALS_FILE} (0600). Nothing is retried until it is replaced.`,
     );
   }
   if (res.status === 404) throw new JiraError(`not found (HTTP 404): ${path.split('?')[0]}`);
@@ -340,7 +366,34 @@ export async function issueDetail(key: string): Promise<JiraIssue> {
       if (!isNotFound(err)) throw err;
     }
   }
-  throw new JiraError(`no issue ${key} — either it does not exist or this token cannot see it`);
+  /**
+   * A 404 HERE MAY NOT BE ABOUT THE ISSUE AT ALL — so ask something that answers honestly.
+   *
+   * Atlassian does not return 401 for an issue an unauthorised caller requests; it returns 404,
+   * because confirming the key exists would leak it. Measured against the real site with a
+   * deliberately invalid token:
+   *
+   *     rest/api/3/myself            401
+   *     rest/api/3/issue/PERF-14116  404
+   *
+   * So an expired token produced "no issue PERF-14116 — either it does not exist or this token cannot
+   * see it", which contains the truth and buries it: the reader checks the key, the project, the
+   * permissions, and the credential died last week. `/myself` is the cheapest request that
+   * distinguishes them and it is only made once the issue lookup has already failed — on the path
+   * that was about to give a misleading answer, never on a working one.
+   *
+   * Its 401 carries the whole refresh procedure (see `call`), so the throw below is only reached when
+   * the credential is PROVEN good, which is what finally makes "it does not exist" worth saying.
+   */
+  try {
+    await call('/rest/api/3/myself');
+  } catch (err) {
+    if (err instanceof JiraError && !isNotFound(err)) throw err;
+  }
+  throw new JiraError(
+    `no issue ${key} — the credential works (it just authenticated), so this is the issue: either `
+    + `the key does not exist or your account cannot see that project.`,
+  );
 }
 
 /**

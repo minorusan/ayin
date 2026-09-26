@@ -142,15 +142,23 @@ answer = () => ({ status: 404 });
 const goneLearned = await jiraTicket.execute({ key: 'PROJ-4242' });
 ok(/does not exist/.test(goneLearned) && !/HTTP 404/.test(goneLearned),
   'the reply says what a 404 means, never the raw endpoint', goneLearned.trim());
-ok(seen.length === 1, 'and the known flavour is not re-probed', String(seen.length));
+/**
+ * TWO REQUESTS, AND THE SECOND ONE IS THE POINT. Atlassian answers 404 — not 401 — for an issue an
+ * unauthorised caller asks about, because confirming the key exists would leak it. Measured against
+ * the real site with a dead token: `/issue/KEY` 404, `/myself` 401. So a 404 here is ambiguous, and
+ * the lookup asks `/myself` before blaming the issue. Only on the failure path, never on a hit.
+ */
+ok(seen.length === 2, 'and the known flavour is not re-probed — one lookup, then the credential check', String(seen.length));
 
 console.log('\nnot found (both flavours 404)');
 fresh();
 answer = () => ({ status: 404 });
 const missing = await jiraTicket.execute({ key: 'PROJ-9999' });
-ok(/PROJ-9999/.test(missing) && /does not exist/.test(missing) && /cannot see it/.test(missing),
+ok(/PROJ-9999/.test(missing) && /does not exist/.test(missing) && /cannot see that project/.test(missing),
   'says both things a 404 can mean — a permission problem is not a missing ticket', missing.trim());
-ok(seen.length === 2, 'after trying both flavours', String(seen.length));
+ok(/credential works/.test(missing),
+  'and says the credential was PROVEN good first, so the reader stops suspecting their token');
+ok(seen.length === 3, 'after trying both flavours, then proving the credential', String(seen.length));
 
 console.log('\nrejected credential (must not look like a missing ticket)');
 fresh();
@@ -158,6 +166,18 @@ answer = () => ({ status: 401 });
 const denied = await jiraTicket.execute({ key: 'PROJ-1' });
 ok(/rejected the credential/.test(denied) && /jira-auth/.test(denied), 'the token is named as the cause', denied.trim());
 ok(seen.length === 1, 'and a 401 is not retried on the other flavour', String(seen.length));
+/**
+ * A REFUSAL AN OPERATOR CAN ACT ON WITHOUT LEAVING THE TERMINAL.
+ *
+ * This message used to end at "re-run /jira-auth with a fresh token" — the last step of four, with
+ * the other three left as an exercise. A token that expires on a schedule means this refusal is
+ * emitted again and again, so each one carries the whole procedure: where Atlassian mints tokens,
+ * what to run, and to revoke the old one afterwards.
+ */
+ok(/id\.atlassian\.com\/manage-profile\/security\/api-tokens/.test(denied),
+  'a rejected credential says WHERE to get a new one, not just which command to re-run', denied.slice(0, 80));
+ok(/\/jira-auth/.test(denied) && /[Rr]evoke/.test(denied),
+  'and names the command and the cleanup, so the whole rotation is in one reply');
 
 console.log(fails ? `\njira check: ${fails} FAILURE(S)\n` : '\njira check: ok\n');
 process.exit(fails ? 1 : 0);
