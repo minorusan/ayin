@@ -69,8 +69,13 @@ async function limits(key: string): Promise<string> {
     const limit = d.limit === null ? 'unlimited' : String(d.limit ?? '?');
     const usage = String(d.usage ?? '?');
     const free = d.is_free_tier === true;
+    // -1 IS "NO LIMIT", NOT A LIMIT OF MINUS ONE. Same sentinel as the model pricing, same lesson:
+    // printed straight through it read `rate -1 per 10s`, which is not a fact about anything.
     const rl = d.rate_limit as Record<string, unknown> | undefined;
-    const rate = rl ? `${String(rl.requests ?? '?')} per ${String(rl.interval ?? '?')}` : '';
+    const reqs = Number(rl?.requests);
+    const rate = rl && Number.isFinite(reqs)
+      ? (reqs < 0 ? 'no per-interval cap' : `${reqs} per ${String(rl.interval ?? '?')}`)
+      : '';
     return `Account: ${free ? 'FREE tier' : 'paid tier'} · credit limit ${limit} · used ${usage}`
       + (rate ? ` · rate ${rate}` : '')
       + (free
