@@ -29,7 +29,7 @@ import {
 import { isTranscribing, startTranscript, stopTranscript, transcriptPath, transcriptSize, flush as flushTranscript } from './transcript.js';
 import { executeWipe, humanBytes, planWipe, wipeOverview, type WipeScope } from './wipe.js';
 import { connect, disconnect, onConnectionChange, isConnected, currentRequestId } from './connection.js';
-import { refreshActiveModel, activeModelId, activeContextTokens, lastUsage, onLlmUsage } from './llm/manager.js';
+import { refreshActiveModel, activeModelId, activeContextTokens, lastUsage, lastMainUsage, onLlmUsage } from './llm/manager.js';
 import { initLlmProvider } from './llm/select.js';
 import { getSummaryText, getSummary, resetSummary } from './summary.js';
 import { estimateSessionTokens } from './tokens.js';
@@ -123,7 +123,9 @@ async function refreshTokens(): Promise<void> {
     // window is about to overflow. Every reply now reports `prompt_eval_count`, which IS the prompt size
     // in the tokenizer that read it, so the last round of this turn is the honest number. The estimate
     // remains for the first prompt of a session, marked `~`.
-    const measured = lastUsage();
+    // The last TURN ROUND, never the last call of any kind — see `lastMainUsage`. A sub-call's prompt
+    // is not this session's context, and reading it as one is what made this meter untrustworthy.
+    const measured = lastMainUsage();
     if (measured && measured.in > 0) {
       setStatus({ tokens: { used: measured.in, total: activeContextTokens() } });
       return;

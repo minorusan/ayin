@@ -557,6 +557,20 @@ export interface TurnUsage {
 }
 
 let _lastUsage: TurnUsage | null = null;
+/**
+ * The last usage from a TURN ROUND, kept apart from the last usage of any kind.
+ *
+ * `_lastUsage` records every call, which is right for a per-call readout and wrong for the session
+ * meter. A subagent, a corpus embed, a plan step and the one-shot spell-check in front of `!` are all
+ * LLM calls with their own small prompts, and each overwrote the figure the footer reads — so after
+ * `!ls` the meter reported a few hundred tokens of context in use, and after a subagent it reported
+ * the subagent's prompt. The `main` flag has always distinguished them; nothing consumed it.
+ *
+ * Kept SEPARATELY rather than filtered at the call site: filtering would leave the meter with nothing
+ * to show the moment a sub-call happened, falling back to an estimate after it already knew the exact
+ * number. The last real round's figure stays the answer until the next real round replaces it.
+ */
+let _lastMainUsage: TurnUsage | null = null;
 let _prev: { in: number; out: number } | null = null;
 let _usageHook: ((u: TurnUsage) => void) | null = null;
 
@@ -640,8 +654,14 @@ export function lastUsage(): TurnUsage | null {
   return _lastUsage;
 }
 
+/** What the session meter wants: the last TURN ROUND's prompt, never a sub-call's. */
+export function lastMainUsage(): TurnUsage | null {
+  return _lastMainUsage;
+}
+
 /** A new turn: the next call's prompt is not this turn's previous prompt plus a tool result. */
 export function resetUsageBaseline(): void {
+  _lastMainUsage = null;
   _prev = null;
 }
 
@@ -666,6 +686,7 @@ export function computeUsage(
 function recordUsage(u: { in: number; out: number }, purpose: string, promptChars = 0): void {
   const usage = computeUsage(_prev, u, purpose);
   _lastUsage = usage;
+  if (usage.main) _lastMainUsage = usage;
   // The one place both numbers for the SAME call are in scope. Anywhere else would be pairing a
   // character count with some other call's token count.
   noteTokenRatio(promptChars, u.in, usage.main);

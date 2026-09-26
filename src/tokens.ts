@@ -10,7 +10,9 @@
 
 import { log } from './log.js';
 import { llmBaseUrl } from './connection.js';
-import { activeContextTokens } from './llm/manager.js';
+import { activeContextTokens, charsPerToken } from './llm/manager.js';
+import { llmProviderName, providerOverrideName } from './llm/select.js';
+import { isVendorId } from './llm/vendors.js';
 
 export interface TokenEstimate {
   promptTokens: number;
@@ -28,10 +30,25 @@ export function getLastEstimate(): TokenEstimate | null {
 /**
  * Estimate tokens for a set of messages. Prefers the backend's exact tokenizer, falls back to char/4.
  */
+/**
+ * Is the model answering us the one `llmBaseUrl()` points at?
+ *
+ * `/api/estimate` is the LOCAL endpoint's tokenizer, and it is only the right tokenizer when the local
+ * endpoint is what is serving. Asked unconditionally it did two wrong things at once on a cloud
+ * provider: it posted the whole conversation to a LAN address on every footer refresh — a 5-second
+ * timeout each time when that host is asleep, in the render path — and if the box DID answer, the
+ * reply described a completely different model's tokenizer and context window.
+ */
+function servedLocally(): boolean {
+  const name = providerOverrideName() || llmProviderName();
+  return !isVendorId(name);
+}
+
 export async function estimateTokens(
   messages: Array<{ role: string; content: string }>,
 ): Promise<TokenEstimate> {
   try {
+    if (!servedLocally()) throw new Error('remote provider — the local tokenizer describes another model');
     const res = await fetch(`${llmBaseUrl()}/api/estimate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -68,11 +85,29 @@ export async function estimateTokens(
   // provider sets `num_ctx` itself. `activeContextTokens()` is that number, and 0 means genuinely
   // unknown, which the caller must render as unknown rather than backfill.
   const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
-  const cw = knownContextWindow || activeContextTokens();
+  /**
+   * THE LIVE WINDOW WINS OVER THE CACHED ONE. `knownContextWindow` is whatever `/api/estimate` last
+   * said, kept forever and never cleared — so once a local box had answered, its window outranked the
+   * provider's own for the rest of the process, and switching to a cloud model left the meter
+   * describing the machine under the desk. `activeContextTokens()` is re-read from the live provider
+   * on every status poll and is 0 only when genuinely unknown, which is exactly when the stale value
+   * is worth having as a fallback rather than as an override.
+   */
+  const cw = activeContextTokens() || knownContextWindow;
+  /**
+   * AND THE RATIO IS MEASURED, NOT FOUR. `charsPerToken()` is learned from the server's own
+   * `prompt_tokens` over the session's real calls, clamped to 2.5–5.5, with a deliberately pessimistic
+   * 3 until three samples land. This divided by a hardcoded 4 — a different number from the one the
+   * rest of the system uses, and optimistic against every one of them, so the meter read low by
+   * roughly a quarter on the one prompt it is ever asked about: the first of a session, before any
+   * real usage is known.
+   */
+  const tokens = Math.ceil(totalChars / charsPerToken());
   const est: TokenEstimate = {
-    promptTokens: Math.ceil(totalChars / 4),
+    promptTokens: tokens,
     contextWindow: cw,
-    remaining: cw - Math.ceil(totalChars / 4),
+    // A prompt over the window is a real state and the meter must not render it as a negative bar.
+    remaining: Math.max(0, cw - tokens),
   };
   lastEstimate = est;
   return est;
