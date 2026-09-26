@@ -16,6 +16,17 @@ documents rather than from indentation. Reading one as text tells you almost not
 - map_dependencies draws what a file touches, grouped by the .asmdef that owns it — assembly
   boundaries are a fact about the build that the source does not show.
 
+Reading a .cs file is where a Unity session leaks its window. MonoBehaviours are long and what you
+want is the surface, not the bodies:
+
+- read_file structure=true returns every type and member with its exact line range and no bodies —
+  the serialized fields, the lifecycle hooks, the whole API — in one call.
+- expand_method then returns the one body that mattered, by name.
+- find_references, not grep, answers who calls it: a prefab wires the call and contains no class name.
+
+Paging the same file with offset= to find out what it contains is the expensive way to learn what
+structure= says at once. Reach for a window only when you already know the lines you want.
+
 Editing a .cs file is ordinary work: str_replace, and the usual rules apply. Editing an asset is not —
 one malformed value makes it unreadable by Unity and the failure surfaces days later in the editor,
 not here.
