@@ -1342,9 +1342,13 @@ console.log('\ntools are discovered, and a private set needs no fork');
     // api.openai.com or sentry.io. It is how a token discovers which sites it can reach, which is what
     // lets `/jira-auth <token>` need nothing else. The operator's OWN site is the thing that must never
     // be a literal, and it stays interpolated.
+    // `id.atlassian.com` is the same class and is not even dialled: it is the page where Atlassian
+    // mints API tokens, identical for every customer, printed into the refusal an expired credential
+    // produces so the whole rotation fits in one reply. A URL the operator OPENS is not a coupling —
+    // the property this case protects is that ayin never sends a REQUEST anywhere it was not told to.
     const dialable = jiraSrc
       .replace(/https:\/\/\$\{[^}]+\}/g, '')
-      .replace(/https:\/\/api\.atlassian\.com\S*/g, '')
+      .replace(/https:\/\/(api|id)\.atlassian\.com\S*/g, '')
       .replace(/https?:\/\/[a-z0-9-]+\.example\.(com|net|org)\S*/gi, '')
       .match(/https?:\/\/[a-z0-9-]+\.[a-z][^\s'"`)]*/gi);
     ok(dialable === null, 'and it hardcodes no site: an unconfigured connector dials nowhere', String(dialable));
