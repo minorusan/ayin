@@ -51,11 +51,21 @@ export function findRunner(): { cmd: string; args: (dll: string, out: string) =>
   for (const cmd of ['nunit3-console', 'nunit-console']) {
     if (which(cmd)) return { cmd, args: (dll, out) => [dll, `--result=${out}`] };
   }
-  if (which('dotnet')) {
-    // vstest can drive an NUnit DLL when NUnit3TestAdapter sits beside it, which it does in a Unity
-    // project's package cache. Kept as a fallback because it is the toolchain most likely present.
-    return { cmd: 'dotnet', args: (dll, out) => ['vstest', dll, `--logger:trx;LogFileName=${out}`] };
-  }
+  /**
+   * `dotnet vstest` IS NOT A FALLBACK — it was offered as one and could not work either way.
+   *
+   * The claim was that NUnit3TestAdapter "sits beside it in a Unity project's package cache". It does
+   * not: Unity ships `com.unity.ext.nunit`, the NUnit FRAMEWORK, and the VSTest ADAPTER is a separate
+   * NuGet package that is nowhere in the tree. Measured on a real project — vstest ran, found the
+   * assembly, and answered "No test is available … Make sure that test discoverer & executors are
+   * registered". And had it found them, its output is TRX
+   * (`schemas/VisualStudio/TeamTest/2010`), which `parseNUnitXml` cannot read.
+   *
+   * Offering it cost more than offering nothing. `runAssembly` saw an empty result and reported "ran
+   * but produced no readable results — the assembly probably could not load (engine types?)", which
+   * blames the operator's assembly for a defect in this function. With no runner, the message names
+   * the missing tool and how to supply it, which is both true and actionable.
+   */
   return null;
 }
 
@@ -207,20 +217,48 @@ export function runBatchmode(
   if (!unity) {
     return { outcomes: [], error: `no Unity ${unityVersion(repo) ?? ''} install found — set one with /set unity-path <path>` };
   }
+  /**
+   * THE LOCK IS CHECKED BEFORE UNITY IS SPAWNED, because Unity's own refusal takes a minute to arrive
+   * and then costs the caller the reason. A second instance cannot open a project the Editor holds.
+   */
+  if (unityHasProjectOpen(repo)) {
+    return {
+      outcomes: [],
+      error: 'the Unity Editor has this project open, and a second instance cannot open it. '
+        + 'Close Unity and run this again (unity_test_run offers to quit it for you).',
+    };
+  }
   const dir = mkdtempSync(join(tmpdir(), 'ayin-batch-'));
   const results = join(dir, 'results.xml');
+  let said = '';
   try {
     try {
-      execFileSync(unity, [
+      said = execFileSync(unity, [
         '-batchmode', '-runTests', '-nographics',
         '-projectPath', repo,
         '-testPlatform', platform,
         '-testResults', results,
         '-assemblyNames', assemblies.join(';'),
         '-logFile', '-',
-      ], { encoding: 'utf-8', timeout: 60 * 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
-    } catch { /* Unity exits non-zero when tests fail — the results file decides */ }
-    if (!existsSync(results)) return { outcomes: [], error: 'Unity produced no results file' };
+      ], { encoding: 'utf-8', timeout: 60 * 60_000, stdio: ['ignore', 'pipe', 'pipe'] }) ?? '';
+    } catch (e) {
+      // Unity exits non-zero when tests fail, and the results file decides that. It ALSO exits
+      // non-zero when it never started, and then this output is the only account of why — it was
+      // being discarded, so a licence error, a lock and a broken install were all reported as
+      // "Unity produced no results file".
+      const err = e as { stdout?: string; stderr?: string };
+      said = `${err.stdout ?? ''}\n${err.stderr ?? ''}`;
+    }
+    if (!existsSync(results)) {
+      const tail = said.split('\n').map((l) => l.trim())
+        .filter((l) => /error|licen[cs]e|fail|cannot|unable|exception/i.test(l))
+        .slice(-6);
+      return {
+        outcomes: [],
+        error: 'Unity produced no results file'
+          + (tail.length ? `. What it said:\n  ${tail.join('\n  ')}` : ' and said nothing about why.'),
+      };
+    }
     const cases = parseNUnitXml(readFileSync(results, 'utf-8'));
     // Batch mode returns one file for everything; split back per assembly by the fullname prefix so
     // the report reads the same whichever path produced it.
