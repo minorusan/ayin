@@ -43,7 +43,7 @@ import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
 import { promisesTheReportItself, reportsRatherThanPromises, stoppedShort } from './announced.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
 import { deniedWithoutAsking, checkPermission } from './permissions.js';
-import { artifactFor, artifactSessionDir, hasArtifacts, humanBytes, saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
+import { artifactFor, artifactSessionDir, getArtifactsDir, hasArtifacts, humanBytes, saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
 import { recordPrompt, recordRaw, recordTool, recordAnswer } from './session-record.js';
 // The FULL record (opt-in, unclipped) runs alongside the clipped operating record above — see
 // transcript.ts for why both exist. Every call here is a no-op unless /transcribe is on.
@@ -3383,9 +3383,25 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       if (!detached && TREE_SAFE.has(name) && !/^(Error|Refused)\b/.test(result)) {
         guardNoteRead([params.path, params.file].filter((p): p is string => Boolean(p)));
       }
+      /**
+       * READING AN ARTIFACT MUST NOT MAKE ANOTHER ONE — that is a chain, and it formed.
+       *
+       * The result is saved so a clip can point at it. When the result IS an artifact, the copy is
+       * the same bytes under a new name, its clip points at the copy, and re-reading that makes a
+       * third. Measured: `t48-read_file.txt` opened with TWO nested "saved output of read_file"
+       * banners, three levels deep, in a session that spent 14 of 60 calls inside this loop.
+       *
+       * The original is already on disk and already named, so there is nothing here worth writing.
+       */
+      const readsAnArtifact = name === 'read_file'
+        && typeof params.path === 'string'
+        && params.path.startsWith(`${getArtifactsDir()}/`);
       // The path comes back so the clip can NAME it — see `clipForWindow`. Saving and then telling the
       // reader to re-run is the gap both of this session's reports called the biggest one.
-      const savedArtifact = saveArtifact(name, paramPreview, result);
+      const savedArtifact = readsAnArtifact ? null : saveArtifact(name, paramPreview, result);
+      // No copy means nothing new to name. Empty `where` makes the clip say "re-run narrowed" rather
+      // than point the reader back at the very file it is already reading, which is the loop itself.
+      const artifactPath = savedArtifact?.filepath ?? '';
       recordTool(name, paramPreview, result);
       // FULL params (not the 60-char-per-value preview) and the FULL result — the operating record
       // clips both at 4000 chars, which is exactly the part that explains the next model turn.
@@ -3668,7 +3684,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       if (lostWhyNow?.kind === 'clap') {
         lostAtRound = round;
         lostWhy = lostWhyNow.why;
-        pushToWindow('user', renderToolResult(echo ?? clipForWindow(result, undefined, savedArtifact.filepath)));
+        pushToWindow('user', renderToolResult(echo ?? clipForWindow(result, undefined, artifactPath)));
         // `continue roundLoop` for the same reason as the blocked-call clap above: this is the tool
         // loop, and the last word has to come from the model, not from the next call in the batch.
         if (askForLastWord(round)) continue roundLoop;
@@ -3681,7 +3697,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       const nudgeNote = lostWhyNow ? lostNudge(lostWhyNow.why) : '';
       const shaped = echo !== null
         ? { body: echo, suppressRepeatNote: true }
-        : shapeFileResult(name, params as Record<string, unknown>, result, clipForWindow(result, undefined, savedArtifact.filepath), conversationWindow);
+        : shapeFileResult(name, params as Record<string, unknown>, result, clipForWindow(result, undefined, artifactPath), conversationWindow);
       const repeatNote = shaped.suppressRepeatNote ? '' : (guard.note ?? '');
       pushToWindow('user', renderToolResult(resultHead + shaped.body + repeatNote + editMissNote + nudgeNote));
       pushMessage('assistant', `[tool: ${name}(${paramPreview})]`);
