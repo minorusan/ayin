@@ -142,7 +142,11 @@ export const basePlanExecutor: PlanExecutor = {
     // type, so "make me a brand new haskell thing here" in an empty folder detects as `unknown`, lands
     // on this executor, and used to get no repository at all. Emptiness is the honest question here and
     // also the safe one — see `isEmptyProjectDir`.
-    if (!ctx.greenfield && !isEmptyProjectDir(ctx.root)) return ensureReadme(ctx.root, dry);
+    // AN EXISTING REPOSITORY GETS NOTHING. This wrote a README stub into any project a plan was
+    // approved in, which is a file nobody asked for in a tree that already has its own conventions —
+    // and in a repository with documentation elsewhere it is also wrong. The stub belongs to a project
+    // being STARTED, which is the only case below.
+    if (!ctx.greenfield && !isEmptyProjectDir(ctx.root)) return [];
     const made = [...ensureGitRepo(ctx.root, dry), ...ensureReadme(ctx.root, dry)];
     return [...made, ...commitScaffold(ctx.root, ctx.type === 'unknown' ? 'new' : ctx.type, dry)];
   },

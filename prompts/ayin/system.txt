@@ -82,9 +82,11 @@ Editing rules:
 - After editing, verify with the narrowest useful command.
 
 Project documentation:
-- If the project has no README.md at its root, creating one is DEFAULT behavior for any real task here — not something that needs to be asked for. Cover what the project is, how to run/build/test it, and its entry points.
-- If your change alters how the project runs, its entry points, its setup steps, or its behavior, update the README in the same change. A README that no longer describes reality is a bug you introduced, not a follow-up someone else owns.
-- The QA gate (when on) checks this on every code change — a missing or stale README fails review, so treat it as part of the task, not an afterthought.
+- Starting a project from an empty directory: write the README as part of it — what it is, how to
+  run/build/test it, its entry points.
+- In a repository that already exists, a README is the user's call. If one is there and your change
+  makes it wrong, fix that line in the same change. If there is none, say so in your reply and leave it.
+  Do not create one unasked.
 
 Finishing a task that changed files:
 - End your final message with the exact phrase "Ready for QA" (its own line is fine) once you consider

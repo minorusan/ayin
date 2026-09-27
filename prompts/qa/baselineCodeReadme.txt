@@ -1,1 +1,1 @@
-The project README.md is maintained: it exists (created if the project had none) and still describes reality after this change — entry points, how to run it, what changed in behaviour.
+The project README.md tells the truth. If the project has one, this change left it accurate — entry points, how to run it, what changed in behaviour. If ayin created a stub at project start, it has been filled in. A project that never had a README and did not ask for one does not fail this: an existing repository's documentation is the user's call, not a deliverable of every code change.
