@@ -334,6 +334,15 @@ const EVIDENCE_TOOLS = new Set([
   'read_file', 'read_files', 'grep', 'find_files',
   'expand_method', 'find_references', 'corpus_search', 'map_dependencies',
   'prefab_inspect', 'animator_inspect', 'jira_ticket',
+  /**
+   * THE MOST EXPENSIVE RESULT IN THE SYSTEM, and it was the least durable.
+   *
+   * A subagent is minutes of a whole separate agent's work returned as a paragraph — the best
+   * evidence-per-token anything here produces, and the entire reason delegation helps a small window.
+   * It was not recorded, so it lived in history and was compressed away like any tool output, and the
+   * parent could lose the answer it had just paid the most for.
+   */
+  'subagent',
 ]);
 /** Entries are held long and trimmed at RENDER time against the budget — see `evidenceBlock`. */
 const EVIDENCE_MAX = 60;
