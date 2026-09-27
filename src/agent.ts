@@ -317,9 +317,39 @@ const gatheredFacts: string[] = [];
  * costs no prompt budget.
  */
 const evidenceFacts: string[] = [];
-const EVIDENCE_TOOLS = new Set(['read_file', 'read_files', 'grep', 'find_files']);
-const EVIDENCE_CHARS = 400;
-const EVIDENCE_MAX = 12;
+/**
+ * EVERY TOOL THAT RETURNS A FINDING, not the four that happened to be listed.
+ *
+ * `expand_method` was the loudest omission: a method body IS the fact a diagnosis turns on, and on one
+ * measured session fifteen of them were fetched and none recorded anywhere — of 80 tool calls, two
+ * (explore) reached the prompt durably, forty became 400-character judge-only snippets of which the
+ * last twelve survived, and thirty-eight left no trace at all. Everything else lived in history, and
+ * history was compressed on 29 of 51 rounds and trimmed to two messages three times. The model read
+ * the method, reasoned about it, and four rounds later the bytes were gone.
+ *
+ * Actions are deliberately NOT here. `str_replace` and `bash` change the tree; what they did belongs
+ * to the call ledger and the diff, and their output is the noisiest in the set.
+ */
+const EVIDENCE_TOOLS = new Set([
+  'read_file', 'read_files', 'grep', 'find_files',
+  'expand_method', 'find_references', 'corpus_search', 'map_dependencies',
+  'prefab_inspect', 'animator_inspect', 'jira_ticket',
+]);
+/** Entries are held long and trimmed at RENDER time against the budget — see `evidenceBlock`. */
+const EVIDENCE_MAX = 60;
+/**
+ * What one finding may occupy, and what the whole block may.
+ *
+ * A FRACTION OF THE TOTAL WINDOW, never of what is free: a budget measured against headroom is most
+ * generous when the window is emptiest, which is how a 22,000-character read ended up resident for a
+ * whole turn and pushed a 40,000-token prompt to 43,996. 2.5% of the context is the same share at
+ * every size — about 4,000 characters at 40k, about 100,000 at 1M — and one entry may take a quarter
+ * of it, so no single body can crowd out the rest.
+ */
+function evidenceBudgetChars(): number {
+  const ctx = activeContextTokens();
+  return Math.max(3_000, Math.floor((ctx || 32_000) * 0.1));
+}
 type JudgeVerdict = { confidence: 'high' | 'mid' | 'low'; reasoning: string } | null;
 let judgeVerdict: JudgeVerdict = null;
 const JUDGE_INTERVAL = 5;
@@ -673,6 +703,36 @@ const MAX_CONTINUE_NUDGES = 1;
  */
 const MAX_STALLED_NUDGES = 3;
 
+/**
+ * WHAT THIS TURN HAS LEARNED, newest first, inside one budget.
+ *
+ * Newest first because a turn's most recent readings are what its next step is about, and because a
+ * budget filled from the front would pin round one's findings and starve round twenty's. Each entry
+ * is capped at a quarter of the block so one long method body cannot take the whole thing, and the
+ * count of what did not fit is stated rather than hidden — a model that knows it is missing five
+ * earlier findings can go and re-read them; one that does not, cannot.
+ */
+function evidenceBlock(): string {
+  if (evidenceFacts.length === 0) return '';
+  const budget = evidenceBudgetChars();
+  const perEntry = Math.max(400, Math.floor(budget / 4));
+  const kept: string[] = [];
+  let spent = 0;
+  for (let i = evidenceFacts.length - 1; i >= 0; i--) {
+    const raw = evidenceFacts[i];
+    const entry = raw.length > perEntry ? `${raw.slice(0, perEntry)} \u2026[cut]` : raw;
+    if (spent + entry.length > budget) break;
+    kept.unshift(entry);
+    spent += entry.length;
+  }
+  if (kept.length === 0) return '';
+  const missing = evidenceFacts.length - kept.length;
+  const head = `\n\nWhat you have READ this turn (${kept.length} of ${evidenceFacts.length} finding(s), `
+    + `oldest first; these survive even after the messages carrying them are compressed away`
+    + `${missing ? `; ${missing} earlier one(s) did not fit \u2014 re-read them if you need them` : ''}):\n`;
+  return head + kept.map((e, i) => `${i + 1}. ${e}`).join('\n');
+}
+
 export function buildMessages(round: number, maxRounds: number): Message[] {
   const summary = getSummary();
   const messages: Message[] = [];
@@ -786,6 +846,20 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
 
   if (researchContext) {
     volatile += `\n\n${researchContext}`;
+  }
+
+  /**
+   * THE DIRECT READS, IN THE PROMPT — which is where they always should have been.
+   *
+   * This store existed and was spent on the judge and the write-critic only; its own comment said the
+   * prompt block "stays explore-only so this costs no prompt budget". That saving is what blinded the
+   * turn: history is compressed and evicted, so a finding recorded nowhere else stops existing, and on
+   * the measured session the model's entire durable memory was two explore results out of eighty calls.
+   * It costs budget now, bounded by `evidenceBudgetChars`.
+   */
+  const evidence = evidenceBlock();
+  if (evidence) {
+    volatile += evidence;
   }
 
   // Programmatic fact tracker — no LLM, just concatenated explore results.
@@ -3749,7 +3823,9 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       ) {
         // A miss is not evidence: "0 matches" must not count as progress, or the judge is lied to in
         // the other direction.
-        evidenceFacts.push(`[${name} ${paramPreview}] ${result.slice(0, EVIDENCE_CHARS).replace(/\s+/g, ' ').trim()}`);
+        // Whitespace is collapsed but the text is NOT cut here — `evidenceBlock` decides what fits,
+        // and a fact cut to 400 characters before anyone asked is a fact that cannot be restored.
+        evidenceFacts.push(`[${name} ${paramPreview}] ${result.replace(/\s+/g, ' ').trim()}`);
         if (evidenceFacts.length > EVIDENCE_MAX) evidenceFacts.shift();
       }
 
