@@ -562,34 +562,24 @@ const WINDOW_RESULT_CHARS_DEFAULT = 8_000;
  * So the floor stays exactly where it was measured, and above it the clip follows the window. Roughly
  * 2% of the context per result: 8,000 characters at 32k as before, about 80,000 at 1M. An explicit
  * `toolResultChars` still wins over both — an operator who set a number meant it.
+ *
+ * AND IT IS A FRACTION OF THE TOTAL, NOT OF WHAT IS FREE — which was tried, and broke a live session
+ * inside twenty rounds. Letting one result take half the measured headroom is generous exactly when
+ * the window is empty, so 22,000-character reads and a 32,000-character grep went in whole while the
+ * headroom was large, stayed there, and the prompt reached 43,996 estimated tokens against a 40,000
+ * window. `history_compressed` then ran on 29 of 51 rounds and `window_trimmed` dropped 17-19 messages
+ * to keep 2. A clip that can be recovered from costs one call; a window that no longer fits costs the
+ * whole turn's memory, every round.
+ *
+ * The recoverable half of that trade is a separate fix and is done: an artifact is no longer re-read
+ * as if it were a source file, so following the pointer this clip leaves is one honest call again.
  */
 function windowResultChars(): number {
   const set = getConfig('toolResultChars', 0);
   if (set > 0) return set;
   const ctx = activeContextTokens();
   if (!ctx || ctx <= 0) return WINDOW_RESULT_CHARS_DEFAULT;
-  const budget = Math.max(WINDOW_RESULT_CHARS_DEFAULT, Math.floor(ctx * 0.08));
-  /**
-   * …AND A FRACTION OF THE TOTAL IS NOT A FRACTION OF WHAT IS FREE.
-   *
-   * `ctx * 0.08` is a char budget derived from a token count, so it stays under the 8,000 floor until
-   * the window passes 100k tokens — which means every ordinary local model gets exactly the fixed
-   * ceiling the scaling was added to remove, no matter how empty its window is.
-   *
-   * Measured: a 40,000-token session, 56% used, 15,520 tokens of headroom. `read_files` returned a
-   * 616-line C# file in one call — 21,029 characters, about 5,100 tokens, comfortably inside that
-   * headroom — and it was clipped to 8,000. The model then spent SIX calls paging the artifact back
-   * with offset/limit, and those reads were clipped at 8,000 too, so recovering the file cost more
-   * window than keeping it would have. The clip only saves anything when the omitted part is not
-   * wanted; here it was the whole point of the call.
-   *
-   * So a result may take up to half of what is ACTUALLY free, and never less than the measured floor.
-   * Half rather than all because the next round has to fit beside it, and the floor stays because it
-   * is the one number in here that was measured rather than reasoned.
-   */
-  if (lastHeadroomTokens <= 0) return budget;
-  const freeChars = Math.floor(lastHeadroomTokens * charsPerToken() * 0.5);
-  return Math.max(budget, freeChars);
+  return Math.max(WINDOW_RESULT_CHARS_DEFAULT, Math.floor(ctx * 0.08));
 }
 
 /**
@@ -948,14 +938,7 @@ function logCoverage(c: {
     headroomEst: ctx ? String(ctx - RESPONSE_RESERVE_TOKENS - used) : '',
     usedPct: ctx ? (100 * used / ctx).toFixed(1) : '',
   });
-  // KEPT, because the clip below needs it and cannot reconstruct it: this is the only place that
-  // knows the system prefix and the volatile block, and a result budget blind to them is a budget
-  // guessing at the one number it exists to respect.
-  lastHeadroomTokens = ctx ? ctx - RESPONSE_RESERVE_TOKENS - used : 0;
 }
-
-/** Window headroom as of the last round built, in tokens. 0 until one has been. */
-let lastHeadroomTokens = 0;
 
 /**
  * Never compress the four most recent messages. A floor, not a policy — what actually decides how much
