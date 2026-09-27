@@ -499,6 +499,26 @@ async function isCircling(newDirection: string): Promise<boolean> {
  *  Returns HIGH (ready to produce output), MID (promising, need more evidence),
  *  or LOW (stuck or wrong direction).
  *  This is a classification task — plays to MoE strengths. */
+/**
+ * FACTS FOR A REVIEWER, NOT FOR RE-READING — the judge and the critic want to know WHAT was found.
+ *
+ * `evidenceFacts` stores results uncut, because the prompt block decides at render time what fits and
+ * a fact cut before anyone asked cannot be restored. These two callers joined the whole store into a
+ * sub-call prompt, which was harmless while every entry was clipped to 400 characters and is not now:
+ * sixty full file reads would make a cheap progress check the most expensive call of the round.
+ *
+ * So they get the head of each. A reviewer deciding "is this enough evidence" reads the shape of what
+ * was gathered; it does not need the bodies, and it never did.
+ */
+const REVIEW_FACT_CHARS = 400;
+const REVIEW_FACTS_MAX = 20;
+function factsForReview(): string[] {
+  const all = [...gatheredFacts, ...evidenceFacts];
+  return all.slice(-REVIEW_FACTS_MAX).map((f) => (
+    f.length > REVIEW_FACT_CHARS ? `${f.slice(0, REVIEW_FACT_CHARS)} \u2026[head only]` : f
+  ));
+}
+
 async function callJudge(task: string, facts: string[]): Promise<JudgeVerdict> {
   if (facts.length === 0) return { confidence: 'low', reasoning: 'No facts gathered yet.' };
 
@@ -913,8 +933,31 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     // partial rather than presented as a conclusion.
     volatile += `\n\nYou are out of investigation budget. Write up what you have, and say plainly which parts are unconfirmed. What was still missing: ${judgeVerdict.reasoning}`;
   } else if (judgeVerdict?.confidence === 'low') {
-    // Not "stop" — "here is what you are missing, go and get it".
-    volatile += `\n\nProgress check: ${judgeVerdict.reasoning}\nThat is what is still missing — go and read it. Do not write a final answer yet.`;
+    /**
+     * A RATING'S RATIONALE IS NOT A READING LIST.
+     *
+     * `judgeProgress.txt` asks for a confidence and "one sentence why". What comes back is a sentence
+     * about absences it inferred from an evidence list — "has not read Enqueue, reviewed PERF-14109,
+     * traced callers" — and this line used to assert it as established fact and issue an order: "That
+     * is what is still missing — go and read it."
+     *
+     * The judge never sees the code. It sees the heads of gathered facts, so the things it names as
+     * missing are the things it could not see, which is not the same as the things the agent does not
+     * know. Handed an imperative, the agent works the list: observed verbatim mid-turn — *"The judge
+     * says I still need to read something. I'm missing OpenHook, Finish, Cancel, Capture, Restore,
+     * RaiseDeactivated, and OpenHideHook."* It then recovered its own judgement and took three, which
+     * is the behaviour this now asks for instead of getting by accident.
+     *
+     * The brake stays: a low verdict still means do not write the final answer yet. What changes is
+     * that it is a second opinion the agent may answer, not a checklist it must clear — the same rule
+     * the QA gate now follows, for the same reason.
+     */
+    volatile += `\n\nProgress check — a reviewer that has seen only the HEADS of your gathered facts, `
+      + `never the code: ${judgeVerdict.reasoning}\n`
+      + `Treat that as a second opinion, not a reading list. What it calls missing may be something it `
+      + `could not see rather than something you do not know — read what is genuinely still unknown, and `
+      + `if it is wrong about a point, say which in one line instead of reading to satisfy it. Either way, `
+      + `do not write the final answer while something it names is genuinely unknown.`;
   }
 
   // What the corpus knows about THIS prompt. In the volatile block, never the prefix: it changes
@@ -3212,7 +3255,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       if (name === 'write_file' && !isUnchained() && gatheredFacts.length + evidenceFacts.length >= 2) {
         const content = params.content || '';
         if (content.length > 200 && directions.length < MAX_DIRECTIONS) {
-          const criticResult = await runCritic(content, [...gatheredFacts, ...evidenceFacts]);
+          const criticResult = await runCritic(content, factsForReview());
           if (criticResult) {
             // Extract a direction from the critique
             const newDirection = criticResult.substring(0, 300);
@@ -3837,7 +3880,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
 
       if (shouldJudge) {
         addMessage('system', '[evaluating progress...]');
-        judgeVerdict = await callJudge(currentGoal, [...gatheredFacts, ...evidenceFacts]);
+        judgeVerdict = await callJudge(currentGoal, factsForReview());
         log('INFO', 'judge_routed', { confidence: judgeVerdict?.confidence || 'unknown', totalTools: String(totalToolCalls) });
 
         const wantsMore = judgeVerdict?.confidence === 'mid' || judgeVerdict?.confidence === 'low';

@@ -1692,7 +1692,13 @@ const src = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
 // Comments quote the OLD directive to explain why it went; judge the code, not the prose.
 const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 ok(!/do not continue exploring/i.test(code), 'the terminate-on-low-confidence directive is gone from the code');
-ok(/Do not write a final answer yet/.test(src), 'a low verdict tells it what is missing and to keep going');
+ok(/do not write the final answer/i.test(src), 'a low verdict still holds back the final answer rather than ending the turn');
+// A RATIONALE IS NOT AN ORDER. The judge is asked for "one sentence why" it rated, and that sentence
+// used to be handed over as "That is what is still missing — go and read it." A model observed
+// mid-turn read it as a checklist: "The judge says I still need to read something. I'm missing
+// OpenHook, Finish, Cancel, Capture, Restore, RaiseDeactivated, and OpenHideHook."
+ok(!/go and read it/i.test(code), 'the judge\'s rationale is not issued to the agent as an order');
+ok(/second opinion/i.test(src), 'it is framed as a second opinion the agent may answer');
 ok(/MAX_JUDGE_EXTENSIONS/.test(src) && /judgeExtensions\s*\+\+/.test(src),
   'extensions are counted, so "keep going" is bounded rather than unbounded');
 ok(/out of investigation budget/.test(src),
