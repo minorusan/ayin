@@ -18,6 +18,7 @@
  * and testable on any machine, execution needs a .NET toolchain that most machines do not have.
  */
 
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { log } from '../log.js';
@@ -432,8 +433,26 @@ export function unityLockPath(repo: string): string {
   return join(repo, 'Temp', 'UnityLockfile');
 }
 
+/**
+ * A LOCKFILE IS NOT A RUNNING EDITOR. Unity leaves `Temp/UnityLockfile` behind on a crash or an
+ * unclean quit, and it is then indistinguishable from a held one by existence alone — measured here:
+ * a zero-byte file a day old, with no Unity process on the machine.
+ *
+ * Unity holds the file OPEN while it has the project, so asking the operating system who has it open
+ * is the question that actually distinguishes the two. `lsof` is absent or restricted on some hosts;
+ * when it cannot answer, the lockfile's existence is the fallback, which is the old behaviour and
+ * errs toward leaving an editor alone.
+ */
 export function unityHasProjectOpen(repo: string): boolean {
-  return existsSync(unityLockPath(repo));
+  const lock = unityLockPath(repo);
+  if (!existsSync(lock)) return false;
+  try {
+    const held = spawnSync('lsof', ['-t', lock], { encoding: 'utf-8', timeout: 5_000 });
+    // `lsof` exits 1 with no output when nothing holds the file — that is a real answer, not a failure.
+    if (held.error) return true;
+    if (held.status === 0 || held.status === 1) return held.stdout.trim().length > 0;
+  } catch { /* fall through to the conservative answer */ }
+  return true;
 }
 
 /** True for a directory that is a Unity project at all. */

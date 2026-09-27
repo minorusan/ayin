@@ -253,10 +253,20 @@ export function runBatchmode(
       const tail = said.split('\n').map((l) => l.trim())
         .filter((l) => /error|licen[cs]e|fail|cannot|unable|exception/i.test(l))
         .slice(-6);
+      // A LICENCE FAILURE IS NOT A TEST FAILURE, and it is the one an operator can act on without
+      // reading a Unity log. Measured here: the Editor is licensed and batch mode still refused with
+      // "Failed to activate/update license Missing or bad username or password", because batch mode
+      // activates separately from the GUI.
+      const licence = /licen[cs]e/i.test(said)
+        ? '\n  This is Unity licensing, not your tests. Batch mode activates separately from the '
+          + 'Editor: activate it once with `Unity -batchmode -quit -serial <serial> -username <u> '
+          + '-password <p>`, or run the Editor once so a licence file exists for this user.'
+        : '';
       return {
         outcomes: [],
         error: 'Unity produced no results file'
-          + (tail.length ? `. What it said:\n  ${tail.join('\n  ')}` : ' and said nothing about why.'),
+          + (tail.length ? `. What it said:\n  ${tail.join('\n  ')}` : ' and said nothing about why.')
+          + licence,
       };
     }
     const cases = parseNUnitXml(readFileSync(results, 'utf-8'));
