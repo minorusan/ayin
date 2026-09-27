@@ -1425,6 +1425,22 @@ let originalGoal = '';
  * report still outlives the process, which was the whole point of writing it down. Failing to write
  * one is never a reason to skip the restart: the report is evidence, not the mechanism.
  */
+/**
+ * TOOLS WHOSE SAVED OUTPUT MUST NOT BE OFFERED BACK — re-running them is cheaper and better.
+ *
+ * The ledger tells the model that every result is also a file and to read that instead of running the
+ * call again. Sound for `grep`, `explore`, `subagent`, a connector — seconds, a network hop, or the
+ * whole tree. Wrong for a file read, and it predates the tools that make it wrong: re-running one is
+ * milliseconds (measured in the live log at 3, 8 and 11 ms), and the SOURCE answers things the dump
+ * cannot — `structure=true`, `around=`, `expand_method`, the read-before-edit guard, and line numbers
+ * that address the file rather than a copy of a window onto it.
+ *
+ * Measured: 14 of 60 tool calls in one session went to artifacts, with the model paging them by
+ * offset because {{CACHE}} told it offset and limit work there. They no longer do — an artifact comes
+ * back verbatim — so advertising them was teaching an idiom that is now a no-op as well as a detour.
+ */
+const NO_ARTIFACT_POINTER = new Set(['read_file', 'read_files', 'expand_method']);
+
 function reportPath(name: string): string {
   const dir = join(homedir(), '.ayin-cli', 'reports');
   mkdirSync(dir, { recursive: true });
@@ -1599,7 +1615,7 @@ export function renderCallLedger(): string {
 
   const lines = callLedger.map((c, i) => {
     if (!listed.has(i)) return '';
-    const where = c.file ? `  [${humanBytes(c.bytes)} → ${c.file}]` : '';
+    const where = c.file && !NO_ARTIFACT_POINTER.has(c.tool) ? `  [${humanBytes(c.bytes)} → ${c.file}]` : '';
     const status = c.ok ? '' : 'FAILED: ';
     const call = `${i + 1}. ${c.tool}(${clipParams(c.params)})${where}`;
     const shown = detail.get(i);
@@ -1608,7 +1624,9 @@ export function renderCallLedger(): string {
     // times — 15k characters of it, measured.
     if (!shown) return `${call}${c.ok ? '' : '  FAILED'}`;
     // Indented under the call, so a reader — and a model — can tell the output from the next call.
-    const more = c.bytes && c.file && shown.length > 3 ? `\n     ... full output in ${c.file}` : '';
+    const more = c.bytes && c.file && shown.length > 3 && !NO_ARTIFACT_POINTER.has(c.tool)
+      ? `\n     ... full output in ${c.file}`
+      : '';
     return `${call}\n   ${status}${shown.join('\n   ')}${more}`;
   });
   const folded = [...tally.entries()].sort((a, b) => b[1] - a[1]);
@@ -1618,9 +1636,12 @@ export function renderCallLedger(): string {
       .concat(folded.length > LEDGER_TALLY_MAX ? [`  … and ${folded.length - LEDGER_TALLY_MAX} other distinct call(s)`] : [])
     : [];
   const head = lines.filter((l) => l !== '').concat(foldedLines);
-  const earlier = earlierCalls.length
+  // See NO_ARTIFACT_POINTER: a saved file read is not an answer worth returning to, so it is not
+  // offered as one. Re-reading the source is cheaper and gives back the tools the dump has lost.
+  const earlierWorthKeeping = earlierCalls.filter((c) => !NO_ARTIFACT_POINTER.has(c.tool));
+  const earlier = earlierWorthKeeping.length
     ? `\nFrom earlier turns this session — the answers are still on disk, read the file rather than re-running:\n`
-      + earlierCalls.map((c) => `  ${c.file}  ${c.tool}(${c.params})  ${humanBytes(c.bytes)}`).join('\n')
+      + earlierWorthKeeping.map((c) => `  ${c.file}  ${c.tool}(${c.params})  ${humanBytes(c.bytes)}`).join('\n')
       + '\n'
     : '';
   return getPrompt('callLedger', {
@@ -1629,8 +1650,10 @@ export function renderCallLedger(): string {
     // Stated ONCE, because the same 80-character path on sixty lines is sixty times the cost for the
     // same fact. Empty when nothing has been cached, so the instruction never points at nothing.
     CACHE: hasArtifacts()
-      ? `\nEvery result is also a file in ${artifactSessionDir()} — read one with read_file`
-        + ` (offset and limit work) instead of running the call again.\n`
+      ? `\nA result that cost something to produce — a search, an exploration, a subagent, a connector —`
+        + ` is also a file in ${artifactSessionDir()}; read one with read_file instead of running that`
+        + ` call again. A file you have already READ is not on that list: read the source again, which`
+        + ` is faster and still answers structure=true, around= and expand_method.\n`
       : '',
   });
 }

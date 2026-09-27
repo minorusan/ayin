@@ -1,7 +1,8 @@
 Every call made this turn, in order, with the head of what each returned — including the ones whose
 results the history above has since compressed away. Use these answers rather than running a call again.
-When you genuinely need it again — something changed, or you need the part not shown here — run it; the
-full output of any call is also a file you can read.
+When you genuinely need it again — something changed, or you need the part not shown here — run it.
+A call whose line ends in a path has its full output in that file, and reading it beats repeating an
+expensive call; a file you read is never one of those — read the file itself again.
 {{CACHE}}
 {{CALLS}}
 {{EARLIER}}
