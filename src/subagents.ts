@@ -38,7 +38,7 @@ import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { log } from './log.js';
 import { postmortemEnabled } from './postmortem.js';
-import { getConfigString } from './prompts.js';
+import { getConfigString, getPrompt } from './prompts.js';
 import { backgroundEnv, inBackground, providerUsable } from './background.js';
 
 /** How deep we already are. `0` is the operator's own session; `1` is a subagent it spawned. */
@@ -450,9 +450,22 @@ async function spawnSubagent(task: string, opts: SubagentOpts = {}): Promise<Sub
 
   // The plan file is named, never inlined: reading it is the child's first act and costs one tool call,
   // where inlining it would put the whole phase into the PARENT's tool result as well.
-  const prompt = planFile
-    ? `${task}\n\nA plan for this task has already been written to ${planFile}. Read that file first and follow it.`
-    : task;
+  /**
+   * THE REPORT CONTRACT RIDES WITH EVERY TASK — it is not the caller's job to remember it.
+   *
+   * `brevity` already reaches the child and already says "state the result, then stop", which is the
+   * rule for answering a PERSON. A subagent answers an agent: one that cannot see the child's tools,
+   * files or reasoning, and that will re-investigate anything the report leaves vague — which is the
+   * expensive failure delegation exists to avoid. So the child is told who is reading and what that
+   * reader needs, deterministically, rather than depending on how the parent happened to phrase the
+   * task.
+   */
+  const brief = getPrompt('subagentBrief');
+  const prompt = [
+    task,
+    planFile ? `A plan for this task has already been written to ${planFile}. Read that file first and follow it.` : '',
+    brief,
+  ].filter(Boolean).join('\n\n');
 
   // Named by the PARENT so the correlation is a fact rather than a timestamp guess, and so the
   // filename itself says depth - a directory listing now distinguishes parent from child.
