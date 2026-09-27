@@ -268,8 +268,19 @@ export function parseLogicVerdict(raw: string): LogicVerdict {
  * twenty rows of the same sentence — the detail lists the files under a headline that carries the count
  * (which is also what keeps the operator's card to one line while the agent gets every location).
  *
- * `certain` findings become `hard`: they are mechanical consequences, and a model weighing them is how
- * "enforce" quietly becomes "mention". The rest are reported and pass.
+ * A SHAPE FINDING IS EVIDENCE, NOT A VERDICT — none of them are `hard` any more.
+ *
+ * `certain` used to mean `hard`, and `hard` is defined as binary and unarguable, "never for anything
+ * with a defensible exception, because a hard gate on a judgement call is how a QA loop becomes
+ * unfalsifiable". These are regex inferences over C# source, and twice now they have inferred wrong:
+ * the asmdef check told the loop to write "Assembly-CSharp" into a real references array (see
+ * PREDEFINED_ASSEMBLIES in shape.ts), and the serialized-field check reported fields in plain service
+ * classes Unity never serializes. Both arrived as `certain`, both were unfalsifiable, and the second
+ * was still failing on the third fix pass over the same file — the agent argued once and then gave in,
+ * because the gate told it a compiler had spoken.
+ *
+ * They are still computed, still shown on the card, and still in the summary the operator reads. What
+ * they no longer do is fail the turn by themselves. Running something — a compile, a test — does that.
  */
 function inspectShape(repo: string, cs: ChangedFile[]): ProbeFact[] {
   if (!cs.length) return [];
@@ -291,7 +302,7 @@ function inspectShape(repo: string, cs: ChangedFile[]): ProbeFact[] {
   return [...byKind.entries()].map(([kind, { certain, lines }]) => ({
     key: `unity-${kind}`,
     ok: !certain,
-    hard: certain,
+    hard: false,
     detail: [`${HEADLINE[kind] ?? kind}: ${lines.length} place(s)`, ...lines.slice(0, 8).map((l) => `  ${l}`), ...(lines.length > 8 ? [`  … ${lines.length - 8} more`] : [])].join('\n'),
   }));
 }

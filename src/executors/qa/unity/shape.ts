@@ -457,6 +457,39 @@ const PREDEFINED_ASSEMBLIES = new Set([
   'Assembly-CSharp-Editor', 'Assembly-CSharp-Editor-firstpass',
 ]);
 
+/**
+ * WHICH TYPES IN THIS FILE UNITY ACTUALLY SERIALIZES — by line range, because one file can hold a
+ * MonoBehaviour and a plain helper beside it.
+ *
+ * The serialized-field check below had no such question. It walked every field in the file and
+ * reported any Dictionary, interface, delegate or `object` as "serialized but Unity stores nothing for
+ * it", as `certain`, in classes Unity never serializes at all — a service, a repository, a POCO. The
+ * statement is false there: Unity stores nothing for the whole type, so the field is not a mistake,
+ * and `certain: true` gave that falsehood authority over an agent with no way to argue back. Reported
+ * from a live run as an invented finding, still failing on the third fix pass over the same file.
+ *
+ * Unity serializes a type's fields when it derives from a Unity base, or when it is a plain class or
+ * struct marked [Serializable] and reached from one. The attribute is read from the source because
+ * `CsFacts.types` carries a base and a line, not attributes.
+ */
+function serializedTypeSpans(facts: CsFacts, source: string): Array<[number, number]> {
+  const lines = source.split('\n');
+  const sorted = [...facts.types].sort((a, b) => a.line - b.line);
+  const spans: Array<[number, number]> = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const t = sorted[i];
+    const end = i + 1 < sorted.length ? sorted[i + 1].line - 1 : lines.length;
+    if (t.base && UNITY_BASE.test(t.base)) { spans.push([t.line, end]); continue; }
+    // [Serializable] sits on its own line above the declaration, possibly with other attributes between.
+    for (let j = t.line - 2; j >= 0 && j >= t.line - 6; j--) {
+      const above = lines[j]?.trim() ?? '';
+      if (!above.startsWith('[')) break;
+      if (/\[(System\.)?Serializable\b/.test(above)) { spans.push([t.line, end]); break; }
+    }
+  }
+  return spans;
+}
+
 export function inspectFile(opts: {
   repo: string;
   file: string;
@@ -551,8 +584,10 @@ export function inspectFile(opts: {
     }
   }
 
-  // 4 ── [SerializeField] on something Unity does not store
+  // 4 ── [SerializeField] on something Unity does not store, IN A TYPE UNITY ACTUALLY STORES
+  const serializedSpans = serializedTypeSpans(facts, source);
   for (const f of facts.fields) {
+    if (!serializedSpans.some(([a, b]) => f.line >= a && f.line <= b)) continue;
     if (!isSerialized(f)) continue;
     const hit = NOT_SERIALIZABLE.find((n) => n.re.test(f.type));
     if (!hit) continue;

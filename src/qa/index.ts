@@ -409,11 +409,26 @@ export async function qaGate(
       return {
         action: 'fix', pass, maxPasses, verdict, card,
         feedback: [
-          `<system>QA GATE — pass ${pass} of ${maxPasses}: ${failures.length} MEASURED check(s) failed on this ${ctx.type} project. A compiler said this; there is nothing to argue with.`,
+          `<system>QA GATE — pass ${pass} of ${maxPasses}: ${failures.length} check(s) failed on this ${ctx.type} project.`,
           '',
           ...failures.map((f, n) => `${n + 1}. [${f.key}] ${f.detail}`),
           '',
-          'Fix exactly these. Then report what you changed.</system>',
+          /**
+           * IT USED TO SAY "A compiler said this; there is nothing to argue with."
+           *
+           * Often untrue, and it was the sentence that ended the argument. A live run put two static
+           * inferences behind it — a Dictionary field in a vendor SDK, serialization in a plain class
+           * Unity never serializes — and the agent, which had pushed back once and was right, edited
+           * working code to satisfy them. An unfalsifiable gate does not get correctness, it gets
+           * compliance.
+           *
+           * A fact that survives to here is measured, and most of them are exactly what they claim.
+           * That is a reason to state what measured it, not a reason to forbid a reply.
+           */
+          'Fix exactly these, then report what you changed. If one of them is WRONG — the check inferred'
+          + ' something the code does not do — do not edit working code to satisfy it: say which one,'
+          + ' quote the line that disproves it, and fix the rest. A finding you can disprove is a defect'
+          + ' in the check, and naming it is worth more than a fix that hides it.</system>',
         ].join('\n'),
       };
     }
