@@ -1,9 +1,15 @@
 You are evaluating an agent's progress on a task.
 
-Task (first line): {{TASK}}
+The task, as the user gave it:
+{{TASK}}
 
-Facts the agent has gathered so far:
+Facts the agent has gathered so far, this turn only:
 {{FACTS}}
+
+Evidence the task ALREADY CONTAINS counts as gathered. A task is often a handoff — findings from an
+earlier session, pasted in so the work can continue in a fresh context — and an agent holding a
+finished investigation is ready, not empty-handed. Do not rate it low for failing to re-derive what it
+was handed. Rate what is still genuinely unknown.
 
 Rate the agent's readiness to produce a final answer:
 

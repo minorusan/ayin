@@ -511,6 +511,8 @@ async function isCircling(newDirection: string): Promise<boolean> {
  * was gathered; it does not need the bodies, and it never did.
  */
 const REVIEW_FACT_CHARS = 400;
+/** How much of the turn's own input the progress check may read — a handoff is often most of it. */
+const JUDGE_TASK_CHARS = 2_000;
 const REVIEW_FACTS_MAX = 20;
 function factsForReview(): string[] {
   const all = [...gatheredFacts, ...evidenceFacts];
@@ -523,8 +525,21 @@ async function callJudge(task: string, facts: string[]): Promise<JudgeVerdict> {
   if (facts.length === 0) return { confidence: 'low', reasoning: 'No facts gathered yet.' };
 
   const factsText = facts.map((f, i) => `${i + 1}. ${f}`).join('\n\n');
+  /**
+   * THE WHOLE TASK, NOT ITS FIRST LINE — because the task is sometimes the evidence.
+   *
+   * A handoff workflow is the way a small window is made to work: investigate, write the findings,
+   * clear the context, paste them back and act. The judge was shown `task.split('\n')[0]`, so a
+   * three-page handoff arrived as one sentence, and the facts it weighed were only the ones gathered
+   * in THIS turn — `resetCounters` clears them at every user message. It therefore could not tell an
+   * agent that had been handed a finished investigation from one that had found nothing, rated low,
+   * and the harness told it to go and read. Reported from a live session as the model refusing to take
+   * a handoff on trust and re-investigating from scratch.
+   *
+   * Capped because a pasted handoff can be long and this is a cheap check that must stay cheap.
+   */
   const prompt = getPrompt('judgeProgress', {
-    TASK: task.split('\n')[0],
+    TASK: task.length > JUDGE_TASK_CHARS ? `${task.slice(0, JUDGE_TASK_CHARS)} \u2026[task truncated]` : task,
     FACTS: factsText,
   });
 
