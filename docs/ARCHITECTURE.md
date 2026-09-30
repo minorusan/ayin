@@ -3381,7 +3381,8 @@ families.
 ## Tools (`tools.ts`, `tools/`)
 
 Each tool is `{ name, description, parameters, execute }`; the model calls it by its unique
-name. **Core** (no external deps): `read_file`, `list_dir`, `grep`, `find_files`, `write_file`,
+name. **Core** (no external deps): `read_file`, `list_dir`, `grep` (ripgrep from `@vscode/ripgrep`, else `rg` on
+PATH, else system grep), `find_files`, `write_file`,
 `str_replace`, `rename`, `bash`, `explore`, `status`, `arduino_db`. **Optional integrations** (inert unless
 configured): `diagram`, `web_search`, `jira`, `jira_ticket`, `jira_auth`. See the README table.
 

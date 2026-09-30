@@ -3,6 +3,8 @@ import { corpusNotesForFiles } from '../../indulge/inject.js';
 import { FIND_LIMIT, GREP_LIMIT, boolParam, execAsync, resolveAgainstCwd, shq, suggestSimilarPaths } from '../lib.js';
 import { existsSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
 import { detectProfile, guidBlock, rankGrepLines, type GrepProfile } from '../grep-rank.js';
 
 const CWD = process.cwd();
@@ -39,6 +41,14 @@ const NEVER_RECURSE = [
   'Library', 'Temp', 'obj', 'Logs', // Unity: imported artifacts and build scratch
   'dist', 'build', 'out', '.next', 'coverage', '__pycache__', '.venv', 'vendor',
 ];
+
+const RG: string | null = (() => {
+  try {
+    const bundled: string = createRequire(import.meta.url)('@vscode/ripgrep').rgPath;
+    if (existsSync(bundled)) return bundled;
+  } catch { /* not installed for this platform */ }
+  return spawnSync('rg', ['--version'], { stdio: 'ignore' }).status === 0 ? 'rg' : null;
+})();
 
 /**
  * WHICH FILES THE CORPUS NOTES ARE ABOUT.
@@ -153,11 +163,15 @@ export const tool: Tool = {
       // `Assets/` matches thousands of `.asset` YAML headers, and a 300-file scan never reached
       // `Assets/Games` at all, so every first-party `.cs` was outside the window the sort could see.
       const scan = filesOnly || counting ? 2000 : Math.min(Math.max(cap * 10, 200), 2000);
+      const search = RG
+        ? `${shq(RG)} --no-config --no-ignore --hidden --color never --no-heading -H ${[counting ? '-c' : filesOnly ? '-l' : onlyMatching ? '-on' : '-n', ...flags.slice(1).filter((f) => f !== '-E')].join(' ')}` +
+          `${params.include ? ` -g ${shq(String(params.include))}` : ''}${NEVER_RECURSE.map((d) => ` -g ${shq(`!${d}/`)}`).join('')}`
+        : `grep ${flags.join(' ')}${inc}${prune}`;
       const out = await execAsync(
         // `--include` MUST precede `--`: after the terminator grep reads every argument as a file
         // operand, so the filter became a missing filename ("grep: --include=*.cs: No such file")
         // and quietly stopped filtering. Caught by watching a real run, not by the build.
-        `grep ${flags.join(' ')}${inc}${prune} -- ${shq(String(params.pattern))} ${shq(String(params.path))}${zeroes}${excl} | head -${scan + 1}`,
+        `${search} -- ${shq(String(params.pattern))} ${shq(String(params.path))}${zeroes}${excl} | head -${scan + 1}`,
         { cwd: CWD },
       );
       const raw = out === '(no output)' ? [] : out.split('\n').filter((l) => l.trim());

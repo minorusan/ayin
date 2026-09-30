@@ -93,6 +93,7 @@
   "dependencies": {
     "@langchain/core": "^1.2.9",
     "@langchain/langgraph": "^1.4.12",
+    "@vscode/ripgrep": "^1.18.0",
     "blessed": "^0.1.81",
     "openai": "^7.4.0",
     "sharp": "^0.33.5",
