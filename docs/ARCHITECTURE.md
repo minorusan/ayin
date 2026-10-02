@@ -2008,6 +2008,12 @@ what `--allow-parallel-subagents` produces, stopping the turn used to stop one a
 - **`execAsync` has no default timeout** — `timeoutMs` is honoured when a caller passes one explicitly,
   and `AYIN_EXEC_TIMEOUT_MS` is an operator backstop that is off unless set. `bash` passes the run's
   signal, so a cancelled call kills its child rather than leaving it running with nobody waiting.
+- **A command is done when its shell exits, not when its pipes close.** `server &` hands the tool's
+  stdout/stderr to a process that never exits, so waiting for `close` (EOF) hung the run forever with
+  the shell long gone. On `exit`, `execAsync` waits `EXEC_ORPHAN_GRACE_MS` (2 s) for buffered output,
+  then answers with what it has plus a note naming the process group that still holds the pipes. The
+  background process is left running (it was usually the point) and its pipes are unref'd, not
+  destroyed — a closed read end would turn its next write into EPIPE.
 - **The subagent kill-timer is gone.** A stage of the work takes as long as it takes; the signal stops
   it.
 

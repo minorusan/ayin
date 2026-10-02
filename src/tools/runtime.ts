@@ -50,9 +50,13 @@ export interface ToolLogger {
  * happens to satisfy it with a real spawn.
  */
 export interface ToolProcess {
-  stdout: { on(event: 'data', cb: (chunk: Buffer | string) => void): unknown } | null;
-  stderr: { on(event: 'data', cb: (chunk: Buffer | string) => void): unknown } | null;
+  stdout: { on(event: 'data', cb: (chunk: Buffer | string) => void): unknown; unref?(): void } | null;
+  stderr: { on(event: 'data', cb: (chunk: Buffer | string) => void): unknown; unref?(): void } | null;
+  pid?: number;
   on(event: 'error', cb: (err: Error) => void): unknown;
+  /** The shell itself exited — its stdio may still be held open by a process it backgrounded. */
+  on(event: 'exit', cb: (code: number | null) => void): unknown;
+  /** Exited AND every holder of its stdio closed it. */
   on(event: 'close', cb: (code: number | null) => void): unknown;
 }
 

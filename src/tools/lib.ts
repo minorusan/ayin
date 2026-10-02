@@ -123,6 +123,8 @@ export function boolParam(v: unknown): boolean {
  */
 export const EXEC_TIMEOUT_MS = 120_000;
 export const EXEC_MAX_BYTES = 256 * 1024;
+// How long after the shell exits to wait for its output pipes to close before answering without them.
+export const EXEC_ORPHAN_GRACE_MS = 2_000;
 
 /**
  * NO EXECUTION TIMEOUT BY DEFAULT. A command runs as long as it needs; `signal` is how it stops.
@@ -192,7 +194,25 @@ export function execAsync(command: string, opts: { cwd?: string; timeoutMs?: num
       finish(() => reject(error));
     });
 
-    child.on('close', (code) => {
+    // 'close' waits for EOF on stdout/stderr, and `server &` hands those pipes to a process that never
+    // exits — the call hung forever with the shell long gone. The SHELL exiting is the command being
+    // done: give buffered output a grace period, then answer without waiting for the pipes.
+    let orphaned = false;
+    child.on('exit', (code) => {
+      if (cancelled || timedOut) return;
+      setTimeout(() => {
+        if (settled) return;
+        orphaned = true;
+        // Unref, never destroy: a closed read end turns the background process's next write into EPIPE.
+        child.stdout?.unref?.();
+        child.stderr?.unref?.();
+        complete(code);
+      }, EXEC_ORPHAN_GRACE_MS).unref?.();
+    });
+
+    child.on('close', (code) => complete(code));
+
+    const complete = (code: number | null): void => {
       const out = [stdout, stderr].filter(Boolean).join('\n').trim();
 
       if (cancelled) {
@@ -207,6 +227,10 @@ export function execAsync(command: string, opts: { cwd?: string; timeoutMs?: num
             ? `(TIMED OUT after ${Math.round(limit / 1000)}s and was killed — the command did not finish, so this output is PARTIAL. ` +
               `If it is long-running or interactive, start it in the background instead: \`cmd >/tmp/out.log 2>&1 &\` then read the log.)`
             : '',
+          orphaned
+            ? `(the shell exited, but a process it started in the background still holds this command's output (process group ${child.pid}) and is still running. ` +
+              `Its later output is not captured — start background processes as \`cmd >/tmp/out.log 2>&1 &\` and read the log.)`
+            : '',
         ].filter(Boolean).join('\n');
         const withNotes = (body: string): string => (notes ? `${body}\n${notes}` : body);
 
@@ -217,7 +241,7 @@ export function execAsync(command: string, opts: { cwd?: string; timeoutMs?: num
         else if (code && code !== 0) resolve(withNotes(`Command exited with code ${code}`));
         else resolve(withNotes('(no output)'));
       });
-    });
+    };
   });
 }
 
