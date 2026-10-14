@@ -901,8 +901,9 @@ console.log('\nfinish() is the only exit, and it carries the answer');
   ok(!/hasFinalMarker|stripFinalMarker|markerWorthEnforcing/.test(agentSrc),
     'and no trace of the marker contract survives in the loop');
   const sys = readFileSync(join(DIST, '..', 'prompts', 'ayin', 'system.txt'), 'utf-8');
-  ok(/A TASK ENDS ONLY WHEN YOU CALL finish\(\)/.test(sys) && !/FINISHED REPLIES START WITH/.test(sys),
-    'the system prompt states the finish contract and no longer asks for a dollar sign');
+  ok(/A TASK ENDS ONLY WHEN YOU CALL THE finish TOOL/.test(sys) && !/FINISHED REPLIES START WITH/.test(sys)
+    && !/finish\(/.test(sys),
+    'the system prompt states the finish contract, asks for no dollar sign, and spells no bare finish( call');
 }
 
 // A provider that BILLS may be the fresh-clone DEFAULT, but must never be reached by accident: not
@@ -1057,7 +1058,7 @@ console.log('\nnaama: authoring a design as structured facts');
 console.log('\nthe $ marker: a finished reply says so, and the harness verifies it');
 {
   const sys = readFileSync(join(DIST, '..', 'prompts', 'ayin', 'system.txt'), 'utf-8');
-  ok(/^A TASK ENDS ONLY WHEN YOU CALL finish\(\)/.test(sys),
+  ok(/^A TASK ENDS ONLY WHEN YOU CALL THE finish TOOL/.test(sys),
     'the rule is the FIRST thing in the system prompt — position is load-bearing, the middle gets skimmed');
   const ag = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
   // The marker is gone: termination is a finish() call, not a formatting convention the model may ignore.

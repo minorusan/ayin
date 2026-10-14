@@ -852,6 +852,15 @@ detector is deliberately narrow (a known tool name at the start of a line, openi
 `name=` argument; fenced and inline code stripped first), because a false positive turns a correct
 answer into a wasted round. `npm run check:readguard` pins the positive and the negative cases.
 
+**"The model's own invention" was not always the model's.** `prompts/ayin/system.txt` and
+`prompts/tools/finish.txt` both told it, in prose, to `finish(summary="what you did or found")` — the
+one shape no dialect parses, in the prompt's first lines, where position is most load-bearing, and
+ahead of the dialect's tool-call format block. gemma4:26b copied the literal it was shown: measured on
+a repeat task, four consecutive rounds of unparsed `finish(summary=…)`, then one round of
+`<parameter=summary="…")` blending the two instructions, then three of `<parameter name=summary>` — ten
+rounds to end a four-round task. Naming the parameters instead of showing a call shape ended it: zero
+unparsed calls over four runs. A prompt may not spell a call in a syntax the runtime cannot read.
+
 ## sentinaile — a standing instruction, carried out on a schedule
 
     /sentinaile check the CI and tell me if anything broke, every 10 minutes
