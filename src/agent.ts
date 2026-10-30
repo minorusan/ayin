@@ -14,7 +14,7 @@
  */
 
 import { formatTurnTimings, resetTurnTimings, timed } from './timing.js';
-import { waiveReadOnce } from './tools/readGuard.js';
+import { recordSeen, waiveReadOnce } from './tools/readGuard.js';
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -3862,6 +3862,13 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       const shaped = echo !== null
         ? { body: echo, suppressRepeatNote: true }
         : shapeFileResult(name, params as Record<string, unknown>, result, clipForWindow(result, undefined, artifactPath), conversationWindow);
+      if ((name === 'bash' || name === 'grep') && echo === null && !result.startsWith('Error:')) {
+        const base = name === 'bash' && params.cwd ? resolveAgainstCwd(String(params.cwd)) : process.cwd();
+        const named = name === 'bash'
+          ? String(params.command ?? '').split(/[\s;|&<>()]+/).map((t) => t.replace(/^['"]|['"]$/g, '')).filter((t) => t && !t.startsWith('-'))
+          : [];
+        recordSeen(shaped.body, named, base);
+      }
       const repeatNote = shaped.suppressRepeatNote ? '' : (guard.note ?? '');
       pushToWindow('user', renderToolResult(resultHead + shaped.body + repeatNote + editMissNote + nudgeNote));
       pushMessage('assistant', `[tool: ${name}(${paramPreview})]`);

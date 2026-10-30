@@ -1,4 +1,5 @@
 import { readFileSync, statSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 import { resolveAgainstCwd } from './lib.js';
 import { type Span, describeSpans, mergeSpans, spanLines } from './readWindow.js';
 
@@ -113,6 +114,45 @@ export function recordRead(path: string, span?: Span, totalLines?: number): void
     lines,
     spans: stale || !prev ? merge([], addition) : merge(prev.spans, addition),
   });
+}
+
+const SEEN_MAX_BYTES = 1_000_000;
+const SEEN_MAX_FILES = 50;
+const HIT = /^(.+?)([:-])(\d+)\2(.*)$/;
+
+function textOf(path: string): string | null {
+  try {
+    if (!statSync(path).isFile() || statSync(path).size > SEEN_MAX_BYTES) return null;
+    return readFileSync(path, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+export function recordSeen(output: string, named: string[], base: string): void {
+  const at = (p: string) => (isAbsolute(p) ? p : resolve(base, p));
+  for (const p of named.slice(0, SEEN_MAX_FILES)) {
+    const abs = at(p);
+    const text = textOf(abs);
+    if (!text || !text.trim() || !output.includes(text.replace(/\n$/, ''))) continue;
+    recordRead(abs, undefined, text.split('\n').length);
+  }
+  const hits = new Map<string, Array<[number, string]>>();
+  for (const line of output.split('\n')) {
+    const m = HIT.exec(line);
+    if (!m) continue;
+    const abs = at(m[1]);
+    if (!hits.has(abs) && hits.size >= SEEN_MAX_FILES) continue;
+    hits.set(abs, [...(hits.get(abs) ?? []), [Number(m[3]), m[4]]]);
+  }
+  for (const [abs, shown] of hits) {
+    const text = textOf(abs);
+    if (text === null) continue;
+    const rows = text.split('\n');
+    for (const [n, row] of shown) {
+      if (n >= 1 && rows[n - 1] === row) recordRead(abs, [n, n], rows.length);
+    }
+  }
 }
 
 export interface Where {

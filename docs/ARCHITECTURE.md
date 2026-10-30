@@ -3654,6 +3654,8 @@ match before writing, so the line number costs nothing.
 | `write_file` over a file read only in part | refused — this is the `N lines GONE` banner, enforced instead of printed after the fact |
 | **Create** a new file | allowed, no read required — there is nothing to have read |
 | A second edit to the same file | allowed — the read-back already re-armed the guard |
+| File seen whole in `bash` output (`cat f`) | counts as a whole-file read — only when the file is named in the command and its full text appears verbatim in the result the model received |
+| Lines seen in `grep`/`bash` hits (`path:N:text`, `path-N-text`) | each line counts as read — only when `text` equals line N on disk |
 | Any successful write | result carries `read back from disk: N B, byte-identical` |
 
 Both tools return the refusal as an `Error:` string rather than throwing, which is the contract
