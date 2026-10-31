@@ -1628,9 +1628,13 @@ the work and the scaffold IS its first act) and on the plan path only **after** 
 
 #### A question's answer is not "no tool call while working"
 
-The round loop discards a text-only reply when a tool has already run this turn, on the grounds that
-narrating is not working. That rule was earned — six of six empty-patch runs ended on a narrated
-intention — and its proxy is "did a tool run?".
+The round loop does not accept a text-only reply when a tool has already run this turn, on the grounds
+that narrating is not working. That rule was earned — six of six empty-patch runs ended on a narrated
+intention — and its proxy is "did a tool run?". The reply used to be discarded and the identical
+prompt re-sent; measured on keras-22642, a near-deterministic model answered the identical prompt
+three times in ten seconds and the lost detector then restarted the turn with a wiped window. So the
+reply is now kept and the step is retried under the announced-action nudge, which asks for the call;
+three such replies in a row still restart the turn.
 
 The proxy is backwards for a question. Questions are precisely the turns that run tools first and
 then have nothing left to do but answer. Measured: asked to explore this Unity project and say how
@@ -1646,8 +1650,8 @@ classified, so the hatch would answer "not a promise" for everything and decide 
 
 | the reply | what happens |
 |---|---|
-| a promise as its last sentence | discarded, as before |
-| a direction with no concrete anchor | discarded, as before |
+| a promise as its last sentence | nudged for the call and retried, as before |
+| a direction with no concrete anchor | nudged for the call and retried, as before |
 | anything else | it is the answer — shown, not thrown away |
 
 **The promise test here is STRICTER than the nudge's**, and that cost a session to learn.
