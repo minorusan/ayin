@@ -177,6 +177,7 @@ interface Message {
   role: string;
   content: string;
   pinned?: boolean;
+  continues?: boolean;
 }
 
 const conversationWindow: Message[] = [];
@@ -593,6 +594,14 @@ export function clipForWindow(text: string, limit = windowResultChars(), where =
 }
 
 function pushToWindow(role: string, content: string): void {
+  const last = conversationWindow[conversationWindow.length - 1];
+  if (last?.continues) {
+    last.continues = false;
+    if (role === 'assistant') {
+      last.content = `${last.content}\n${content}`;
+      return;
+    }
+  }
   conversationWindow.push({ role, content });
   // NO CONTEXT DECISION HERE. Evicting on push threw history away before anyone knew whether it fit —
   // on a 65k model, two thirds of the window sat unused while the original question was already gone.
@@ -889,7 +898,11 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
   const deduped = dedupeRepeatedResults(conversationWindow);
   const masked = compressOldest(conversationWindow, fixed, deduped.canonical);
   for (const msg of conversationWindow) messages.push(msg);
-  if (volatileTurn) messages.push(volatileTurn);
+  if (volatileTurn) {
+    const last = messages[messages.length - 1];
+    if (last?.role === 'assistant' && last.continues) messages.splice(messages.length - 1, 0, volatileTurn);
+    else messages.push(volatileTurn);
+  }
   logCoverage({
     round,
     system: systemContent,
@@ -1985,6 +1998,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
   let verifyAsked = false;
   let verifyTurns = 0;
   let sheetIds: string[] = [];
+  let continuingReply = false;
   let deferralNudges = 0;
   let unwrittenClaimNudges = 0;
   /** "I'll rewrite that now." — announced, never acted. One nudge; see src/announced.ts. */
@@ -2213,6 +2227,12 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       continue;
     }
     hasToolCalls = parsed.toolCalls.length > 0;
+    if (continuingReply) {
+      continuingReply = false;
+      log('INFO', 'verify_continued', { round: String(round), hadToolCalls: String(hasToolCalls) });
+      const last = conversationWindow[conversationWindow.length - 1];
+      if (last?.continues && !hasToolCalls) conversationWindow.pop();
+    }
     if (verifyAsked) {
       verifyAsked = false;
       const viewCalls = hasToolCalls && parsed.toolCalls.every((c) => c.name === 'full_view');
@@ -2228,6 +2248,15 @@ async function runAgentTurn(rawInput: string): Promise<void> {
         pushToWindow('user', getPrompt('fullView', { TASK: currentGoal, RESULTS: sheet }));
         conversationWindow[conversationWindow.length - 1].pinned = true;
         fullViewServed = true;
+        continue;
+      }
+      if (!hasToolCalls && (parsed.text ?? '').trim()) {
+        continuingReply = true;
+        log('INFO', 'verify_continue', { round: String(round) });
+        addMessage('system', '[verify: continuing the unfinished reply]');
+        transcribeResponse(round, activeModelId(), response, 0);
+        pushToWindow('assistant', (parsed.text ?? response).trim());
+        conversationWindow[conversationWindow.length - 1].continues = true;
         continue;
       }
       log('INFO', 'verify_turn_declined', { round: String(round), hadToolCalls: String(hasToolCalls) });

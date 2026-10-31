@@ -856,8 +856,13 @@ acts from. The sheet accumulates: a later selection adds to it and nothing chose
 sheet that forgot the last one sent the model back to re-investigate on the clock — measured, a second
 sheet of one small result after ten rounds of probing. The verify prompt names what is on the sheet
 already and says that only ids fetch, since "the full GroupQueryAttention class" in words fetched
-nothing twice in a row. At most 4 verify turns per turn; past that the tool-less reply falls to the
-discard below.
+nothing twice in a row. A verify reply with neither ids nor a call — "Let me check the CallSpec
+class.", and silence — is **continued** rather than re-asked: it goes back as the model's own unfinished
+assistant turn (`Message.continues`) with the `<session-context>` block placed before it, and the
+endpoint resumes mid-sentence, in the measured probe straight into the tool call. Nothing is added to
+the window. A continuation that brings a call is merged into that assistant message; one that brings
+only prose is popped, and the verify turn repeats within its budget. At most 4 verify turns per turn;
+past that the tool-less reply falls to the discard below.
 
 It replaces the progress judge: a side call asking for a JSON verdict every 5 tool calls, which a
 tool-calling model answered with a tool call. Measured on six SWE-rebench tasks with qwen3.8:27b, every

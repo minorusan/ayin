@@ -1698,6 +1698,8 @@ ok((code.match(/\|\| msg\.pinned\) continue;/g) ?? []).length === 2 && /findInde
   'the pinned full view is passed over by compression, dedupe, eviction and the message cap');
 ok(/getPrompt\('verifyTurn'/.test(code) && /conversationWindow\.length = 0;\s*\n\s*pushToWindow\('user', getPrompt\('fullView'/.test(code),
   'a tool-less reply mid-work opens the verify turn, and the chosen results come back on a clean sheet');
+ok(/verify_continue'/.test(code) && /continues = true;/.test(code) && /last\.continues\) messages\.splice/.test(code),
+  'a verify reply with neither ids nor a call is continued as the model\'s own unfinished turn, the session context placed before it');
 ok(existsSync(join(DIST, '..', 'src', 'tools', 'defs', 'full_view.ts')), 'full_view is a tool the model calls');
 const systemTxt = readFileSync(join(DIST, '..', 'prompts', 'ayin', 'system.txt'), 'utf-8');
 ok(/\{\{CONTEXT_TOKENS\}\}/.test(systemTxt) && /full_view/.test(systemTxt), 'the system prompt states the window and names full_view');
@@ -3040,7 +3042,7 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
   ok(/const head = messages\[0\];/.test(winSrc) && /return \[head, \.\.\.rest\]/.test(winSrc),
     'the system message is never evicted — it carries the tools, and it must stay byte-identical for the KV cache');
   {
-    const push = /function pushToWindow[\s\S]{0,900}?\n}/.exec(winSrc)?.[0] ?? '';
+    const push = /function pushToWindow[\s\S]{0,1200}?\n}/.exec(winSrc)?.[0] ?? '';
     ok(/WINDOW_HARD_MAX/.test(push),
       'pushToWindow bounds MEMORY only; what fits the model is decided at build time, not at push time');
   }
