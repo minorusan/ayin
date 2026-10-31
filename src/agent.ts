@@ -1059,7 +1059,7 @@ export function compressOldest(window: Message[], fixedTokens: number, canonical
     // call; the call returns the same bytes; the window fills further; this fires again. Say instead
     // what is true and what would actually help: repeating this call cannot produce anything new.
     msg.content = `${kept}\n\u2026 [truncated \u2014 the window was full. Repeating this exact call returns `
-      + `these same bytes. The whole result is in the call list with its id; full_view <id> shows it whole.]\n</tool_response>`;
+      + `these same bytes. The whole result is in the call list with its id; the full_view tool, ids=<id>, shows it whole.]\n</tool_response>`;
     total -= before - approxTokens(msg.content);
     dropped += was - msg.content.length;
     count++;
@@ -1617,7 +1617,7 @@ export function renderCallLedger(): string {
     if (!shown) return `${call}${c.ok ? '' : '  FAILED'}`;
     // Indented under the call, so a reader — and a model — can tell the output from the next call.
     const more = c.tokens && c.file && shown.length > 3
-      ? `\n     ... whole: full_view ${c.file.slice(0, c.file.indexOf('-'))}`
+      ? `\n     ... whole: full_view(ids=${c.file.slice(0, c.file.indexOf('-'))})`
       : '';
     return `${call}\n   ${status}${shown.join('\n   ')}${more}`;
   });
