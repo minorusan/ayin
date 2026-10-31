@@ -53,10 +53,15 @@ const hashOf = (s: string): string => createHash('sha1').update(s).digest('hex')
  * answering the second with a diff against the first would hand the model a diff of bytes it has never
  * seen. Different region ⇒ different view ⇒ materialized on its own terms.
  */
-function keyOf(params: Record<string, unknown>): string | null {
+function keyOf(params: Record<string, unknown>, result: string): string | null {
   const path = String(params.path ?? params.file ?? '').trim();
   if (!path) return null;
-  return `${path}|${params.offset ?? ''}|${params.limit ?? ''}`;
+  // Param-free reads can slide to a new region. Compare the returned range as well as
+  // the requested view; otherwise disjoint windows look like edits to the same text.
+  const range = result.match(/^\((lines \d+-\d+(?: and \d+-\d+)?) of \d+/m)?.[1] ?? '';
+  const view = ['offset', 'limit', 'around', 'tail', 'structure']
+    .map((name) => params[name] ?? '');
+  return `${path}|${JSON.stringify([...view, range])}`;
 }
 
 /**
@@ -108,7 +113,7 @@ export function shapeFileResult(
   tool: string, params: Record<string, unknown>, result: string, clipped: string, window: Message[],
 ): Shaped {
   if (!VIEW_TOOLS.has(tool) || result.startsWith('Error:')) return { body: clipped, suppressRepeatNote: false };
-  const key = keyOf(params);
+  const key = keyOf(params, result);
   if (!key) return { body: clipped, suppressRepeatNote: false };
 
   const prior = views.get(key);

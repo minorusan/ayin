@@ -806,6 +806,14 @@ for.
    a `<tool_response>` turn → continue.
 6. Plain text (no tool calls) → display → done.
 
+**A file view goes in once (`file-view.ts`).** A repeated read of the same view returns what changed,
+or says nothing did. A view is keyed by path, the requested window (offset, limit, around, tail,
+structure) and the line range the read actually returned — not the request alone, because two
+parameter-free reads of a large file slide to different regions, and keyed on the request they were
+diffed against each other as if they were the same text. That key widening came out of the Meta-Harness
+loop: the proposer read the traces, found the mis-keyed views, and the candidate carrying the fix was
+the one kept.
+
 **Served-model identity (`buildMessages`).** The system prompt names the served model
 (`activeModelId()`) and says explicitly that this is not Claude / ChatGPT / Gemini, and never to
 guess a vendor. This is not cosmetic. The prompt used to say *who* ayin is and nothing about *what
