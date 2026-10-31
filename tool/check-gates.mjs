@@ -1685,25 +1685,20 @@ const idxSrc = readFileSync(join(srcDir, 'app.ts'), 'utf-8');
 ok(/replace\(\/-\(\[a-z\]\)\/g/.test(idxSrc),
   '/set converts kebab-case to camelCase generally, not via a map that forgets new keys');
 
-// A LOW verdict must not end the investigation. It used to inject "Report what you have found so far
-// — do not continue exploring", so the harder the bug the sooner the harness quit: a correct run was
-// cut at round 12 having just found the faulty method, and its own report listed what it still needed.
-console.log('\nthe judge extends, it does not terminate');
+console.log('\nthe full view replaces the judge');
 const src = readFileSync(join(DIST, '..', 'src', 'agent.ts'), 'utf-8');
-// Comments quote the OLD directive to explain why it went; judge the code, not the prose.
 const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
-ok(!/do not continue exploring/i.test(code), 'the terminate-on-low-confidence directive is gone from the code');
-ok(/do not write the final answer/i.test(src), 'a low verdict still holds back the final answer rather than ending the turn');
-// A RATIONALE IS NOT AN ORDER. The judge is asked for "one sentence why" it rated, and that sentence
-// used to be handed over as "That is what is still missing — go and read it." A model observed
-// mid-turn read it as a checklist: "The judge says I still need to read something. I'm missing
-// OpenHook, Finish, Cancel, Capture, Restore, RaiseDeactivated, and OpenHideHook."
-ok(!/go and read it/i.test(code), 'the judge\'s rationale is not issued to the agent as an order');
-ok(/second opinion/i.test(src), 'it is framed as a second opinion the agent may answer');
-ok(/MAX_JUDGE_EXTENSIONS/.test(src) && /judgeExtensions\s*\+\+/.test(src),
-  'extensions are counted, so "keep going" is bounded rather than unbounded');
-ok(/out of investigation budget/.test(src),
-  'only an exhausted budget asks for a write-up, and it says which parts are unconfirmed');
+ok(!/judgeProgress|callJudge|MAX_JUDGE_EXTENSIONS/.test(code), 'no progress judge, no extension budget, no forced wrap-up');
+ok(!/do not continue exploring|out of investigation budget/i.test(code), 'no directive ends the investigation — only the round cap does');
+ok(!/FULL_PICTURE_INTERVAL|fullPictureSelect/.test(code), 'no forced checkpoint — the model asks for the full view itself');
+ok(/getPrompt\('fullView'/.test(code), 'a full view carries the task with the results, unclipped');
+ok(/!repliesToPicture/.test(code), 'the reply to a full view is not handed off as a fresh diagnosis');
+ok(/!repliesToPicture && !hasToolCalls && subagentsAllowed\(\)/.test(code), 'a finding followed by tool calls is left to run, not cut for a handover');
+ok((code.match(/\|\| msg\.pinned\) continue;/g) ?? []).length === 2 && /findIndex\(\(m\) => !m\.pinned\)/.test(code),
+  'the pinned full view is passed over by compression, dedupe, eviction and the message cap');
+ok(existsSync(join(DIST, '..', 'src', 'tools', 'defs', 'full_view.ts')), 'full_view is a tool the model calls');
+const systemTxt = readFileSync(join(DIST, '..', 'prompts', 'ayin', 'system.txt'), 'utf-8');
+ok(/\{\{CONTEXT_TOKENS\}\}/.test(systemTxt) && /full_view/.test(systemTxt), 'the system prompt states the window and names full_view');
 
 // THE PREFIX MUST NOT MOVE: the system message is what a server caches. If it changes between
 // rounds, every round pays full prefill for the whole window again (measured: 15s/round → 104s/round
@@ -1728,7 +1723,7 @@ delete process.env.AYIN_UNCHAINED;
 ok(!agentMod.isUnchained(), 'the compensating machinery is ON by default — an experiment flag never changes behaviour by accident');
 for (const on of ['1', 'true', 'TRUE ']) {
   process.env.AYIN_UNCHAINED = on;
-  ok(agentMod.isUnchained(), `AYIN_UNCHAINED=${JSON.stringify(on)} disables the judge and the critic`);
+  ok(agentMod.isUnchained(), `AYIN_UNCHAINED=${JSON.stringify(on)} disables the critic`);
 }
 for (const off of ['0', 'false', '', 'yes']) {
   process.env.AYIN_UNCHAINED = off;
@@ -3043,7 +3038,7 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
   ok(/const head = messages\[0\];/.test(winSrc) && /return \[head, \.\.\.rest\]/.test(winSrc),
     'the system message is never evicted — it carries the tools, and it must stay byte-identical for the KV cache');
   {
-    const push = /function pushToWindow[\s\S]{0,600}?\n}/.exec(winSrc)?.[0] ?? '';
+    const push = /function pushToWindow[\s\S]{0,900}?\n}/.exec(winSrc)?.[0] ?? '';
     ok(/WINDOW_HARD_MAX/.test(push),
       'pushToWindow bounds MEMORY only; what fits the model is decided at build time, not at push time');
   }

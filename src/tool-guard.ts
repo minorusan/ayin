@@ -615,7 +615,7 @@ export function isStateQuery(command: string): boolean { return STATE_QUERY.test
  * Keyed on tool + output only. The parameters are deliberately NOT in the key: the loop above wrote its
  * command four different ways and meant one thing every time.
  */
-export function refuseIfEcho(tool: string, result: string, stateQuery = false, edits = 0): string | null {
+export function refuseIfEcho(tool: string, result: string, stateQuery = false, edits = 0, artifactId = ''): string | null {
   if (NEVER_STALE.has(tool)) return null;
   const key = `${tool}|${createHash('sha1').update(result).digest('hex').slice(0, 16)}`;
   const prior = outputSeen.get(key);
@@ -646,6 +646,7 @@ export function refuseIfEcho(tool: string, result: string, stateQuery = false, e
       + `or act on what it already says.]`
     : `[REFUSED — this is the ${ord} time ${tool} has returned these exact bytes this turn. `
       + `The answer has not changed and will not change by asking again; nothing new can come from repeating it. `
+      + (artifactId ? `The result is in the call list as ${artifactId}; full_view ${artifactId} shows it whole. ` : '')
       + `If you are checking whether your work landed, you have not done the work yet — make the edit. `
       + `If you are waiting on something, do something else first so there is something to see.]`;
 }

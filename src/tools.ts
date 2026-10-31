@@ -16,7 +16,7 @@ import { ensureToolRuntime } from './tool-wiring.js';
 import { discoverTools, extraToolDirs } from './tools/loader.js';
 import { isUnityProject } from './indulge/attributors/unity.js';
 import { isArduinoProject } from './tools/arduino-explain.js';
-import { toolCallInstructions, toolMode } from './llm/manager.js';
+import { activeContextTokens, toolCallInstructions, toolMode } from './llm/manager.js';
 
 export { cancelActiveToolExecution } from './tools/lib.js';
 
@@ -335,6 +335,7 @@ export function toolsSystemPrompt(): string {
   if (toolMode() === 'native') {
     return getPrompt('system', {
       WORKING_DIR: CWD,
+      CONTEXT_TOKENS: String(activeContextTokens() || 16384),
       TOOLS: 'Your tools are declared to the runtime; call them directly.',
       TOOL_CALL_FORMAT: '',
       PROJECT: projectBlock(),
@@ -363,6 +364,7 @@ export function toolsSystemPrompt(): string {
 
   return getPrompt('system', {
     WORKING_DIR: CWD,
+    CONTEXT_TOKENS: String(activeContextTokens() || 16384),
     TOOLS: `${arbiterNote}${toolDefs}`,
     // The tool-call format is OWNED BY THE ACTIVE DIALECT (gemma/qwen), injected
     // here via the LLM manager. New prompts use {{TOOL_CALL_FORMAT}}; an older

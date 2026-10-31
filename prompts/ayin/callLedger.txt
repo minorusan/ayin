@@ -1,8 +1,7 @@
 Every call made this turn, in order, with the head of what each returned — including the ones whose
 results the history above has since compressed away. Use these answers rather than running a call again.
-When you genuinely need it again — something changed, or you need the part not shown here — run it.
-A call whose line ends in a path has its full output in that file, and reading it beats repeating an
-expensive call; a file you read is never one of those — read the file itself again.
+Each call's full output is kept whole: the bracket gives its size in tokens and its id, and full_view with
+ids returns any of them whole, with the task. Run a call again only when something changed.
 {{CACHE}}
 {{CALLS}}
 {{EARLIER}}

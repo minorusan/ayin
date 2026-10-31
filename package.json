@@ -91,6 +91,7 @@
     "check:syntax": "node tool/check-syntax.mjs"
   },
   "dependencies": {
+    "@huggingface/tokenizers": "^0.2.0",
     "@langchain/core": "^1.2.9",
     "@langchain/langgraph": "^1.4.12",
     "@vscode/ripgrep": "^1.18.0",

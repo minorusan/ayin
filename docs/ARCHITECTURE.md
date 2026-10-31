@@ -819,18 +819,42 @@ backend's ownership log (it reported `gemma4:26b` on a run where ownership had g
 gemma really was serving).
 
 Headless mode adds guardrails for unattended runs: a **CTA tracker** (don't exit until the
-asked-for deliverable exists), a lightweight **judge** (is there enough evidence to answer?),
-an internal **critic** (sanity-check substantial `write_file` output against gathered facts),
-and a self-audit on hitting the round cap.
+asked-for deliverable exists), an internal **critic** (sanity-check substantial `write_file` output
+against gathered facts), and a self-audit on hitting the round cap.
 
-**What counts as evidence.** Two records feed the judge and the critic. `explore` returns curated prose
+**The full view** (every mode). The system prompt tells the model its context window in tokens
+(`{{CONTEXT_TOKENS}}`, from the endpoint's status), that every result it sees is a clipped excerpt, and that
+the call ledger names each call with its id and its full size in tokens. The model investigates as it
+likes; when the ledger holds what the task needs it calls `full_view(ids)`, a tool like any other
+(`src/tools/defs/full_view.ts`), which returns those results whole — raw bytes, not the window clip — under
+the task restated (`prompts/ayin/fullView.txt`), with the instruction to reason the task against them and
+act. The tool holds 40% of the context window; a result that does not fit is named with its size so the
+model narrows it (a read with offset/limit or around=, structure then expand_method, a tighter grep) and
+asks again, which is how a 60k-token file becomes the three pieces that matter. The reply to a full view is
+exempt from the diagnosis handover for that one round, because it is by construction a diagnosis followed
+by the edit. The handover itself fires only on a finding stated with no tool call in the same reply; a
+finding followed by calls is work in progress, and the calls run. The newest full view is **pinned**: the
+window's compression, dedupe, eviction and message cap all pass over it, and only the next full view
+replaces it — measured, an unpinned view was compressed to a stub seven rounds after it was fetched and
+the model spent the next eight rounds re-reading what it had asked for. An echo refusal (the same bytes
+returned a third time) names the result's id and points at `full_view` instead of claiming the bytes are
+still above, which after compression they were not. A full view's own output is not saved as an artifact,
+so the ledger never offers a view of a view. Nothing forces the view and nothing in the loop ends an
+investigation but the round cap.
+
+It replaces the progress judge: a side call asking for a JSON verdict every 5 tool calls, which a
+tool-calling model answered with a tool call. Measured on six SWE-rebench tasks with qwen3.8:27b, every
+check came back unusable, each still spent one of four extensions, and the fifth forced a wrap-up on runs
+that held a correct diagnosis and no edit.
+
+**What counts as evidence.** Two records feed the critic. `explore` returns curated prose
 and is kept whole in `gatheredFacts`, which is also injected into the prompt as "Facts gathered so far".
 The direct tools — `read_file`, `grep`, `find_files` — land in `evidenceFacts`: one clipped line each
-(400 chars, last 12), fed to the judge and critic but **not** to the prompt, whose window already holds
+(400 chars, last 12), fed to the critic but **not** to the prompt, whose window already holds
 the real output. Both exist because only `explore` used to count: a turn that searched and read for
 itself was told `progress: insufficient — No facts gathered yet` after ten calls that had already found
 the faulty method and its caller, and the critic (armed at ≥ 2 facts) never ran for such a turn at all.
-A miss (`0 matches`, an error) is deliberately not evidence — otherwise the judge is lied to in the
+A miss (`0 matches`, an error) is deliberately not evidence — otherwise the critic is lied to in the
 other direction.
 
 ### A reply with no parsable call is not automatically an answer
@@ -2734,7 +2758,11 @@ not a regression. If it returns, it belongs back as an explicit opt-in, not bund
 
 Every tool result is written to `~/.ayin-cli/artifacts/<sessionId>/t<N>-<tool>.txt` as it is produced, and
 the call ledger in the volatile block names the file next to the call — `grep(pattern=Widget) → 3 hits
-[204 KB → t7-grep.txt]`, with the folder stated once above the list.
+[52140 tokens → t7]`, with the folder stated once above the list. The size is the full result's
+length in the served model's own tokens, counted by `tokenizer.ts` from the tokenizer files in
+`~/.ayin-cli/tokenizer/` (`tokenizer.json`, `tokenizer_config.json`, loaded on first use); without them
+it is the chars-per-token estimate. The id is what `full_view` takes; every cached call carries one,
+reads included.
 
 **Why the file has to be NAMED and not merely written.** Results were already saved (that is what Ctrl+O
 browses), but nothing told the model they existed. The window compresses and evicts old observations —

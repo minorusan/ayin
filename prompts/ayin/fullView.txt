@@ -1,0 +1,7 @@
+The task, as the user gave it:
+{{TASK}}
+
+The results you selected, in full:
+{{RESULTS}}
+
+Reason the task against these results and act now: make the change with the edit tools, or write the answer. Their output is here — do not run these calls again. If one result you need is missing, fetch it, then act.

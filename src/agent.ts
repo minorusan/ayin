@@ -34,6 +34,7 @@ import { subagentsAllowed } from './subagents.js';
 import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLESS, formatToolResultForChat, formatToolCallForChat, escapeBlessedTags, updateToolProgress } from './ui.js';
 import { theme } from './ui/theme.js';
 import { log } from './log.js';
+import { tokenCount } from './tokenizer.js';
 import { shapeFileResult, resetFileViews } from './file-view.js';
 import { grepRewrite } from './bash-to-grep.js';
 import { skepticInjection, inSkepticPass, closeSkepticPass, resetSkepticPass, resetSkepticRun, beginVerifyTurn, tickSkepticPass, verifyAttempts, verifyBudgetSpent } from './skeptic-pass.js';
@@ -43,7 +44,7 @@ import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
 import { promisesTheReportItself, reportsRatherThanPromises, stoppedShort } from './announced.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
 import { deniedWithoutAsking, checkPermission } from './permissions.js';
-import { artifactFor, artifactSessionDir, getArtifactsDir, hasArtifacts, humanBytes, saveArtifact, getSessionArtifacts, readArtifact } from './artifacts.js';
+import { artifactFor, artifactSessionDir, getArtifactsDir, getSessionArtifacts, hasArtifacts, readArtifact, saveArtifact } from './artifacts.js';
 import { recordPrompt, recordRaw, recordTool, recordAnswer } from './session-record.js';
 // The FULL record (opt-in, unclipped) runs alongside the clipped operating record above — see
 // transcript.ts for why both exist. Every call here is a no-op unless /transcribe is on.
@@ -174,6 +175,7 @@ export function enqueueAgentMessage(message: string): void {
 interface Message {
   role: string;
   content: string;
+  pinned?: boolean;
 }
 
 const conversationWindow: Message[] = [];
@@ -359,37 +361,16 @@ function evidenceBudgetChars(): number {
   const ctx = activeContextTokens();
   return Math.max(3_000, Math.floor((ctx || 32_000) * 0.1));
 }
-type JudgeVerdict = { confidence: 'high' | 'mid' | 'low'; reasoning: string } | null;
-let judgeVerdict: JudgeVerdict = null;
-const JUDGE_INTERVAL = 5;
 let totalToolCalls = 0;
-let judgeRoundsGranted = 0; // extra rounds granted by a judge verdict
-/**
- * How many times a judge verdict may extend the run before it must wrap up.
- *
- * `low` used to TERMINATE: "Report what you have found so far — do not continue exploring." So the
- * harder the bug, the sooner the harness gave up — while `mid` (doing fine) was granted 5 more rounds.
- * Measured on a real ticket: a correct investigation was cut at round 12 having just found the faulty
- * method, and it wrote a report whose own last section was a list of what it still needed to read.
- *
- * Low confidence means KEEP GOING, with the judge's own account of what is missing. Stopping is the
- * round cap's job — but an unbounded "keep going" is its own failure, so extensions are counted and the
- * wrap-up directive fires when they run out.
- */
-const MAX_JUDGE_EXTENSIONS = 4;
-let judgeExtensions = 0;
 
 /** Reset per-turn counters on new user turn */
 function resetCounters(): void {
   exploreCallCount = 0;
-  if (isUnchained()) log('INFO', 'unchained', { judge: 'off', critic: 'off' });
+  if (isUnchained()) log('INFO', 'unchained', { critic: 'off' });
   guardBeginTurn(); // repeat/deny/poll budget is per turn — see tool-guard.ts
   gatheredFacts.length = 0;
   evidenceFacts.length = 0;
-  judgeVerdict = null;
   totalToolCalls = 0;
-  judgeRoundsGranted = 0;
-  judgeExtensions = 0;
   directions.length = 0;
 }
 
@@ -509,92 +490,23 @@ async function isCircling(newDirection: string): Promise<boolean> {
  *  or LOW (stuck or wrong direction).
  *  This is a classification task — plays to MoE strengths. */
 /**
- * FACTS FOR A REVIEWER, NOT FOR RE-READING — the judge and the critic want to know WHAT was found.
+ * FACTS FOR A REVIEWER, NOT FOR RE-READING — the critic wants to know WHAT was found.
  *
  * `evidenceFacts` stores results uncut, because the prompt block decides at render time what fits and
- * a fact cut before anyone asked cannot be restored. These two callers joined the whole store into a
- * sub-call prompt, which was harmless while every entry was clipped to 400 characters and is not now:
- * sixty full file reads would make a cheap progress check the most expensive call of the round.
+ * a fact cut before anyone asked cannot be restored. Joining the whole store into a sub-call prompt was
+ * harmless while every entry was clipped to 400 characters and is not now: sixty full file reads would
+ * make a cheap check the most expensive call of the round.
  *
- * So they get the head of each. A reviewer deciding "is this enough evidence" reads the shape of what
+ * So it gets the head of each. A reviewer deciding "is this enough evidence" reads the shape of what
  * was gathered; it does not need the bodies, and it never did.
  */
 const REVIEW_FACT_CHARS = 400;
-/** How much of the turn's own input the progress check may read — a handoff is often most of it. */
-const JUDGE_TASK_CHARS = 2_000;
 const REVIEW_FACTS_MAX = 20;
 function factsForReview(): string[] {
   const all = [...gatheredFacts, ...evidenceFacts];
   return all.slice(-REVIEW_FACTS_MAX).map((f) => (
     f.length > REVIEW_FACT_CHARS ? `${f.slice(0, REVIEW_FACT_CHARS)} \u2026[head only]` : f
   ));
-}
-
-async function callJudge(task: string, facts: string[]): Promise<JudgeVerdict> {
-  if (facts.length === 0) return { confidence: 'low', reasoning: 'No facts gathered yet.' };
-
-  const factsText = facts.map((f, i) => `${i + 1}. ${f}`).join('\n\n');
-  /**
-   * THE WHOLE TASK, NOT ITS FIRST LINE — because the task is sometimes the evidence.
-   *
-   * A handoff workflow is the way a small window is made to work: investigate, write the findings,
-   * clear the context, paste them back and act. The judge was shown `task.split('\n')[0]`, so a
-   * three-page handoff arrived as one sentence, and the facts it weighed were only the ones gathered
-   * in THIS turn — `resetCounters` clears them at every user message. It therefore could not tell an
-   * agent that had been handed a finished investigation from one that had found nothing, rated low,
-   * and the harness told it to go and read. Reported from a live session as the model refusing to take
-   * a handoff on trust and re-investigating from scratch.
-   *
-   * Capped because a pasted handoff can be long and this is a cheap check that must stay cheap.
-   */
-  const prompt = getPrompt('judgeProgress', {
-    TASK: task.length > JUDGE_TASK_CHARS ? `${task.slice(0, JUDGE_TASK_CHARS)} \u2026[task truncated]` : task,
-    FACTS: factsText,
-  });
-
-  try {
-    const response = await llmChat([{ role: 'user', content: prompt }]);
-    const cleaned = response.trim();
-    // Parse JSON from response
-    const match = cleaned.match(/\{[^}]+\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]);
-      const conf = String(parsed.confidence || '').toLowerCase();
-      const reasoning = String(parsed.reasoning || '');
-      if (conf === 'high' || conf === 'mid' || conf === 'low') {
-        log('INFO', 'judge_verdict', { confidence: conf, reasoning, factCount: String(facts.length) });
-        return { confidence: conf, reasoning };
-      }
-    }
-    /**
-     * Fallback: look for keywords — IN THE PROSE, not in whatever markup came with it.
-     *
-     * The judge is a sub-call asking for one JSON object, and it is answered by a model that spends
-     * every other round emitting tool calls. When it answers this one the same way, no JSON matches
-     * above and the RAW reply became `reasoning` — which is printed verbatim into the progress line and
-     * fed back into the next prompt:
-     *
-     *     [progress: not there yet (4/4) — <function=read_file><parameter=path>…</parameter></function>]
-     *
-     * Reported by the operator, who read it as a tool that had failed to run. It never ran and was never
-     * going to: the judge holds no tools and is not in the loop. It is markup in a string, so it is
-     * stripped by the active dialect exactly as every other reply's markup is — this is the one reply
-     * path that never went through a parser.
-     *
-     * A reply that is NOTHING but a call leaves no prose, and saying so is the honest verdict. The
-     * keyword scan runs on the prose too, so a `MID` inside a file path no longer decides a verdict.
-     */
-    const judged = parseToolCalls(response);
-    const cleanedProse = judged.text.trim()
-      || (judged.toolCalls.length > 0 ? 'The judge replied with a tool call instead of a verdict.' : cleaned);
-    const upper = cleanedProse.toUpperCase();
-    if (upper.includes('HIGH')) return { confidence: 'high', reasoning: cleanedProse };
-    if (upper.includes('MID')) return { confidence: 'mid', reasoning: cleanedProse };
-    return { confidence: 'low', reasoning: cleanedProse };
-  } catch (err) {
-    log('ERROR', 'judge_error', { error: String(err) });
-    return { confidence: 'mid', reasoning: 'Judge call failed.' };
-  }
 }
 
 /**
@@ -686,7 +598,8 @@ function pushToWindow(role: string, content: string): void {
   // What survives is decided at build time, against the model actually loaded. This bound is memory.
   const cap = getWindowSize() > 0 ? getWindowSize() : WINDOW_HARD_MAX;
   while (conversationWindow.length > cap) {
-    conversationWindow.shift();
+    const i = conversationWindow.findIndex((m) => !m.pinned);
+    conversationWindow.splice(i === -1 ? 0 : i, 1);
   }
 }
 
@@ -938,52 +851,6 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     volatile += `Do not repeat these approaches. Try a different angle.\n`;
   }
 
-  // Judge verdict — routes the agent's next action
-  if (judgeVerdict?.confidence === 'high') {
-    volatile += `\n\nYour gathered facts are sufficient to produce a complete answer. Write your final output now.`;
-  // THE JUDGE MAY NOT DECLARE BANKRUPTCY WHILE THE ROUND BUDGET IS FULL.
-  //
-  // Its extension budget was counted independently of `maxRounds`, so "you are out of investigation
-  // budget" could arrive at round 23 of 55. Measured on a real run: the model had already written the
-  // correct root cause AND the correct one-line fix (`hlcode.strip()` in `visit_literal`), then closed
-  // with "the fix is not yet applied — investigation budget exhausted" and called finish() with 32
-  // rounds still available. A right answer, thrown away by a message about a budget that was not spent.
-  //
-  // Past three quarters of the rounds the message is true and worth sending; before that the judge is
-  // entitled to say what is missing (the branch below) but not to call time.
-  } else if (judgeVerdict && judgeExtensions >= MAX_JUDGE_EXTENSIONS && judgeRoundsGranted <= 0
-             && (!Number.isFinite(maxRounds) || round >= Math.floor(maxRounds * 0.75))) {
-    // The budget is spent. NOW wrapping up is right — and say why, so a partial answer is labelled as
-    // partial rather than presented as a conclusion.
-    volatile += `\n\nYou are out of investigation budget. Write up what you have, and say plainly which parts are unconfirmed. What was still missing: ${judgeVerdict.reasoning}`;
-  } else if (judgeVerdict?.confidence === 'low') {
-    /**
-     * A RATING'S RATIONALE IS NOT A READING LIST.
-     *
-     * `judgeProgress.txt` asks for a confidence and "one sentence why". What comes back is a sentence
-     * about absences it inferred from an evidence list — "has not read Enqueue, reviewed PERF-14109,
-     * traced callers" — and this line used to assert it as established fact and issue an order: "That
-     * is what is still missing — go and read it."
-     *
-     * The judge never sees the code. It sees the heads of gathered facts, so the things it names as
-     * missing are the things it could not see, which is not the same as the things the agent does not
-     * know. Handed an imperative, the agent works the list: observed verbatim mid-turn — *"The judge
-     * says I still need to read something. I'm missing OpenHook, Finish, Cancel, Capture, Restore,
-     * RaiseDeactivated, and OpenHideHook."* It then recovered its own judgement and took three, which
-     * is the behaviour this now asks for instead of getting by accident.
-     *
-     * The brake stays: a low verdict still means do not write the final answer yet. What changes is
-     * that it is a second opinion the agent may answer, not a checklist it must clear — the same rule
-     * the QA gate now follows, for the same reason.
-     */
-    volatile += `\n\nProgress check — a reviewer that has seen only the HEADS of your gathered facts, `
-      + `never the code: ${judgeVerdict.reasoning}\n`
-      + `Treat that as a second opinion, not a reading list. What it calls missing may be something it `
-      + `could not see rather than something you do not know — read what is genuinely still unknown, and `
-      + `if it is wrong about a point, say which in one line instead of reading to satisfy it. Either way, `
-      + `do not write the final answer while something it names is genuinely unknown.`;
-  }
-
   // What the corpus knows about THIS prompt. In the volatile block, never the prefix: it changes
   // every turn by definition, and the system message must stay byte-identical for the KV cache.
   const corpus = pendingCorpus();
@@ -1152,7 +1019,7 @@ export function dedupeRepeatedResults(window: Message[]): { count: number; dropp
   const last = window.length - VERBATIM_TAIL;
   for (let i = 0; i < last; i++) {
     const msg = window[i];
-    if (msg.role !== 'user' || !msg.content.startsWith('<tool_response>')) continue;
+    if (msg.role !== 'user' || !msg.content.startsWith('<tool_response>') || msg.pinned) continue;
     if (msg.content.length < DEDUPE_MIN_CHARS) continue;
     const at = firstSeen.get(msg.content);
     if (at === undefined) { firstSeen.set(msg.content, i); continue; }
@@ -1179,7 +1046,7 @@ export function compressOldest(window: Message[], fixedTokens: number, canonical
   let dropped = 0;
   for (let i = 0; i < last && total > target; i++) {
     const msg = window[i];
-    if (msg.role !== 'user' || !msg.content.startsWith('<tool_response>')) continue;
+    if (msg.role !== 'user' || !msg.content.startsWith('<tool_response>') || msg.pinned) continue;
     if (msg.content.length <= COMPRESS_TO_CHARS) continue;
     // The sole surviving copy of a result that later messages point AT. Truncating it would leave
     // those pointers aimed at a stub, which is the one way this pass could destroy more than it saves.
@@ -1192,8 +1059,7 @@ export function compressOldest(window: Message[], fixedTokens: number, canonical
     // call; the call returns the same bytes; the window fills further; this fires again. Say instead
     // what is true and what would actually help: repeating this call cannot produce anything new.
     msg.content = `${kept}\n\u2026 [truncated \u2014 the window was full. Repeating this exact call returns `
-      + `these same bytes. To see a DIFFERENT part, narrow it: around=<line> for a span, or a tighter `
-      + `grep pattern.]\n</tool_response>`;
+      + `these same bytes. The whole result is in the call list with its id; full_view <id> shows it whole.]\n</tool_response>`;
     total -= before - approxTokens(msg.content);
     dropped += was - msg.content.length;
     count++;
@@ -1255,7 +1121,8 @@ export function trimToContext(messages: Message[]): Message[] {
   const before = approxTokens(head.content) + total(rest);
   let dropped = 0;
   while (rest.length > 1 && approxTokens(head.content) + total(rest) > target) {
-    rest.shift();
+    const i = rest.findIndex((m) => !m.pinned);
+    rest.splice(i === -1 ? 0 : i, 1);
     dropped++;
   }
   if (dropped) {
@@ -1466,7 +1333,7 @@ const BARREN_NUDGE_EVERY = 8;
  * the whole point: the cheapest thing in this file, and the only one that cannot be thrown away.
  */
 interface RanCall {
-  tool: string; params: string; ok: boolean; file: string; bytes: number;
+  tool: string; params: string; ok: boolean; file: string; tokens: number;
   /** First lines of the output. */
   head: string[];
   /** Lines from the MIDDLE that name an error, an assertion or an exception. Empty when none matched. */
@@ -1487,7 +1354,7 @@ const callLedger: RanCall[] = [];
  * and the model re-ran a 6-second inspect for a file it already had. Only what is needed to fetch it is
  * kept: the call and its file, never the gist, which belongs to the turn that asked.
  */
-interface EarlierCall { tool: string; params: string; file: string; bytes: number }
+interface EarlierCall { tool: string; params: string; file: string; tokens: number }
 const earlierCalls: EarlierCall[] = [];
 /** Enough to reach back over a few questions; short enough to stay a footnote in the prompt. */
 const EARLIER_LINES = 12;
@@ -1500,7 +1367,7 @@ export function resetCallLedger(): void {
     // lines saying one thing.
     const already = earlierCalls.findIndex((e) => e.tool === c.tool && e.params === c.params);
     if (already !== -1) earlierCalls.splice(already, 1);
-    earlierCalls.push({ tool: c.tool, params: c.params, file: c.file, bytes: c.bytes });
+    earlierCalls.push({ tool: c.tool, params: c.params, file: c.file, tokens: c.tokens });
   }
   if (earlierCalls.length > EARLIER_LINES) earlierCalls.splice(0, earlierCalls.length - EARLIER_LINES);
   callLedger.length = 0;
@@ -1566,22 +1433,6 @@ let originalGoal = '';
  * report still outlives the process, which was the whole point of writing it down. Failing to write
  * one is never a reason to skip the restart: the report is evidence, not the mechanism.
  */
-/**
- * TOOLS WHOSE SAVED OUTPUT MUST NOT BE OFFERED BACK — re-running them is cheaper and better.
- *
- * The ledger tells the model that every result is also a file and to read that instead of running the
- * call again. Sound for `grep`, `explore`, `subagent`, a connector — seconds, a network hop, or the
- * whole tree. Wrong for a file read, and it predates the tools that make it wrong: re-running one is
- * milliseconds (measured in the live log at 3, 8 and 11 ms), and the SOURCE answers things the dump
- * cannot — `structure=true`, `around=`, `expand_method`, the read-before-edit guard, and line numbers
- * that address the file rather than a copy of a window onto it.
- *
- * Measured: 14 of 60 tool calls in one session went to artifacts, with the model paging them by
- * offset because {{CACHE}} told it offset and limit work there. They no longer do — an artifact comes
- * back verbatim — so advertising them was teaching an idiom that is now a no-op as well as a detour.
- */
-const NO_ARTIFACT_POINTER = new Set(['read_file', 'read_files', 'expand_method']);
-
 function reportPath(name: string): string {
   const dir = join(homedir(), '.ayin-cli', 'reports');
   mkdirSync(dir, { recursive: true });
@@ -1672,7 +1523,7 @@ export function noteRanCall(tool: string, params: string, ok: boolean, outcome: 
   callLedger.push({
     tool, params, ok, head, signal, tail, omitted,
     file: cached ? `${cached.id}-${cached.tool}.txt` : '',
-    bytes: cached?.bytes ?? 0,
+    tokens: cached ? tokenCount(outcome) : 0,
   });
 }
 
@@ -1756,7 +1607,7 @@ export function renderCallLedger(): string {
 
   const lines = callLedger.map((c, i) => {
     if (!listed.has(i)) return '';
-    const where = c.file && !NO_ARTIFACT_POINTER.has(c.tool) ? `  [${humanBytes(c.bytes)} → ${c.file}]` : '';
+    const where = c.file ? `  [${c.tokens} tokens → ${c.file.slice(0, c.file.indexOf('-'))}]` : '';
     const status = c.ok ? '' : 'FAILED: ';
     const call = `${i + 1}. ${c.tool}(${clipParams(c.params)})${where}`;
     const shown = detail.get(i);
@@ -1765,8 +1616,8 @@ export function renderCallLedger(): string {
     // times — 15k characters of it, measured.
     if (!shown) return `${call}${c.ok ? '' : '  FAILED'}`;
     // Indented under the call, so a reader — and a model — can tell the output from the next call.
-    const more = c.bytes && c.file && shown.length > 3 && !NO_ARTIFACT_POINTER.has(c.tool)
-      ? `\n     ... full output in ${c.file}`
+    const more = c.tokens && c.file && shown.length > 3
+      ? `\n     ... whole: full_view ${c.file.slice(0, c.file.indexOf('-'))}`
       : '';
     return `${call}\n   ${status}${shown.join('\n   ')}${more}`;
   });
@@ -1777,12 +1628,9 @@ export function renderCallLedger(): string {
       .concat(folded.length > LEDGER_TALLY_MAX ? [`  … and ${folded.length - LEDGER_TALLY_MAX} other distinct call(s)`] : [])
     : [];
   const head = lines.filter((l) => l !== '').concat(foldedLines);
-  // See NO_ARTIFACT_POINTER: a saved file read is not an answer worth returning to, so it is not
-  // offered as one. Re-reading the source is cheaper and gives back the tools the dump has lost.
-  const earlierWorthKeeping = earlierCalls.filter((c) => !NO_ARTIFACT_POINTER.has(c.tool));
-  const earlier = earlierWorthKeeping.length
-    ? `\nFrom earlier turns this session — the answers are still on disk, read the file rather than re-running:\n`
-      + earlierWorthKeeping.map((c) => `  ${c.file}  ${c.tool}(${c.params})  ${humanBytes(c.bytes)}`).join('\n')
+  const earlier = earlierCalls.length
+    ? `\nFrom earlier turns this session — the answers are still kept; full_view with the id shows one whole rather than re-running:\n`
+      + earlierCalls.map((c) => `  ${c.file.slice(0, c.file.indexOf('-'))}  ${c.tool}(${c.params})  ${c.tokens} tokens`).join('\n')
       + '\n'
     : '';
   return getPrompt('callLedger', {
@@ -1791,10 +1639,8 @@ export function renderCallLedger(): string {
     // Stated ONCE, because the same 80-character path on sixty lines is sixty times the cost for the
     // same fact. Empty when nothing has been cached, so the instruction never points at nothing.
     CACHE: hasArtifacts()
-      ? `\nA result that cost something to produce — a search, an exploration, a subagent, a connector —`
-        + ` is also a file in ${artifactSessionDir()}; read one with read_file instead of running that`
-        + ` call again. A file you have already READ is not on that list: read the source again, which`
-        + ` is faster and still answers structure=true, around= and expand_method.\n`
+      ? `\nEvery result is kept whole as a file in ${artifactSessionDir()} (t<id>-<tool>.txt): grep one to narrow`
+        + ` it; full_view with ids shows results whole. Do not read_file a saved result — it comes back clipped.\n`
       : '',
   });
 }
@@ -2120,6 +1966,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
   let pictureAsked = false;
   /** Set between asking for the picture and receiving it, so the next reply is read as the brief. */
   let awaitingPicture = false;
+  let fullViewServed = false;
   let deferralNudges = 0;
   let unwrittenClaimNudges = 0;
   /** "I'll rewrite that now." — announced, never acted. One nudge; see src/announced.ts. */
@@ -2350,6 +2197,9 @@ async function runAgentTurn(rawInput: string): Promise<void> {
     hasToolCalls = parsed.toolCalls.length > 0;
     if (hasToolCalls) { consecutiveText = 0; workingRetries = 0; }
 
+    const repliesToPicture = fullViewServed;
+    fullViewServed = false;
+
     /**
      * THE DIAGNOSIS HANDOVER — cut the round at the moment of insight and start the work clean.
      *
@@ -2393,7 +2243,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       }
       // Nothing worth passing on. Let the turn carry on rather than spend a child on two words.
       log('INFO', 'picture_unusable', { chars: String(brief.length) });
-    } else if (!pictureAsked && subagentsAllowed() && hasClearPicture(parsed.text ?? response)) {
+    } else if (!pictureAsked && !repliesToPicture && !hasToolCalls && subagentsAllowed() && hasClearPicture(parsed.text ?? response)) {
       pictureAsked = true;
       awaitingPicture = true;
       log('INFO', 'picture_detected', { round: String(round), hadToolCalls: String(hasToolCalls) });
@@ -3296,7 +3146,6 @@ async function runAgentTurn(rawInput: string): Promise<void> {
               // Reset round budget — give the model a fresh runway for the new direction
               round = Math.min(round, Math.floor(maxRounds * 0.5));
               totalToolCalls = 0;
-              judgeVerdict = null;
               log('INFO', 'critic_new_direction', { direction: newDirection, attempt: String(directions.length), roundReset: String(round) });
 
               if (HEADLESS) {
@@ -3562,7 +3411,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
         && params.path.startsWith(`${getArtifactsDir()}/`);
       // The path comes back so the clip can NAME it — see `clipForWindow`. Saving and then telling the
       // reader to re-run is the gap both of this session's reports called the biggest one.
-      const savedArtifact = readsAnArtifact ? null : saveArtifact(name, paramPreview, result);
+      const savedArtifact = readsAnArtifact || name === 'full_view' ? null : saveArtifact(name, paramPreview, result);
       // No copy means nothing new to name. Empty `where` makes the clip say "re-run narrowed" rather
       // than point the reader back at the very file it is already reading, which is the loop itself.
       const artifactPath = savedArtifact?.filepath ?? '';
@@ -3835,7 +3684,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
 
       // A `git diff` repeating after an edit is confirmation, not an echo — see `refuseIfEcho`.
       const stateCheck = name === 'bash' && typeof params.command === 'string' && isStateQuery(params.command);
-      const echo = refuseIfEcho(name, result, stateCheck, mutations);
+      const echo = refuseIfEcho(name, result, stateCheck, mutations, savedArtifact?.id);
       /**
        * EVERY EXECUTED CALL IS RECORDED HERE, refused or not — that is the change that matters.
        *
@@ -3859,9 +3708,12 @@ async function runAgentTurn(rawInput: string): Promise<void> {
        * so the model sees what the call returned AND that it has now seen it several times.
        */
       const nudgeNote = lostWhyNow ? lostNudge(lostWhyNow.why) : '';
+      if (name === 'full_view' && echo === null && !result.startsWith('Error:')) fullViewServed = true;
       const shaped = echo !== null
         ? { body: echo, suppressRepeatNote: true }
-        : shapeFileResult(name, params as Record<string, unknown>, result, clipForWindow(result, undefined, artifactPath), conversationWindow);
+        : name === 'full_view'
+          ? { body: getPrompt('fullView', { TASK: currentGoal, RESULTS: result }), suppressRepeatNote: true }
+          : shapeFileResult(name, params as Record<string, unknown>, result, clipForWindow(result, undefined, artifactPath), conversationWindow);
       if ((name === 'bash' || name === 'grep') && echo === null && !result.startsWith('Error:')) {
         const base = name === 'bash' && params.cwd ? resolveAgainstCwd(String(params.cwd)) : process.cwd();
         const named = name === 'bash'
@@ -3871,6 +3723,10 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       }
       const repeatNote = shaped.suppressRepeatNote ? '' : (guard.note ?? '');
       pushToWindow('user', renderToolResult(resultHead + shaped.body + repeatNote + editMissNote + nudgeNote));
+      if (name === 'full_view' && echo === null) {
+        for (const m of conversationWindow) m.pinned = false;
+        conversationWindow[conversationWindow.length - 1].pinned = true;
+      }
       pushMessage('assistant', `[tool: ${name}(${paramPreview})]`);
 
       // CTA just delivered — tell the model it's done. This prevents the
@@ -3895,7 +3751,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
         result.length > 20 &&
         !/^(0 matches|0 files match|Error:|Command exited)/.test(result)
       ) {
-        // A miss is not evidence: "0 matches" must not count as progress, or the judge is lied to in
+        // A miss is not evidence: "0 matches" must not count as progress, or the critic is lied to in
         // the other direction.
         // Whitespace is collapsed but the text is NOT cut here — `evidenceBlock` decides what fits,
         // and a fact cut to 400 characters before anyone asked is a fact that cannot be restored.
@@ -3903,30 +3759,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
         if (evidenceFacts.length > EVIDENCE_MAX) evidenceFacts.shift();
       }
 
-      // Judge gate — every JUDGE_INTERVAL tool calls, evaluate progress
       totalToolCalls++;
-      const shouldJudge = !isUnchained() && totalToolCalls > 0 &&
-        totalToolCalls % JUDGE_INTERVAL === 0 &&
-        judgeVerdict?.confidence !== 'high';
-
-      if (shouldJudge) {
-        addMessage('system', '[evaluating progress...]');
-        judgeVerdict = await callJudge(currentGoal, factsForReview());
-        log('INFO', 'judge_routed', { confidence: judgeVerdict?.confidence || 'unknown', totalTools: String(totalToolCalls) });
-
-        const wantsMore = judgeVerdict?.confidence === 'mid' || judgeVerdict?.confidence === 'low';
-        if (wantsMore && judgeExtensions < MAX_JUDGE_EXTENSIONS) {
-          judgeExtensions++;
-          judgeRoundsGranted = 5;
-          const label = judgeVerdict?.confidence === 'mid' ? 'on track' : 'not there yet';
-          addMessage('system', `[progress: ${label} (${judgeExtensions}/${MAX_JUDGE_EXTENSIONS}) — ${judgeVerdict?.reasoning}]`);
-        } else if (wantsMore) {
-          addMessage('system', `[progress: out of extensions — wrapping up. ${judgeVerdict?.reasoning}]`);
-        }
-      }
-
-      // Count down granted rounds for mid-confidence
-      if (judgeRoundsGranted > 0) judgeRoundsGranted--;
     }
 
     triggerSync();

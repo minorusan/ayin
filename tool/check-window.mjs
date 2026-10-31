@@ -176,14 +176,14 @@ startArtifactSession(`check-window-${process.pid}`);
 saveArtifact('grep', 'pattern=Widget', 'x'.repeat(4096));
 noteRanCall('grep', 'pattern=Widget', true, 'Assets/Widget.cs:12: Widget;');
 const withFile = renderCallLedger();
-if (!/t\d+-grep\.txt/.test(withFile)) fail('the ledger does not name the file holding the full result');
-if (!/4\.0 KB/.test(withFile)) fail('the ledger does not say how big that result is — the reader cannot decide against reading it');
+if (!/→ t\d+\b/.test(withFile)) fail('the ledger does not name the id holding the full result');
+if (!/\d+ tokens → t\d+\b/.test(withFile)) fail('the ledger does not say how big that result is in tokens — the reader cannot decide what fits');
 if (!withFile.includes(artifactSessionDir())) fail('the cache folder is not stated anywhere in the ledger');
 if ((withFile.match(new RegExp(artifactSessionDir().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length !== 1) {
   fail('the folder is repeated per line — it must be stated once, not sixty times');
 }
 noteRanCall('read_file', 'path=NeverRan.cs', false, 'ENOENT');
-if (/NeverRan\.cs\)[^\n]*\[.* KB/.test(renderCallLedger())) fail('a call with no cached result was given a file anyway');
+if (/NeverRan\.cs\)[^\n]*\[\d+ tokens/.test(renderCallLedger())) fail('a call with no cached result was given a file anyway');
 
 /**
  * THE MAP MUST SURVIVE THE TURN BOUNDARY.
@@ -195,7 +195,7 @@ if (/NeverRan\.cs\)[^\n]*\[.* KB/.test(renderCallLedger())) fail('a call with no
 resetCallLedger();
 const nextTurn = renderCallLedger();
 if (!/From earlier turns this session/.test(nextTurn)) fail('the cache map did not survive the turn boundary');
-if (!/t\d+-grep\.txt/.test(nextTurn)) fail('the carried entry does not name its file');
+if (!/\bt\d+\s+grep\(/.test(nextTurn)) fail('the carried entry does not name its id');
 if (/Assets\/Widget\.cs:12/.test(nextTurn)) fail('the gist was carried too — that belonged to the turn that asked');
 if (!/nothing yet in this turn/.test(nextTurn)) fail('the empty current turn is not stated, so the list reads as this turn\'s work');
 resetSessionLedger();
