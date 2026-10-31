@@ -2415,15 +2415,12 @@ async function runAgentTurn(rawInput: string): Promise<void> {
 
       if (touchedAnythingThisTurn() && !stopAwaitingOperator() && !replyIsTheAnswer(parsed.text ?? response)) {
         workingRetries++;
-        // The transcript keeps it, and so does the model's context, under the nudge that asks for the
-        // call: an identical re-ask of a near-deterministic model is the loop the restart below exists
-        // to break, and three of them in ten seconds wiped a working window (measured, keras-22642).
-        recordRaw(round, 'no tool call while working — nudged for the call, step retried', response);
+        // The transcript keeps it; the model's context does not. "Why did it stop there" stays
+        // answerable tomorrow without the failed round shaping the next one.
+        recordRaw(round, 'no tool call while working — round discarded, step retried', response);
         log('INFO', 'working_retry', {
           attempt: String(workingRetries), round: String(round), toolsRun: String(toolsRunThisTurn),
         });
-        pushToWindow('assistant', parsed.text ?? response);
-        pushToWindow('user', getPrompt('announcedNudge'));
         /**
          * A ROUND THAT MADE NO CALL IS STILL A ROUND THAT DID NOTHING — and the clap could not see it.
          *

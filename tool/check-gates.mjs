@@ -895,9 +895,9 @@ console.log('\nfinish() is the only exit, and it carries the answer');
   ok(/touchedAnythingThisTurn\(\) && !stopAwaitingOperator\(\)[\s\S]{0,300}?workingRetries\+\+/.test(agentSrc),
     'a working turn DISCARDS a tool-less reply and retries the step instead of ending');
   const discardAt = agentSrc.indexOf('workingRetries++');
-  const block = agentSrc.slice(discardAt, discardAt + 900);
-  ok(/pushToWindow\('user', getPrompt\('announcedNudge'\)\)/.test(block),
-    'and asks for the call under the kept reply — a silent identical re-ask is the determinism loop (measured: three in ten seconds, then a wiped window)');
+  const block = agentSrc.slice(discardAt, discardAt + 600);
+  ok(!/pushToWindow/.test(block),
+    'and pushes NOTHING to the window — a discarded round leaves no trace to negotiate with');
   ok(!/hasFinalMarker|stripFinalMarker|markerWorthEnforcing/.test(agentSrc),
     'and no trace of the marker contract survives in the loop');
   const sys = readFileSync(join(DIST, '..', 'prompts', 'ayin', 'system.txt'), 'utf-8');
