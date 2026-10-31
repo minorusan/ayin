@@ -35,6 +35,7 @@ import { addMessage, setAgentStatus, setAgentState, setStatus, showAlert, HEADLE
 import { theme } from './ui/theme.js';
 import { log } from './log.js';
 import { tokenCount } from './tokenizer.js';
+import { parseIds, renderFullView } from './tools/defs/full_view.js';
 import { shapeFileResult, resetFileViews } from './file-view.js';
 import { grepRewrite } from './bash-to-grep.js';
 import { skepticInjection, inSkepticPass, closeSkepticPass, resetSkepticPass, resetSkepticRun, beginVerifyTurn, tickSkepticPass, verifyAttempts, verifyBudgetSpent } from './skeptic-pass.js';
@@ -1527,6 +1528,20 @@ export function noteRanCall(tool: string, params: string, ok: boolean, outcome: 
   });
 }
 
+const SHEET_SHARE = 0.6;
+const VERIFY_TURNS_MAX = 4;
+const MENU_PARAM_CHARS = 120;
+
+function renderLedgerMenu(): string {
+  const clip = (p: string): string => {
+    const flat = p.replace(/\s+/g, ' ').trim();
+    return flat.length > MENU_PARAM_CHARS ? `${flat.slice(0, MENU_PARAM_CHARS - 1)}…` : flat;
+  };
+  return callLedger.filter((c) => c.file).map((c) =>
+    `${c.file.slice(0, c.file.indexOf('-'))}  ${c.tool}(${clip(c.params)})  ${c.tokens} tokens${c.ok ? '' : '  FAILED'}`,
+  ).join('\n');
+}
+
 /** The ledger as prompt text, or '' when nothing has run yet. Exported for `check:window`. */
 export function renderCallLedger(): string {
   if (callLedger.length === 0 && earlierCalls.length === 0) return '';
@@ -1967,6 +1982,8 @@ async function runAgentTurn(rawInput: string): Promise<void> {
   /** Set between asking for the picture and receiving it, so the next reply is read as the brief. */
   let awaitingPicture = false;
   let fullViewServed = false;
+  let verifyAsked = false;
+  let verifyTurns = 0;
   let deferralNudges = 0;
   let unwrittenClaimNudges = 0;
   /** "I'll rewrite that now." — announced, never acted. One nudge; see src/announced.ts. */
@@ -2195,6 +2212,24 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       continue;
     }
     hasToolCalls = parsed.toolCalls.length > 0;
+    if (verifyAsked) {
+      verifyAsked = false;
+      const viewCalls = hasToolCalls && parsed.toolCalls.every((c) => c.name === 'full_view');
+      const ids = viewCalls
+        ? parseIds(parsed.toolCalls.map((c) => String(c.params.ids ?? '')).join(' '))
+        : hasToolCalls ? [] : parseIds(parsed.text ?? response);
+      if (ids.length) {
+        const sheet = renderFullView(ids, SHEET_SHARE);
+        log('INFO', 'call_of_truth', { ids: ids.join(','), chars: String(sheet.length), round: String(round) });
+        addMessage('system', `[call of truth: ${ids.join(', ')} on a clean sheet]`);
+        conversationWindow.length = 0;
+        pushToWindow('user', getPrompt('fullView', { TASK: currentGoal, RESULTS: sheet }));
+        conversationWindow[conversationWindow.length - 1].pinned = true;
+        fullViewServed = true;
+        continue;
+      }
+      log('INFO', 'verify_turn_declined', { round: String(round), hadToolCalls: String(hasToolCalls) });
+    }
     if (hasToolCalls) { consecutiveText = 0; workingRetries = 0; }
 
     const repliesToPicture = fullViewServed;
@@ -2410,6 +2445,24 @@ async function runAgentTurn(rawInput: string): Promise<void> {
           'That said you WILL write it; it did not write it. Nothing was performed and nobody can read a '
           + 'preamble. You have the material — write the report itself NOW, in full, in your next reply, '
           + 'with no sentence about being about to.'));
+        continue roundLoop;
+      }
+
+      if (!verifyAsked && verifyTurns < VERIFY_TURNS_MAX && callLedger.some((c) => c.file)
+          && touchedAnythingThisTurn() && !stopAwaitingOperator() && !replyIsTheAnswer(parsed.text ?? response)) {
+        verifyAsked = true;
+        verifyTurns++;
+        recordRaw(round, 'no tool call while working — verify turn: pick results or keep investigating', response);
+        log('INFO', 'verify_turn', { round: String(round), toolsRun: String(toolsRunThisTurn), nth: String(verifyTurns) });
+        addMessage('system', '[verify: pick the results to decide from, or keep investigating]');
+        pushToWindow('assistant', parsed.text ?? response);
+        pushMessage('assistant', parsed.text ?? response);
+        pushToWindow('user', getPrompt('verifyTurn', {
+          TASK: currentGoal,
+          CONTEXT_TOKENS: String(activeContextTokens() || CONSERVATIVE_CONTEXT),
+          BUDGET: String(Math.floor((activeContextTokens() || CONSERVATIVE_CONTEXT) * SHEET_SHARE)),
+          CALLS: renderLedgerMenu(),
+        }));
         continue roundLoop;
       }
 

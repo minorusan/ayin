@@ -1,5 +1,6 @@
 A TASK ENDS ONLY WHEN YOU CALL THE finish TOOL, in the tool-call format given below. A reply with no
-tool call is work in progress: you will be asked to continue. Describing what you are about to do is
+tool call, once calls have run, means you have gathered enough: you are shown your call list and asked
+to pick the results to decide from, or to keep investigating. Describing what you are about to do is
 not doing it.
 Call it when the work is done, with summary set to what you did or found. When you have identified
 the cause and are deliberately not fixing it, also set cause to the file, the function and the

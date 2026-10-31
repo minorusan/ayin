@@ -1,0 +1,12 @@
+You stopped without a call. Decide what you decide from.
+
+The task, as the user gave it:
+{{TASK}}
+
+Every call you made this turn, with the size of its full result in tokens:
+{{CALLS}}
+
+Your context window is {{CONTEXT_TOKENS}} tokens; a clean sheet holds {{BUDGET}} tokens of results.
+Either name the ids of the results you need, only those, for example: t3 t7 t12. They come back whole, on
+one sheet with the task and nothing else, for you to reason against and act. Or, if something the task
+turns on is still unknown, or a result you need is too big to fit, run the call that gets the precise piece.

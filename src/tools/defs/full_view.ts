@@ -14,11 +14,20 @@ export const tool: Tool = {
     { name: 'ids', type: 'string', description: 'Result ids from the call list, space or comma separated, e.g. "t3 t7"', required: true },
   ],
   async execute(params) {
-    const raw = params.ids ?? '';
-    const ids = [...new Set((raw.match(/\bt?\d{1,4}\b/g) ?? []).map((x) => (x.startsWith('t') ? x : `t${x}`)))];
+    const ids = parseIds(params.ids ?? '');
     if (!ids.length) return 'Error: ids required, e.g. t3 t7';
+    return renderFullView(ids);
+  },
+};
+
+export function parseIds(raw: string): string[] {
+  return [...new Set((raw.match(/\bt?\d{1,4}\b/g) ?? []).map((x) => (x.startsWith('t') ? x : `t${x}`)))];
+}
+
+export function renderFullView(ids: string[], share = BUDGET_SHARE): string {
+  {
     const all = getSessionArtifacts();
-    const budget = Math.floor((activeContextTokens() || CONTEXT_FALLBACK) * BUDGET_SHARE);
+    const budget = Math.floor((activeContextTokens() || CONTEXT_FALLBACK) * share);
     let spent = 0;
     const shown: string[] = [];
     const missing: string[] = [];
@@ -40,5 +49,5 @@ export const tool: Tool = {
     }
     const out = [...shown, ...notes].join('\n\n');
     return out || 'Error: nothing to show';
-  },
-};
+  }
+}

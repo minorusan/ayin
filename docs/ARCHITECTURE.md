@@ -842,6 +842,18 @@ still above, which after compression they were not. A full view's own output is 
 so the ledger never offers a view of a view. Nothing forces the view and nothing in the loop ends an
 investigation but the round cap.
 
+**The verify turn and the call of truth.** A reply with no tool call, once calls have run this turn, is
+read as "I have gathered enough" — measured on a 40k-context Qwen, 18 of 52 replies in one run ended
+at "Let me check X:" with nothing eaten in transit; the model simply stopped. Discarding that reply and
+re-asking the identical prompt bought 16 wasted rounds and three restarts; nudging it bought more prose.
+So the reply is kept and answered with the **verify turn** (`prompts/ayin/verifyTurn.txt`): the task,
+the turn's call list with each result's size in tokens, the window size and the sheet budget, and one
+question — name the ids you decide from, or run the call that gets the precise piece. Ids in prose or a
+`full_view` call are the selection; any other call is investigation and the ledger grows. On a selection
+the window is cleared and the chosen results come back whole on one pinned sheet with the task and
+nothing else (`fullView.txt`, 60% of the window), the **call of truth** the model reasons against and
+acts from. At most 4 verify turns per turn; past that the tool-less reply falls to the discard below.
+
 It replaces the progress judge: a side call asking for a JSON verdict every 5 tool calls, which a
 tool-calling model answered with a tool call. Measured on six SWE-rebench tasks with qwen3.8:27b, every
 check came back unusable, each still spent one of four extensions, and the fifth forced a wrap-up on runs
@@ -1628,9 +1640,11 @@ the work and the scaffold IS its first act) and on the plan path only **after** 
 
 #### A question's answer is not "no tool call while working"
 
-The round loop discards a text-only reply when a tool has already run this turn, on the grounds that
-narrating is not working. That rule was earned — six of six empty-patch runs ended on a narrated
-intention — and its proxy is "did a tool run?".
+Before any of this, a text-only reply after calls have run opens the verify turn (see "The verify turn
+and the call of truth" above); what follows applies once its budget is spent. The round loop discards a
+text-only reply when a tool has already run this turn, on the grounds that narrating is not working.
+That rule was earned — six of six empty-patch runs ended on a narrated intention — and its proxy is
+"did a tool run?".
 
 The proxy is backwards for a question. Questions are precisely the turns that run tools first and
 then have nothing left to do but answer. Measured: asked to explore this Unity project and say how

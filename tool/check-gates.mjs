@@ -1696,6 +1696,8 @@ ok(/!repliesToPicture/.test(code), 'the reply to a full view is not handed off a
 ok(/!repliesToPicture && !hasToolCalls && subagentsAllowed\(\)/.test(code), 'a finding followed by tool calls is left to run, not cut for a handover');
 ok((code.match(/\|\| msg\.pinned\) continue;/g) ?? []).length === 2 && /findIndex\(\(m\) => !m\.pinned\)/.test(code),
   'the pinned full view is passed over by compression, dedupe, eviction and the message cap');
+ok(/getPrompt\('verifyTurn'/.test(code) && /conversationWindow\.length = 0;\s*\n\s*pushToWindow\('user', getPrompt\('fullView'/.test(code),
+  'a tool-less reply mid-work opens the verify turn, and the chosen results come back on a clean sheet');
 ok(existsSync(join(DIST, '..', 'src', 'tools', 'defs', 'full_view.ts')), 'full_view is a tool the model calls');
 const systemTxt = readFileSync(join(DIST, '..', 'prompts', 'ayin', 'system.txt'), 'utf-8');
 ok(/\{\{CONTEXT_TOKENS\}\}/.test(systemTxt) && /full_view/.test(systemTxt), 'the system prompt states the window and names full_view');
