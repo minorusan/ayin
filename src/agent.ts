@@ -1984,6 +1984,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
   let fullViewServed = false;
   let verifyAsked = false;
   let verifyTurns = 0;
+  let sheetIds: string[] = [];
   let deferralNudges = 0;
   let unwrittenClaimNudges = 0;
   /** "I'll rewrite that now." — announced, never acted. One nudge; see src/announced.ts. */
@@ -2219,9 +2220,10 @@ async function runAgentTurn(rawInput: string): Promise<void> {
         ? parseIds(parsed.toolCalls.map((c) => String(c.params.ids ?? '')).join(' '))
         : hasToolCalls ? [] : parseIds(parsed.text ?? response, false);
       if (ids.length) {
-        const sheet = renderFullView(ids, SHEET_SHARE);
-        log('INFO', 'call_of_truth', { ids: ids.join(','), chars: String(sheet.length), round: String(round) });
-        addMessage('system', `[call of truth: ${ids.join(', ')} on a clean sheet]`);
+        sheetIds = [...new Set([...sheetIds, ...ids])];
+        const sheet = renderFullView(sheetIds, SHEET_SHARE);
+        log('INFO', 'call_of_truth', { ids: sheetIds.join(','), added: ids.join(','), chars: String(sheet.length), round: String(round) });
+        addMessage('system', `[call of truth: ${sheetIds.join(', ')} on a clean sheet]`);
         conversationWindow.length = 0;
         pushToWindow('user', getPrompt('fullView', { TASK: currentGoal, RESULTS: sheet }));
         conversationWindow[conversationWindow.length - 1].pinned = true;
@@ -2461,6 +2463,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
           TASK: currentGoal,
           CONTEXT_TOKENS: String(activeContextTokens() || CONSERVATIVE_CONTEXT),
           BUDGET: String(Math.floor((activeContextTokens() || CONSERVATIVE_CONTEXT) * SHEET_SHARE)),
+          SHEET: sheetIds.length ? sheetIds.join(', ') : '(nothing yet)',
           CALLS: renderLedgerMenu(),
         }));
         continue roundLoop;

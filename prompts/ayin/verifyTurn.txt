@@ -6,7 +6,10 @@ The task, as the user gave it:
 Every call you made this turn, with the size of its full result in tokens:
 {{CALLS}}
 
-Your context window is {{CONTEXT_TOKENS}} tokens; a clean sheet holds {{BUDGET}} tokens of results.
-Either name the ids of the results you need, only those, for example: t3 t7 t12. They come back whole, on
-one sheet with the task and nothing else, for you to reason against and act. Or, if something the task
-turns on is still unknown, or a result you need is too big to fit, run the call that gets the precise piece.
+Already on your sheet, kept whole: {{SHEET}}
+
+Your context window is {{CONTEXT_TOKENS}} tokens; the sheet holds {{BUDGET}} tokens of results.
+Either name the ids to add to the sheet, for example: t3 t7 t12. Ids only: describing a result does not
+fetch it. The sheet then comes back whole, with the task and nothing else, for you to reason against and
+act. Or, if something the task turns on is still unknown, or a result you need is too big to fit, run the
+call that gets the precise piece.

@@ -852,7 +852,12 @@ question — name the ids you decide from, or run the call that gets the precise
 `full_view` call are the selection; any other call is investigation and the ledger grows. On a selection
 the window is cleared and the chosen results come back whole on one pinned sheet with the task and
 nothing else (`fullView.txt`, 60% of the window), the **call of truth** the model reasons against and
-acts from. At most 4 verify turns per turn; past that the tool-less reply falls to the discard below.
+acts from. The sheet accumulates: a later selection adds to it and nothing chosen is dropped, because a
+sheet that forgot the last one sent the model back to re-investigate on the clock — measured, a second
+sheet of one small result after ten rounds of probing. The verify prompt names what is on the sheet
+already and says that only ids fetch, since "the full GroupQueryAttention class" in words fetched
+nothing twice in a row. At most 4 verify turns per turn; past that the tool-less reply falls to the
+discard below.
 
 It replaces the progress judge: a side call asking for a JSON verdict every 5 tool calls, which a
 tool-calling model answered with a tool call. Measured on six SWE-rebench tasks with qwen3.8:27b, every
