@@ -20,8 +20,9 @@ export const tool: Tool = {
   },
 };
 
-export function parseIds(raw: string): string[] {
-  return [...new Set((raw.match(/\bt?\d{1,4}\b/g) ?? []).map((x) => (x.startsWith('t') ? x : `t${x}`)))];
+export function parseIds(raw: string, bareNumbers = true): string[] {
+  const re = bareNumbers ? /\bt?\d{1,4}\b/g : /\bt\d{1,4}\b/g;
+  return [...new Set((raw.match(re) ?? []).map((x) => (x.startsWith('t') ? x : `t${x}`)))];
 }
 
 export function renderFullView(ids: string[], share = BUDGET_SHARE): string {

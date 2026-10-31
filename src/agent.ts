@@ -2217,7 +2217,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
       const viewCalls = hasToolCalls && parsed.toolCalls.every((c) => c.name === 'full_view');
       const ids = viewCalls
         ? parseIds(parsed.toolCalls.map((c) => String(c.params.ids ?? '')).join(' '))
-        : hasToolCalls ? [] : parseIds(parsed.text ?? response);
+        : hasToolCalls ? [] : parseIds(parsed.text ?? response, false);
       if (ids.length) {
         const sheet = renderFullView(ids, SHEET_SHARE);
         log('INFO', 'call_of_truth', { ids: ids.join(','), chars: String(sheet.length), round: String(round) });
