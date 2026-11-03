@@ -45,8 +45,14 @@ const MAX_CHARS = 600;
  */
 const PROMISE = new RegExp([
   // English: I'll / let me / I am going to / one moment …
-  String.raw`\b(?:i(?:'m| am)\s+going\s+to|i'?ll|i\s+will|let\s+me|allow\s+me\s+to|give\s+me\s+a\s+(?:second|moment|minute))\b`,
+  String.raw`\b(?:i(?:'m| am)\s+going\s+to|i'?ll|i\s+will|let\s+me(?!\s+know\b)|allow\s+me\s+to|give\s+me\s+a\s+(?:second|moment|minute))\b`,
   String.raw`\b(?:one\s+(?:second|moment)|hold\s+on|stand\s+by|coming\s+right\s+up)\b`,
+  // A stated NEED is the same promise in other words — the dense qwen3.8 phrasing (2026-11-02,
+  // sessions 7db5c2e1 + 40017efd): "Now I need: how `chatOnce` is called…", "I need to see how…".
+  // The MoE said "Let me", so the list never had to know this. NOT "I need you…" (that asks the
+  // operator, and asking must end the turn) and not "needed" (\b fails mid-word: a past report).
+  String.raw`\bi\s+(?:still\s+|now\s+|also\s+|first\s+)?need(?!\s+(?:you|your)\b)\b`,
+  String.raw`\bi\s+(?:have|want)\s+to\s+(?:see|check|read|look|find|inspect|verify|confirm|understand|review)\b`,
   // Russian / Ukrainian. NO `\b` HERE, deliberately: JavaScript's word boundary is ASCII-only, so
   // `\bсейчас\b` never matches — there is no boundary between the start of a string and a Cyrillic
   // letter as far as `\b` is concerned. Every Cyrillic case in the gate failed on exactly that.
@@ -56,6 +62,7 @@ const PROMISE = new RegExp([
   String.raw`(?<!\p{L})я\s+(?:сейчас\s+|зараз\s+)?(?:созда|напиш|перепиш|сдела|провер|запущ|добав|исправ|поищ|гляну|подивл|перевір)`,
   String.raw`(?<!\p{L})(?:погоди|подожди|зачекай|секунд|хвилин)`,
   String.raw`(?<!\p{L})(?:попробую|спробую|подивлюся|посмотрю)`,
+  String.raw`(?<!\p{L})(?:мне\s+(?:ещё\s+|еще\s+)?(?:нужно|надо)|мені\s+(?:ще\s+)?(?:треба|потрібно))(?!\p{L})`,
 ].join('|'), 'iu');
 
 /**
@@ -73,13 +80,47 @@ function deliversInline(sentence: string): boolean {
   return /:\s*\S/.test(sentence) || /```/.test(sentence);
 }
 
+/**
+ * What the reply said OUTSIDE its promises — the only place an anchor proves delivery.
+ *
+ * "Before the last sentence" was the old boundary, and a plan walks straight through it. Measured
+ * 2026-11-02 (session 3afb5f37): "I have all the evidence I need. Let me now create it properly:
+ * 1. Create `backend/src/tasks/dreamDiary.ts` … 4. Update `docs/TOOLS.md`. Let me first check …:"
+ * The paths are the OBJECTS of a promise, but they sat before the LAST one, so the reply counted as a
+ * delivered report, the turn ended, and every "go on" reproduced it verbatim — three times.
+ *
+ * So: a list introduced by a promise ending in ":" belongs to that promise, and promise sentences
+ * themselves are dropped. Whatever is left is what was actually said — "Let me explain. The bug is
+ * at foo.ts:31. I'll fix it next." keeps its anchor, a to-do list of paths does not.
+ */
+const LIST_ITEM = /^\s*(?:\d+[.)]|[-*•])\s+/;
+function outsidePromises(text: string): string {
+  const kept: string[] = [];
+  let inPromisedList = false;
+  for (const line of text.split('\n')) {
+    if (inPromisedList && (!line.trim() || LIST_ITEM.test(line))) continue;
+    inPromisedList = false;
+    kept.push(line);
+    const t = line.trim();
+    if (t.endsWith(':') && PROMISE.test(lastSentence(t))) inPromisedList = true;
+  }
+  return kept.join('\n').split(SENTENCE_SPLIT).filter((p) => !PROMISE.test(p)).join(' ');
+}
+
+/**
+ * Sentence boundary — NOT after "e.g." / "i.e." / "etc." / "vs." / "cf.". A model listing what it will
+ * read writes "(e.g. `diary/photo.ts`)" and the old split made THAT the last sentence, so a promise
+ * whose tail held an example read as a report and ended the turn (session 40017efd).
+ */
+const SENTENCE_SPLIT = /(?<=[.!?…])(?<!\b(?:e\.g|i\.e|etc|vs|cf)\.)\s+/i;
+
 /** The last non-empty sentence, which is the only one this check looks at. */
 function lastSentence(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) return '';
   // Split on sentence enders followed by whitespace, keeping it crude on purpose: a model's punctuation
   // is not reliable enough to justify a parser, and the fallback (the whole reply) is the safe one.
-  const parts = trimmed.split(/(?<=[.!?…])\s+/).map((p) => p.trim()).filter(Boolean);
+  const parts = trimmed.split(SENTENCE_SPLIT).map((p) => p.trim()).filter(Boolean);
   return parts.length ? parts[parts.length - 1] : trimmed;
 }
 
@@ -111,8 +152,7 @@ export function announcedWithoutActing(text: string, didWork: boolean): boolean 
    * OBJECT of the promise, not evidence that anything was done. Testing the reply as a whole gets that
    * backwards, which is what the gate caught.
    */
-  const before = trimmed.slice(0, trimmed.length - last.length);
-  return !hasConcreteAnchor(before);
+  return !hasConcreteAnchor(outsidePromises(trimmed));
 }
 
 /**
@@ -252,6 +292,37 @@ export function promisesTheReportItself(text: string): boolean {
   return /\b(report|write\s+(?:it|this|that|them)?\s*up|summar(?:y|ise|ize)|findings|answer|conclusion|verdict|assessment|feedback|write-?up)\b/i.test(last);
 }
 
+/**
+ * Does the LAST sentence promise something? No anchor exemption — the caller decides when "it
+ * delivered first" cannot apply: on a turn that has already EDITED, an anchor before the promise is
+ * work in progress, not a delivered answer. Measured (dense qwen3.8): "The dream.ts file looks good.
+ * Now I need to register it in registry.ts — add the import…" ended the turn, because `dream.ts` read
+ * as delivery and nothing had classified the turn as a build.
+ */
+export function endsOnPromise(text: string): boolean {
+  const last = lastSentence(text ?? '');
+  return !!last && PROMISE.test(last) && !promisesTheReportItself(text);
+}
+
+/**
+ * A reply whose last character is a colon introduced something it never wrote. Never an answer, on any
+ * turn. Measured (dense qwen3.8, session 6c36b7f6): "First, the tool file:" — 7 tokens, then end of
+ * turn, accepted as the final answer because it carried no promise word.
+ */
+export function endsDangling(text: string): boolean {
+  const t = (text ?? '').trim();
+  if (/:\s*$/.test(t)) return true;
+  // A HEADING WITH NOTHING UNDER IT. Measured (dense qwen3.8, session d08c605d): "Now I'll make all four
+  // fixes. Let me do them in sequence.\n\n**Fix 1: `renderRecord` — drop the `###` line (fix 3)**" — the
+  // last line titles a section that was never written. A final line that is only a markdown heading or
+  // only a bold label opens content; it cannot close it. One line of the reply alone is not judged.
+  const lines = t.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 2) return false;
+  const last = lines[lines.length - 1];
+  // A bold SENTENCE ("**Typecheck passes.**") is a conclusion, not a title — punctuation tells them apart.
+  return /^#{1,6}\s+\S/.test(last) || /^\*\*[^*].*[^.!?]\*\*:?$/.test(last) || /^__[^_].*[^.!?]__:?$/.test(last);
+}
+
 export function reportsRatherThanPromises(text: string): boolean {
   const trimmed = (text ?? '').trim();
   if (!trimmed) return false;
@@ -280,5 +351,5 @@ export function announcesNextAction(text: string): boolean {
   if (!trimmed || trimmed.length > MAX_CHARS) return false;
   const last = lastSentence(trimmed);
   if (!last || !PROMISE.test(last)) return false;
-  return !hasConcreteAnchor(trimmed.slice(0, trimmed.length - last.length));
+  return !hasConcreteAnchor(outsidePromises(trimmed));
 }

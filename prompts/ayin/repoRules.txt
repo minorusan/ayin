@@ -1,0 +1,5 @@
+<rules>
+This repository's own rules. They override every default below. Before an edit, a command or a reply, check it against them; when a rule names a file to read first, read it first.
+
+{{RULES}}
+</rules>

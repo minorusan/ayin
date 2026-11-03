@@ -410,6 +410,17 @@ console.log(`check-window: OK — trimmed to ${after}/${budget} tokens, ${headro
 console.log(`             compression: ${quiet.count} cuts when it fits, ${cut.count} when it does not (${cut.dropped} chars)`);
 console.log(`             ledger: ${lines.length} lines rendered from 300 calls, newest kept`);
 
+// The volatile turn survives eviction (session 7db5c2e1): one huge tool_response must not be the
+// only message left — Qwen's template rejects a prompt with no user query (HTTP 500).
+{
+  const vol = { role: 'user', content: '<session-context>\n[Round 14.]\n</session-context>' };
+  const ms = [msg('system', 3000), msg('user', 900), msg('assistant', 300), tr(budget * CPT * 0.65), vol];
+  const out = trimToContext(ms);
+  if (out[out.length - 1] !== vol) fail('the volatile turn was evicted — the prompt can end up with no user query');
+  if (!out.some((m) => m.role === 'user' && !m.content.startsWith('<tool_response>'))) fail('no user query left after trim');
+  console.log(`             volatile turn kept through a ${out.length}-message trim`);
+}
+
 // Exit explicitly: importing the agent drags in modules that hold the event loop open (the blessed
 // screen, a keep-alive HTTP pool). A gate that hangs is a gate that gets deleted.
 process.exit(0);

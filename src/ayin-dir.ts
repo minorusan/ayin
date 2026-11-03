@@ -10,7 +10,8 @@
  *     <repo>/.ayin/plans/ayin-plan-<ts>.md          the plan, and one file per phase
  *     <repo>/.ayin/reports/AYIN-REPORT-<KIND>-<ts>.md   what `ayin watch` produced
  *
- * IT IGNORES ITSELF. `ensureAyinDir` drops a `.gitignore` containing `*` inside `.ayin/`, so the
+ * IT IGNORES ITSELF — except `ayin.md`, the repo's rules (rules.ts), which its owners commit.
+ * `ensureAyinDir` drops a `.gitignore` containing `*` and `!ayin.md` inside `.ayin/`, so the
  * directory and everything under it is invisible to git without touching the operator's own
  * `.gitignore`. That is deliberate and is the opposite of the choice made for `.naamah/`: a design is
  * reviewed, so it belongs in the diff, whereas a plan is one turn's working note and there is a new
@@ -21,7 +22,7 @@
  * said so, and this is a default, not a policy.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './log.js';
 
@@ -47,8 +48,13 @@ const GITIGNORE = `# ayin's working artifacts for this repository — plan docum
 # would otherwise carry a dozen files it never asked for.
 #
 # The DESIGN is deliberately not here — see .naamah/, which is meant to be reviewed and committed.
+# The exception is ayin.md: the repo's rules for ayin, written by its owners and committed.
 *
+!ayin.md
 `;
+
+/** The ignore file every ayin release before the rules file shipped — upgraded in place, once. */
+const GITIGNORE_V1 = GITIGNORE.replace("# The exception is ayin.md: the repo's rules for ayin, written by its owners and committed.\n", '').replace('!ayin.md\n', '');
 
 /**
  * Create `<root>/.ayin/<sub>` and make sure the whole directory is ignored by git.
@@ -63,7 +69,7 @@ export function ensureAyinDir(root: string, sub: 'plans' | 'reports' | 'edits' |
   try {
     mkdirSync(dir, { recursive: true });
     const ignore = join(base, '.gitignore');
-    if (!existsSync(ignore)) writeFileSync(ignore, GITIGNORE);
+    if (!existsSync(ignore) || readFileSync(ignore, 'utf-8') === GITIGNORE_V1) writeFileSync(ignore, GITIGNORE);
   } catch (err) {
     log('WARN', 'ayin_dir_failed', { dir, error: err instanceof Error ? err.message : String(err) });
   }

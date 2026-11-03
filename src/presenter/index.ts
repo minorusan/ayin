@@ -172,6 +172,8 @@ export async function presenterPass(
   response: string,
   files: ChangedFile[],
   skip: Set<string> = new Set(),
+  /** One-line header for the reply. `goal` is the verbatim (multi-message) spec the model judges against. */
+  label: string = goal,
 ): Promise<PresenterOutcome> {
   const none: PresenterOutcome = { presented: false, arduinoRegenerated: new Set() };
   if (!presenterEnabled()) return { ...none, reason: 'disabled (AYIN_PRESENTER=0)' };
@@ -222,7 +224,7 @@ export async function presenterPass(
       log('WARN', 'presenter_artifacts_failed', { error: err instanceof Error ? err.message : String(err) });
     }
 
-    const text = formatPresentation(goal, parsed, artifactLines);
+    const text = formatPresentation(label, parsed, artifactLines);
     log('INFO', 'presenter_presented', { files: String(parsed.files?.length ?? 0) });
     return { presented: true, text, arduinoRegenerated };
   } finally {

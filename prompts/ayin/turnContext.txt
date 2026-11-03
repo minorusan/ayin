@@ -1,0 +1,1 @@
+The user's message after this block is their request, verbatim. Every step and named field in it is a requirement; their stated reasons are context, not requirements. <task_spec> holds their earlier messages on this task.

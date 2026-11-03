@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
-const { promisesTheReportItself, reportsRatherThanPromises, announcedWithoutActing, worthAsking, saysNotFinished } = await import(`file://${join(DIST, 'announced.js')}`);
+const { endsDangling, endsOnPromise, promisesTheReportItself, reportsRatherThanPromises, announcedWithoutActing, worthAsking, saysNotFinished } = await import(`file://${join(DIST, 'announced.js')}`);
 
 let fails = 0;
 const ok = (cond, label, extra = '') => {
@@ -157,6 +157,53 @@ console.log('\n— promising the REPORT is answered, not discarded: discarding i
     'and neither is a promise to edit a file');
   ok(!promisesTheReportItself('The explore probes returned zero hits even though the file exists, so I fell back to grep.'),
     'and a reply that IS the report needs no nudge');
+}
+
+console.log('\n— a plan full of paths is still a plan (session 3afb5f37, 2026-11-02) —');
+{
+  const planWithPaths = "I have all the evidence I need to build this tool. Let me now create it properly:\n\n1. Create `backend/src/tasks/dreamDiary.ts` - the dream diary tool\n2. Register it in `backend/src/tasks/registry.ts`\n3. Add a voice line in `backend/src/tasks/voiceLines.ts`\n4. Update `docs/TOOLS.md`\n\nLet me first check what icons are available and look at the diary store's search functionality:";
+  ok(!reportsRatherThanPromises(planWithPaths), 'the reply that ended the turn three times is NOT an answer — its paths are objects of the first promise');
+  ok(reportsRatherThanPromises('I found the leak at src/queue.ts:31. I will write that up next.'),
+    'an anchor BEFORE the first promise still means it delivered');
+  ok(reportsRatherThanPromises("Let me explain. The bug is at src/queue.ts:31. I'll fix it next."),
+    'an anchor AFTER an opening promise, outside any promise, still means it delivered');
+  ok(!reportsRatherThanPromises("I've read the store. I'll add the tool next:\n- backend/src/tasks/dreamDiary.ts\n- docs/TOOLS.md"),
+    'a bulleted to-do list of paths after a promise is still the promise');
+}
+
+console.log('\n— the dense model says "I need", not "let me" (sessions 7db5c2e1, 40017efd) —');
+{
+  const stop1 = "I have the diary store and tool. Now I need: how `chatOnce` is called (signature), the registry, voiceLines, categories, and an example of a tool using the LLM (e.g. `diary/photo.ts` or `astro/writer.ts`).";
+  const stop2 = "I need to see how `chatOnce` is called and find an example of a tool that uses the LLM for text generation (like a title).";
+  ok(!reportsRatherThanPromises(stop1), 'verbatim stop #1 — "Now I need:" + an e.g. inside the list is a promise');
+  ok(!reportsRatherThanPromises(stop2), 'verbatim stop #2 — "I need to see" is a promise');
+  ok(!reportsRatherThanPromises('Мне нужно посмотреть store.ts.'), 'and in Russian');
+  ok(reportsRatherThanPromises('I need you to restart the daemon before this takes effect.'), '"I need YOU to" asks the operator — it is an answer');
+  ok(reportsRatherThanPromises('I needed to patch src/store.ts:31 to make the import resolve.'), 'past-tense "needed" is a report');
+  ok(reportsRatherThanPromises('The fix is in src/queue.ts:31 (e.g. the retry loop). It is done.'), 'an e.g. no longer splits a finished report');
+}
+
+console.log("\n— a turn that already EDITED: the anchor before the promise is work in progress —");
+{
+  const stall = "The dream.ts file looks good. Now I need to register it in registry.ts — add the import and add dream to the CORE\n   array.";
+  ok(endsOnPromise(stall), "the verbatim dense stall ends on a promise");
+  ok(!endsOnPromise("Registered dream in registry.ts and documented it in TOOLS.md. Done."), "a completion report does not");
+  ok(!endsOnPromise("Done: wrote dream.ts and registered it. Let me know if you want tests."), "\"let me know\" asks the operator — not a promise");
+  ok(!endsOnPromise("Wrote dream.ts. Let me write up the summary."), "promising the report is promisesTheReportItself's, not this");
+  ok(reportsRatherThanPromises("Done: wrote dream.ts. Let me know if anything is off."), "\"let me know\" no longer reads as a promise anywhere");
+}
+
+console.log("\n— unfinished endings, at any length —");
+{
+  const plan = "I now have a complete understanding of the architecture. Let me implement the dream-diary tool. Here's my plan:\n\n1. Create `backend/src/tasks/dreamDiary.ts` — the new Task\n2. Register it in `registry.ts`\n3. Add a voice line in `voiceLines.ts`\n4. Add it to `DEFAULT_TOOL_CATEGORY` in `tools/categories.ts`\n5. Add a section in `docs/TOOLS.md`\n\nThe tool logic:\n1. Parse the user's dream description\n2. Use LLM to extract: date (or default today), and determine if it matches an existing dream\n3. Search the diary for the relevant day's page, look for existing dreams\n4. Format as \"Dream N — Title\" with Location/Characters/User notes\n5. Either append a new entry or update the existing one\n\nLet me also check how `indexDay` works and look at the `searchDiary` function to understand the search mechanism better before writing the tool.";
+  ok(plan.length > 600 && endsOnPromise(plan), "a 900-char plan ending on \"Let me also check…\" ends on a promise");
+  ok(endsDangling("First, the tool file:"), "a bare \"First, the tool file:\" dangles");
+  ok(!endsDangling("Done. The fix is in src/a.ts:31."), "a line number is not a dangling colon");
+  // Verbatim, session d08c605d — accepted as the final answer; the operator had to type "go".
+  ok(endsDangling("I have the full file. Now I'll make all four fixes. Let me do them in sequence.\n\n**Fix 1: `renderRecord` — drop the `###` line (fix 3)**"), "a reply ending on a bold section title dangles");
+  ok(endsDangling("Plan below.\n\n## Step 1"), "a reply ending on a markdown heading dangles");
+  ok(!endsDangling("Wrote dream.ts and wired it in.\n\n**Typecheck passes.**"), "a bold SENTENCE is a conclusion, not a title");
+  ok(!endsDangling("**Fix 1: drop the heading**"), "a one-line reply is not judged by its shape");
 }
 
 console.log(fails ? `\nannounced check: ${fails} FAILED` : '\nannounced check: all passed');

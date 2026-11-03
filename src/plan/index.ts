@@ -108,6 +108,7 @@ import {
 } from './approval.js';
 import { beginPlanProgress, endPlanProgress, type PhaseRuntime } from './progress.js';
 import type { PlanExecutor } from '../executors/types.js';
+import { rulesMessages } from '../rules.js';
 
 // This module imports tool implementations directly, so it must not depend on the registry having
 // been loaded by someone else first. Idempotent.
@@ -892,7 +893,7 @@ export async function runPlan(userInput: string, goal: string): Promise<PlanResu
         + `${actionable.unresolved.length ? `, ${actionable.unresolved.length} problem(s) the validator still rejects` : ', validated'}.`);
     }
 
-    const body = phased ? '' : actionable ? actionable.markdown : await llmChat([{
+    const body = phased ? '' : actionable ? actionable.markdown : await llmChat([...rulesMessages(), {
       role: 'user',
       content: getPrompt('planDocument', {
         REQUEST: userInput.slice(0, 8000),

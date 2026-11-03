@@ -676,6 +676,44 @@ most recent with a seam naming what was omitted, because "what did I just try" i
 than "what did I try first", and a 300-call turn would otherwise put 13k tokens of its own bookkeeping
 in front of the model — this fix in reverse.
 
+**Since 2026-11-02 the ledger, the evidence block and the explore facts are NOT in the volatile block.**
+They are a backup of history, and while nothing has been evicted or masked every one of them repeats a
+tool result that is still in the window. In the tail they were ~19k tokens that changed every round,
+and on a hybrid/recurrent model (qwen3.5/3.8) the server can resume only from checkpoints it saves
+~512 tokens before a prompt's end — so with a tail longer than that, no checkpoint ever preceded the
+point where the prompt changed, and every round re-read the whole prompt (Ollama logs it as *"forcing
+full prompt re-processing … hybrid/recurrent memory"*; ~75 s per round at 50k tokens, session
+6c36b7f6). Now `buildMessages` renders the three as one backup and sends it only once history has
+actually been lost — as an `<earlier-findings>` message right after the system prompt, re-rendered when
+`trimToContext` evicts or `compressOldest` masks (`eviction_digest` in the log) and frozen in between,
+so it sits in the stable prefix. `trimToContext` reserves its size. The volatile tail keeps only what
+genuinely changes between rounds: the round counter, blocked calls, plan progress, the CTA reminder.
+
+**Per-turn context lives in the system message** (`<turn_context>`): the task line (dropped when the
+verbatim spec already carries it), a restored summary, the plan, research and the corpus are set once
+when a turn starts, so there they cost one cache invalidation per turn. In the tail they were ~1,000
+tokens, and the tail is re-sent after the newest messages — the prompt diverges where the old tail
+began, so on a hybrid model the WHOLE tail must fit inside the ~512 tokens before the checkpoint. Measured
+on session 1d766269 after the fixes above: the common prefix grew to within ~1,030 tokens of the end and
+still missed the checkpoint every round. `check-gates` now asserts the tail stays under 1,200 characters.
+
+**…and then out of the system message too, into the turn's own prompt** (`placeTurnContext`). "One
+invalidation per turn" was the whole bill at 90k tokens: a new prompt — even "go" — changed the system
+message, so the first round of every turn re-read the entire conversation (session d08c605d: 152 s and
+184 s before the first token). The task spec (earlier messages; this turn's own is not repeated), the
+task line, a restored summary, the plan, research and the corpus are now rendered ONCE, at the first
+build of the turn, as a `<turn_context>` block prepended to that turn's prompt message in
+`conversationWindow` (framing line: `prompts/ayin/turnContext.txt`). That message has not been sent
+yet, so nothing cached moves; afterwards it is ordinary append-only history, and the system message is
+byte-identical for the whole session. `check:rules` asserts both.
+
+Two bugs made this worse, both fixed with it. `windowSize` shipped as **20** in `prompts.ts` while
+`agent.ts` documents 0 (AUTO, trim by tokens) as the default, so the window slid by one message every
+round — no prefix reuse on any model, and the model forgot its own reads after ten calls. And
+`trimToContext`'s one-bite eviction trimmed a COPY: the evicted messages stayed in the window, so the
+next round recomputed the cut and slid by one again. The eviction now removes them from
+`conversationWindow`.
+
 #### The token estimate is MEASURED, not assumed
 
 Every budget above divided characters by a flat `CHARS_PER_TOKEN = 3`, chosen pessimistically because
@@ -793,6 +831,40 @@ forget.
 discover the same failure separately. One dialect serves all of them; that is what the abstraction is
 for.
 
+## Repo rules — `.ayin/ayin.md` (`rules.ts`)
+
+A repository tells ayin its conventions, what is forbidden there, and how to build and redeploy it in
+`<repo>/.ayin/ayin.md`, where `<repo>` is the git toplevel of the working directory (so launching from
+`backend/` still finds it). `REPO_FILES` in `rules.ts` is the list of files read from `.ayin/`;
+`ayin.md` is the first. `--rules "…"` is appended after them.
+
+- **Where it goes.** In full, never summarised or trimmed, wrapped by `prompts/ayin/repoRules.txt`, as
+  the FIRST thing in the system message of every round and every chat reply (`buildMessages`), and as
+  the system message of the planner's draft and plan-document calls. It sits in the prefix, so it costs
+  nothing per round once cached.
+- **Committed, not ignored.** `.ayin/.gitignore` is `*` plus `!ayin.md`: plans, edits and reports stay
+  out of git; the rules file is the repo owners' and goes in it. `ensureAyinDir` rewrites a
+  `.gitignore` that is byte-equal to the pre-rules version; an edited one is left alone.
+- **Seen.** Startup prints which rules file loaded (or that none did); the TUI says it once on connect.
+- **Checked at the end of the turn, not only read.** When a reply would end a turn that wrote files
+  (`write_file`/`str_replace`) and the repo has rules, the reply is held back and the model gets
+  `prompts/ayin/rulesReview.txt` with the list of files it changed: re-read them against `<rules>`, fix
+  a violation with a tool call, or give the report again naming the rules each file was checked
+  against. It fires again only if new edits landed since the last review (a fix gets checked too), at
+  most `RULES_REVIEW_MAX` (2) times a turn. Not per edit: mid-turn a file is half-written, and a
+  reminder repeated every edit is skimmed. It only appends to the history, so the cached prefix
+  holds. `npm run check:rules` drives the real loop against a scripted model to pin it.
+- **At both doors.** A turn ends by a reply OR by `finish()`; the review runs at either (`rulesReviewDue`
+  / `askRulesReview`). The reply-only version missed every edit made after its one firing when the
+  turn then left through `finish` — measured: registry, voiceLines, categories and TOOLS.md, unchecked.
+  A held `finish` is answered with the review, and the next one is honoured as usual.
+- **A review re-opens the narration nudge.** "I'll fix the blank-line bug…" right after a review is
+  the answer to it, not a stall; with the per-tool nudge already spent it was discarded twice and the
+  idle clap ended the turn lost (session d08c605d). Asking the review resets the nudge budget once.
+- **Root `AYIN.md` is no longer read.** A repo that still has one gets a startup line naming where it
+  goes, and a `rules_legacy_ignored` log event. There is no fallback read: two places for the rules is
+  how one of them goes stale.
+
 ## Agent loop (`agent.ts`)
 
 1. User input → added to the conversation window + rolling summary.
@@ -886,6 +958,18 @@ itself was told `progress: insufficient — No facts gathered yet` after ten cal
 the faulty method and its caller, and the critic (armed at ≥ 2 facts) never ran for such a turn at all.
 A miss (`0 matches`, an error) is deliberately not evidence — otherwise the critic is lied to in the
 other direction.
+
+**A tool call is not a verdict (2026-11-02).** The critic's peer and arbiter calls declare no tools,
+and a model trained to end every turn with a call (`qwen3.8:27b`) writes one out as text anyway:
+the peer "conclusion" was `<function=finish><parameter=summary>…`, the arbiter's first-digit
+`parseScore` read it as 8/10, and an invented root cause became the new direction of a build turn.
+A peer or arbiter reply matching `TOOL_CALL_SHAPE` (`<function=`, `<tool_call>`) now makes the critic
+stand down (`critic_unusable`), the same outcome as a failed call.
+
+**The write critic is OFF by default (2026-11-02)** — `criticEnabled()` requires `AYIN_CRITIC=1`, and
+`AYIN_UNCHAINED=1` still forces it off. On build tasks it audited each substantial `write_file` as a bug
+hunt and injected invented root causes as new directions in every dream-diary run, on both qwen models.
+Each turn logs `critic_off` with the reason. It stays in the code, opt-in, so its cost can be measured.
 
 ### A reply with no parsable call is not automatically an answer
 
@@ -1692,6 +1776,20 @@ and keeps only the one that means something — a concrete anchor BEFORE the pro
 separates "I found the leak at Dispose.cs:31, I'll write it up next" from a reply whose every
 concrete thing sits inside the promise.
 
+"Before the promise" means OUTSIDE every promise (`announced.ts#outsidePromises`), not "before the
+last sentence" (changed 2026-11-02). The old boundary let a plan through: "Let me now create it
+properly: 1. Create `backend/src/tasks/dreamDiary.ts` … Let me first check …:" — the paths sat before
+the LAST promise, so the reply read as a delivered report, the turn ended, and each "go on" reproduced
+it verbatim (session 3afb5f37). Now promise sentences are dropped and so is the list a promise
+ending in ":" introduces; only an anchor in what remains counts.
+
+The promise vocabulary is per-MODEL, not just per-language (2026-11-02): the MoE qwen says "Let me…",
+the dense `qwen3.8:27b` says "Now I need: …" / "I need to see …", which read as finished reports and
+ended the turn twice. `PROMISE` now covers a first-person present NEED ("I need", "I have/want to
+see|check|read…", «мне нужно», «мені треба») — but not "I need YOU to…" (asks the operator) and not
+"needed" (a past report). Sentences split on `SENTENCE_SPLIT`, which does not break after "e.g." /
+"i.e." / "etc." / "vs." / "cf." — "(e.g. `diary/photo.ts`)." had become the "last sentence" of a promise.
+
 `turnRequestKind()` is null whenever triage did not run (the kill switch, the session toggle, a
 request under `planToggledMinChars`), so every turn plan mode skips behaves exactly as it did. The
 turn that WORKS an approved investigation sets it from the pending record, since triage does not run
@@ -2234,6 +2332,33 @@ saying to write it now, in full, with no sentence about being about to. **Pushin
 the next round is built from different history, which is the only thing that can change a
 temperature-zero answer. Bounded at two, after which the ordinary discard resumes with the clap
 behind it, because a nudge that can repeat is the loop it replaced.
+
+### A narrated next step is answered too — once per tool call
+
+The paragraph above assumed *"Let me check the prefab"* costs one discard and gets the call. A dense
+model falsified it: three narrations in a row (*"Let me check the chatOnce signature…"*, *"Let me
+check for an archcheck…"*, *"I need the addPhotoEntry implementation…"*) were discarded against a
+byte-identical prompt, the idle clap tripped and the turn ended lost — and when the reply was pushed
+back for its last word, the same model made the call at once.
+
+So a working-turn reply with no call that `announcesNextAction` is now pushed with `announcedNudge`
+instead of discarded (`narration_nudge` in the log). The bound is progress, not a count: one nudge per
+tool call made. A second narration with no tool run since the last nudge falls through to the discard
+and the clap, so a model that only narrates still ends as lost.
+
+**After an edit, an anchor no longer proves delivery.** *"The dream.ts file looks good. Now I need to
+register it in registry.ts — add the import…"* ended a turn: triage had not run, so the turn was not
+strict, and `dream.ts` before the promise read as "delivered first". That exemption is for answers to
+questions. Once a turn has a successful edit, a reply whose last sentence is a promise
+(`endsOnPromise`, no anchor exemption, the report-promise excluded) is not the answer and takes the
+narration nudge. *"Let me know…"* is no longer a promise anywhere — it asks the operator.
+
+**A heading with nothing under it is unfinished too** (`endsDangling`). *"Now I'll make all four
+fixes. Let me do them in sequence. **Fix 1: `renderRecord` — drop the `###` line (fix 3)**"* ended a
+turn: the last line was a bold title, so neither the promise check nor the trailing-colon check saw
+it, and the operator had to type "go". A multi-line reply whose last line is only a markdown heading,
+or only a bold label that does not end in sentence punctuation, takes the nudge. A bold *sentence*
+("**Typecheck passes.**") is a conclusion and passes.
 
 ### A widened explore says that it widened
 
@@ -5563,8 +5688,9 @@ A prompt is a much worse retrieval key than a file path: a large share of turns 
 knows their intent; a cosine value guesses at it — so this is opt-in, with the first prompt as the
 exception. Prompts under three words are skipped outright.
 
-The block rides in the **volatile per-turn message** inside `<corpus>`, never the system prefix: it
-changes every turn by definition, and the prefix must stay byte-identical for the KV cache. Lifetime
+The block rides in the turn's `<turn_context>` (prepended to the turn's prompt message) inside `<corpus>` —
+it changes every turn by definition, so there it is appended history and invalidates nothing, and in the per-round tail it would cost a
+full re-read every round on a hybrid model (see "The calls already made are in the prompt"). Lifetime
 is the TURN — set before the loop, cleared after — so it survives every round (where the plan forms)
 without pinning one turn's lookup into the next, where the task has usually moved on.
 
@@ -5611,7 +5737,10 @@ tree knows about the internals). Design rules:
   draggable, so a click still does whatever your terminal does with it) and **switchable**
   (`AYIN_MOUSE=0` restores keyboard-only exactly, for a terminal without the bypass).
 - **Scrolling, in one place.** Wheel (3 lines/notch) · `PgUp`/`PgDn` (half page) · `Shift+↑`/`Shift+↓`
-  (one line). Plain `↑`/`↓` are **prompt history** — but inside a multi-line buffer they move the
+  (one line). **The wheel works with tracking OFF too** (`keys.ts#wheelBurst`): terminals in alternate-
+  scroll mode turn a notch into a burst of ↑/↓ in ONE input chunk, which ayin reads as scrolling — a
+  real key press is one arrow per chunk and stays prompt history. Reported before: "I cannot scroll
+  up by any means. Up arrow circles prompt." `npm run check:wheel` pins the classifier. Plain `↑`/`↓` are **prompt history** — but inside a multi-line buffer they move the
   cursor between lines first (`input.ts#moveCursorLine`), because pressing ↑ to fix the first line of a
   three-line prompt used to replace the whole thing with the previous prompt and lose what you wrote.
   History is reached only from the buffer's first or last line, exactly like a shell.
@@ -5708,8 +5837,15 @@ tree knows about the internals). Design rules:
 - **Session goal** (`goal.ts` + `widgets/chat.ts`): a one-line, auto-determined **direction**
   for the session — the anti-wander anchor. On the first user message `refreshGoal()` makes one
   cheap LLM call (the `goal` prompt) that distils the user's intent into a stable one-liner;
-  it's injected into the agent's system context every round (`Session goal (…do not wander…)`,
-  above the volatile `Current task`), and shown at the **bottom of the chat — just above the
+  it is a **UI label only** — the agent does NOT see it (changed 2026-11-02). What the agent and every
+  gate (plan, QA, skeptic, presenter) get instead is `getTaskSpec()`: the user's prompts **verbatim**
+  (`recordRequest()` on every TUI prompt and on headless `-p`; first prompt always kept whole, newest
+  follow-ups fill an 8k-char budget, omissions marked), injected as `<task_spec>` in the stable prefix.
+  A goal the user types with `/goal <text>` is their own words and joins the spec. Why: the ≤16-word
+  paraphrase dropped the user's numbered steps (session 40f33c6c turned "match the dream, format
+  Dream N/Location/Characters, append or update" into "format diary entries for RAG"), the agent built
+  the wrong tool, and the gates passed it because they judged against the same paraphrase. It is
+  shown at the **bottom of the chat — just above the
   thinking indicator and the input** (in the user's eyeline while typing / watching ayin think),
   in **cursive** and dim. blessed has no italic attribute (its attr model has no italic bit; a raw
   `\x1b[3m` is dropped by `attrCode`), so "cursive" is a Unicode Mathematical-Italic transform
@@ -5981,6 +6117,11 @@ can finish — see the warning in `SETUP.md`.
   summary from the sidecar, the last 20 turns replayed from the record. **Tool calls are excluded
   from the replay** — they're in the record to read, but replaying them would spend the context
   budget on output the model already acted on.
+  - **Both exits record the answer.** A turn ends by a reply OR by `finish()`, and only the reply
+    path called `recordAnswer` — so a finish-ended turn left prompts and tool calls and no answer,
+    and the resume replayed the user asking twice and nothing the agent did (session ecd6b744: 2
+    prompts, 55 tool calls, 0 answers). The finish summary plus its changed-files line is now
+    recorded as the answer. `check:rules` asserts it.
   - **What a restore actually restores** (all three, since two were missing): the **agent's
     `conversationWindow`** via `restoreConversation()` — the ONLY history `buildMessages` reads, and
     previously module-private with no way in, so a resumed session gave the model *nothing*; the
@@ -6115,7 +6256,7 @@ src/
 │                       in prompts.json and injected as prompt text
 ├── permissions.ts      approval dialogs + allow-lists
 ├── summary.ts          rolling session summary
-├── goal.ts             auto-determined session goal (anti-wander anchor; LLM-distilled, cursive)
+├── goal.ts             session goal label (LLM-distilled, cursive, UI-only) + verbatim task spec (agent + gates)
 ├── git.ts              current-branch lookup for the status bar (reads .git/HEAD, 2s cache)
 ├── prompts.ts          ayin's prompt namespace + config in ~/.ayin-cli/prompts.json + /set values
 ├── prompts-service.ts  prompt file store: source→local materialization, PromptBundle injection

@@ -25,7 +25,7 @@ import { llmCall } from './llm.js';
 import { webSearch } from './tools/web-search.js';
 import { toolsSystemPrompt, getTool, getAllTools, cancelActiveToolExecution, modelTools } from './tools.js';
 import { getSummary, pushMessage, updateSummary } from './summary.js';
-import { getGoal } from './goal.js';
+import { getGoal, getTaskSpec } from './goal.js';
 import { hasClearPicture, PICTURE_REQUEST, briefIsUsable } from './clear-picture.js';
 // A CHILD MUST NOT HAND OVER. It is already the fresh context this mechanism creates, and at depth
 // >= 1 `subagent` is not registered at all — so a handover there would ask for a process that cannot
@@ -42,7 +42,7 @@ import { skepticInjection, inSkepticPass, closeSkepticPass, resetSkepticPass, re
 import { refuseIfEcho, resetOutputEchoes, isStateQuery } from './tool-guard.js';
 import { ACCOUNT_REQUEST, IDLE_CALL, LOST_ACCOUNT_REQUEST, beginLostTurn, lostNudge, lostReport, noteCall, resetLost, restartDepth, restartExhausted, unverifiedReport } from './lost.js';
 import { DEFERRAL_NUDGE, looksLikeDeferral } from './deferral.js';
-import { promisesTheReportItself, reportsRatherThanPromises, stoppedShort } from './announced.js';
+import { announcesNextAction, endsDangling, endsOnPromise, promisesTheReportItself, reportsRatherThanPromises, stoppedShort } from './announced.js';
 import { attemptsSummary, beginEditTurn, claimsAnEditThatDoesNotExist, consecutiveMissesOn, editAttempts, noteEditAttempt } from './edit-truth.js';
 import { deniedWithoutAsking, checkPermission } from './permissions.js';
 import { artifactFor, artifactSessionDir, getArtifactsDir, getSessionArtifacts, hasArtifacts, readArtifact, saveArtifact } from './artifacts.js';
@@ -51,7 +51,7 @@ import { recordPrompt, recordRaw, recordTool, recordAnswer } from './session-rec
 // transcript.ts for why both exist. Every call here is a no-op unless /transcribe is on.
 import { transcribeAnswer, transcribePrompt, transcribeResponse, transcribeTool } from './transcript.js';
 import { getConfig, getConfigIfSet, getPrompt } from './prompts.js';
-import { getRules } from './rules.js';
+import { getRules, rulesBlock } from './rules.js';
 import { isLogCoverage, isNaamah, isVerbose } from './modes.js';
 import { pendingCorpus } from './indulge/inject.js';
 import { syncSession, getSessionId } from './session-store.js';
@@ -71,7 +71,7 @@ import { renderHandoff, stageAndOpenForPresentation } from './presenter/handoff.
 import { clearActivity } from './activity.js';
 import { callKey, guardBeginTurn, guardCheck, guardDirective, guardNoteDenied, guardNoteMutation, guardNoteRead, TREE_SAFE } from './tool-guard.js';
 import { planContextBlock, resolvePlanApproval, runPlan, turnRequestKind } from './plan/index.js';
-import { readIfPresent, recordEdit } from './edits/ledger.js';
+import { displayPath, readIfPresent, recordEdit } from './edits/ledger.js';
 import { resolveAgainstCwd } from './tools/lib.js';
 import { finishPlanProgress, planProgressBlock } from './plan/progress.js';
 import { liveTool } from './live-mirror.js';
@@ -214,7 +214,7 @@ function detectProjectExpertise(cwd: string): string {
   };
 
   // Only widely-published frameworks are named here. A specific project's own systems and class names
-  // belong in that project's `AYIN.md` (loaded as rules from the working directory) — never compiled
+  // belong in that project's `.ayin/ayin.md` (loaded as rules, see rules.ts) — never compiled
   // into this package, which is public and installed by strangers.
   if (exists('Assets') && exists('ProjectSettings')) {
     const parts = ['Unity C# mobile game'];
@@ -307,6 +307,16 @@ export function isUnchained(): boolean {
   const v = (process.env.AYIN_UNCHAINED ?? '').trim().toLowerCase();
   return v === '1' || v === 'true';
 }
+/**
+ * The write critic is OFF unless `AYIN_CRITIC=1` (2026-11-02). On a build task it audited every
+ * substantial write_file as a bug hunt and injected invented root causes as new directions — in all four
+ * dream-diary runs, on both the MoE and the dense qwen (which also answered its tool-less calls with
+ * tool calls). Opt-in so its cost can still be measured; `AYIN_UNCHAINED` still forces it off.
+ */
+export function criticEnabled(): boolean {
+  const v = (process.env.AYIN_CRITIC ?? '').trim().toLowerCase();
+  return (v === '1' || v === 'true') && !isUnchained();
+}
 const gatheredFacts: string[] = [];
 /**
  * Evidence from the DIRECT search/read tools, kept apart from `gatheredFacts` (which holds `explore`'s
@@ -368,10 +378,11 @@ let totalToolCalls = 0;
 /** Reset per-turn counters on new user turn */
 function resetCounters(): void {
   exploreCallCount = 0;
-  if (isUnchained()) log('INFO', 'unchained', { critic: 'off' });
+  if (!criticEnabled()) log('INFO', 'critic_off', { why: isUnchained() ? 'AYIN_UNCHAINED' : 'default (AYIN_CRITIC unset)' });
   guardBeginTurn(); // repeat/deny/poll budget is per turn — see tool-guard.ts
   gatheredFacts.length = 0;
   evidenceFacts.length = 0;
+  evictionDigest = '';
   totalToolCalls = 0;
   directions.length = 0;
 }
@@ -394,6 +405,16 @@ const MAX_DIRECTIONS = 5;
  *
  * Returns null if agent's answer wins (or on error), or the better direction if peer wins.
  */
+/**
+ * A critic side-call answered with a TOOL CALL, not an analysis. The critic's calls declare no tools,
+ * and a model trained to end every turn with a call writes one out as text anyway. Measured
+ * 2026-11-02 (qwen3.8:27b, session 664f0a89): the peer "conclusion" was `<function=finish>
+ * <parameter=summary>…`, the arbiter scored it 8/10 by grabbing the first digit it found, and an
+ * invented "failed registration of the diary tool" was injected as the new direction of a BUILD turn.
+ * Such a reply carries no verdict — the critic stands down, exactly as when its call fails.
+ */
+const TOOL_CALL_SHAPE = /<function=|<tool_call>|<\|tool_call/i;
+
 async function runCritic(proposedAnswer: string, facts: string[]): Promise<string | null> {
   const factsText = facts.map((f, i) => `Fact ${i + 1}: ${f}`).join('\n\n');
 
@@ -414,6 +435,10 @@ async function runCritic(proposedAnswer: string, facts: string[]): Promise<strin
     const peerResponse = await llmChat([{ role: 'user', content: peerPrompt }]);
     peerConclusion = peerResponse.trim();
     log('INFO', 'critic_peer', { conclusion: peerConclusion.substring(0, 300) });
+    if (TOOL_CALL_SHAPE.test(peerConclusion)) {
+      log('INFO', 'critic_unusable', { stage: 'peer', why: 'replied with a tool call, not an analysis' });
+      return null;
+    }
     addMessage('system', `[peer review: ${peerConclusion.substring(0, 100)}...]`);
   } catch {
     return null;
@@ -447,6 +472,10 @@ async function runCritic(proposedAnswer: string, facts: string[]): Promise<strin
       return m ? parseInt(m[1], 10) : 5;
     };
 
+    if (TOOL_CALL_SHAPE.test(originalResponse) || TOOL_CALL_SHAPE.test(peerResponse)) {
+      log('INFO', 'critic_unusable', { stage: 'arbiter', why: 'replied with a tool call, not a score' });
+      return null;
+    }
     const originalScore = parseScore(originalResponse);
     const peerScore = parseScore(peerResponse);
 
@@ -636,7 +665,7 @@ export function recordSlashTurn(userInput: string, answer: string): void {
  */
 export function restoreConversation(turns: Array<{ role: string; content: string }>): number {
   conversationWindow.length = 0;
-  const max = getWindowSize();
+  const max = getWindowSize() > 0 ? getWindowSize() : WINDOW_HARD_MAX;
   for (const t of turns.slice(-max)) {
     if (t.role !== 'user' && t.role !== 'assistant') continue; // tool traffic is not replayed
     conversationWindow.push({ role: t.role, content: t.content });
@@ -752,17 +781,12 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     systemContent += `\n\n${getPrompt('naamah')}`;
   }
 
-  const rules = getRules();
+  // The repo's `.ayin/ayin.md` (rules.ts), FIRST: hard constraints are read at the start or the end.
+  const rules = rulesBlock();
   if (rules) {
-    systemContent = `<rules>\n${rules}\n</rules>\n\n${systemContent}`;
+    systemContent = `${rules}\n\n${systemContent}`;
   }
 
-  // Session goal — the auto-determined overall direction (goal.ts). This is the anti-wander
-  // anchor: it stays stable while `currentGoal` (the latest raw input) changes turn to turn.
-  const sessionGoal = getGoal();
-  if (sessionGoal) {
-    systemContent += `\n\nSession goal (the user's overall direction — keep every step aligned with this and do not wander off it): ${sessionGoal}`;
-  }
 
   /**
    * THE PREFIX MUST NOT MOVE.
@@ -781,21 +805,9 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
    * new work. It is sent as a `user` turn rather than a second system message because only the first
    * system message is honoured reliably across chat templates.
    */
+  placeTurnContext(summary.summary);
+
   let volatile = '';
-  if (currentGoal) {
-    volatile += `\n\nCurrent task: ${currentGoal}`;
-  }
-
-  // Auto-research grounding for this turn (web search ran before the base call, per the trigger).
-  // A rolling summary carried in from a resumed session — prior context the window can't hold.
-  if (summary.summary) {
-    volatile += `\n\nContext from earlier in this session (restored):\n${summary.summary}`;
-  }
-
-  // A plan produced before this turn (plan mode) — the agent's marching orders for a big request.
-  if (planContext) {
-    volatile += `\n\n${planContext}`;
-  }
 
   /**
    * AND WHERE THE PLAN ACTUALLY IS — measured, not recalled.
@@ -811,9 +823,6 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     volatile += `\n\n${progress}`;
   }
 
-  if (researchContext) {
-    volatile += `\n\n${researchContext}`;
-  }
 
   /**
    * THE DIRECT READS, IN THE PROMPT — which is where they always should have been.
@@ -824,26 +833,29 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
    * the measured session the model's entire durable memory was two explore results out of eighty calls.
    * It costs budget now, bounded by `evidenceBudgetChars`.
    */
-  const evidence = evidenceBlock();
-  if (evidence) {
-    volatile += evidence;
-  }
-
-  // Programmatic fact tracker — no LLM, just concatenated explore results.
-  if (gatheredFacts.length > 0) {
-    volatile += `\n\nFacts gathered so far (${gatheredFacts.length} explore calls):\n`;
-    gatheredFacts.forEach((fact, i) => {
-      volatile += `${i + 1}. ${fact}\n\n`;
-    });
-  }
-
-  // What has already run. Same reasoning as the blocked list below, applied to the calls that
-  // SUCCEEDED — a result that scrolled out of the window is indistinguishable, from the model's side,
-  // from a call it never made.
-  const ledger = renderCallLedger();
-  if (ledger) {
-    volatile += `\n\n${ledger}`;
-  }
+  /**
+   * …BUT NOT IN THE VOLATILE TAIL. Evidence, explore facts and the call ledger are a BACKUP of history:
+   * every one of them repeats a tool result that is still in the window until something is evicted or
+   * masked. Re-sent at the end of every round they were ~19k tokens that changed every round, and on a
+   * hybrid/recurrent model (qwen3.5/3.8) the server can only resume from a checkpoint ~512 tokens
+   * before the previous prompt's end — a tail longer than that means NO checkpoint precedes the point
+   * where the prompt changed, so every round re-read the whole prompt ("forcing full prompt
+   * re-processing … hybrid/recurrent memory", ~75 s a round at 50k tokens, session 6c36b7f6).
+   *
+   * So the backup is rendered here and sent only once history has actually been lost — as a FROZEN
+   * message right after the system prompt (`evictionDigest`), re-rendered only when the next eviction
+   * or masking happens. Between those it is part of the stable prefix and costs nothing per round.
+   */
+  const backup = [
+    evidenceBlock(),
+    gatheredFacts.length > 0
+      ? `\n\nFacts gathered so far (${gatheredFacts.length} explore calls):\n`
+        + gatheredFacts.map((fact, i) => `${i + 1}. ${fact}\n\n`).join('')
+      : '',
+    // What has already run — a result that scrolled out of the window is indistinguishable, from the
+    // model's side, from a call it never made.
+    (() => { const l = renderCallLedger(); return l ? `\n\n${l}` : ''; })(),
+  ].join('').trim();
 
   // Blocked / denied calls — a refusal that only lives in a tool_response scrolls out of the window
   // and the model tries again. Here it is present every round for as long as the turn lasts.
@@ -861,12 +873,6 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     volatile += `Do not repeat these approaches. Try a different angle.\n`;
   }
 
-  // What the corpus knows about THIS prompt. In the volatile block, never the prefix: it changes
-  // every turn by definition, and the system message must stay byte-identical for the KV cache.
-  const corpus = pendingCorpus();
-  if (corpus) {
-    volatile += `\n\n<corpus>\n${corpus}\n</corpus>`;
-  }
 
   // CTA tracking — remind the model of its deliverable if overdue
   const remaining = maxRounds - round - 1;
@@ -903,16 +909,87 @@ export function buildMessages(round: number, maxRounds: number): Message[] {
     if (last?.role === 'assistant' && last.continues) messages.splice(messages.length - 1, 0, volatileTurn);
     else messages.push(volatileTurn);
   }
+  const trimmed = trimToContext(messages, backup ? approxTokens(backup) + 50 : 0);
+  if (backup && (lastTrimDropped > 0 || masked.count > 0)) {
+    evictionDigest = backup;
+    log('INFO', 'eviction_digest', {
+      round: String(round), tokensEst: String(approxTokens(backup)),
+      evicted: String(lastTrimDropped), masked: String(masked.count),
+    });
+  }
+  if (evictionDigest) {
+    trimmed.splice(1, 0, {
+      role: 'user',
+      content: `<earlier-findings>\nHistory before this point was trimmed to fit the context. What this turn had read and run by then:\n\n${evictionDigest}\n</earlier-findings>`,
+    });
+  }
   logCoverage({
     round,
     system: systemContent,
-    history: messages.slice(1, volatileTurn ? messages.length - 1 : messages.length),
+    history: trimmed.slice(1, volatileTurn ? trimmed.length - 1 : trimmed.length),
     volatile: volatileTurn?.content ?? '',
     maskedCount: masked.count,
     maskedCharsDropped: masked.dropped + deduped.dropped,
   });
-  return trimToContext(messages);
+  return trimmed;
 }
+
+/**
+ * PER-TURN CONTEXT RIDES IN HISTORY, NOT IN THE SYSTEM MESSAGE.
+ *
+ * The task spec, the task line, a restored summary, the plan, research and the corpus are set when a
+ * turn starts and never change inside it. They moved out of the volatile tail into the system message
+ * (one invalidation per turn instead of per round) — and at 90k tokens "one per turn" turned out to be
+ * the whole bill: a new prompt, even "go", changed the system message, so the first round of every
+ * turn re-read the entire conversation (measured, session d08c605d: 152 s and 184 s before the first
+ * token, 87-91k tokens, on a hybrid/recurrent model that can only resume near the previous end).
+ *
+ * So they are rendered ONCE, at the first build of the turn, and prepended to that turn's own prompt
+ * message in `conversationWindow`. That message has not been sent yet, so nothing cached moves; after
+ * this it is ordinary history, append-only like every other message, and the system message is
+ * byte-identical across the whole session. It also survives a `/resume`, being part of the window.
+ */
+let turnPromptMsg: Message | null = null;
+let turnContextPlaced = true;
+
+/** Mark the message that opened this turn — called right after `pushToWindow('user', userInput)`. */
+function markTurnPrompt(): void {
+  turnPromptMsg = conversationWindow[conversationWindow.length - 1] ?? null;
+  turnContextPlaced = false;
+}
+
+function placeTurnContext(restoredSummary: string | undefined): void {
+  if (turnContextPlaced) return;
+  turnContextPlaced = true;
+  const msg = turnPromptMsg;
+  if (!msg || !conversationWindow.includes(msg)) return;
+  const prompt = msg.content.trim();
+  // The task in the user's own words (goal.ts#getTaskSpec) — never the derived paraphrase, which drops
+  // the user's steps. This turn's own message follows the block verbatim, so it is cut from the spec.
+  const fullSpec = getTaskSpec();
+  const ownTail = fullSpec.lastIndexOf(prompt);
+  const spec = (ownTail >= 0 && fullSpec.slice(ownTail + prompt.length).trim() === ''
+    ? fullSpec.slice(0, ownTail).replace(/--- user message \d+ ---\s*$/, '')
+    : fullSpec).trim();
+  const parts: string[] = [getPrompt('turnContext')];
+  if (spec) parts.push(`<task_spec>\n${spec}\n</task_spec>`);
+  if (currentGoal && !fullSpec.includes(currentGoal.trim())) parts.push(`Current task: ${currentGoal}`);
+  // A rolling summary carried in from a resumed session — prior context the window can't hold.
+  if (restoredSummary) parts.push(`Context from earlier in this session (restored):\n${restoredSummary}`);
+  // A plan produced before this turn (plan mode) — the agent's marching orders for a big request.
+  if (planContext) parts.push(planContext);
+  // Auto-research grounding for this turn (web search ran before the base call, per the trigger).
+  if (researchContext) parts.push(researchContext);
+  // What the corpus knows about THIS prompt — set per prompt, constant for the turn.
+  const corpus = pendingCorpus();
+  if (corpus) parts.push(`<corpus>\n${corpus}\n</corpus>`);
+  msg.content = `<turn_context>\n${parts.join('\n\n')}\n</turn_context>\n\n${msg.content}`;
+}
+
+/** The frozen history backup — see the comment on `backup` in `buildMessages`. Reset per turn. */
+let evictionDigest = '';
+/** How many messages the last `trimToContext` evicted (0 = it fit). */
+let lastTrimDropped = 0;
 
 /**
  * WHAT THE PROMPT IS MADE OF, and how much of the window went unused.
@@ -1101,9 +1178,10 @@ export function compressOldest(window: Message[], fixedTokens: number, canonical
  * instruction. Everything between them is history, newest first in value, so eviction runs from the
  * front.
  */
-export function trimToContext(messages: Message[]): Message[] {
+export function trimToContext(messages: Message[], reserveTokens = 0): Message[] {
+  lastTrimDropped = 0;
   const ctx = activeContextTokens() || CONSERVATIVE_CONTEXT;
-  const budget = ctx - RESPONSE_RESERVE_TOKENS;
+  const budget = ctx - RESPONSE_RESERVE_TOKENS - reserveTokens;
   if (budget <= 0) return messages;
 
   const total = (ms: Message[]): number => ms.reduce((n, m) => n + approxTokens(m.content), 0);
@@ -1129,27 +1207,43 @@ export function trimToContext(messages: Message[]): Message[] {
   const EVICT_TO = 0.7;
   const target = Math.floor(budget * EVICT_TO);
 
-  // Index 0 is the system message; the last entry may be the volatile turn. Evict between them.
+  // Index 0 is the system message; the last entry may be the volatile turn. Evict BETWEEN them —
+  // the volatile turn is never a candidate. It was, and on 2026-11-02 (session 7db5c2e1, 40k window)
+  // one 18k-token full_view outlived everything else: "dropped 8, kept 1", the one kept was a
+  // <tool_response>, and Qwen's chat template refused the request outright ("no user query found in
+  // messages", HTTP 500). The volatile turn is the one user message that is always current.
   const head = messages[0];
-  const rest = messages.slice(1);
+  const lastMsg = messages[messages.length - 1];
+  const tail = messages.length > 1 && lastMsg.role === 'user' && lastMsg.content.startsWith('<session-context>')
+    ? [lastMsg] : [];
+  const rest = messages.slice(1, messages.length - tail.length);
   const before = approxTokens(head.content) + total(rest);
   let dropped = 0;
-  while (rest.length > 1 && approxTokens(head.content) + total(rest) > target) {
+  while (rest.length > 1 && approxTokens(head.content) + total(rest) + total(tail) > target) {
     const i = rest.findIndex((m) => !m.pinned);
-    rest.splice(i === -1 ? 0 : i, 1);
+    const [gone] = rest.splice(i === -1 ? 0 : i, 1);
+    /**
+     * THE BITE MUST STICK. This trimmed a COPY: the evicted messages stayed in `conversationWindow`,
+     * so the next round — one message longer, still over budget — recomputed the cut from scratch and
+     * slid it by one. The "one bite" above was one message per round in practice, the exact pattern it
+     * was written to prevent. Removing them from the window is what makes the next rounds append.
+     */
+    const w = conversationWindow.indexOf(gone);
+    if (w !== -1) conversationWindow.splice(w, 1);
     dropped++;
   }
+  lastTrimDropped = dropped;
   if (dropped) {
     log('INFO', 'window_trimmed', {
       dropped: String(dropped),
       kept: String(rest.length),
       ctxTokens: String(ctx),
-      estTokens: String(approxTokens(head.content) + total(rest)),
+      estTokens: String(approxTokens(head.content) + total(rest) + total(tail)),
       wasTokens: String(before),
       targetTokens: String(target),
     });
   }
-  return [head, ...rest];
+  return [head, ...rest, ...tail];
 }
 
 function drainQueuedMessages(): number {
@@ -1213,7 +1307,7 @@ function isSimilarText(a: string, b: string): boolean {
 const RESEARCH_TRIGGER = /(grounded|citing|citation|research)/i;
 /**
  * The operator's stack + hardware, used to tailor grounded answers. Ships EMPTY: it is
- * environment-specific, so it comes from the `SYSTEM_INFO` env var (or an `AYIN.md` rule file for
+ * environment-specific, so it comes from the `SYSTEM_INFO` env var (or the repo's `.ayin/ayin.md` rules file for
  * anything longer). A baked default published one person's lab inventory to every installer of this
  * package — and was wrong for all of them, which made the feature quietly worse rather than better.
  */
@@ -1313,6 +1407,8 @@ const EMPTY_RESULT_CHARS = 90;
 
 /** Tools whose success means the working tree changed. */
 const MUTATING_TOOLS = new Set(['write_file', 'str_replace']);
+/** Rules reviews per turn — see the review before `recordAnswer`. */
+const RULES_REVIEW_MAX = 2;
 
 /**
  * How many times a turn may be told to write the report instead of promising it.
@@ -1912,6 +2008,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
   recordPrompt(userInput); // consolidated per-session record (prompts + tools + answers)
   transcribePrompt(userInput); // full transcript (no-op unless /transcribe)
   pushToWindow('user', userInput);
+  markTurnPrompt();
   pushMessage('user', userInput);
   interrupted = false;
   immediateCancel = false;
@@ -1944,7 +2041,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
   // Plan mode (deterministic size trigger + one triage call) — a big cross-feature request gets a
   // written plan BEFORE any work starts, and the plan goes into this turn's context.
   planContext = '';
-  const plan = await runPlan(userInput, getGoal());
+  const plan = await runPlan(userInput, getTaskSpec());
   /**
    * THE PLAN IS WAITING ON THE OPERATOR, SO THE TURN IS OVER.
    *
@@ -2003,8 +2100,29 @@ async function runAgentTurn(rawInput: string): Promise<void> {
   let unwrittenClaimNudges = 0;
   /** "I'll rewrite that now." — announced, never acted. One nudge; see src/announced.ts. */
   let announcedNudges = 0;
+  let toolsAtNarrationNudge = -1;
   /** "Let me write the report." — answered once, then let through. See the discard branch below. */
   let reportNudges = 0;
+  /** Files written this turn, and how many edits the last rules review saw — see the review below. */
+  const rulesEditedPaths = new Set<string>();
+  let rulesEdits = 0;
+  let rulesEditsReviewed = 0;
+  let rulesReviews = 0;
+  /** New edits since the last review, rules present, budget left — see THE RULES REVIEW below. */
+  const rulesReviewDue = (): boolean =>
+    !!getRules() && rulesEdits > rulesEditsReviewed && rulesReviews < RULES_REVIEW_MAX && !stopAwaitingOperator();
+  /** Ask for it. The review is a new instruction, so it also re-opens the narration nudge — see below. */
+  const askRulesReview = (round: number, via: 'reply' | 'finish', text: string): void => {
+    rulesEditsReviewed = rulesEdits;
+    rulesReviews++;
+    // "I'll fix it" after a review is the answer to the review, not a stall: give it its nudge.
+    toolsAtNarrationNudge = -1;
+    const files = [...rulesEditedPaths].map((p) => `- ${displayPath(p, process.cwd())}`).join('\n');
+    recordRaw(round, `${via} after edits — rules review asked`, text);
+    log('INFO', 'rules_review', { round: String(round), via, files: String(rulesEditedPaths.size), nth: String(rulesReviews) });
+    addMessage('system', `[rules review: checking ${rulesEditedPaths.size} changed file(s) against the repo rules]`);
+    pushToWindow('user', getPrompt('rulesReview', { FILES: files }));
+  };
   // Did this turn actually DO anything? A turn that ran a tool has produced something the operator
   // did not have; its closing "you should also check X" is a caveat, not a dodge.
   let toolsRunThisTurn = 0;
@@ -2054,7 +2172,22 @@ async function runAgentTurn(rawInput: string): Promise<void> {
    * reply is SEEN on its way back round to `finish()`.
    */
   const answeringTurn = (): boolean => turnRequestKind() !== 'build';
-  const replyIsTheAnswer = (text: string): boolean => answeringTurn() && reportsRatherThanPromises(text);
+  /**
+   * A reply that ENDS on a promise ("…Let me also check indexDay before writing the tool.") or on a
+   * dangling colon is mid-work, whatever triage said — and triage almost never says anything: it runs
+   * only in plan mode, so `turnRequestKind()` is null on nearly every turn and the strict build rules
+   * never apply. Measured three ways on one task (dense qwen3.8): an anchor before the promise
+   * ("The dream.ts file looks good. Now I need to register it…"), a bare "First, the tool file:", and a
+   * plan over 600 characters ending "Let me also check how indexDay works…" — each ended the turn.
+   *
+   * Not the answer WHILE A NUDGE IS AVAILABLE (a tool has run since the last one). Once it is spent
+   * with no progress the reply is accepted as before, so a false positive costs one round, never a
+   * discard loop — and the nudge itself says "if you already have the answer, give it now".
+   */
+  const nudgeAvailable = (): boolean => toolsRunThisTurn > toolsAtNarrationNudge;
+  const looksUnfinished = (text: string): boolean => endsDangling(text) || endsOnPromise(text);
+  const replyIsTheAnswer = (text: string): boolean =>
+    answeringTurn() && reportsRatherThanPromises(text) && !(nudgeAvailable() && looksUnfinished(text));
   /** How much the design had absorbed at the last nudge, so progress can clear the stall counter. */
   let lastImplemented = -1;
   // THE SKEPTIC PASS RUNS PAST THE ROUND CAP, on purpose and only while it is open.
@@ -2498,6 +2631,30 @@ async function runAgentTurn(rawInput: string): Promise<void> {
         continue roundLoop;
       }
 
+      /**
+       * A NARRATED NEXT STEP IS ANSWERED, NOT DISCARDED — once per tool call made.
+       *
+       * The discard below rebuilds identical history, and a model whose habit is "say the step, then
+       * stop" says it again. Measured (dense qwen3.8, session a430e4ef): "Let me check the chatOnce
+       * signature…", "Let me check for an archcheck…", "I need the addPhotoEntry implementation…" —
+       * three discards on a byte-identical 40,649-token prompt, the idle clap tripped, the turn ended
+       * lost. Asked for its last word with that reply pushed, the same model made the call at once.
+       *
+       * Pushing the reply plus `announcedNudge` changes the history, which is what breaks it. Bounded by
+       * PROGRESS, not a count: a second narration with no tool run since the last nudge falls through to
+       * the discard and the clap, so a model that only narrates still ends as lost.
+       */
+      if (touchedAnythingThisTurn() && !stopAwaitingOperator() && !replyIsTheAnswer(parsed.text ?? response)
+          && nudgeAvailable()
+          && (announcesNextAction(parsed.text ?? response) || looksUnfinished(parsed.text ?? response))) {
+        toolsAtNarrationNudge = toolsRunThisTurn;
+        recordRaw(round, 'narrated the next step without the call — nudged', response);
+        log('INFO', 'narration_nudge', { round: String(round), toolsRun: String(toolsRunThisTurn) });
+        pushToWindow('assistant', parsed.text ?? response);
+        pushToWindow('user', getPrompt('announcedNudge'));
+        continue roundLoop;
+      }
+
       if (touchedAnythingThisTurn() && !stopAwaitingOperator() && !replyIsTheAnswer(parsed.text ?? response)) {
         workingRetries++;
         // The transcript keeps it; the model's context does not. "Why did it stop there" stays
@@ -2659,6 +2816,24 @@ async function runAgentTurn(rawInput: string): Promise<void> {
           continue;
         }
       }
+      /**
+       * THE RULES REVIEW — once per batch of edits, at the moment the turn would end.
+       *
+       * The repo's rules (`.ayin/ayin.md`, rules.ts) are first in every prompt and still lose to the
+       * work: measured, a dense model wrote a tool with a stand-in fallback, a doubled heading and a
+       * `matchAll` that throws — all three named or implied by rules it had in context the whole time.
+       * Reading them is not checking against them. So before the report goes out, the model is handed
+       * the list of files it changed and told to re-read them against the rules.
+       *
+       * Not per edit: mid-turn the file is half-written, and a reminder repeated every edit is skimmed.
+       * Bounded by PROGRESS — it fires again only if new edits landed since the last review (a fix), and
+       * at most RULES_REVIEW_MAX times a turn, so a model that keeps touching files cannot loop it.
+       */
+      if (rulesReviewDue()) {
+        pushToWindow('assistant', response_);
+        askRulesReview(round, 'reply', response_);
+        continue;
+      }
       recordAnswer(response_);
       transcribeAnswer(response_);
       pushToWindow('assistant', response_);
@@ -2795,7 +2970,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
             // Presenter's project-type executor regenerates artifacts too, so it is handed whatever
             // the QA executor's `prepare()` already covered in an earlier pass of this same turn —
             // one grounding call per unit per turn, never two, whichever gate ran first.
-            const presenterOutcome = await presenterPass(getGoal() || currentGoal, response, gate.files, qaPreparedUnits());
+            const presenterOutcome = await presenterPass(getTaskSpec() || currentGoal, response, gate.files, qaPreparedUnits(), getGoal() || currentGoal);
             if (presenterOutcome.presented && presenterOutcome.text) {
               addMessage('assistant', presenterOutcome.text);
               /**
@@ -2848,7 +3023,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
           }
 
           if (doQa) {
-            const outcome = await qaGate(getGoal() || currentGoal, textForQa, gate.files, () => interrupted);
+            const outcome = await qaGate(getTaskSpec() || currentGoal, textForQa, gate.files, () => interrupted);
             qaShowCard(outcome.card);
             if (outcome.action === 'fix' && outcome.feedback && !interrupted) {
               pushToWindow('user', outcome.feedback);
@@ -2888,7 +3063,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
        * the human already reading the screen.
        */
       if (!interrupted && gate.run && skepticWantsToRun) {
-        const result = await skepticPass(getGoal() || currentGoal, textForQa, gate.files, process.cwd(), () => interrupted);
+        const result = await skepticPass(getTaskSpec() || currentGoal, textForQa, gate.files, process.cwd(), () => interrupted);
         qaShowCard(skepticCard(result));
       }
 
@@ -3211,7 +3386,7 @@ async function runAgentTurn(rawInput: string): Promise<void> {
 
       // Internal critic — when model writes substantial output and has gathered facts,
       // verify the answer against the evidence before proceeding.
-      if (name === 'write_file' && !isUnchained() && gatheredFacts.length + evidenceFacts.length >= 2) {
+      if (name === 'write_file' && criticEnabled() && gatheredFacts.length + evidenceFacts.length >= 2) {
         const content = params.content || '';
         if (content.length > 200 && directions.length < MAX_DIRECTIONS) {
           const criticResult = await runCritic(content, factsForReview());
@@ -3593,6 +3768,17 @@ async function runAgentTurn(rawInput: string): Promise<void> {
           closeSkepticPass();
         }
         /**
+         * THE RULES REVIEW, AT THE OTHER DOOR. A turn can end by `finish()` as well as by a reply, and
+         * the reply-only version missed every edit made after its one firing: measured, a run edited
+         * registry, voiceLines, categories and TOOLS.md after the review, then left through `finish`
+         * with none of them checked. Same bound, same prompt; the finish is held, not refused.
+         */
+        if (rulesReviewDue()) {
+          pushMessage('assistant', '[tool: finish(...) — held for the rules review]');
+          askRulesReview(round, 'finish', String(params.summary ?? ''));
+          continue roundLoop;
+        }
+        /**
          * THE DIFF, ONCE, AT THE DOOR — the last thing before the turn ends.
          *
          * A CONFIRMATION, NOT A LICENCE TO ACT. The first finish does not finish: it prints the
@@ -3677,6 +3863,16 @@ async function runAgentTurn(rawInput: string): Promise<void> {
             : '\n\nNo files were changed.';
         const composed = `${result}${evidence}`;
         addMessage('assistant', composed);
+        /**
+         * THE ANSWER IS RECORDED AT THIS DOOR TOO. Only the reply exit called `recordAnswer`, so a turn
+         * that ended in `finish()` left a session record of prompts and tool calls with no answer — and
+         * `/resume` rebuilds the conversation from prompts + answers. Measured (session ecd6b744): two
+         * prompts, 55 tool calls, zero answers; after a reboot the resumed model saw the user ask twice
+         * and nothing it had done. The finish summary IS the turn's answer.
+         */
+        recordAnswer(composed);
+        transcribeAnswer(composed);
+        pushMessage('assistant', composed);
         await writeHandoff('finish', currentGoal, round, maxRounds);
         log('INFO', 'agent_done', { round: String(round), reason: 'finish',
           files: String(changed.length), toolsRun: String(toolsRunThisTurn), discards: String(workingRetries) });
@@ -3754,6 +3950,10 @@ async function runAgentTurn(rawInput: string): Promise<void> {
        * moment it is cheapest to check — 800 rounds later the model is defending a conclusion instead
        * of testing one.
        */
+      if (MUTATING_TOOLS.has(name) && !result.startsWith('Error:') && !result.startsWith('REFUSED') && typeof params.path === 'string') {
+        rulesEditedPaths.add(resolve(params.path));
+        rulesEdits++;
+      }
       if (MUTATING_TOOLS.has(name) && !result.startsWith('Error:') && !inSkepticPass()) {
         const changedNow = (treeChangedFiles() ?? []).map((f) => f.path);
         const editInj = skepticInjection({

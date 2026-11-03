@@ -88,7 +88,9 @@
     "check:ruby": "node tool/check-ruby.mjs",
     "check:java": "node tool/check-java.mjs",
     "check:cpp": "node tool/check-cpp.mjs",
-    "check:syntax": "node tool/check-syntax.mjs"
+    "check:syntax": "node tool/check-syntax.mjs",
+    "check:rules": "node tool/check-rules-review.mjs",
+    "check:wheel": "node tool/check-wheel.mjs"
   },
   "dependencies": {
     "@huggingface/tokenizers": "^0.2.0",

@@ -1,0 +1,10 @@
+Before this reaches the operator: you changed these files this turn.
+
+{{FILES}}
+
+Re-read each change against <rules> at the top of this conversation, every line of it, the forbidden list first. Read the files again; do not check from memory.
+
+Then run each new or changed path once, the way <rules> says to test, and read what it prints. A typecheck is not a run.
+
+A violation or a failing run: fix it now with a tool call.
+None: give your final report again, with one line per file naming the rules you checked it against, and the command you ran with what it printed (or "not run" and why).

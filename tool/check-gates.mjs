@@ -1720,7 +1720,24 @@ ok(!roundLine.test(m1[0].content) && !roundLine.test(m3[0].content),
 const tail3 = m3[m3.length - 1];
 ok(roundLine.test(tail3.content) && /<session-context>/.test(tail3.content),
   'per-round material rides in a trailing turn instead, where only new tokens are new work', String(tail3.content).slice(0, 60));
+// A hybrid/recurrent model resumes only from a checkpoint ~512 tokens before the previous prompt's end,
+// and the tail is re-sent after the newest messages — so a tail over that re-reads the WHOLE prompt.
+ok(String(tail3.content).length < 1200,
+  'the per-round tail stays far under ~500 tokens — per-turn context lives in the system message', `${String(tail3.content).length} chars`);
+ok(!/Current task:|<corpus>/.test(String(tail3.content)), 'the task line and the corpus are not in the per-round tail');
 
+// AYIN_CRITIC: the write critic is opt-in, and AYIN_UNCHAINED still forces it off
+{
+  const pc = process.env.AYIN_CRITIC, pu = process.env.AYIN_UNCHAINED;
+  delete process.env.AYIN_CRITIC; delete process.env.AYIN_UNCHAINED;
+  ok(!agentMod.criticEnabled(), 'the write critic is OFF by default');
+  process.env.AYIN_CRITIC = '1';
+  ok(agentMod.criticEnabled(), 'AYIN_CRITIC=1 turns it on');
+  process.env.AYIN_UNCHAINED = '1';
+  ok(!agentMod.criticEnabled(), 'AYIN_UNCHAINED=1 overrides AYIN_CRITIC=1');
+  if (pc === undefined) delete process.env.AYIN_CRITIC; else process.env.AYIN_CRITIC = pc;
+  if (pu === undefined) delete process.env.AYIN_UNCHAINED; else process.env.AYIN_UNCHAINED = pu;
+}
 // AYIN_UNCHAINED: an experiment switch must be OFF unless asked for, unambiguously
 const priorUnchained = process.env.AYIN_UNCHAINED;
 delete process.env.AYIN_UNCHAINED;
@@ -3039,7 +3056,7 @@ console.log('\nmarkdown rendering (dialog body / QA cards)');
     'the assembled prompt is trimmed to the context of the model actually loaded');
   ok(/activeContextTokens\(\) \|\| CONSERVATIVE_CONTEXT/.test(winSrc),
     'the budget comes from the LIVE preset, with a conservative floor when the model has not resolved');
-  ok(/const head = messages\[0\];/.test(winSrc) && /return \[head, \.\.\.rest\]/.test(winSrc),
+  ok(/const head = messages\[0\];/.test(winSrc) && /return \[head, \.\.\.rest(?:, \.\.\.tail)?\]/.test(winSrc),
     'the system message is never evicted — it carries the tools, and it must stay byte-identical for the KV cache');
   {
     const push = /function pushToWindow[\s\S]{0,1200}?\n}/.exec(winSrc)?.[0] ?? '';

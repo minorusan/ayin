@@ -23,7 +23,11 @@ export const AYIN_NS = 'ayin';
 
 /** Defaults for everything under `config` in prompts.json. */
 const DEFAULT_CONFIG: Record<string, number> = {
-  windowSize: 20,
+  // 0 = AUTO: keep every message and let trimToContext evict by TOKENS (agent.ts#getWindowSize). This
+  // shipped as 20 while agent.ts documented 0 as the default — the window slid by one message every
+  // round, so no round could reuse the previous prompt from the server cache and the model forgot its
+  // own reads after ten calls (session 6c36b7f6: store.ts read five times, ~75 s prefill per round).
+  windowSize: 0,
   maxToolRounds: 10,
   summaryMaxWords: 180,
   summaryRecentMessages: 6,

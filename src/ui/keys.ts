@@ -29,7 +29,15 @@ export function installKeyRouter(opts: {
 }): void {
   if (HEADLESS) return;
 
+  const wheel = installWheelAsArrows();
+
   screen.on('keypress', (ch: string | undefined, key: blessed.Widgets.Events.IKeyEventArg) => {
+    // The wheel, arriving as arrow keys — scrolls the transcript, never the prompt history.
+    if ((key.full === 'up' || key.full === 'down') && wheel.take(key.full)) {
+      // An open overlay (input blurred) scrolls itself on ↑/↓ in app.ts; the transcript stays put.
+      if (opts.input.isActive()) opts.chat.scrollLine(key.full === 'up' ? -1 : 1);
+      return;
+    }
     if (key.full === 'C-b' || key.full === 'C-f' || key.full === 'C-o' || key.full === 'C-s' || key.full === 'escape') {
       const handler = opts.getGlobalHandler();
       if (handler) handler(key.full);
@@ -74,6 +82,44 @@ function isPrintable(ch: string | undefined, key: blessed.Widgets.Events.IKeyEve
   if (!ch || ch.length !== 1 || key.ctrl || key.meta) return false;
   const code = ch.charCodeAt(0);
   return code >= 0x20 && code !== 0x7f;
+}
+
+/**
+ * THE WHEEL WITH MOUSE TRACKING OFF — which is the default, see `installMouseRouter`.
+ *
+ * Most terminals in "alternate scroll" mode (xterm 1007, on by default in GNOME Terminal, iTerm2,
+ * Terminal.app, Windows Terminal) turn each wheel notch into ↑/↓ key presses while a full-screen app is
+ * up. ayin bound plain ↑/↓ to prompt history, so scrolling back through the transcript cycled the
+ * prompt instead — reported: "I cannot scroll up by any means. Up arrow circles prompt."
+ *
+ * A notch is SEVERAL arrows in ONE input chunk (three, typically); a held or tapped key is one arrow per
+ * chunk, because the terminal writes each key press as it happens. So a chunk made only of two or more
+ * identical arrow sequences is the wheel, and its arrows are consumed as scrolling. One arrow in a chunk
+ * is always a key. The listener is PREPENDED so it classifies the chunk before blessed turns it into
+ * key presses. One line per arrow, so a notch moves the conventional three.
+ */
+/** One input chunk → a wheel burst of n arrows, or null when it is a key (or anything else). */
+export function wheelBurst(chunk: string): { dir: 'up' | 'down'; n: number } | null {
+  if (!/^(\x1b[[O][AB])+$/.test(chunk)) return null;
+  const seq = chunk.slice(0, 3);
+  const n = chunk.length / 3;
+  if (n < 2 || chunk !== seq.repeat(n)) return null;
+  return { dir: seq.endsWith('A') ? 'up' : 'down', n };
+}
+
+function installWheelAsArrows(): { take: (dir: 'up' | 'down') => boolean } {
+  let pending: { dir: 'up' | 'down'; n: number } | null = null;
+  const input = (screen.program as unknown as { input?: NodeJS.ReadableStream }).input;
+  input?.prependListener('data', (chunk: Buffer | string) => {
+    pending = wheelBurst(typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
+  });
+  return {
+    take(dir) {
+      if (!pending || pending.dir !== dir) return false;
+      if (--pending.n <= 0) pending = null;
+      return true;
+    },
+  };
 }
 
 /** Lines per wheel notch — the conventional three, so a flick moves a readable amount. */

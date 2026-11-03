@@ -242,7 +242,7 @@ export const HELP: HelpEntry[] = [
   },
   { name: 'Alt+Enter', kind: 'key', section: 'Keys', short: 'Newline without submitting (also Ctrl+J) — a paste keeps its own newlines' },
   { name: 'Ctrl+C', kind: 'key', section: 'Keys', short: 'Quit' },
-  { name: 'PgUp / PgDn', kind: 'key', section: 'Keys', short: 'Scroll an open overlay' },
+  { name: 'PgUp / PgDn', kind: 'key', section: 'Keys', short: 'Scroll the chat or an open overlay (also Shift+↑↓, the wheel)' },
 
   // ── from the shell ─────────────────────────────────────────────────────────────
   {

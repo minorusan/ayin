@@ -54,7 +54,7 @@ import { getSessionArtifacts, readArtifact } from './artifacts.js';
 import { renderMarkdown } from './markdown.js';
 import { HEADLESS } from './ui.js';
 import { armPostmortem, markCleanExit } from './postmortem.js';
-import { loadRules } from './rules.js';
+import { getRuleSources, legacyRulesPath, loadRules } from './rules.js';
 import { runBang, cancelBang, bangRunning } from './bang.js';
 import { checkBangSyntax } from './bang-check.js';
 import { getConfigString, setConfigValue, resetPromptsToDefaults, promptDriftWarnings, KNOWN_CONFIG_KEYS } from './prompts.js';
@@ -69,7 +69,7 @@ let embedSession = false;
 let embedNextTurn = false;
 /** The FIRST prompt states the task; later ones are refinements. Only the first is automatic. */
 let promptsThisSession = 0;
-import { getGoal, setGoal, clearGoal, refreshGoal } from './goal.js';
+import { getGoal, setGoal, clearGoal, refreshGoal, recordRequest } from './goal.js';
 import { SECTIONS, entriesInSection, suggestNames } from './help.js';
 import { runArduinoDiagram, formatArduinoDiagramOutcome } from './tools/arduino-diagram.js';
 import { runExplain, formatExplainOutcome as formatExplainReportOutcome } from './explain/index.js';
@@ -404,10 +404,16 @@ if (!HEADLESS) {
 
 // ── Connection ──────────────────────────────────────────────────────
 
+let rulesAnnounced = false;
 onConnectionChange((state) => {
   setStatus({ connection: state });
   if (state === 'connected') {
     addMessage('system', 'Connected to backend');
+    if (!rulesAnnounced) {
+      rulesAnnounced = true;
+      const src = getRuleSources();
+      addMessage('system', src.length ? `Repo rules in every prompt: ${src.join(', ')}` : 'No repo rules — add .ayin/ayin.md');
+    }
     refreshTokens();
   } else {
     addMessage('system', 'Disconnected from backend');
@@ -1513,7 +1519,7 @@ async function handleInput(text: string): Promise<void> {
           addMessage('system', 'Goal cleared');
           return;
         }
-        setGoal(arg);
+        setGoal(arg, true);
         addMessage('system', 'Goal set ✓');
         return;
       }
@@ -1631,6 +1637,7 @@ async function handleInput(text: string): Promise<void> {
     // Bounded wait: llmCall's own ceiling is 10 min, so we cap the pre-loop block; if the
     // derivation is slow it keeps running in the background and lands on a later round + the
     // cursive line updates itself via the goal subscription.
+    recordRequest(text);
     if (!getGoal()) {
       setAgentStatus('Determining goal...');
       // THREE SECONDS, NOT TWELVE. The goal is one short line and the derivation keeps running in the
@@ -1782,6 +1789,14 @@ async function main(): Promise<void> {
     return;
   }
   loadRules(process.cwd());
+  // Which repo rules the model is held to, said once — a rules file nobody can see being obeyed is one
+  // nobody can tell is being ignored. A root AYIN.md is no longer read: say where it goes now.
+  {
+    const legacy = legacyRulesPath(process.cwd());
+    if (legacy) process.stderr.write(`ayin: ${legacy} is no longer read — move it to .ayin/ayin.md\n`);
+    const src = getRuleSources();
+    process.stderr.write(src.length ? `ayin: repo rules loaded — ${src.join(', ')}\n` : 'ayin: no repo rules (.ayin/ayin.md)\n');
+  }
   // A local prompt whose {{VAR}} contract has fallen behind the shipped one is INVISIBLE at every
   // other layer: the code passes the data, the prompt never asks for it, the model is never told,
   // nothing errors. Say so before anything else runs, on every path — headless included, where a
@@ -1945,6 +1960,7 @@ async function runHeadless(): Promise<void> {
     catch { setPendingCorpus(null); }   // a corpus that cannot be read must not take the run with it
   }
 
+  recordRequest(prompt); // same verbatim spec as the TUI path — the gates judge against it
   try {
     await runAgent(prompt);
   } catch (err) {

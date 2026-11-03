@@ -49,6 +49,7 @@ import type { Deliverable, PlanExecutor, ProjectContext } from '../executors/typ
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { verifyCommandRefusal } from './verify.js';
+import { rulesMessages } from '../rules.js';
 
 /** Idempotent — `index.ts` registers the same namespace, and registering twice returns one bundle. */
 const planPrompts = promptsService.register('plan', packagePath('prompts', 'plan')).bundle;
@@ -602,7 +603,7 @@ export function actionablePlanGraph(input: ActionablePlanInput) {
 
   const draft = async (s: typeof PlanState.State) => {
     setActivityDetail(mode === 'investigate' ? 'drafting the investigation' : 'drafting the actionable plan');
-    const raw = await llmChat([{
+    const raw = await llmChat([...rulesMessages(), {
       role: 'user',
       // TWO PROMPTS, ONE GRAPH. The draft → validate → repair cycle, the parser, the salvage, the
       // dependency inference and the renderer are all shape-agnostic; only what is ASKED FOR differs,
